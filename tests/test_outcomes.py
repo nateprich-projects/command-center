@@ -48,6 +48,9 @@ def pr(number, *, created="2026-09-10T08:00:00Z", state="CLOSED",
         "closedAt": merged or "2026-09-10T09:00:00Z",
         "mergedAt": merged,
         "statusCheckRollup": checks,
+        # The funnel's own PR: same-repository head, owner author (#1794).
+        "isCrossRepository": False,
+        "author": {"login": "nateprich"},
     }
 
 
@@ -781,6 +784,48 @@ def test_repository_walk_uses_index_rows_once_and_writes_no_partial_scan(
     assert calls == [(REPO, 77)]
     assert records[0]["attempts"] == 2
     assert records[0]["merged"] is True
+
+
+@pytest.mark.parametrize("trust", [
+    {"isCrossRepository": True,
+     "headRepository": {"nameWithOwner": "mallory/repo"},
+     "author": {"login": "mallory"}},
+    {"author": {"login": "mallory"}},
+    {"author": None},
+    {"isCrossRepository": None},
+])
+def test_a_foreign_pr_is_never_a_tickets_attempt(monkeypatch, trust):
+    """A fork's PR can carry the branch name or a closing reference (#1794)."""
+    ticket_row = ticket(42)
+    owner = pr(10, created="2026-09-10T08:00:00Z")
+    by_branch = dict(pr(11, created="2026-09-10T09:00:00Z",
+                        merged="2026-09-10T09:30:00Z"), **trust)
+    by_link = dict(pr(12, branch="feature/x"), **trust)
+    by_link["closingIssuesReferences"] = [
+        {"number": 42, "repository": {"nameWithOwner": REPO}}]
+
+    class Index(dict):
+        all_rows = (owner, by_branch, by_link)
+
+    monkeypatch.setattr(
+        outcomes, "list_closed_tickets", lambda repo, limit: [ticket_row])
+    monkeypatch.setattr(
+        funnel, "ticket_pr_index", lambda repo, limit: (Index(), False))
+    monkeypatch.setattr(outcomes, "read_heartbeat_records", lambda: {})
+
+    def gh_json(*args):
+        if args[0] == "pr":
+            return {"number": args[2], "comments": []}
+        if args[0] == "issue":
+            return {"comments": []}
+        return [[]]
+
+    monkeypatch.setattr(outcomes, "gh_json", gh_json)
+
+    records = outcomes.derive_repository(REPO, limit=77, now=NOW)
+
+    assert records[0]["attempts"] == 1
+    assert records[0]["merged"] is False
 
 
 def test_repository_walk_rejects_a_truncated_pr_scan(monkeypatch):

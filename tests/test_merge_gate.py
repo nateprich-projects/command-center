@@ -113,7 +113,9 @@ def wire(monkeypatch, pr_json, comments):
 def pr(**kw):
     data = {"state": "OPEN", "headRefName": "ticket/9", "headRefOid": SHA,
             "mergeable": "MERGEABLE",
-            "statusCheckRollup": [{"name": "tests", "conclusion": "SUCCESS"}]}
+            "statusCheckRollup": [{"name": "tests", "conclusion": "SUCCESS"}],
+            # The funnel's own PR: same-repository head, owner author (#1794).
+            "isCrossRepository": False, "author": {"login": OWNER}}
     data.update(kw)
     return data
 
@@ -401,6 +403,220 @@ def test_every_failure_is_reported_not_just_the_first(monkeypatch):
     """A gate that says only 'no' makes the reviewer guess which one to fix."""
     wire(monkeypatch, pr(headRefName="nope", statusCheckRollup=[]), [])
     assert len(funnel.merge_blockers(REPO, 5, items(), NOW)) >= 3
+
+
+# -- only the funnel's own PR merges (#1794) ----------------------------------
+#
+# command-center is public: anyone can fork it and open a PR from a branch
+# named ticket/<n>. The branch name proves nothing; where the head lives and
+# who opened the PR do.
+
+#: A fork's PR, as the batched read returns it.
+FORK = {"isCrossRepository": True,
+        "headRepository": {"nameWithOwner": "mallory/repo"},
+        "author": {"login": "mallory"}}
+
+NOT_THE_FUNNELS = [
+    pytest.param(FORK, id="fork"),
+    # A fork is refused even when the owner opened it.
+    pytest.param({"isCrossRepository": True,
+                  "headRepository": {"nameWithOwner": "nateprich/repo"}},
+                 id="owner-fork"),
+    pytest.param({"author": {"login": "mallory"}}, id="another-author"),
+    pytest.param({"author": {"login": "nateprich-bot"}}, id="lookalike-author"),
+    pytest.param({"author": None}, id="author-null"),
+    pytest.param({"author": {}}, id="author-no-login"),
+    pytest.param({"isCrossRepository": None}, id="head-unreadable"),
+    # A head repository that is not the base refuses even beside a false
+    # isCrossRepository: two signals that disagree establish nothing.
+    pytest.param({"headRepository": {"nameWithOwner": "mallory/repo"}},
+                 id="head-elsewhere"),
+]
+
+
+@pytest.mark.parametrize("trust", NOT_THE_FUNNELS)
+def test_a_pr_that_is_not_the_funnels_own_never_passes_the_gate(
+        monkeypatch, trust):
+    wire(monkeypatch, pr(**trust), [verdict()])
+    why = funnel.merge_blockers(REPO, 5, items(), NOW)
+    assert any("PR #5 is not the funnel's own PR" in w for w in why)
+
+
+@pytest.mark.parametrize("trust", NOT_THE_FUNNELS)
+def test_cmd_merge_never_merges_a_pr_that_is_not_the_funnels_own(
+        monkeypatch, capsys, trust):
+    wire(monkeypatch, pr(**trust), [verdict()])
+    runs = []
+    monkeypatch.setattr(
+        funnel, "_run_gh",
+        lambda argv, **kwargs: runs.append(list(argv)) or type(
+            "R", (), {"returncode": 0, "stdout": "", "stderr": ""})())
+
+    assert funnel.cmd_merge(items(), NOW, REPO, 5, True) == 1
+
+    assert not any(argv[:3] == ["gh", "pr", "merge"] for argv in runs)
+    assert "not the funnel's own PR" in capsys.readouterr().err
+
+
+def test_a_conflicting_fork_pr_gets_no_verdict_and_releases_no_claim(
+        monkeypatch):
+    """Writing the conflict rejection acts on the PR and on the ticket its
+    branch names; neither follows from a stranger's PR (#1794)."""
+    rows = items()
+    rows[1].item_id = "ticket-project-item"
+    rows[1].in_motion_since = NOW
+    posted = _gate_rejection_wired(
+        monkeypatch, pr(mergeable="CONFLICTING", **FORK), [verdict()])
+
+    assert funnel.cmd_merge(rows, NOW, REPO, 5, False) == 1
+
+    assert posted == []
+    assert rows[1].in_motion_since == NOW
+
+
+@pytest.mark.parametrize("trust", NOT_THE_FUNNELS)
+def test_cmd_review_records_no_verdict_on_a_pr_that_is_not_the_funnels_own(
+        monkeypatch, trust):
+    wire(monkeypatch, pr(**trust), [])
+    runs = []
+    monkeypatch.setattr(
+        funnel, "_run_gh",
+        lambda argv, **kwargs: runs.append(list(argv)) or type(
+            "R", (), {"returncode": 0, "stdout": "", "stderr": ""})())
+
+    with pytest.raises(funnel.GitHubError, match="not the funnel's own PR"):
+        funnel.cmd_review(REPO, 5, "approved", "green", [], None)
+
+    assert not any(argv[:3] == ["gh", "pr", "comment"] for argv in runs)
+
+
+def test_the_owners_same_repository_pr_still_merges(monkeypatch):
+    """Both trust fields readable and right: exactly today's behaviour."""
+    wire(monkeypatch, pr(headRepository={"nameWithOwner": REPO}),
+         [verdict()])
+    assert funnel.merge_blockers(REPO, 5, items(), NOW) == []
+
+
+@pytest.mark.parametrize("row", [
+    # The batched GraphQL read.
+    {"isCrossRepository": False, "headRepository": {"nameWithOwner": REPO},
+     "author": {"login": OWNER}},
+    # ``gh pr view --json isCrossRepository,headRepository,...``.
+    {"isCrossRepository": False, "headRepository": {"name": "repo"},
+     "headRepositoryOwner": {"login": "owner"}, "author": {"login": OWNER}},
+    # REST ``pulls/<n>``, which has no isCrossRepository.
+    {"head": {"repo": {"full_name": REPO}}, "user": {"login": OWNER}},
+    # GitHub names are case-insensitive.
+    {"head": {"repo": {"full_name": "Owner/Repo"}},
+     "user": {"login": "NatePrich"}},
+    # GitHub's own isCrossRepository answer stands when no name came back.
+    {"isCrossRepository": False, "author": {"login": OWNER}},
+])
+def test_every_wire_shape_of_the_owners_same_repository_pr_is_the_funnels(row):
+    assert funnel.foreign_pr_reason(REPO, row) is None
+    assert funnel.is_funnel_pr(REPO, dict(row, headRefName="ticket/9"))
+    assert funnel.ticket_ref_from_pr(
+        REPO, dict(row, headRefName="ticket/9")) == REPO + "#9"
+
+
+@pytest.mark.parametrize("row, reason", [
+    ({"isCrossRepository": True,
+      "headRepository": {"nameWithOwner": "mallory/repo"},
+      "author": {"login": OWNER}}, "another repository (mallory/repo)"),
+    ({"head": {"repo": {"full_name": "mallory/repo"}},
+      "user": {"login": OWNER}}, "head repository mallory/repo is not"),
+    # A deleted fork: REST reports ``head.repo`` null.
+    ({"head": {"repo": None}, "user": {"login": OWNER}},
+     "head repository could not be read"),
+    ({"author": {"login": OWNER}}, "head repository could not be read"),
+    # Two shapes naming different repositories name none.
+    ({"headRepository": {"nameWithOwner": REPO},
+      "head": {"repo": {"full_name": "mallory/repo"}},
+      "author": {"login": OWNER}}, "head repository could not be read"),
+    ({"isCrossRepository": False}, "author could not be read"),
+    ({"isCrossRepository": False, "author": {"login": OWNER},
+      "user": {"login": "mallory"}}, "author could not be read"),
+    ({"isCrossRepository": False, "user": {"login": "mallory"}},
+     "opened by mallory"),
+    (None, "could not be read"),
+    ("ticket/9", "could not be read"),
+])
+def test_foreign_pr_reason_names_why_and_fails_closed(row, reason):
+    found = funnel.foreign_pr_reason(REPO, row)
+    assert found is not None and reason in found
+    assert not funnel.is_funnel_pr(REPO, row)
+    assert funnel.ticket_ref_from_pr(REPO, row) is None
+
+
+@pytest.mark.parametrize("trust, reopened", [
+    ({"isCrossRepository": False, "author": {"login": OWNER}}, True),
+    (FORK, False),
+    ({"isCrossRepository": False, "author": {"login": "mallory"}}, False),
+    ({"author": {"login": OWNER}}, False),
+])
+def test_a_rejected_merge_reopens_only_the_funnels_own_ticket(
+        monkeypatch, capsys, trust, reopened):
+    view = dict(trust, title="PR 5", url="https://example.invalid/5",
+                headRefName="ticket/9", merged=True)
+    runs = []
+
+    def fake_run(argv, **kwargs):
+        argv = list(argv)
+        runs.append(argv)
+        out = json.dumps(view) if argv[:3] == ["gh", "pr", "view"] else (
+            "https://example.invalid/issue/77")
+        return type("R", (), {"returncode": 0, "stdout": out, "stderr": ""})()
+
+    moved = []
+    monkeypatch.setattr(funnel, "_run_gh", fake_run)
+    monkeypatch.setattr(funnel, "REPO", REPO)
+    monkeypatch.setattr(funnel, "_option_id", lambda field, name: name)
+    monkeypatch.setattr(
+        funnel, "gh_graphql",
+        lambda query, **variables: moved.append(variables["option"]) or {})
+
+    assert funnel.cmd_reject(items(), NOW, "5", None) == 0
+
+    fields = runs[0][runs[0].index("--json") + 1].split(",")
+    assert {"isCrossRepository", "headRepository", "headRepositoryOwner",
+            "author"} <= set(fields)
+    assert any(argv[:3] == ["gh", "issue", "reopen"]
+               for argv in runs) is reopened
+    # The project goes back to Building / Broken only for the funnel's PR.
+    assert moved == (["Building", "Broken"] if reopened else [])
+
+
+# -- a skipped check verified nothing (#1794) ---------------------------------
+#
+# command-center's pytest job skips itself on a fork's PR, and GitHub reports
+# that as SKIPPED. Read as a pass, the fork's CI would be green.
+
+def test_a_skipped_check_is_not_green(monkeypatch):
+    wire(monkeypatch, pr(statusCheckRollup=[
+        {"name": "pytest", "conclusion": "SKIPPED", "status": "COMPLETED"}]),
+        [verdict()])
+    why = funnel.merge_blockers(REPO, 5, items(), NOW)
+    assert ("CI not green: pytest skipped — a skipped check verified "
+            "nothing") in why
+
+
+def test_a_skipped_check_beside_a_passing_one_is_not_green(monkeypatch):
+    wire(monkeypatch, pr(statusCheckRollup=[
+        {"name": "tests", "conclusion": "SUCCESS", "status": "COMPLETED"},
+        {"name": "pytest", "conclusion": "SKIPPED", "status": "COMPLETED"}]),
+        [verdict()])
+    why = funnel.merge_blockers(REPO, 5, items(), NOW)
+    assert any("CI not green" in w and "pytest" in w for w in why)
+    assert not any("tests" in w for w in why if "CI not green" in w)
+
+
+def test_a_neutral_check_is_still_excused(monkeypatch):
+    """Only SKIPPED changed: the rest of the success set is as it was."""
+    wire(monkeypatch, pr(statusCheckRollup=[
+        {"name": "tests", "conclusion": "SUCCESS", "status": "COMPLETED"},
+        {"name": "lint", "conclusion": "NEUTRAL", "status": "COMPLETED"}]),
+        [verdict()])
+    assert funnel.merge_blockers(REPO, 5, items(), NOW) == []
 
 
 # -- a conflicting branch hands the ticket back -------------------------------

@@ -142,16 +142,23 @@ def fetch_plan(repo: str, ticket: dict) -> Optional[dict]:
 
 
 def fetch_verdict_blocking(repo: str, number: int) -> dict:
-    """Read the newest verdict for the ticket's open PR, when one exists."""
+    """Read the newest verdict for the ticket's open PR, when one exists.
+
+    ``--head`` matches the branch name in any fork, so only the funnel's own
+    PR is the ticket's (#1794): a stranger's PR named ``ticket/<n>`` must not
+    hand the engineer its number, head or review.
+    """
     rows = funnel._gh_json(
         "gh", "pr", "list", "--repo", repo, "--state", "open",
         "--head", "ticket/{}".format(number), "--json",
-        "number,headRefOid,updatedAt", "--limit", "10",
+        "number,headRefOid,updatedAt," + funnel.PR_TRUST_JSON_FIELDS,
+        "--limit", "10",
     )
     if rows is None or not isinstance(rows, list):
         raise funnel.GitHubError(
             "could not list open PRs for {}#{}".format(repo, number)
         )
+    rows = [row for row in rows if funnel.is_funnel_pr(repo, row)]
     if not rows:
         return {"pr": None, "head_sha": None, "verdict": None,
                 "blocking": []}
@@ -1369,16 +1376,24 @@ def close_no_diff_ticket(repo: str, number: int, *,
 
 def create_or_update_pr(repo: str, context: dict, ticket: dict,
                         body: str) -> dict:
-    """Create the ticket PR, or update the one already open for the branch."""
+    """Create the ticket PR, or update the one already open for the branch.
+
+    Only the funnel's own open PR is updated (#1794): ``--head`` also matches
+    a fork's PR on a branch of the same name, and editing that would act on
+    a stranger's PR.
+    """
     rows = funnel._gh_json(
         "gh", "pr", "list", "--repo", repo, "--state", "open",
-        "--head", context["branch"], "--json", "number,url", "--limit", "10",
+        "--head", context["branch"],
+        "--json", "number,url," + funnel.PR_TRUST_JSON_FIELDS,
+        "--limit", "10",
     )
     if rows is None or not isinstance(rows, list):
         raise funnel.GitHubError("could not list the branch's open PR")
+    rows = [row for row in rows if funnel.is_funnel_pr(repo, row)]
     title = "{} (#{})".format(ticket["title"], ticket["number"])
     if rows:
-        pr = rows[0]
+        pr = {"number": rows[0].get("number"), "url": rows[0].get("url")}
         proc = funnel._run_gh(
             ["gh", "pr", "edit", str(pr["number"]), "--repo", repo,
              "--title", title, "--body-file", "-"],

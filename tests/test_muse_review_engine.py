@@ -2266,6 +2266,30 @@ def test_the_breakdown_prompt_is_judgement_text_under_500_words():
                 protocol))
 
 
+def test_the_breakdown_prompt_asks_for_seams_a_reproduction_and_sequencing(
+        tmp_path):
+    """The prompt Muse is sent carries the ticket shape the implementer
+    routines act on (#1807), and sequencing rules that leave small work
+    alone (#1808). Read from the sent prompt, not the file: the header
+    above `---` never reaches the model."""
+    proc, repo = _stubbed_runner(
+        tmp_path, _issue_begin("breakdown"), _issue_packet("breakdown"),
+        answers=(_issue_answer("breakdown"),))
+
+    assert proc.returncode == 0, proc.stderr
+    prompt = (repo / "muse.prompt.1").read_text()
+    normalized = " ".join(prompt.split()).lower()
+    assert ("its accept names the one to three seams its tests go at"
+            in normalized)
+    assert ("a ticket fixing a reported defect makes its first accept item "
+            "`reproduction: <the failing test at a named seam>`"
+            in normalized)
+    assert ("sequence expand, migrate, contract only for a genuinely wide "
+            "change" in normalized)
+    assert ("make a needed refactor its own prefactor ticket, first; small "
+            "work stays one ticket" in normalized)
+
+
 def test_the_shape_prompt_is_judgement_text_under_500_words():
     """#794's Phase 2 bar for the shape routine: the decision-record rules,
     the schema, the packet placeholder — and no protocol."""

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""review-replay — replay a private review packet and print verdicts only."""
+"""review-replay — replay a private review packet and print only its verdicts
+and failed part names; the engine's timing lines go to stderr (#1784)."""
 
 import os
 import sys

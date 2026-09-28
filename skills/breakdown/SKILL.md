@@ -32,6 +32,24 @@ evidence channel during breakdown: either a CI check that covers it or a
 status, output summary, and environment note). If no such channel is obtainable,
 re-scope the `Accept` during breakdown to what CI or the diff can prove.
 
+### Seams, reproductions and wide changes
+
+A ticket's `Accept` names the **one to three seams** its tests go at: the
+functions, commands or packets a test drives. A ticket that fixes a reported
+defect makes its first `Accept` item
+`Reproduction: <the failing test at a named seam>`, which the implementer
+writes first and sees fail. Only the ticket whose change makes it pass
+carries it; a prefactor or expand ticket passes on base by design.
+
+A **genuinely wide change**, one that moves a shape many callers share, is
+sequenced **expand, migrate, contract**: add the new beside the old, move
+the callers, then remove the old, each ticket depending on the one before.
+A refactor the change cannot land without is a **prefactor**: its own
+ticket, first. Neither is a reason to split small work: what fits one run
+stays one ticket.
+
+**Example:** `Accept: Reproduction: parse_departures, given a body with a Risks: section, returns only its departures.`
+
 ### Inferred premises
 
 Before sizing a ticket, check whether its outcome depends on a plan premise

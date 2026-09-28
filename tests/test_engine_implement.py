@@ -28,6 +28,7 @@ sys.path.insert(0, str(ROOT))
 
 import funnel  # noqa: E402
 from engine import implement  # noqa: E402
+from engine import review  # noqa: E402
 
 
 REPO = "owner/repo"
@@ -601,6 +602,24 @@ def test_done_answer_accepts_optional_nonempty_evidence_list():
     ]
 
 
+def test_done_answer_accepts_an_optional_trimmed_risks_list():
+    """The implementer's own pointer to where review should look (#1807)."""
+    found = implement.parse_answer(json.dumps({
+        **answer(), "risks": ["  The retry bound is new; check it stops at two. "],
+    }))
+    assert found["risks"] == ["The retry bound is new; check it stops at two."]
+    assert implement.parse_answer(
+        json.dumps({**answer(), "risks": []}))["risks"] == []
+
+
+@pytest.mark.parametrize(
+    "risks", ("check the bound", [""], ["  "], [None], ["ok", 3], {"a": "b"}))
+def test_done_answer_rejects_a_malformed_risks_list(risks):
+    with pytest.raises(implement.ImplementError,
+                       match="answer risks must be a list of non-empty strings"):
+        implement.parse_answer(json.dumps({**answer(), "risks": risks}))
+
+
 def test_no_diff_with_verified_evidence_closes_and_finishes(
         tmp_path, monkeypatch):
     _, clone = make_clone(tmp_path)
@@ -619,6 +638,7 @@ def test_no_diff_with_verified_evidence_closes_and_finishes(
     responses = {
         "repos/nateprich-projects/project/issues/comments/91": {
             "id": 91,
+            "user": {"login": "nateprich"},
             "url": "https://api.github.com/repos/nateprich-projects/"
                    "project/issues/comments/91",
             "html_url": evidence[0],
@@ -755,6 +775,7 @@ def test_no_diff_rejects_evidence_created_before_run_start(
         funnel, "_gh_api_json",
         lambda endpoint: {
             "id": 91,
+            "user": {"login": "nateprich"},
             "url": "https://api.github.com/repos/nateprich-projects/"
                    "project/issues/comments/91",
             "html_url": url,
@@ -1584,8 +1605,10 @@ def test_a_member_pr_note_names_a_ci_test_step_by_kind_only(
 
     source = 'CI .github/workflows/vault.yml step "tests for the widget vault"'
     assert source in bodies[0]
-    assert finished[0][3] == "PR #91 (tests: {})".format(
-        source if named else "CI workflow step")
+    # The CI step's command ran on the merge with origin/main (#1804).
+    assert finished[0][3] == (
+        "PR #91 (tests: {}); tested on the merge with origin/main".format(
+            source if named else "CI workflow step"))
 
 
 @pytest.mark.parametrize(("repo", "note"), (
@@ -1667,6 +1690,69 @@ def test_pr_template_lists_departures_and_verification():
     assert "- Kept the old entry point for compatibility." in found
     assert "Continued the existing remote ticket branch." in found
     assert "- `python3 -m pytest -q`" in found
+
+
+#: The PR body for ``ticket()`` and ``answer()``, written out by hand: an
+#: answer without risks must keep giving exactly this (#1807).
+PLAIN_PR_BODY = (
+    "Part of #7.\n"
+    "\n"
+    "Implements #42.\n"
+    "\n"
+    "Summary:\n"
+    "Added the bounded implementation runner.\n"
+    "\n"
+    "Departures:\n"
+    "- None.\n"
+    "\n"
+    "Branch:\n"
+    "Created fresh from origin/main; no existing remote ticket branch.\n"
+    "\n"
+    "Verified:\n"
+    "- `python3 -m pytest -q`\n"
+)
+
+
+@pytest.mark.parametrize("extra", ({}, {"risks": []}))
+def test_pr_body_without_risks_is_unchanged(extra):
+    found = implement.render_pr_body(
+        ticket(), implement.parse_answer(json.dumps({**answer(), **extra})),
+        continued=False, tests=["python3 -m pytest -q"])
+    assert found == PLAIN_PR_BODY
+
+
+def test_pr_body_lists_risks_after_the_departures():
+    parsed = implement.parse_answer(json.dumps({
+        **answer(),
+        "departures": ["Kept the old entry point."],
+        "risks": ["The retry bound is new; check it stops at two.",
+                  "Private repos must still get counts only."],
+    }))
+    found = implement.render_pr_body(
+        ticket(), parsed, continued=False, tests=["python3 -m pytest -q"])
+    assert found == (
+        "Part of #7.\n"
+        "\n"
+        "Implements #42.\n"
+        "\n"
+        "Summary:\n"
+        "Added the bounded implementation runner.\n"
+        "\n"
+        "Departures:\n"
+        "- Kept the old entry point.\n"
+        "\n"
+        "Risks:\n"
+        "- The retry bound is new; check it stops at two.\n"
+        "- Private repos must still get counts only.\n"
+        "\n"
+        "Branch:\n"
+        "Created fresh from origin/main; no existing remote ticket branch.\n"
+        "\n"
+        "Verified:\n"
+        "- `python3 -m pytest -q`\n"
+    )
+    # The review packet's pr_departures must not take the risks as departures.
+    assert review.parse_departures(found) == ["Kept the old entry point."]
 
 
 def test_funnel_finish_ticket_forwards_without_importing_engine(monkeypatch):
@@ -2018,6 +2104,79 @@ def test_a_route_for_another_head_or_step_routes_again(
     assert effects["agent_needs"] == [REPO + "#42"]
     assert effects["human_needs"] == []
     assert effects["created"] == []
+
+
+def test_a_forged_route_from_another_author_is_not_this_runs_route(
+        monkeypatch):
+    """Only the owner account's comments are read for a route (#1788).
+
+    A forged route at the current head would read as already routed, and the
+    second-run guard would hand the ticket to Nate without routing it.
+    """
+    route = as_posted(implement.render_closed_step_route(
+        REPO + "#57", CLOSED_STEP_HEAD, blocked()["blocked_on_human"]),
+        "run-1")
+    authors = {"login": "mallory"}
+    monkeypatch.setattr(funnel, "_gh_json", lambda *args: {"comments": [
+        {"author": authors, "body": route},
+        {"body": route},
+        "not a row",
+    ]})
+
+    bodies = implement.read_ticket_comment_bodies(REPO, 42)
+    assert bodies == []
+    assert not implement.routed_for_closed_step(
+        bodies, REPO + "#57", CLOSED_STEP_HEAD)
+
+    authors["login"] = "nateprich"
+    bodies = implement.read_ticket_comment_bodies(REPO, 42)
+    assert bodies == [route]
+    assert implement.routed_for_closed_step(
+        bodies, REPO + "#57", CLOSED_STEP_HEAD)
+
+
+def test_no_diff_rejects_a_comment_another_author_posted(
+        tmp_path, monkeypatch):
+    """A comment is done evidence only from the owner account (#1788)."""
+    _, clone = make_clone(tmp_path)
+    monkeypatch.setattr(implement, "fetch_ticket", lambda repo, number: ticket(number))
+    monkeypatch.setattr(
+        heartbeat, "read_github",
+        lambda agent: [{"run": "run-42", "phase": "start", "ts": 1000}],
+    )
+    url = (
+        "https://github.com/nateprich-projects/project/issues/12"
+        "#issuecomment-91"
+    )
+    monkeypatch.setattr(
+        funnel, "_gh_api_json",
+        lambda endpoint: {
+            "id": 91,
+            "user": {"login": "mallory"},
+            "url": "https://api.github.com/repos/nateprich-projects/"
+                   "project/issues/comments/91",
+            "html_url": url,
+            "created_at": "1970-01-01T00:16:40Z",
+        },
+    )
+    effects = {"closed": [], "released": [], "finished": []}
+
+    with pytest.raises(
+        implement.ImplementError,
+        match="evidence URL .* was not posted by the owner account",
+    ):
+        implement.finish_done(
+            {**answer(), "evidence": [url]},
+            run="run-42",
+            repo=REPO,
+            cwd=clone,
+            test_commands=[[sys.executable, "-c", "pass"]],
+            release=effects["released"].append,
+            heartbeat_finish=lambda *args: effects["finished"].append(args),
+            close_effect=lambda *args, **kwargs: effects["closed"].append(args),
+        )
+
+    assert effects == {"closed": [], "released": [], "finished": []}
 
 
 def test_a_second_run_with_no_pushed_branch_also_hands_to_nate(
@@ -3477,7 +3636,8 @@ def test_finish_done_records_the_test_source_in_pr_body_and_note(
     assert "Test command source:\npyproject.toml [tool.command-center] test" in body
     assert effects["finished"] == [
         ("codex", "run-42", "done",
-         "PR #91 (tests: pyproject.toml [tool.command-center] test)",
+         "PR #91 (tests: pyproject.toml [tool.command-center] test); "
+         "tested on the merge with origin/main",
          REPO + "#42")
     ]
 
@@ -3908,7 +4068,7 @@ def test_finish_git_invocation_sites_match_the_recorded_inventory():
         ("add", "--"): 1,
         ("commit", "-m"): 3,
         ("rev-list", "--count"): 2,
-        ("fetch", "origin"): 1,
+        ("fetch", "origin"): 2,
         ("merge-base", "--is-ancestor"): 1,
         ("merge", "-s"): 1,
         ("push", "--set-upstream"): 1,
@@ -3916,7 +4076,7 @@ def test_finish_git_invocation_sites_match_the_recorded_inventory():
     assert actual == expected
 
     inventory = (ROOT / "docs" / "finish-subprocess-bounds.md").read_text()
-    assert "17 bounded Git callsites" in inventory
+    assert "18 bounded Git callsites" in inventory
     for command in (
         "git diff --name-only -z",
         "git diff --cached --name-only -z",
@@ -4048,3 +4208,341 @@ def test_timed_out_test_keeps_checkpointed_work_and_finishes(
         "--git-dir", str(remote), "show",
         "refs/heads/ticket/42:implemented.txt",
     ).stdout == "unfinished\n"
+
+
+# --- The finish tests the work merged with current main (#1804) ---
+#
+# Each fixture clones a remote whose main then moves on, so only the fetch at
+# finish sees the new main. The fixture's conftest logs the directory every
+# test starts in, which tells the merge worktree from the checkout.
+
+MERGE_LOG_CONFTEST = '''\
+import os
+
+
+def pytest_runtest_logstart(nodeid, location):
+    with open(os.environ["MERGE_LOG"], "a") as log:
+        log.write("{}\\t{}\\n".format(os.getcwd(), nodeid))
+'''
+
+CALC = "def double(x):\n    return x * 2\n"
+CALC_TESTS = (
+    "from calc import double\n\n\n"
+    "def test_one():\n    assert double(1) == 2\n"
+)
+#: What main gains after the clone: a test the ticket's own suite never runs.
+MAIN_TEST = {"tests/test_main.py": (
+    "from calc import double\n\n\n"
+    "def test_three():\n    assert double(3) == 6\n")}
+#: The ticket's change: test_one still passes, main's test_three does not.
+BROKEN_FOR_THREE = "def double(x):\n    return x * 2 if x < 3 else 0\n"
+#: A test that fails on main before and after it moves on.
+RED_TEST = "\n\ndef test_red():\n    assert double(2) == 5\n"
+
+
+def write_tree(root, files):
+    """Write each file, or remove it where its text is None."""
+    for name, text in files.items():
+        path = root / name
+        if text is None:
+            path.unlink()
+            continue
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+
+
+def make_merge_clone(tmp_path, monkeypatch, *, ancestor, main, codex=False):
+    """A ticket clone at ``ancestor`` whose remote main then lands ``main``.
+
+    Returns the remote, the clone, the new main's SHA and the test log.
+    """
+    if codex:
+        remote, clone = make_codex_run_clone(tmp_path, monkeypatch)
+    else:
+        remote, clone = make_clone(tmp_path)
+    seed = tmp_path / "seed"
+    write_tree(seed, dict({"conftest.py": MERGE_LOG_CONFTEST}, **ancestor))
+    run_git("add", "-A", cwd=seed)
+    run_git("commit", "--quiet", "-m", "ancestor", cwd=seed)
+    run_git("push", "--quiet", "origin", "main", cwd=seed)
+    run_git("fetch", "--quiet", "origin", cwd=clone)
+    run_git("reset", "--quiet", "--hard", "origin/main", cwd=clone)
+    write_tree(seed, main)
+    run_git("add", "-A", cwd=seed)
+    run_git("commit", "--quiet", "-m", "main moves on", cwd=seed)
+    run_git("push", "--quiet", "origin", "main", cwd=seed)
+    log = tmp_path / "merge.log"
+    monkeypatch.setenv("MERGE_LOG", str(log))
+    return (remote, clone,
+            run_git("rev-parse", "HEAD", cwd=seed).stdout.strip(), log)
+
+
+def started_in(log):
+    """(directory, node id) for every test the fixture's suite started."""
+    if not log.exists():
+        return []
+    return [(pathlib.Path(directory), node_id) for directory, node_id in
+            (line.split("\t") for line in log.read_text().splitlines())]
+
+
+@pytest.fixture
+def worktree_calls(monkeypatch):
+    """Each ``git worktree add`` or ``remove`` a finish makes, by path."""
+    calls = []
+    real_run = implement._run
+
+    def spy(command, **kwargs):
+        if "worktree" in command:
+            verb = command[command.index("worktree") + 1]
+            if verb == "add":
+                calls.append((verb, command[-2]))
+            elif verb == "remove":
+                calls.append((verb, command[-1]))
+        return real_run(command, **kwargs)
+
+    monkeypatch.setattr(implement, "_run", spy)
+    return calls
+
+
+def _merged_finish(clone, monkeypatch, repo=PUBLIC_REPO):
+    """Run finish_done on the repository's own test plan; return its effects.
+
+    ``raised`` is the finish's error, or None when it opened its PR.
+    """
+    _stub_claim_state(monkeypatch, "owned")
+    monkeypatch.setattr(implement, "fetch_ticket",
+                        lambda found, number: ticket(number, repo))
+    effects = {"prs": [], "released": [], "finished": [], "comments": [],
+               "raised": None}
+
+    def open_pr(target, context, found_ticket, body):
+        effects["prs"].append(body)
+        return {"number": 91, "url": "https://example.test/pull/91"}
+
+    try:
+        implement.finish_done(
+            answer(), run="run-42", repo=repo, cwd=clone,
+            release=effects["released"].append,
+            heartbeat_finish=lambda *args: effects["finished"].append(args),
+            pr_effect=open_pr,
+            comment_effect=lambda *args, **kwargs:
+                effects["comments"].append(args),
+        )
+    except implement.ImplementError as exc:
+        effects["raised"] = exc
+    return effects
+
+
+def test_a_merge_only_failure_fails_the_finish(tmp_path, monkeypatch):
+    # The ticket and main each pass their own suite, bar test_red, which is
+    # red on main too; only the merge fails test_three, and only test_three
+    # is named. The clone's origin/main predates main's test, so only a
+    # fetch finds it.
+    remote, clone, _, log = make_merge_clone(
+        tmp_path, monkeypatch,
+        ancestor={"calc.py": CALC,
+                  "tests/test_calc.py": CALC_TESTS + RED_TEST},
+        main=MAIN_TEST)
+    (clone / "calc.py").write_text(BROKEN_FOR_THREE)
+    run_git("commit", "--quiet", "-am", "change double", cwd=clone)
+
+    effects = _merged_finish(clone, monkeypatch)
+
+    assert isinstance(effects["raised"], implement.MergedSuiteError)
+    assert effects["prs"] == []
+    assert effects["released"] == [PUBLIC_REPO + "#42"]
+    assert effects["finished"] == [(
+        "codex", "run-42", "errored",
+        "tests failed: tests/test_main.py::test_three | 1 failed"
+        " | work kept on ticket/42 | on the merge with origin/main",
+        PUBLIC_REPO + "#42")]
+    # It failed in the merge worktree beside the checkout, not in it.
+    (failed_in,) = [directory for directory, node_id in started_in(log)
+                    if node_id == "tests/test_main.py::test_three"
+                    and directory.name == "merge"]
+    assert failed_in.parent.parent == clone.parent.resolve()
+    assert run_git("--git-dir", str(remote), "show",
+                   "ticket/42:calc.py").stdout == BROKEN_FOR_THREE
+
+
+def test_uncommitted_work_is_what_the_merge_tests(tmp_path, monkeypatch):
+    # The committed head is main's own ancestor; the break is only in the
+    # working tree when the finish starts. The finish commits it, so the
+    # merge must test it.
+    _, clone, _, _ = make_merge_clone(
+        tmp_path, monkeypatch,
+        ancestor={"calc.py": CALC, "tests/test_calc.py": CALC_TESTS},
+        main=MAIN_TEST)
+    (clone / "calc.py").write_text(BROKEN_FOR_THREE)
+    assert run_git("status", "--porcelain", cwd=clone).stdout == " M calc.py\n"
+
+    effects = _merged_finish(clone, monkeypatch)
+
+    assert isinstance(effects["raised"], implement.MergedSuiteError)
+    assert effects["prs"] == []
+    (finished,) = effects["finished"]
+    assert finished[3] == (
+        "tests failed: tests/test_main.py::test_three | 1 failed"
+        " | work kept on ticket/42 | on the merge with origin/main")
+
+
+def test_a_member_repo_merge_failure_note_carries_counts_only(
+        tmp_path, monkeypatch):
+    _, clone, _, _ = make_merge_clone(
+        tmp_path, monkeypatch,
+        ancestor={"calc.py": CALC, "tests/test_calc.py": CALC_TESTS},
+        main=MAIN_TEST)
+    (clone / "calc.py").write_text(BROKEN_FOR_THREE)
+
+    effects = _merged_finish(clone, monkeypatch, repo=REPO)
+
+    (finished,) = effects["finished"]
+    assert finished[2:] == (
+        "errored",
+        "tests failed: 1 failed | work kept on ticket/42"
+        " | on the merge with origin/main",
+        REPO + "#42")
+    # Still a regression to the brief's classifier (#1289).
+    assert heartbeat.classify_error(
+        finished[3], {"head": "abc"}) == "regression"
+    # The id goes to the ticket in its own repository instead (#1796).
+    ((target, number, body),) = effects["comments"]
+    assert (target, number) == (REPO, 42)
+    assert "tests/test_main.py::test_three" in body
+
+
+def test_a_failure_main_already_has_does_not_fail_the_finish(
+        tmp_path, monkeypatch):
+    # test_red fails on main before and after it moves on; the ticket does
+    # not touch it, so the finish opens its PR.
+    _, clone, _, log = make_merge_clone(
+        tmp_path, monkeypatch,
+        ancestor={"calc.py": CALC,
+                  "tests/test_calc.py": CALC_TESTS + RED_TEST},
+        main={"main.txt": "main\n"})
+    (clone / "feature.txt").write_text("feature\n")
+
+    effects = _merged_finish(clone, monkeypatch)
+
+    assert effects["raised"] is None
+    assert len(effects["prs"]) == 1
+    assert effects["finished"] == [(
+        "codex", "run-42", "done",
+        "PR #91 (tests: default pytest); tested on the merge with origin/main"
+        " (1 failing as on origin/main)",
+        PUBLIC_REPO + "#42")]
+    assert {(directory.name, node_id) for directory, node_id
+            in started_in(log)} >= {
+        ("merge", "tests/test_calc.py::test_red"),
+        ("base", "tests/test_calc.py::test_red"),
+    }
+
+
+@pytest.mark.parametrize(("repo", "note"), (
+    (PUBLIC_REPO, "merge with origin/main {} conflicts: calc.py"
+                  " | work kept on ticket/42"),
+    (REPO, "merge with origin/main conflicts in 1 path, names withheld"
+           " | work kept on ticket/42"),
+))
+def test_a_conflict_with_main_finishes_errored(
+        tmp_path, monkeypatch, repo, note):
+    remote, clone, main_sha, log = make_merge_clone(
+        tmp_path, monkeypatch,
+        ancestor={"calc.py": CALC, "tests/test_calc.py": CALC_TESTS},
+        main={"calc.py": "def double(x):\n    return x + x\n"})
+    (clone / "calc.py").write_text("def double(x):\n    return 2 * x\n")
+
+    effects = _merged_finish(clone, monkeypatch, repo=repo)
+
+    assert isinstance(effects["raised"], implement.MergeConflictError)
+    assert effects["prs"] == []
+    assert effects["released"] == [repo + "#42"]
+    # errored, so the repeated-failure backoff counts it.
+    assert effects["finished"] == [(
+        "codex", "run-42", "errored", note.format(main_sha[:12]),
+        repo + "#42")]
+    assert effects["comments"] == []
+    assert started_in(log) == []
+    assert run_git("--git-dir", str(remote), "show", "ticket/42:calc.py") \
+        .stdout == "def double(x):\n    return 2 * x\n"
+
+
+def test_where_no_merge_can_be_made_the_head_runs_alone(
+        tmp_path, monkeypatch, worktree_calls):
+    # Main drops its suite, so no test command can be derived on the merge:
+    # the merge is tried and given up, the head's own suite runs, as before
+    # #1804, and the note says nothing of a merge.
+    _, clone, _, log = make_merge_clone(
+        tmp_path, monkeypatch,
+        ancestor={"calc.py": CALC, "tests/test_calc.py": CALC_TESTS},
+        main={"conftest.py": None, "tests/test_calc.py": None})
+    (clone / "feature.txt").write_text("feature\n")
+
+    effects = _merged_finish(clone, monkeypatch)
+
+    assert [verb for verb, _ in worktree_calls] == ["add", "remove"]
+    assert effects["raised"] is None
+    assert effects["finished"] == [(
+        "codex", "run-42", "done", "PR #91 (tests: default pytest)",
+        PUBLIC_REPO + "#42")]
+    assert started_in(log) == [
+        (clone.resolve(), "tests/test_calc.py::test_one")]
+
+
+@pytest.mark.parametrize(("main", "work", "outcome"), (
+    (MAIN_TEST, {"feature.txt": "feature\n"}, "done"),
+    (MAIN_TEST, {"calc.py": BROKEN_FOR_THREE}, "errored"),
+    ({"calc.py": "def double(x):\n    return x + x\n"},
+     {"calc.py": "def double(x):\n    return 2 * x\n"}, "errored"),
+    ({"conftest.py": None, "tests/test_calc.py": None},
+     {"feature.txt": "feature\n"}, "done"),
+), ids=("passes", "fails", "conflicts", "no-merge"))
+def test_the_merge_worktree_is_removed_on_every_path(
+        tmp_path, monkeypatch, worktree_calls, main, work, outcome):
+    _, clone, _, _ = make_merge_clone(
+        tmp_path, monkeypatch,
+        ancestor={"calc.py": CALC, "tests/test_calc.py": CALC_TESTS},
+        main=main)
+    write_tree(clone, work)
+
+    effects = _merged_finish(clone, monkeypatch)
+
+    assert effects["finished"][0][2] == outcome
+    added = [path for verb, path in worktree_calls if verb == "add"]
+    removed = [path for verb, path in worktree_calls if verb == "remove"]
+    assert added and sorted(removed) == sorted(added)
+    assert run_git("worktree", "list", "--porcelain", cwd=clone).stdout \
+        .count("worktree ") == 1
+    assert list(tmp_path.glob("review-evidence-*")) == []
+
+
+def test_nothing_from_the_merge_is_committed(tmp_path, monkeypatch):
+    remote, clone, main_sha, log = make_merge_clone(
+        tmp_path, monkeypatch,
+        ancestor={"calc.py": CALC, "tests/test_calc.py": CALC_TESTS},
+        main=dict(MAIN_TEST, **{"main.txt": "main\n"}), codex=True)
+    runs_root = clone.parent.resolve()
+    (clone / "feature.txt").write_text("feature\n")
+
+    effects = _merged_finish(clone, monkeypatch)
+
+    assert effects["raised"] is None
+    assert effects["finished"][0][3] == (
+        "PR #91 (tests: default pytest); tested on the merge with origin/main")
+    # The suite ran in a merge worktree in the run directory, beside the
+    # checkout.
+    ran_in = {directory for directory, _ in started_in(log)}
+    assert ran_in and all(directory.name == "merge"
+                          and directory.parent.parent == runs_root
+                          for directory in ran_in)
+    # The branch carries the ticket's work alone: neither main's commit nor
+    # its files, nor anything the merged run left.
+    assert run_git("--git-dir", str(remote), "ls-tree", "-r", "--name-only",
+                   "ticket/42").stdout.split() == [
+        "README.md", "calc.py", "conftest.py", "feature.txt",
+        "tests/test_calc.py"]
+    assert subprocess.run(
+        ["git", "--git-dir", str(remote), "merge-base", "--is-ancestor",
+         main_sha, "ticket/42"]).returncode == 1
+    # The finish removed its checkout, and the merge worktree is gone too.
+    assert list(runs_root.iterdir()) == []

@@ -12,6 +12,9 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 import funnel  # noqa: E402
 
+#: Block comments count only from the owner account (#1788).
+OWNER = {"login": "nateprich"}
+
 
 REPO = "owner/repo"
 
@@ -109,7 +112,8 @@ def _measure_fixture_load(monkeypatch, item_count):
             ):
                 return {
                     "comments": [
-                        {"body": "**Blocked on #84:** Wait for the decision."}
+                        {"author": OWNER,
+                         "body": "**Blocked on #84:** Wait for the decision."}
                     ]
                 }
             # Keep unexpected reads countable. A reintroduced dependency or

@@ -116,3 +116,25 @@ def test_breakdown_reads_awaiting_breakdown_from_the_snapshot(routine):
     body = (ROOT / "routines" / (routine + ".md")).read_text(encoding="utf-8")
     assert "funnel.py snapshot" in body
     assert ".brief.awaiting_breakdown" in body
+
+
+@pytest.mark.parametrize("routine", ("codex-work", "claude-saturday"))
+def test_implement_routines_ask_for_tests_that_catch_the_defect(routine):
+    """Both implementer routines carry the testing method that catches
+    defects before review, and the optional `risks` answer field (#1807).
+    The suite runs once, in finish-ticket; the model runs only what its
+    change touches."""
+    body = (ROOT / "routines" / (routine + ".md")).read_text(encoding="utf-8")
+    normalized = " ".join(body.split()).lower()
+
+    assert ("test at the ticket's named seams (else the public interface), "
+            "one behaviour each" in normalized)
+    assert ("a `reproduction:` first accept item: write that test first and "
+            "see it fail" in normalized)
+    assert ("expected values: from an independent source, never recomputed "
+            "the code's way" in normalized)
+    assert ("no refactoring beyond the ticket; a needed one is a departure "
+            "and its own ticket" in normalized)
+    assert ("run the affected test files while working; `finish-ticket` runs "
+            "the full suite" in normalized)
+    assert "optional `risks`: where review should look hardest" in normalized

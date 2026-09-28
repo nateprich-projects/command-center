@@ -10,6 +10,31 @@
     "expected_reasons": ["credentials"]
   },
   {
+    "source": "Ticket #1770: rotate the deploy credentials during cutover",
+    "body": "## What it is\n\nRotate the deploy credentials during cutover.\n",
+    "expected_reasons": ["credentials"]
+  },
+  {
+    "source": "Ticket #1770: rotates inflection inside the credentials phrase",
+    "body": "## What it is\n\nThe plan rotates the deploy credentials during cutover.\n",
+    "expected_reasons": ["credentials"]
+  },
+  {
+    "source": "Ticket #1770: rotated inflection inside the credentials phrase",
+    "body": "## What it is\n\nThe plan rotated the deploy credentials during cutover.\n",
+    "expected_reasons": ["credentials"]
+  },
+  {
+    "source": "Ticket #1770: rotating inflection inside the credentials phrase",
+    "body": "## What it is\n\nRotating the deploy credentials during cutover.\n",
+    "expected_reasons": ["credentials"]
+  },
+  {
+    "source": "Ticket #1770: existing API-key proposal still matches",
+    "body": "## What it is\n\nWe will rotate the API key before the deploy.\n",
+    "expected_reasons": ["credentials"]
+  },
+  {
     "source": "Decided by the agent: permanent deletion",
     "body": "## Decided by the agent\n\n- Permanently delete expired records after the retention cutoff.\n",
     "expected_reasons": ["destructive"]

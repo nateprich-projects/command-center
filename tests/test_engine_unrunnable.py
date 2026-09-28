@@ -121,6 +121,30 @@ def test_lister_requirement_is_normalized_to_the_verified_deferral():
     assert all("Probe the parent plan" not in row for row in result)
 
 
+def test_only_matching_canonical_probe_is_replaced():
+    fixture = rejected_1612_fixture()
+    packet = fixture["packet"]
+    premise = packet["plan_premises"][0]["premises"][0]
+    premise["claim"] = "CI"
+    premise["deferred_answer"] = fixture["expected_deferred_answer"]
+    probe = (
+        "Probe the parent plan #1581 premise labelled inferred against live "
+        "evidence using its evidence pointer: 'CI' (evidence pointer: {}); "
+        "cite support or contradiction, and record unsure if unresolved."
+    ).format(premise["evidence"])
+    wrong_pointer_probe = probe.replace(
+        premise["evidence"], "ticket #1700, checks")
+    acceptance = 'CI check "Run the suite" passes on head'
+
+    result = review.normalize_plan_premise_requirements(
+        packet, [acceptance, wrong_pointer_probe, probe])
+
+    assert acceptance in result
+    assert wrong_pointer_probe in result
+    assert probe not in result
+    assert "Defer the inferred premise 'CI'" in result[-1]
+
+
 def test_verified_deferral_does_not_remain_unsure_at_judgement():
     fixture = rejected_1612_fixture()
     packet = fixture["packet"]
@@ -189,8 +213,10 @@ def test_verified_forward_label_error_becomes_a_canonical_rejection(
     premise["label"] = label
     review.annotate_unrunnable_premises(packet)
 
+    probe = fixture["rejected_requirement"].replace(
+        "labelled inferred", "labelled {}".format(label))
     result = review.normalize_plan_premise_requirements(
-        packet, [fixture["rejected_requirement"]])
+        packet, [probe])
 
     assert result == [
         "Reject the {} premise 'The split framer may itself still go silent' "

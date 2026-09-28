@@ -3359,7 +3359,8 @@ def test_measured_forward_pointer_is_rejected_as_a_labeling_error(tmp_path):
         "evidence pointer '{}' names an open ticket that cannot run before "
         "ticket #6 is complete.".format(claim, evidence_pointer))
     probe = (
-        "Probe the parent plan premise '{}' using its evidence pointer {}; "
+        "Probe the parent plan #1 premise labelled measured against live "
+        "evidence using its evidence pointer: '{}' (evidence pointer: {}); "
         "leave it unsure if evidence is unavailable.".format(
             claim, evidence_pointer))
     packet = _packet(plan_premises=[{

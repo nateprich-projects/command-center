@@ -1652,6 +1652,9 @@ def _verified_deferred_premises(packet: Dict) -> List[Dict[str, str]]:
     for group in groups:
         if not isinstance(group, dict) or group.get("available") is not True:
             continue
+        parent_ref = group.get("parent_ref")
+        if not isinstance(parent_ref, str):
+            continue
         premises = group.get("premises")
         if not isinstance(premises, list):
             continue
@@ -1672,6 +1675,8 @@ def _verified_deferred_premises(packet: Dict) -> List[Dict[str, str]]:
             verified.append({
                 "claim": claim,
                 "evidence": evidence,
+                "label": "inferred",
+                "parent_ref": parent_ref,
                 "reviewed_ticket": reviewed_ref,
             })
     return verified
@@ -1699,6 +1704,9 @@ def _verified_label_error_premises(packet: Dict) -> List[Dict[str, str]]:
     for group in groups:
         if not isinstance(group, dict) or group.get("available") is not True:
             continue
+        parent_ref = group.get("parent_ref")
+        if not isinstance(parent_ref, str):
+            continue
         premises = group.get("premises")
         if not isinstance(premises, list):
             continue
@@ -1722,6 +1730,7 @@ def _verified_label_error_premises(packet: Dict) -> List[Dict[str, str]]:
                 "claim": claim,
                 "evidence": evidence,
                 "label": label,
+                "parent_ref": parent_ref,
                 "reviewed_ticket": reviewed_ref,
             })
     return verified
@@ -1736,6 +1745,45 @@ def _label_error_premise_requirement(premise: Dict[str, str]) -> str:
             "before ticket {} is complete.").format(
                 premise["label"], premise["claim"], premise["evidence"],
                 reviewed_ticket)
+
+
+def _is_verified_premise_probe(requirement: str,
+                               premise: Dict[str, str]) -> bool:
+    """Match only the canonical lister probe for this exact premise."""
+    parent_parts = _issue_ref_parts(premise.get("parent_ref"))
+    reviewed_parts = _issue_ref_parts(premise.get("reviewed_ticket"))
+    label = premise.get("label")
+    claim = premise.get("claim")
+    evidence = premise.get("evidence")
+    if (parent_parts is None or reviewed_parts is None
+            or not isinstance(label, str)
+            or not isinstance(claim, str)
+            or not isinstance(evidence, str)):
+        return False
+
+    parent_repo, parent_number = parent_parts
+    reviewed_repo, _ = reviewed_parts
+    parent_ref = ("#{}".format(parent_number) if parent_repo == reviewed_repo
+                  else "{}#{}".format(parent_repo, parent_number))
+    text = requirement.casefold()
+    prefix = (
+        "Probe the parent plan {} premise labelled {} against live evidence "
+        "using its evidence pointer: '{}'".format(
+            parent_ref, label, claim)
+    ).casefold()
+    if not text.startswith(prefix):
+        return False
+
+    # The lister may include a short parenthetical explanation before the
+    # pointer. Keep that part of the canonical shape, and require its exact
+    # evidence value so unrelated requirements sharing a claim survive.
+    suffix = text[len(prefix):]
+    if not suffix.startswith(" ("):
+        return False
+    parenthetical, separator, _ = suffix.partition(");")
+    if not separator:
+        return False
+    return "evidence pointer: {}".format(evidence.casefold()) in parenthetical
 
 
 def normalize_plan_premise_requirements(
@@ -1754,10 +1802,7 @@ def normalize_plan_premise_requirements(
 
     kept: List[str] = []
     for requirement in requirements:
-        text = requirement.casefold()
-        if any(premise["claim"].casefold() in text
-               or (premise["evidence"].casefold() in text
-                   and "premise" in text)
+        if any(_is_verified_premise_probe(requirement, premise)
                for premise in verified):
             continue
         kept.append(requirement)

@@ -4742,6 +4742,58 @@ def _dashboard_authoring_pr_agents() -> Dict[str, Set[str]]:
     return authored_by
 
 
+def _retired_merge_times(repo: str, numbers: Set[int]) -> Dict[int, datetime]:
+    """Read merge timestamps for only the retired PRs named by heartbeats."""
+    if not numbers:
+        return {}
+    try:
+        owner, name = repo.split("/", 1)
+    except ValueError:
+        raise GitHubError("invalid repository ref {}".format(repo))
+
+    aliases = {
+        number: "pr{}".format(index)
+        for index, number in enumerate(sorted(numbers))
+    }
+    selections = "\n".join(
+        "{}: pullRequest(number: {}) {{ mergedAt }}".format(alias, number)
+        for number, alias in aliases.items()
+    )
+    query = """query {{
+  rateLimit {{ cost remaining resetAt }}
+  repo0: repository(owner: {owner}, name: {name}) {{
+    {pull_requests}
+  }}
+}}""".format(
+        owner=json.dumps(owner),
+        name=json.dumps(name),
+        pull_requests=selections,
+    )
+    data = gh_graphql(query)
+    if not isinstance(data, dict):
+        raise GitHubError("retired PR response was not an object")
+    repository = data.get("repo0")
+    if not isinstance(repository, dict):
+        raise GitHubError(
+            "could not read repository {} in retired PR response".format(repo)
+        )
+
+    found: Dict[int, datetime] = {}
+    for number, alias in aliases.items():
+        row = repository.get(alias)
+        if row is None:
+            continue
+        if not isinstance(row, dict):
+            raise GitHubError("invalid retired pull-request row")
+        merged_at = _metric_time(row.get("mergedAt"))
+        if merged_at is None:
+            raise GitHubError(
+                "PR #{} has no parseable mergedAt".format(number)
+            )
+        found[number] = merged_at
+    return found
+
+
 def unattended_merges(now: datetime) -> List[Dict[str, object]]:
     """Merges a reviewer made without Nate, read from agent heartbeats.
 
@@ -4792,24 +4844,13 @@ def unattended_merges(now: datetime) -> List[Dict[str, object]]:
                 number = int(str(value).lstrip("#"))
             except (TypeError, ValueError):
                 continue
-            if number > 0:
+            # Older zcode finishes stored the merge count (0 or 1), not a PR
+            # number. This repository has no PR #1, so discard that sentinel.
+            if number > 1:
                 retired_prs.add(number)
     retired_merge_times: Dict[int, datetime] = {}
     if retired_prs:
-        recent_prs = _recent_merged_pr_rows(REPO, now - MAINTENANCE_WINDOW)
-        for row in recent_prs:
-            try:
-                number = int(row["number"])
-            except (KeyError, TypeError, ValueError):
-                continue
-            if number not in retired_prs:
-                continue
-            merged_at = _metric_time(row.get("mergedAt"))
-            if merged_at is None:
-                raise GitHubError(
-                    "PR #{} has no parseable mergedAt".format(number)
-                )
-            retired_merge_times[number] = merged_at
+        retired_merge_times = _retired_merge_times(REPO, retired_prs)
 
     authored_by: Dict[str, Set[str]] = {}
     for _agent, rows in live_rows:
@@ -5374,8 +5415,7 @@ def _recent_merged_pr_rows(
     """Read merged PRs updated within the window using a light paged query.
 
     The portfolio metric needs the branch, merge timestamps, and fields that
-    show whether a PR is the funnel's own (#1794). Retired-agent brief records
-    also need PR numbers to join their heartbeat rows. Reusing
+    show whether a PR is the funnel's own (#1794). Reusing
     ``ticket_pr_index`` would also request CI rollups and scan every PR state;
     the brief's 100-row bound can also hide valid merges. Merged PRs sort by
     ``updatedAt``, so the first row older than the cutoff proves that later
@@ -5394,7 +5434,7 @@ def _recent_merged_pr_rows(
       orderBy: {{field: UPDATED_AT, direction: DESC}}
     ) {{
       nodes {{
-        number state headRefName mergedAt updatedAt
+        state headRefName mergedAt updatedAt
         isCrossRepository headRepository {{ nameWithOwner }} author {{ login }}
       }}
       pageInfo {{ hasNextPage endCursor }}
@@ -5443,7 +5483,6 @@ def _recent_merged_pr_rows(
             if updated_at < cutoff:
                 return rows
             rows.append({
-                "number": node.get("number"),
                 "state": node.get("state"),
                 "headRefName": node.get("headRefName"),
                 "mergedAt": node.get("mergedAt"),

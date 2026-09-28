@@ -109,6 +109,9 @@ def test_retired_merges_stop_at_cutoff_but_stay_out_of_silence_alarms(monkeypatc
             {"agent": "zcode", "phase": "finish", "run": "old-count-zero",
              "ts": (retired_at - timedelta(days=1)).timestamp(),
              "merged": "0", "note": "legacy merge count"},
+            {"agent": "zcode", "phase": "finish", "run": "old-count-one",
+             "ts": (retired_at - timedelta(days=1)).timestamp(),
+             "merged": "1", "note": "legacy merge count"},
             {"agent": "zcode", "phase": "finish", "run": "old-count-bool",
              "ts": (retired_at - timedelta(days=1)).timestamp(),
              "merged": True, "note": "legacy merge count"},
@@ -116,16 +119,36 @@ def test_retired_merges_stop_at_cutoff_but_stay_out_of_silence_alarms(monkeypatc
         "muse": [_finish("muse", merged=202)],
     }
     read = _wire(monkeypatch, spools)
-    monkeypatch.setattr(
-        funnel, "_recent_merged_pr_rows",
-        lambda repo, cutoff: [
-            {"number": 1491, "mergedAt": (retired_at - timedelta(days=1)).isoformat()},
-            {"number": 1553, "mergedAt": retired_at.isoformat()},
-            {"number": 1568, "mergedAt": (retired_at + timedelta(seconds=1)).isoformat()},
-        ],
-    )
+    queries = []
 
-    found = funnel.unattended_merges(now)
+    def fake_graphql(query, **variables):
+        queries.append(" ".join(query.split()))
+        return {"repo0": {
+            "pr0": {
+                "number": 1491,
+                "mergedAt": (retired_at - timedelta(days=1)).isoformat(),
+            },
+            "pr1": {"number": 1553, "mergedAt": retired_at.isoformat()},
+            "pr2": {
+                "number": 1568,
+                "mergedAt": (retired_at + timedelta(seconds=1)).isoformat(),
+            },
+        }}
+
+    def reject_broad_scan(*args, **kwargs):
+        raise AssertionError("retired merge lookup must not scan every merged PR")
+
+    monkeypatch.setattr(funnel, "gh_graphql", fake_graphql)
+    monkeypatch.setattr(funnel, "_recent_merged_pr_rows", reject_broad_scan)
+    timings = {}
+    degraded = []
+
+    found = funnel._brief_timed(
+        "unattended_merges",
+        lambda: funnel.unattended_merges(now),
+        timings,
+        degraded,
+    )
 
     assert {(row["pr"], row["agent"]) for row in found} == {
         (1491, "zcode"), (1553, "zcode"), (202, "muse"),
@@ -136,47 +159,21 @@ def test_retired_merges_stop_at_cutoff_but_stay_out_of_silence_alarms(monkeypatc
     ).isoformat()
     assert by_pr[1553]["at"] == retired_at.isoformat()
     assert "zcode" in read
+    assert len(queries) == 1
+    assert all(
+        "pullRequest(number: {})".format(number) in queries[0]
+        for number in (1491, 1553, 1568)
+    )
+    assert "pullRequests(" not in queries[0]
+    assert timings["unattended_merges"] <= funnel.BRIEF_SECTION_BUDGETS[
+        "unattended_merges"
+    ]
+    assert degraded == []
 
     read.clear()
     health = funnel.agent_health(now)
     assert all(row["agent"] != "zcode" for row in health)
     assert "zcode" not in read
-
-
-def test_recent_merged_pr_rows_include_number_for_cutoff_lookup(monkeypatch):
-    merged_at = datetime.fromtimestamp(
-        heartbeat.ZAI_STANDARD_UNTIL, timezone.utc
-    ) - timedelta(seconds=1)
-    queries = []
-
-    def fake_graphql(query, **variables):
-        queries.append(query)
-        return {"repo0": {"pullRequests": {
-            "nodes": [{
-                "number": 1491, "state": "MERGED",
-                "headRefName": "ticket/1491",
-                "mergedAt": merged_at.isoformat(),
-                "updatedAt": merged_at.isoformat(),
-            }],
-            "pageInfo": {"hasNextPage": False, "endCursor": None},
-        }}
-        }
-
-    monkeypatch.setattr(funnel, "gh_graphql", fake_graphql)
-
-    found = funnel._recent_merged_pr_rows(
-        funnel.REPO, merged_at - timedelta(days=1)
-    )
-
-    assert found == [{
-        "number": 1491, "state": "MERGED", "headRefName": "ticket/1491",
-        "mergedAt": merged_at.isoformat(), "isCrossRepository": None,
-        "headRepository": None, "author": None,
-    }]
-    assert len(queries) == 1
-    query = " ".join(queries[0].split())
-    assert "nodes { number state headRefName mergedAt updatedAt" in query
-    assert "isCrossRepository headRepository { nameWithOwner } author { login }" in query
 
 
 def test_rows_outside_the_window_fall_out(monkeypatch):

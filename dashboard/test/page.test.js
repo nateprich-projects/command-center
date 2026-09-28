@@ -835,6 +835,28 @@ test("the Budget panel renders D1-D6, marks Muse pace resets, and explains the D
 
     assert.match(html, /Muse’s ChatGPT-side usage and Claude’s claude\.ai usage are invisible/);
     assert.match(html, /id="budget-grid"/);
+
+    const estimateStatus = (value) => ({
+      kind: "category",
+      daily: Array(fixture.days.length).fill(null).map((item, index) => (
+        index === fixture.days.length - 1 ? value : item
+      )),
+      r7: Array(fixture.days.length).fill(null),
+      r28: Array(fixture.days.length).fill(null),
+      delta: Array(fixture.days.length).fill(null),
+    });
+    for (const [value, label] of [
+      [true, /Five-hour window \(estimated\)/],
+      [false, /Five-hour window \(authoritative app reading\)/],
+    ]) {
+      fixture.metrics.D.D3.estimated = estimateStatus(value);
+      renderBudgetMetrics(fixture, grid);
+      const claude = grid.querySelectorAll(".budget-tile")[2];
+      assert.match(claude.textContent, label);
+      assert.match(claude.textContent, value
+        ? /Seven-day window \(estimated\)/
+        : /Seven-day window \(authoritative app reading\)/);
+    }
   } finally {
     if (previousDocument === undefined) delete globalThis.document;
     else globalThis.document = previousDocument;

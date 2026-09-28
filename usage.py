@@ -55,9 +55,8 @@ MUSE_SESSIONS = os.path.expanduser(
 #
 # **This undercounts.** It cannot see claude.ai or mobile usage on the same
 # subscription, which is exactly the objection plan.md raised against estimating
-# from these files. That objection stands: this is an estimate, it errs low, and
-# it carries an explicit haircut below to lean the other way. It is used only
-# when the real reading is unavailable.
+# from these files. It remains explicitly marked as an estimate and is used only
+# when the account-level app reading is unavailable.
 
 #: Only Opus is budgeted. It is what actually consumes a subscription window —
 #: the 5-hour window that came closest to the limit on 2026-09-05 carried 713k
@@ -65,41 +64,20 @@ MUSE_SESSIONS = os.path.expanduser(
 #: counting it adds arithmetic without changing a decision.
 BUDGETED_MODEL = "opus"
 
-#: Base capacity in Opus output tokens, calibrated 2026-09-05 against Claude's
-#: own usage panel: 1,667,023 tokens since the weekly reset reading 61% used,
-#: and 262,413 in the trailing five hours reading 45%. The weekly figure has the
-#: +50% promo of that day divided back out.
-#:
-#: An earlier pair of numbers was wrong in both directions, because the weekly
-#: one was calibrated against a percentage read off the *ChatGPT* usage panel
-#: rather than Claude's. Cross-wiring two providers' figures produces a
-#: confidently wrong constant, so re-derive these only from Claude's own panel.
-#: The five-hour figure is deliberately generous, and is the weaker of the two.
-#: Its calibration is self-contradictory: 262,413 tokens read 45% on the panel,
-#: implying 583k capacity, yet a measured 801,303-token five-hour stretch did not
-#: hit the limit. Both cannot hold, so the five-hour limit is evidently not a
-#: function of Opus output tokens alone — cache reads dwarf output in volume and
-#: very likely carry weight. Set above the largest stretch actually observed, so
-#: this window does not produce false refusals; the weekly window, which
-#: calibrates cleanly, is the load-bearing gate.
-#:
-#: **Scaled 5× on 2026-09-10 from Nate's plan change, not from a panel reading.**
-#: The figures above (1,822,000 weekly, 900,000 five-hour) were calibrated on the
-#: plan he had on 2026-09-05; he has since moved to a plan with five times the
-#: bandwidth, and the constants had not moved with it. A gate five times too
-#: tight is worse than one scaled from a known ratio, so the ratio is applied
-#: here with its provenance stated. Recalibrate from Claude's own panel at the
-#: first opportunity — tokens since the weekly reset against the percentage it
-#: shows — and replace both numbers and this paragraph when that is done. The
-#: five-hour figure carries the same 5× and the same caveats as before.
-FIVE_HOUR_CAPACITY = 4_500_000.0
-WEEKLY_CAPACITY = 9_110_000.0
+#: The 2026-09-27 paired sample had 530,879 deduplicated Opus output tokens in
+#: five hours and read 43% in Claude's app, implying about 1.235M tokens. Since
+#: output tokens are a weaker signal for this window, keep the denominator above
+#: the observed 801,303-token stretch and below the paired estimate. This makes
+#: the transcript fallback read higher than the paired app percentage.
+FIVE_HOUR_CAPACITY = 1_200_000.0
 
-#: No inflation. The capacities above are calibrated from the real panel using
-#: these same token counts, so any systematic blind spot is already absorbed
-#: into them — a haircut on top would double-count the conservatism. The
-#: reserves below carry the margin instead. Raise this only if the estimate is
-#: observed reading low against the panel.
+#: The same paired sample had 937,634 deduplicated tokens since reset and read
+#: 14% in the app: 937,634 / 0.14 = 6,697,385.7. Round to the nearest token so
+#: the transcript fallback reproduces that weekly sample.
+WEEKLY_CAPACITY = 6_697_386.0
+
+#: No additional inflation factor; these readings remain estimates, and the
+#: normal reserves below carry the safety margin.
 ESTIMATE_HAIRCUT = 1.0
 
 #: When the weekly window resets, in local time. The estimate counts tokens
@@ -453,6 +431,8 @@ def read_claude_local(now: Optional[float] = None) -> Optional[Dict]:
     cutoff = min(reset, now - FIVE_HOUR)
     five_hour = weekly = 0.0
     seen = False
+    seen_five_hour_message_ids = set()
+    seen_weekly_message_ids = set()
 
     for path in glob.glob(CLAUDE_TRANSCRIPTS):
         try:
@@ -478,10 +458,22 @@ def read_claude_local(now: Optional[float] = None) -> Optional[Dict]:
                     if not tokens or stamp is None or stamp < cutoff:
                         continue
                     seen = True
-                    if stamp >= reset:
+                    message_id = message.get("id")
+                    has_message_id = isinstance(message_id, str) and bool(message_id)
+                    if stamp >= reset and (
+                        not has_message_id
+                        or message_id not in seen_weekly_message_ids
+                    ):
                         weekly += tokens
-                    if stamp >= now - FIVE_HOUR:
+                        if has_message_id:
+                            seen_weekly_message_ids.add(message_id)
+                    if stamp >= now - FIVE_HOUR and (
+                        not has_message_id
+                        or message_id not in seen_five_hour_message_ids
+                    ):
                         five_hour += tokens
+                        if has_message_id:
+                            seen_five_hour_message_ids.add(message_id)
         except OSError:
             continue
 

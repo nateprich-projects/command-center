@@ -77,6 +77,7 @@ def _queue_with_verdict_history(monkeypatch, verdict, verdict_at,
     comments = [{
         "body": funnel.REVIEW_MARKER + "\n" + json.dumps(verdict),
         "createdAt": verdict_at,
+        "author": {"login": "nateprich"},
     }]
     comments.extend({"body": "later PR comment", "createdAt": created_at}
                      for created_at in comment_times)

@@ -308,7 +308,9 @@ def _latest_review_comment(comments: object):
     if not isinstance(comments, list):
         return None
     for comment in reversed(comments):
-        if not isinstance(comment, dict):
+        # An untrusted author's verdict would make someone else's approval
+        # read as the one that raced this run (#1787).
+        if not isinstance(comment, dict) or not funnel.trusted_comment(comment):
             continue
         body = comment.get("body")
         if not isinstance(body, str):

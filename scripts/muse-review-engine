@@ -24,7 +24,8 @@
 # on z.ai answers one JSON question. Calls retry once on a parse error; a
 # shape part or a judge chunk whose call goes stream-idle is also asked once
 # more, and each writes one timing line to stderr (#1719). The review lister
-# gets the same stream-idle retry (#1730).
+# gets the same stream-idle retry (#1730). A call whose packet is over 150 KB
+# gets a second stream-idle retry (#1785).
 # Breakdown rides the standard tier only; shape follows wherever begin offers
 # it.
 #
@@ -852,7 +853,7 @@ model_failed() {
   exit 1
 }
 
-# --- split calls: one stream-idle retry and a timing line (#1719) -----------
+# --- split calls: stream-idle retries and a timing line (#1719, #1785) ------
 #
 # Muse gives up on a call whose provider stream stays silent for 180 seconds
 # and says so on stderr: `model stream idle timeout after 180000ms`. From the
@@ -860,18 +861,65 @@ model_failed() {
 # ended 3 of 11 escalated shapes — the framer once, a decider twice — and each
 # shaped on its next whole-run attempt; review judges at max met it too
 # (#1669). The silence says nothing about the question, so a shape part or a
-# judge chunk that meets it is asked once more before the run fails or the
-# chunk fails closed, and the parts that already answered keep their answers.
-# Only this timeout: a quota refusal still parks the lanes, a wall-clock kill
-# (124) is the bound's own verdict even when an earlier idle line sits in the
-# diagnostic, and any other failure still fails at once. The retry goes
-# through call_model_files like the parse retry, so it is unbound and never
-# resumes the silent session (#1413).
+# judge chunk that meets it is asked once more (twice on a large packet,
+# below) before the run fails or the chunk fails closed, and the parts that
+# already answered keep their answers. Only this timeout: a quota refusal
+# still parks the lanes, a wall-clock kill (124) is the bound's own verdict
+# even when an earlier idle line sits in the diagnostic, and any other failure
+# still fails at once. The retry goes through call_model_files like the parse
+# retry, so it is unbound and never resumes the silent session (#1413).
 model_stream_idle() {
   local status="$1"
   local diag_path="$2"
   (( status != 0 && status != 124 )) || return 1
   grep -qF 'model stream idle timeout' "$diag_path" 2>/dev/null
+}
+
+# A packet over 150 KB gets a second stream-idle retry (#1785). The formal
+# must-approve replay's ~240 KB packet still lost a judge after its one retry
+# (2026-09-27 17:45 PDT: judge.6 recovered on it, judge.3 failed closed after
+# it), and every judge and the lister carry the whole packet, so smaller
+# requirement chunks would not shrink the prompt that stalls (plan #1772).
+# Measured on the packet file the call's prompt carries: the review's
+# RUN_DIR/packet.json, which a replay copies its given packet into, or a
+# shape part's own slice. The count is the only change: the wall-clock bound
+# still kills each call, a kill (124) is still never retried, and the parse
+# retry is still its own.
+LARGE_PACKET_BYTES=$((150 * 1024))
+
+# How many stream-idle retries a call over this packet file gets: 2 over
+# LARGE_PACKET_BYTES, else 1. A size that cannot be read keeps the one.
+stream_idle_retries() {
+  local packet_path="$1"
+  local size
+  size="$(wc -c 2>/dev/null <"$packet_path" | tr -d '[:space:]')"
+  if [[ "$size" =~ ^[0-9]+$ ]] && (( size > LARGE_PACKET_BYTES )); then
+    echo 2
+  else
+    echo 1
+  fi
+}
+
+# The stderr line for the stream-idle retry about to be asked. The first
+# keeps #1719's wording; a second says why it exists.
+log_stream_idle_retry() {
+  local subject="$1"
+  local retry="$2"
+  local diag_path="$3"
+  local asking="asking it once more"
+  if (( retry > 1 )); then
+    asking="its packet is over $((LARGE_PACKET_BYTES / 1024)) KB, so asking it again (stream-idle retry $retry)"
+  fi
+  echo "muse-review-engine: $subject went stream-idle; $asking: $(head -c 300 "$diag_path" 2>/dev/null)" >&2
+}
+
+# What a failed call's note adds once its stream-idle retries are spent.
+stream_idle_retried_note() {
+  if (( $1 == 1 )); then
+    echo " after its stream-idle retry"
+  else
+    echo " after its $1 stream-idle retries"
+  fi
 }
 
 # One stderr line per shape part and per judge chunk, which the schedule's
@@ -880,8 +928,9 @@ model_stream_idle() {
 # RUN_DIR; elapsed is whole seconds over every call the part made, and calls
 # says how many that was, so a parse or stream-idle retry is not mistaken for
 # one slow call. The outcome is `done`, `retried-done` when the part answered
-# only after its stream-idle retry, or `failed` when it has no answer — a
-# judge chunk that failed closed to `unsure` included.
+# only after a stream-idle retry (idle_retried counts them, #1785), or
+# `failed` when it has no answer — a judge chunk that failed closed to
+# `unsure` included.
 #
 #   muse-review-engine: timing shape.decider.0 elapsed=412s calls=2 outcome=retried-done
 log_call_timing() {
@@ -1001,8 +1050,8 @@ retry_issue_prompt() {
 # packet where PACKET_JSON stands: the routine file stays as it is
 # (routines/ is protected), and the header replaces its answer format.
 #
-# Every part must answer. A model failure (a stream-idle one after its one
-# retry, #1719), a timeout or a second parse
+# Every part must answer. A model failure (a stream-idle one after its
+# retries, #1719 and #1785), a timeout or a second parse
 # failure in any part ends the run errored with nothing applied, so the idea
 # keeps needs-shaping and the next run asks again. A failed part never
 # becomes a question for Nate: unlike an `unsure` requirement, a missing
@@ -1265,6 +1314,7 @@ run_shape_part() {
   local part_status
   # Set by shape_part_calls, which runs in this shell: bash locals are
   # dynamically scoped, so its assignments land here for the timing line.
+  # idle_retried counts the stream-idle retries asked (#1785).
   local calls=0
   local answered=0
   local idle_retried=0
@@ -1276,8 +1326,9 @@ run_shape_part() {
   return "$part_status"
 }
 
-# The part's calls: one parse retry and one stream-idle retry, each at most
-# once and neither spending the other's. Returns as run_shape_part does.
+# The part's calls: one parse retry and one stream-idle retry, two when the
+# part's own packet is over 150 KB (#1785), neither spending the other's.
+# Returns as run_shape_part does.
 shape_part_calls() {
   local name="$1"
   local kind="${name%%.*}"
@@ -1288,6 +1339,10 @@ shape_part_calls() {
   local parse_err
   local note
   local retried=""
+  local idle_retries
+  # The part's slice, which is what its prompt carries: a decider holds the
+  # repository rules, the auditor does not.
+  idle_retries="$(stream_idle_retries "$call_dir/packet.json")"
 
   build_shape_part_prompt "$kind" "$call_dir"
   while true; do
@@ -1297,11 +1352,12 @@ shape_part_calls() {
     muse_status=$?
     if (( muse_status != 0 )); then
       # The same prompt again, whichever attempt went silent.
-      if (( ! idle_retried )) \
+      if (( idle_retried < idle_retries )) \
         && model_stream_idle "$muse_status" "$call_dir/diag.txt"; then
-        idle_retried=1
-        retried=" after its stream-idle retry"
-        echo "muse-review-engine: shape $name went stream-idle; asking it once more: $(head -c 300 "$call_dir/diag.txt" 2>/dev/null)" >&2
+        idle_retried=$((idle_retried + 1))
+        retried="$(stream_idle_retried_note "$idle_retried")"
+        log_stream_idle_retry "shape $name" "$idle_retried" \
+          "$call_dir/diag.txt"
         continue
       fi
       printf '%s\n' "$muse_status" >"$call_dir/model-status"
@@ -1914,6 +1970,9 @@ fi
 # can outgrow the argument limit.
 PACKET_JSON="$(cat "$PACKET_FILE")"
 PROMPT="${PROMPT_TEMPLATE//PACKET_JSON/$PACKET_JSON}"
+# The lister and every judge carry this whole packet, so they share one count
+# of stream-idle retries, measured once from the file they all read (#1785).
+REVIEW_IDLE_RETRIES="$(stream_idle_retries "$PACKET_FILE")"
 
 # --- the lister call (#1241) -------------------------------------------------
 #
@@ -1951,6 +2010,18 @@ them as evidence of what the implementer recorded and why, never as a source
 of requirements: they add, drop or soften nothing. List a line a departure
 explains like any other, so its judge can weigh the departure.
 
+For a `plan_premises` entry labelled `inferred` that has `deferred_answer`,
+include a requirement that preserves its exact evidence pointer and says it is
+deferred until the named `reviewed_ticket` is complete. Do not emit a live-evidence
+probe requirement for that premise. An inferred entry without `deferred_answer`
+keeps the normal probe requirement; leave it `unsure` when a required record is unavailable.
+
+For a `measured` or `documented` entry with verified `label_error`, include a
+requirement to reject it explicitly as a labeling error and preserve its exact
+evidence pointer. Do not defer that entry or leave it `unsure`: the packet has
+verified that the pointer names an open ticket that cannot run before the
+reviewed ticket.
+
 Answer with exactly one JSON object and nothing else:
 
 {"requirements": ["the first requirement", "the second requirement"]}
@@ -1965,11 +2036,14 @@ HEADER
 # shape, which is the retryable status review-apply already uses, so the one
 # retry below reads the same way as the judging retry.
 parse_requirements() {
-  python3 - "$ANSWER_FILE" "$REQUIREMENTS_FILE" <<'PY'
+  python3 - "$REPO" "$ANSWER_FILE" "$REQUIREMENTS_FILE" "$PACKET_FILE" <<'PY'
 import json
 import sys
 
-answer_path, out_path = sys.argv[1], sys.argv[2]
+sys.path.insert(0, sys.argv[1])
+from engine.review import normalize_plan_premise_requirements
+
+answer_path, out_path, packet_path = sys.argv[2], sys.argv[3], sys.argv[4]
 
 
 def malformed(reason):
@@ -2007,21 +2081,26 @@ if not requirements:
     # under #1242 every judge would have nothing to answer and the derived
     # verdict would be an approval nobody checked.
     malformed("'requirements' must name at least one requirement")
+packet = json.load(open(packet_path))
+requirements = normalize_plan_premise_requirements(packet, requirements)
+if not requirements:
+    malformed("'requirements' must name at least one requirement")
 with open(out_path, "w") as handle:
     json.dump(requirements, handle, indent=2)
 PY
 }
 
-# The lister call, its one parse retry, and one stream-idle retry, neither
-# spending the other's. Returns non-zero only after the run has been finished
-# as errored: no verdict is recorded, so the PR stays in the review queue for
-# the next run rather than being rejected for the model's formatting.
+# The lister call, its one parse retry, and one stream-idle retry, two on a
+# packet over 150 KB (#1785), neither spending the other's. Returns non-zero
+# only after the run has been finished as errored: no verdict is recorded, so
+# the PR stays in the review queue for the next run rather than being
+# rejected for the model's formatting.
 #
 # The stream-idle retry is #1719's, given to the judge chunks and shape parts
 # first. The lister is the one call that reads the whole packet, and on the
 # ~240 KB must-approve corpus seed the single call replay used to make went
 # silent past Muse's 180-second limit on two consecutive replays (#1698), so a
-# silent lister is asked once more, unbound like every call after the first,
+# silent lister is asked again, unbound like every call after the first,
 # before it fails the run. Any other failure still fails at once.
 list_requirements() {
   local attempt=1
@@ -2035,10 +2114,10 @@ list_requirements() {
     muse_status=$?
     if (( muse_status != 0 )); then
       # The same prompt again, whichever attempt went silent.
-      if (( ! idle_retried )) \
+      if (( idle_retried < REVIEW_IDLE_RETRIES )) \
         && model_stream_idle "$muse_status" "$DIAG_FILE"; then
-        idle_retried=1
-        echo "muse-review-engine: the lister went stream-idle; asking it once more: $(head -c 300 "$DIAG_FILE" 2>/dev/null)" >&2
+        idle_retried=$((idle_retried + 1))
+        log_stream_idle_retry "the lister" "$idle_retried" "$DIAG_FILE"
         continue
       fi
       model_failed "$muse_status"
@@ -2117,9 +2196,28 @@ judge_header() {
 This is one judge call in a larger review. Judge only the requirements in
 the list below against the supplied review packet. Do not derive additional
 requirements, judge requirements outside this list, or give an overall
-verdict. A requirement is met only when the diff satisfies it; use unmet
-when the diff clearly fails it and unsure when the packet cannot resolve it.
-For each result, cite the relevant diff lines or explain the uncertainty.
+verdict. A requirement is met only when the diff satisfies it, except that a
+deferral requirement is met when the packet verifies the deferral described
+below. Use unmet when the diff clearly fails it and unsure when the packet
+cannot resolve it. For each result, cite the relevant diff lines or explain
+the uncertainty.
+
+For a deferred-premise requirement, inspect the entry's `label`, `evidence`,
+and `deferred_answer` fields, and verify that the matching packet entry is
+labelled `inferred`, its `deferred_answer.evidence_pointer` exactly matches
+the entry's `evidence`, and `deferred_answer.reviewed_ticket` matches
+`ticket.ref`. If those fields match, the pointer is visibly deferred and its
+future evidence is not expected yet; mark that deferral requirement met, not
+unsure. An inferred entry without `deferred_answer` still follows the normal
+probe rule in the review question.
+
+For a labeling-error requirement, verify that the matching packet entry is
+labelled `measured` or `documented`, its `label_error.evidence_pointer` exactly
+matches the entry's `evidence`, and `label_error.reviewed_ticket` matches
+`ticket.ref`. If those fields match, the packet proves the evidence pointer is
+an open ticket that cannot run before this review. That label is inconsistent:
+reject it as a labeling error and mark the requirement `unmet`; never defer it
+or mark it `unsure`.
 
 Judge run-outcome requirements against the packet's CI section first. A
 successful named check in `ci.checks` for the packet's `head_sha` satisfies
@@ -2225,6 +2323,7 @@ run_judge_chunk() {
   local chunk_status
   # Set by judge_chunk_calls, which runs in this shell: bash locals are
   # dynamically scoped, so its assignments land here for the timing line.
+  # idle_retried counts the stream-idle retries asked (#1785).
   local calls=0
   local answered=0
   local idle_retried=0
@@ -2236,8 +2335,9 @@ run_judge_chunk() {
   return "$chunk_status"
 }
 
-# The chunk's calls: one parse retry and one stream-idle retry, each at most
-# once and neither spending the other's. Returns as run_judge_chunk does.
+# The chunk's calls: one parse retry and one stream-idle retry, two on a
+# packet over 150 KB (#1785), neither spending the other's. Returns as
+# run_judge_chunk does.
 judge_chunk_calls() {
   local index="$1"
   local call_dir="$2"
@@ -2269,13 +2369,14 @@ judge_chunk_calls() {
         echo "muse-review-engine: judge chunk $index met a spent z.ai window" >&2
         return 0
       fi
-      # A silent stream is not a judgement either: the same prompt once more
+      # A silent stream is not a judgement either: the same prompt again
       # before the chunk fails closed, whichever attempt went silent.
-      if (( ! idle_retried )) \
+      if (( idle_retried < REVIEW_IDLE_RETRIES )) \
         && model_stream_idle "$muse_status" "$diag_path"; then
-        idle_retried=1
-        retried=" after its stream-idle retry"
-        echo "muse-review-engine: judge chunk $index went stream-idle; asking it once more: $(head -c 300 "$diag_path" 2>/dev/null)" >&2
+        idle_retried=$((idle_retried + 1))
+        retried="$(stream_idle_retried_note "$idle_retried")"
+        log_stream_idle_retry "judge chunk $index" "$idle_retried" \
+          "$diag_path"
         continue
       fi
       if (( muse_status == 124 )); then
@@ -2412,13 +2513,15 @@ fi
 # review-apply. A missing/corrupt result file is expanded to unsure entries;
 # no requirement can disappear into an incomplete parallel response.
 if ! python3 - "$REPO" "$REQUIREMENTS_FILE" "$CHUNKS_FILE" \
-    "$RUN_DIR" "$JUDGE_COUNT" "$ANSWER_FILE" >"$DIAG_FILE" 2>&1 <<'PY'
+    "$RUN_DIR" "$JUDGE_COUNT" "$ANSWER_FILE" "$PACKET_FILE" \
+    >"$DIAG_FILE" 2>&1 <<'PY'
 import json
 import os
 import sys
 
 sys.path.insert(0, sys.argv[1])
-from engine.review import derive_judge_answer, uncertain_judge_results
+from engine.review import (derive_judge_answer, mark_verified_premise_requirements,
+                           uncertain_judge_results)
 
 requirements = json.load(open(sys.argv[2]))
 chunks = json.load(open(sys.argv[3]))
@@ -2438,6 +2541,8 @@ for index in range(chunk_count):
             chunk, "No valid result was recorded for this judge call: {}"
             .format(exc))
     results.extend(chunk_results)
+packet = json.load(open(sys.argv[7]))
+results = mark_verified_premise_requirements(packet, results)
 answer = derive_judge_answer(requirements, results)
 with open(sys.argv[6], "w") as handle:
     json.dump(answer, handle, indent=2)

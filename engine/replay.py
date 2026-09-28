@@ -53,16 +53,20 @@ ROUTINE_DEFAULT = (
 #:
 #:   muse-review-engine: timing judge.3 elapsed=412s calls=2 outcome=failed
 #:
-#: The part is the call's directory in the engine's run directory (`judge.3`,
-#: `shape.decider.0`), so nothing in a matching line comes from the packet.
-#: The whole line must match: the engine's other stderr lines can quote a
-#: failing judge's diagnostic, which can quote a requirement drawn from a
-#: private ticket, and a line that merely contains a timing line is one of
-#: those (#1784). The bounds cap what a line that only looks like one could
-#: carry at a lowercase dotted name.
+#: The part is the call's directory in the engine's run directory, and only
+#: the names the engine gives those are accepted: `judge.N` for a judge
+#: chunk, `shape.framer`, `shape.sibling.N`, `shape.decider.N` and
+#: `shape.auditor` for the shape parts, and `lister`. The whole line must
+#: match, case and all: the engine's other stderr lines can quote a failing
+#: judge's diagnostic, which can quote a requirement drawn from a private
+#: ticket, and a line that merely contains a timing line is one of those
+#: (#1784). So a line that only looks like a timing line can carry nothing
+#: but digits.
 TIMING_LINE = re.compile(
     r"muse-review-engine: timing "
-    r"(?P<part>[a-z]{1,32}(?:\.[a-z0-9]{1,32}){0,3}) "
+    r"(?P<part>judge\.[0-9]{1,4}"
+    r"|shape\.(?:framer|auditor|(?:sibling|decider)\.[0-9]{1,4})"
+    r"|lister) "
     r"elapsed=(?P<elapsed>[0-9]{1,9})s "
     r"calls=(?P<calls>[0-9]{1,4}) "
     r"outcome=(?P<outcome>done|retried-done|failed)"
@@ -305,7 +309,8 @@ def replay(packet: str | pathlib.Path, routine: str | pathlib.Path, *,
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Replay a private review packet and print verdicts only")
+        description="Replay a private review packet and print only its "
+                    "verdicts and failed part names")
     parser.add_argument("packet", help="packet path relative to the runtime root")
     parser.add_argument("--routine", default=str(ROUTINE_DEFAULT),
                         help="review routine path (default: live review routine)")

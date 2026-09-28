@@ -349,6 +349,23 @@ QUOTING_LINES = [
     # Requirement text where the part name or outcome goes.
     _timing(REQUIREMENT, 412, 2, "failed"),
     _timing("judge.3", 412, 2, "failed: " + REQUIREMENT),
+    # Requirement text with no spaces, in every field. A part is only a
+    # name the engine gives: capitals, `_`, `-` or `:` in it are refused,
+    # and so is a lowercase word or dotted name the engine never uses.
+    _timing("PayoutsRoundHalfEven", 412, 2, "failed"),
+    _timing("judge.Payouts", 412, 2, "failed"),
+    _timing("payouts_round_half_even", 412, 2, "failed"),
+    _timing("payouts-round-half-even", 412, 2, "failed"),
+    _timing("judge.3:payouts", 412, 2, "failed"),
+    _timing("payouts", 412, 2, "failed"),
+    _timing("judge.payouts", 412, 2, "failed"),
+    _timing("shape.payouts.0", 412, 2, "failed"),
+    # An outcome is one of the engine's three, in its own case...
+    _timing("judge.3", 412, 2, "failed:payouts-round-half-even"),
+    _timing("judge.3", 412, 2, "FAILED"),
+    # ...and elapsed and calls are digits alone.
+    _timing("judge.3", "payouts-round-half-even", 2, "failed"),
+    _timing("judge.3", 412, "payouts-round-half-even", "failed"),
 ]
 
 
@@ -359,6 +376,10 @@ QUOTING_LINES = [
         (_timing("judge.0", 38, 1, "done"), "judge.0", "done"),
         (_timing("shape.decider.0", 412, 2, "retried-done"),
          "shape.decider.0", "retried-done"),
+        (_timing("judge.12", 60, 1, "done"), "judge.12", "done"),
+        (_timing("shape.framer", 300, 1, "done"), "shape.framer", "done"),
+        (_timing("shape.sibling.2", 90, 1, "failed"),
+         "shape.sibling.2", "failed"),
         (_timing("shape.auditor", 7, 1, "done"), "shape.auditor", "done"),
         (_timing("lister", 95, 3, "done"), "lister", "done"),
     ],
@@ -437,9 +458,11 @@ def test_a_line_quoting_requirement_text_is_dropped(
     assert output.err == (
         "review-replay: run 1: timing judge.3 elapsed=412s calls=2 "
         "outcome=failed\n")
+    # Its part is the only failed part on stdout.
+    assert json.loads(output.out)["failed_parts"] == [["judge.3"]]
     for stream in (output.out, output.err):
         assert "NEVER PRINT" not in stream
-        assert "half-even" not in stream
+        assert "payouts" not in stream.lower()
 
 
 def test_a_failed_run_reports_its_exit_status_and_failed_parts(

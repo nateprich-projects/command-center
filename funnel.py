@@ -655,6 +655,7 @@ BRIEF_SECTION_BUDGETS = {
     # 1091-item board at 20.93 s, 25.17 s, 22.94 s.
     "cleared_blocks": 30.0,
     "blocked": 0.25,
+    "held_at_accept": 0.25,
     "human_steps": 0.25,
     "machine_local_steps": 0.25,
     "blocked_human_steps": 0.25,
@@ -707,6 +708,7 @@ BRIEF_PURE_SECTIONS = frozenset({
     "counts_by_gate",
     "in_motion",
     "blocked",
+    "held_at_accept",
     "human_steps",
     "machine_local_steps",
     "blocked_human_steps",
@@ -1050,6 +1052,36 @@ def _acceptance_waiting_reason(
     if parse_analysis_marker(body) is not None:
         return "Analysis review"
     return "Ordinary accept"
+
+
+def is_held_at_accept(item: Item) -> bool:
+    """Whether a finished project is held at Accept by Nate (#1725).
+
+    Nate's hold is recorded in the ordinary blocked form (``funnel hold``,
+    #1724): the ``blocked`` label with a ``**Blocked until ...:**`` or
+    ``**Blocked on #N:**`` comment. That named condition already keeps the
+    project out of ``total_needing_nate`` and out of the "Ordinary accept"
+    list, because ``gate_question`` asks nothing of a conditioned block; what
+    it did not do is say so. The brief listed the hold as blocked work.
+
+    Only a project that would otherwise ask "Accept it?" is held there: open,
+    at Building, every ticket closed, and not one that closes itself (the
+    unattended close ignores ``blocked``, so such a block holds nothing). A
+    block with no date or issue condition still asks "Unblock or park?", and
+    an event condition is an agent's wait, so both stay blocked work.
+    """
+    return (
+        item.state == "OPEN"
+        and item.parent is None
+        and item.status == "Building"
+        and item.is_blocked
+        and item.children_all_closed
+        and not _can_close_itself(item)
+        and (
+            bool(item.block_references)
+            or _item_blocked_until(item) is not None
+        )
+    )
 
 
 def question_since(item: Item) -> Optional[datetime]:
@@ -12339,8 +12371,65 @@ def _blocked_item_json(item: Item, now: datetime) -> Dict[str, object]:
 def blocked_json(
     items: Iterable[Item], now: datetime,
 ) -> List[Dict[str, object]]:
-    """The brief's blocked section, reusing one load-time comment fetch."""
-    return [_blocked_item_json(item, now) for item in blocked_items(items)]
+    """The brief's blocked section, reusing one load-time comment fetch.
+
+    A finished project Nate holds at Accept is not blocked work: it is listed
+    in ``held_at_accept`` instead (#1725).
+    """
+    return [
+        _blocked_item_json(item, now) for item in blocked_items(items)
+        if not is_held_at_accept(item)
+    ]
+
+
+def _held_at_accept_condition(item: Item) -> str:
+    """Say in words what lifts an Accept hold: a date, issues closing, or both."""
+    parts = []
+    blocked_until = _item_blocked_until(item)
+    if blocked_until is not None:
+        parts.append(blocked_until.isoformat())
+    if item.block_references:
+        parts.append("{} {}".format(
+            " and ".join(item.block_references),
+            "closes" if len(item.block_references) == 1 else "close",
+        ))
+    return "until " + " and ".join(parts)
+
+
+def _held_at_accept_item_json(item: Item) -> Dict[str, object]:
+    """Render one Accept hold with its condition and Nate's reason (#1725).
+
+    The block parser keeps everything after the header as the reason, the
+    provenance trailer included, so the reason is cut at that marker.
+    """
+    reason = _visible_comment(item.block_reason or "").strip()
+    rendered = {
+        "ref": item.ref,
+        "title": item.title,
+        "url": item.url,
+        "condition": _held_at_accept_condition(item),
+        "conditions": list(item.block_references),
+        "reason": reason or None,
+        "held_since": (
+            item.blocked_since.isoformat() if item.blocked_since else None
+        ),
+    }
+    blocked_until = _item_blocked_until(item)
+    if blocked_until is not None:
+        rendered["blocked_until"] = blocked_until.isoformat()
+    return rendered
+
+
+def held_at_accept_json(items: Iterable[Item]) -> List[Dict[str, object]]:
+    """The brief's held-at-Accept section, in the blocked section's order.
+
+    Neither a decision nor blocked work: the hold lifts itself when its
+    condition is met, and the project then asks "Accept it?" again.
+    """
+    return [
+        _held_at_accept_item_json(item) for item in blocked_items(items)
+        if is_held_at_accept(item)
+    ]
 
 
 def _event_block_mismatch(item: Item) -> Optional[str]:
@@ -13952,6 +14041,7 @@ def cmd_brief(
             "cleared_blocks", lambda: cleared_blocks_json(items, now)
         )
         blocked = section("blocked", lambda: blocked_json(items, now))
+        held = section("held_at_accept", lambda: held_at_accept_json(items))
         human = section("human_steps", lambda: human_step_json(items, now))
         machine_local = section(
             "machine_local_steps",
@@ -14036,6 +14126,7 @@ def cmd_brief(
         counts = pure_values["counts_by_gate"]
         running = pure_values["in_motion"]
         blocked = pure_values["blocked"]
+        held = pure_values["held_at_accept"]
         human = pure_values["human_steps"]
         machine_local = pure_values["machine_local_steps"]
         blocked_human = pure_values["blocked_human_steps"]
@@ -14092,6 +14183,7 @@ def cmd_brief(
             "closed_itself": closed_itself,
             "cleared_blocks": cleared_blocks,
             "blocked": blocked,
+            "held_at_accept": held,
             "human_steps": human,
             "machine_local_steps": machine_local,
             "blocked_human_steps": blocked_human,
@@ -16447,9 +16539,149 @@ def shapeable_idea(items: Sequence[Item], tier: Optional[str],
     return None
 
 
+#: The heading ``render_plan`` writes, and the variants a plan writer uses:
+#: a trailing colon, closing hashes, a parenthetical naming the reasons.
+_PLAN_RISK_RATIONALE_RE = re.compile(
+    r"^ {0,3}#{1,6}[ \t]+Risk rationale\b[^\n]*$", re.IGNORECASE | re.MULTILINE
+)
+_PLAN_SECTION_END_RE = re.compile(
+    r"^ {0,3}#{1,6}[ \t]+|^[ \t]*<!-- command-center-[\w-]+ -->", re.MULTILINE
+)
+_PLAN_RISK_RATIONALE_ENTRY_RE = re.compile(
+    r"^[ \t]*[-*+][ \t]+(?P<reason>[\w-]+)[ \t]*:"
+)
+#: A rationale section in exactly the words render_plan uses for an empty
+#: list is not a declaration; any other prose, even prose opening "No", is.
+_PLAN_RISK_RATIONALE_NONE_RE = re.compile(r"(?i)\ANone recorded\.?\Z")
+#: ``Risk: escalated`` as a plan writer states it: a bare line, a bulleted or
+#: numbered list item, a heading, or bold (``- Risk: escalated``,
+#: ``1. Risk: escalated``, ``## Risk: escalated``, ``**Risk:** escalated``).
+#: ``RISK_LINE`` reads only the bare form; the #1034 union caught the others
+#: by accident.
+_PLAN_RISK_MARKER_RE = re.compile(
+    r"^[ \t]*(?:#{1,6}[ \t]+|(?:[-*+]|\d+[.)])[ \t]+)?[*_]{0,2}Risk[*_]{0,2}"
+    r"[ \t]*:[ \t]*[*_]{0,2}[ \t]*escalated\b[*_]{0,2}(?P<what>.*)$",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def plan_declared_risks(plan_body: str) -> List[str]:
+    """Risks a plan body declares, as distinct from wording-scan hits (#1721).
+
+    The one definition of a declared risk: ``engine/shape.py`` reads it from
+    the rendered scan body beside the typed ``escalated_risk`` list, and the
+    Shaped sweep reads it from the stored body, where the runner has rendered
+    that list as a ``Risk rationale`` section. A declaration is a
+    ``Risk rationale`` section, however it got into the body, or a
+    ``Risk: escalated`` line; either holds a plan at Shaped, while a hit from
+    ``plan_escalation_matches`` alone only raises the review tier. The text is
+    the one that scan reads, so quoted, code and Rejected text declares
+    nothing. A rationale section with prose but no readable entry counts as
+    ``declared``, so a malformed record holds rather than releases; one that
+    is empty or says ``None`` declares nothing.
+    """
+    text = _strip_plan_prose_quotes(
+        asserted_text(_plan_escalation_scan_text(plan_body or ""))
+    )
+    declared: List[str] = []
+
+    def add(reason: str) -> None:
+        if reason not in declared:
+            declared.append(reason)
+
+    for heading in _PLAN_RISK_RATIONALE_RE.finditer(text):
+        section = text[heading.end():]
+        boundary = _PLAN_SECTION_END_RE.search(section)
+        if boundary is not None:
+            section = section[:boundary.start()]
+        content = section.strip()
+        if not content or _PLAN_RISK_RATIONALE_NONE_RE.match(content):
+            continue
+        readable = False
+        for line in section.splitlines():
+            entry = _PLAN_RISK_RATIONALE_ENTRY_RE.match(line)
+            if (entry is not None
+                    and entry.group("reason") in ESCALATION_PATTERNS):
+                readable = True
+                add(entry.group("reason"))
+        if not readable:
+            add("declared")
+    for marker in _PLAN_RISK_MARKER_RE.finditer(text):
+        stated = marker.group("what").strip(" \t*_—-:#").strip()
+        add("declared: " + stated if stated else "declared")
+    return declared
+
+
+def scan_only_escalation_note(reasons: Sequence[str]) -> str:
+    """Self-approval wording for a scan hit that no longer holds (#1721)."""
+    named = " ({})".format(", ".join(reasons)) if reasons else ""
+    return "scan-only escalation{} raises the review tier".format(named)
+
+
+#: The shape runner's record of the risk decision it made (#1721): the
+#: declared risks the decision held on, possibly none, and the scan's reasons.
+#: Prose cannot stand in for it: the readers that find a declaration in prose
+#: strip code and quotes across the whole body, so a malformed fence or quote
+#: in the narrative can blank the rendered Risk rationale below it.
+SHAPE_RISK_MARKER = "<!-- command-center-shape-risk -->"
+
+
+def shape_risk_block(declared: Sequence[str], scan: Sequence[str]) -> str:
+    """Build the runner-owned risk record written into a shaped plan body."""
+    record = {"declared": list(declared), "scan": list(scan)}
+    return "{}\n\n```json\n{}\n```".format(
+        SHAPE_RISK_MARKER, json.dumps(record, indent=2, sort_keys=True)
+    )
+
+
+def parse_shape_risk_record(body: str) -> Optional[Dict[str, List[str]]]:
+    """The runner's risk record, or ``None`` when absent or unreadable.
+
+    The newest block wins, as for every runner record, so a marker the
+    shaper quoted in the narrative above cannot outrank the runner's own.
+    """
+    found = _marked_json(body, SHAPE_RISK_MARKER)
+    if found is None:
+        return None
+    declared = found.get("declared")
+    scan = found.get("scan")
+    if not (isinstance(declared, list)
+            and all(isinstance(reason, str) for reason in declared)
+            and isinstance(scan, list)
+            and all(isinstance(reason, str) for reason in scan)):
+        return None
+    return {"declared": declared, "scan": scan}
+
+
+def _shaped_risk_holds(item: Item, body: str) -> bool:
+    """Whether a Shaped plan's Risk still holds it (#1721).
+
+    Until #1721 an escalated Risk held a plan whoever set it. Now it is
+    released only on the runner's own record that the decision declared no
+    risk, and only when no declaration shows in the prose either. A plan
+    with no record, shaped before #1721 or by hand, or an unreadable one,
+    holds; so do unset or unknown Risk and a body the load did not carry.
+    ``Needs: human`` keeps its own hold whatever the Risk: after #1721 the
+    shape runner never writes it for a scan hit, so it records some other
+    reason to wait.
+    """
+    if item.risk == "standard":
+        return False
+    if item.risk != "escalated" or not body.strip():
+        return True
+    record = parse_shape_risk_record(body)
+    if record is None or record["declared"]:
+        return True
+    return bool(plan_declared_risks(body))
+
+
 def shaped_self_approvable(item: Item,
                            by_ref: Dict[str, Item]) -> bool:
-    """Re-evaluate one Shaped plan with the existing self-approval rule."""
+    """Re-evaluate one Shaped plan with the existing self-approval rule.
+
+    Only a declared risk holds (#1721): an escalated Risk the wording scan
+    set alone no longer does.
+    """
     body = _loaded_item_body(item)
     override = parse_origin_override(body)
     override_target = override["target"] if override is not None else None
@@ -16458,7 +16690,7 @@ def shaped_self_approvable(item: Item,
         item.origin,
         override_target,
         needs_nate=item.needs == "human",
-        escalated=item.risk != "standard",
+        escalated=_shaped_risk_holds(item, body),
         state=item.state,
     )
 
@@ -16495,6 +16727,11 @@ def sweep_shaped_self_approvals(
         reason = "needs_nate all null; class {} self-approvable; {}".format(
             klass, owner_basis
         )
+        # Eligible with an escalated Risk means the scan set it and nothing
+        # declared it (#1721): it stays escalated for the review tier.
+        scan_only = item.risk == "escalated"
+        if scan_only:
+            reason += "; " + scan_only_escalation_note(plan_is_escalated(body))
 
         try:
             status_error = _write_status(item, "Ready", now)
@@ -16504,7 +16741,9 @@ def sweep_shaped_self_approvals(
             errors.append({"ref": item.ref, "error": status_error})
             continue
 
-        basis = "{}; no escalated risk".format(reason)
+        basis = "{}; {}".format(
+            reason, "no declared risk" if scan_only else "no escalated risk"
+        )
         authority_signals = needs_nate_signals(body)
         if authority_signals:
             basis += "; authority signals: {}".format(

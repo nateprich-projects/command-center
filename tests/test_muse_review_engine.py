@@ -525,6 +525,16 @@ MUSE_STUB = (
     "  printf '%s' \"${MUSE_SHAPE_FAILURE:-shape part unavailable}\" >&2\n"
     "  exit \"${MUSE_SHAPE_FAIL_STATUS:-1}\"\n"
     "fi\n"
+    # #1730: the lister's failure hook, counted and filtered the same way.
+    # Its prompt alone opens with the lister header.
+    "if grep -q '^This call is not the review' \"$prompt_file\" \\\n"
+    "    && [[ -n \"${MUSE_LISTER_FAILURE:-}\" ]] \\\n"
+    "    && { [[ -z \"${MUSE_LISTER_FAIL_IF:-}\" ]] \\\n"
+    "         || grep -Fq -- \"$MUSE_LISTER_FAIL_IF\" \"$prompt_file\"; } \\\n"
+    "    && fail_budget lister \"${MUSE_LISTER_FAIL_TIMES:-}\"; then\n"
+    "  printf '%s' \"$MUSE_LISTER_FAILURE\" >&2\n"
+    "  exit 1\n"
+    "fi\n"
     "if [[ -n \"$shape_part\" && \"$shape_part\" == \"${MUSE_SHAPE_SLEEP_PART:-}\" ]]; then\n"
     "  printf '%s' \"${MUSE_SHAPE_SLEEP_STDERR:-}\" >&2\n"
     "  exec sleep 30\n"
@@ -735,6 +745,25 @@ def _stubbed_runner(tmp_path, begin, packet, *, args=(), answers=(),
                     routine_body=None, bound_seconds=20, extra_env=None,
                     timeout=40, muse_model_body=None, muse_call_body=None):
     """Run the engine against stub funnel/heartbeat/packet/apply/gh/muse."""
+    repo, env = _stub_repo(
+        tmp_path, begin, packet, answers=answers, routine_body=routine_body,
+        bound_seconds=bound_seconds, extra_env=extra_env,
+        muse_model_body=muse_model_body, muse_call_body=muse_call_body)
+    proc = subprocess.run(
+        ["/bin/bash", str(SCRIPT)] + list(args),
+        env=env,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+    return proc, repo
+
+
+def _stub_repo(tmp_path, begin, packet, *, answers=(), routine_body=None,
+               bound_seconds=20, extra_env=None, muse_model_body=None,
+               muse_call_body=None):
+    """The stub repository and the environment that points the engine at it."""
     repo = tmp_path / "repo"
     # exist_ok: the flag-rejection test drives the runner four times in one
     # directory; every file below is overwritten per call.
@@ -810,15 +839,7 @@ def _stubbed_runner(tmp_path, begin, packet, *, args=(), answers=(),
         env["MUSE_ANSWER_{}".format(index)] = answer
     if extra_env:
         env.update(extra_env)
-    proc = subprocess.run(
-        ["/bin/bash", str(SCRIPT)] + list(args),
-        env=env,
-        stdin=subprocess.DEVNULL,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-    )
-    return proc, repo
+    return repo, env
 
 
 def _heartbeat(repo):
@@ -3556,6 +3577,84 @@ def test_a_lister_call_past_the_bound_is_killed_like_any_other(tmp_path):
     assert "#392" in heartbeat
 
 
+# -- a stream-idle lister is asked once more (#1730) ---------------------------
+# The lister is the one call that reads the whole packet, and a single call
+# over the ~240 KB must-approve seed went stream-idle twice running (#1698).
+# It gets #1719's one retry: the same prompt, unbound, then the run fails.
+
+def test_a_lister_stream_idle_once_is_asked_again_and_reviewed(tmp_path):
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), _packet(),
+        # Call 1 goes silent and answers nothing; call 2 lists; call 3 judges.
+        answers=(_requirements_answer(), _requirements_answer(),
+                 _judge_answer()),
+        extra_env={"MUSE_LISTER_FAILURE": STREAM_IDLE,
+                   "MUSE_LISTER_FAIL_TIMES": "1"})
+
+    assert proc.returncode == 0, proc.stderr
+    assert _muse_calls(repo) == 3
+    # The same question again, not a parse retry, and not on the silent
+    # call's session: only the first call carries the id (#1413).
+    first = (repo / "muse.prompt.1").read_text()
+    assert (repo / "muse.prompt.2").read_text() == first
+    assert PARSE_RETRY not in first
+    assert "--session-id" in (repo / "muse.args.1").read_text().splitlines()
+    assert "--session-id" not in \
+        (repo / "muse.args.2").read_text().splitlines()
+    assert "the lister went stream-idle; asking it once more: " \
+        + STREAM_IDLE in proc.stderr
+    assert json.loads((repo / "apply.answer").read_text())["verdict"] == \
+        "approved"
+    assert "--outcome done" in _heartbeat(repo)
+
+
+def test_a_lister_stream_idle_twice_fails_the_run(tmp_path):
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), _packet(),
+        extra_env={"MUSE_LISTER_FAILURE": STREAM_IDLE})
+
+    assert proc.returncode == 1
+    # One retry, not two.
+    assert _muse_calls(repo) == 2
+    assert _apply_calls(repo) == []
+    heartbeat = _heartbeat(repo)
+    assert "--outcome errored" in heartbeat
+    assert STREAM_IDLE in heartbeat
+
+
+def test_a_lister_failure_that_is_not_stream_idle_is_not_retried(tmp_path):
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), _packet(),
+        extra_env={"MUSE_LISTER_FAILURE":
+                   "model stream error: connection reset by peer"})
+
+    assert proc.returncode == 1
+    assert _muse_calls(repo) == 1
+    assert "stream-idle" not in proc.stderr
+    assert "--outcome errored" in _heartbeat(repo)
+
+
+def test_a_lister_malformed_then_idle_still_gets_its_idle_retry(tmp_path):
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), _packet(),
+        # Malformed first; the parse retry goes idle; its retry lists.
+        answers=("{not json", _requirements_answer(), _requirements_answer(),
+                 _judge_answer()),
+        extra_env={"MUSE_LISTER_FAILURE": STREAM_IDLE,
+                   "MUSE_LISTER_FAIL_TIMES": "1",
+                   "MUSE_LISTER_FAIL_IF": PARSE_RETRY})
+
+    assert proc.returncode == 0, proc.stderr
+    first, reparse, again = [
+        (repo / "muse.prompt.{}".format(call)).read_text()
+        for call in (1, 2, 3)]
+    assert PARSE_RETRY not in first
+    assert PARSE_RETRY in reparse
+    assert again == reparse
+    assert json.loads((repo / "apply.answer").read_text())["verdict"] == \
+        "approved"
+
+
 # -- the z.ai standard tier (Nate, 2026-09-23) ---------------------------------
 #
 # Before heartbeat.ZAI_STANDARD_UNTIL (2026-09-27 06:00 PDT since #1694;
@@ -3918,3 +4017,342 @@ def test_a_muse_shaped_refusal_in_a_zai_judge_never_parks_muse(tmp_path):
         extra_env=dict(env, HOME=str(tmp_path)))
     assert proc.returncode == 0, proc.stderr
     assert hold.read_text().strip() == "2099-01-01T00:00:00Z"
+
+
+# -- the replay entry (#1730) ---------------------------------------------------
+# review-replay runs this runner on a private corpus packet, so a replayed
+# verdict comes from the lanes' own lister, judges and derivation rather than
+# from a second copy of them (#1698). The entry records nothing, so every
+# command it must never run is a stub below that fails loudly and leaves a
+# line in forbidden.calls. funnel.py keeps the constants engine/review.py
+# imports it for: importing it is how the judges' code loads, and only
+# running it is forbidden.
+
+FORBIDDEN_STUB = (
+    FUNNEL_STUB.split("if __name__ == '__main__':\n", 1)[0]
+    + "if __name__ == '__main__':\n"
+    "    with (pathlib.Path(__file__).parent / 'forbidden.calls').open('a') as fh:\n"
+    "        fh.write(' '.join([pathlib.Path(__file__).name] + sys.argv[1:]) + '\\n')\n"
+    "    sys.stderr.write('a replay ran a forbidden command\\n')\n"
+    "    raise SystemExit(97)\n"
+)
+
+FORBIDDEN_GH = (
+    "#!/bin/bash\n"
+    "printf 'gh %s\\n' \"$*\" >> \"$FORBIDDEN_CALLS\"\n"
+    "echo 'a replay ran gh' >&2\n"
+    "exit 97\n"
+)
+
+FORBIDDEN_COMMANDS = ("funnel.py", "heartbeat.py", "review-packet",
+                      "review-apply", "breakdown-packet", "breakdown-apply",
+                      "shape-packet", "shape-apply")
+
+#: Appended to the replay's routine, after its `---`, so a test can tell the
+#: routine it was given from the stub repository's own.
+REPLAY_ROUTINE_MARK = "Replay routine marker: asked with the given routine."
+
+REFUSAL = ("API error 429: Subscription quota exhausted. Your usage "
+           "window resets at 2099-01-01T00:00:00Z.")
+
+
+def _replay_runner(tmp_path, packet=None, *, answers=(), extra_env=None,
+                   routine_body=None, bound_seconds=20, timeout=40,
+                   muse_model_body=None, replay_env=None):
+    """Run the replay entry on a packet file; everything it must skip is
+    forbidden. Returns the process, the stub repo and the answer path."""
+    repo, env = _stub_repo(
+        tmp_path, _begin(), _packet(), answers=answers,
+        bound_seconds=bound_seconds, muse_model_body=muse_model_body)
+    for name in FORBIDDEN_COMMANDS:
+        (repo / name).write_text(FORBIDDEN_STUB)
+    forbidden_bin = tmp_path / "forbidden-bin"
+    forbidden_bin.mkdir(exist_ok=True)
+    _executable(forbidden_bin / "gh", FORBIDDEN_GH)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir(mode=0o700, exist_ok=True)
+    packet_path = corpus / "packet.json"
+    packet_path.write_text(
+        json.dumps(packet if packet is not None else _packet()))
+    routine_path = tmp_path / "replay-routine.md"
+    routine_path.write_text(
+        routine_body if routine_body is not None
+        else ROUTINE.read_text().rstrip("\n") + "\n\n" + REPLAY_ROUTINE_MARK
+        + "\n")
+    out = tmp_path / "replay-out"
+    out.mkdir(mode=0o700, exist_ok=True)
+    answer_path = out / "answer.json"
+    env.update(
+        GH_BIN=str(forbidden_bin / "gh"),
+        PATH=str(forbidden_bin) + os.pathsep + env["PATH"],
+        FORBIDDEN_CALLS=str(repo / "forbidden.calls"),
+        MUSE_REVIEW_ENGINE_REPLAY_PACKET=str(packet_path),
+        MUSE_REVIEW_ENGINE_REPLAY_ROUTINE=str(routine_path),
+        MUSE_REVIEW_ENGINE_REPLAY_ANSWER=str(answer_path),
+    )
+    if replay_env is not None:
+        for name, value in replay_env.items():
+            if value is None:
+                env.pop(name, None)
+            else:
+                env[name] = value
+    if extra_env:
+        env.update(extra_env)
+    proc = subprocess.run(
+        ["/bin/bash", str(SCRIPT)], env=env, stdin=subprocess.DEVNULL,
+        capture_output=True, text=True, timeout=timeout)
+    return proc, repo, answer_path
+
+
+def _forbidden(repo):
+    calls = repo / "forbidden.calls"
+    return calls.read_text() if calls.exists() else ""
+
+
+def _spooled_heartbeats(tmp_path):
+    """Every heartbeat record written under conftest's per-test spool."""
+    spool = tmp_path / "heartbeat-spool"
+    if not spool.exists():
+        return []
+    return [line for path in sorted(spool.iterdir()) if path.is_file()
+            for line in path.read_text().splitlines() if line.strip()]
+
+
+def _run_dirs(tmp_path):
+    return sorted(tmp_path.glob("muse-review-engine.*"))
+
+
+def test_a_replay_runs_the_lister_and_judges_on_its_packet(tmp_path):
+    proc, repo, answer_path = _replay_runner(
+        tmp_path, answers=_review_answers(_judge_answer()))
+
+    assert proc.returncode == 0, proc.stderr
+    assert _muse_calls(repo) == 2
+    lister = (repo / "muse.prompt.1").read_text()
+    judge = (repo / "muse.prompt.2").read_text()
+    assert lister.startswith("This call is not the review.")
+    assert judge.startswith("This is one judge call in a larger review.")
+    # Both ask with the given routine and carry the given packet.
+    for prompt in (lister, judge):
+        assert REPLAY_ROUTINE_MARK in prompt
+        assert "print('the thing')" in prompt
+        assert "PACKET_JSON" not in prompt
+    assert _assigned_requirements(judge) == \
+        ["thing.py prints the thing the ticket asks for"]
+    # Max, no tools, and no session id: a replay binds nothing to a
+    # heartbeat it never writes.
+    for call in (1, 2):
+        args = (repo / "muse.args.{}".format(call)).read_text().splitlines()
+        assert args[args.index("--reasoning-effort") + 1] == "max"
+        assert "--disable-shell" in args
+        assert "--session-id" not in args
+    assert json.loads(answer_path.read_text())["verdict"] == "approved"
+    assert _forbidden(repo) == ""
+
+
+def test_a_replay_writes_the_derived_answer_and_removes_its_run_directory(
+        tmp_path):
+    from engine.review import derive_judge_answer
+
+    probe = tmp_path / "rundir-probe"
+    proc, repo, answer_path = _replay_runner(
+        tmp_path, answers=(_requirements_answer(*FOUR),),
+        extra_env={"MUSE_DYNAMIC_JUDGES": "1",
+                   "MUSE_JUDGE_UNMET": "requirement 2",
+                   "MUSE_RUNDIR_PROBE": str(probe)})
+
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(answer_path.read_text()) == derive_judge_answer(FOUR, [
+        {"requirement": requirement,
+         "status": "unmet" if requirement == "requirement 2" else "met",
+         "evidence": "thing.py:1"}
+        for requirement in FOUR])
+    # Owner-only: its evidence quotes the private packet.
+    assert stat.S_IMODE(answer_path.stat().st_mode) == 0o600
+    run_dir = pathlib.Path(probe.read_text().splitlines()[0].split(" ", 1)[1])
+    assert run_dir.parent == tmp_path
+    assert not run_dir.exists()
+    assert _run_dirs(tmp_path) == []
+
+
+def test_a_replay_runs_no_heartbeat_funnel_gh_or_review_apply(tmp_path):
+    proc, repo, answer_path = _replay_runner(
+        tmp_path, answers=_review_answers(_judge_answer()))
+
+    assert proc.returncode == 0, proc.stderr
+    assert answer_path.exists()
+    assert _forbidden(repo) == ""
+    assert not (repo / "applied.marker").exists()
+    assert not (repo / "packet.calls").exists()
+    assert _spooled_heartbeats(tmp_path) == []
+
+    # The stubs do catch the live path: the same setup without the replay
+    # variables trips the funnel session server before anything else.
+    proc, repo, _ = _replay_runner(
+        tmp_path / "live", replay_env={
+            "MUSE_REVIEW_ENGINE_REPLAY_PACKET": None,
+            "MUSE_REVIEW_ENGINE_REPLAY_ROUTINE": None,
+            "MUSE_REVIEW_ENGINE_REPLAY_ANSWER": None})
+    assert proc.returncode != 0
+    assert _forbidden(repo).startswith("funnel.py session-server")
+
+
+@pytest.mark.parametrize("packet", [
+    _failing_packet(), _non_open_packet(), _could_not_run_packet(),
+    _covered_verdict_packet(), _rerun_packet(), _wait_packet(),
+], ids=["failing precheck", "not open", "CI could not run",
+        "covered verdict", "CI re-run", "CI wait"])
+def test_a_replay_judges_the_packet_past_the_precheck_and_ci_branches(
+        tmp_path, packet):
+    """Each of these ends a live run before the lister; a replay asks the
+    model about the packet as collected, and records nothing either way."""
+    proc, repo, answer_path = _replay_runner(
+        tmp_path, packet, answers=_review_answers(_judge_answer()))
+
+    assert proc.returncode == 0, proc.stderr
+    assert _muse_calls(repo) == 2
+    assert json.loads(answer_path.read_text())["verdict"] == "approved"
+    assert _forbidden(repo) == ""
+    assert not (repo / "gh.log").exists()
+
+
+@pytest.mark.parametrize("failure,calls,status", [
+    ({"MUSE_LISTER_FAILURE": "provider outage"}, 1, 1),
+    ({"MUSE_LISTER_FAILURE": STREAM_IDLE}, 2, 1),
+    ({"MUSE_ANSWER": "{not json"}, 2, 1),
+    ({"MUSE_SLEEP": "30"}, 1, 124),
+], ids=["failed", "stream-idle twice", "malformed twice", "timed out"])
+def test_a_replay_lister_failure_exits_non_zero_with_no_answer(
+        tmp_path, failure, calls, status):
+    proc, repo, answer_path = _replay_runner(
+        tmp_path, extra_env=failure, bound_seconds=1 if status == 124 else 20,
+        timeout=60)
+
+    assert proc.returncode == status, proc.stderr
+    assert _muse_calls(repo) == calls
+    assert not answer_path.exists()
+    assert "muse-review-engine: " in proc.stderr
+    assert _forbidden(repo) == ""
+    assert _run_dirs(tmp_path) == []
+
+
+def test_a_replay_lister_stream_idle_once_then_answers_succeeds(tmp_path):
+    proc, repo, answer_path = _replay_runner(
+        tmp_path,
+        # Call 1 goes silent; call 2 lists; call 3 judges.
+        answers=(_requirements_answer(), _requirements_answer(),
+                 _judge_answer()),
+        extra_env={"MUSE_LISTER_FAILURE": STREAM_IDLE,
+                   "MUSE_LISTER_FAIL_TIMES": "1"})
+
+    assert proc.returncode == 0, proc.stderr
+    assert _muse_calls(repo) == 3
+    assert (repo / "muse.prompt.2").read_text() == \
+        (repo / "muse.prompt.1").read_text()
+    assert "the lister went stream-idle; asking it once more: " \
+        + STREAM_IDLE in proc.stderr
+    assert json.loads(answer_path.read_text())["verdict"] == "approved"
+    assert _forbidden(repo) == ""
+
+
+@pytest.mark.parametrize("failure,calls", [
+    ({"MUSE_LISTER_FAILURE": REFUSAL}, 1),
+    ({"MUSE_JUDGE_FAIL_IF": "This is one judge call",
+      "MUSE_JUDGE_FAILURE": REFUSAL}, 2),
+], ids=["lister", "judge"])
+def test_a_replay_quota_refusal_writes_the_hold_and_no_answer(
+        tmp_path, failure, calls):
+    """The hold is the account's own limit, so a replay that meets it parks
+    the lanes as a lane would; but it exits non-zero, not a lane's clean
+    skip, and a refused judge's `unsure` never becomes a scored rejection."""
+    proc, repo, answer_path = _replay_runner(
+        tmp_path, answers=_review_answers(_judge_answer()), extra_env=failure)
+
+    assert proc.returncode == 1, proc.stderr
+    assert _muse_calls(repo) == calls
+    hold = tmp_path / ".claude" / "command-center-muse-quota-hold"
+    assert hold.read_text().strip() == "2099-01-01T00:00:00Z"
+    assert not answer_path.exists()
+    assert _forbidden(repo) == ""
+    # The hold alone: no heartbeat record of the hit, which would be a
+    # heartbeat write and a GitHub push.
+    assert _spooled_heartbeats(tmp_path) == []
+    assert _run_dirs(tmp_path) == []
+
+
+def test_a_live_hold_stops_a_replay_non_zero_before_any_call(tmp_path):
+    hold = tmp_path / ".claude" / "command-center-muse-quota-hold"
+    hold.parent.mkdir(parents=True, exist_ok=True)
+    hold.write_text("2099-01-01T00:00:00Z\n")
+
+    proc, repo, answer_path = _replay_runner(
+        tmp_path, answers=_review_answers(_judge_answer()))
+
+    assert proc.returncode == 1
+    assert "parked until 2099-01-01T00:00:00Z" in proc.stderr
+    assert _muse_calls(repo) == 0
+    assert not answer_path.exists()
+    assert _forbidden(repo) == ""
+
+
+@pytest.mark.parametrize("subject,model", [
+    ("nateprich-projects/The-League", "muse-spark-1.3-contributor"),
+    ("nateprich-projects/career-toolset", "muse-spark-1.3"),
+])
+def test_a_replay_resolves_the_model_from_its_packets_repo(
+        tmp_path, subject, model):
+    """The stub repo's begin names owner/repo; only the packet names the
+    subject, so the model can only have come from the packet."""
+    proc, repo, _ = _replay_runner(
+        tmp_path, _packet(repo=subject),
+        answers=_review_answers(_judge_answer()))
+
+    assert proc.returncode == 0, proc.stderr
+    for call in (1, 2):
+        args = (repo / "muse.args.{}".format(call)).read_text().splitlines()
+        assert args[args.index("--model") + 1] == model
+
+
+@pytest.mark.parametrize("case", [
+    "packet alone", "answer exists", "routine without placeholder",
+    "packet without repo", "packet without pr", "unreadable packet",
+])
+def test_a_replay_refuses_a_bad_setup_before_any_call(tmp_path, case):
+    kwargs = {}
+    replay_env = None
+    if case == "packet alone":
+        replay_env = {"MUSE_REVIEW_ENGINE_REPLAY_ROUTINE": None,
+                      "MUSE_REVIEW_ENGINE_REPLAY_ANSWER": None}
+        expected = "needs MUSE_REVIEW_ENGINE_REPLAY_PACKET"
+    elif case == "answer exists":
+        stale = tmp_path / "replay-out" / "answer.json"
+        stale.parent.mkdir(mode=0o700)
+        stale.write_text("a stale answer")
+        expected = "already exists"
+    elif case == "routine without placeholder":
+        kwargs["routine_body"] = "Human note.\n\n---\nNo packet here.\n"
+        expected = "must hold PACKET_JSON exactly once"
+    elif case == "packet without repo":
+        kwargs["packet"] = {key: value for key, value in _packet().items()
+                            if key != "repo"}
+        expected = "names no owner/repo repository"
+    elif case == "packet without pr":
+        kwargs["packet"] = _packet(pr=None)
+        expected = "names no PR number"
+    else:
+        replay_env = {"MUSE_REVIEW_ENGINE_REPLAY_PACKET":
+                      str(tmp_path / "no-such-packet.json")}
+        expected = "cannot read the replay packet"
+
+    proc, repo, answer_path = _replay_runner(
+        tmp_path, answers=_review_answers(_judge_answer()),
+        replay_env=replay_env, **kwargs)
+
+    assert proc.returncode == 1
+    assert expected in proc.stderr
+    assert _muse_calls(repo) == 0
+    assert _forbidden(repo) == ""
+    if case == "answer exists":
+        assert answer_path.read_text() == "a stale answer"
+    else:
+        assert not answer_path.exists()

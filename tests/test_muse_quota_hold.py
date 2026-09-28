@@ -196,6 +196,31 @@ def test_malformed_reset_stamp_is_recorded_as_degraded_not_weekly(tmp_path):
     assert "malformed" in event["degraded_note"]
 
 
+def test_record_zero_writes_the_hold_and_no_heartbeat_record(tmp_path):
+    """The review replay's setting (#1730): it parks the lanes like any
+    caller but writes no heartbeat and makes no GitHub call. The same refusal
+    with the default records its hit."""
+    capture = tmp_path / "stderr"
+    capture.write_text(REFUSAL)
+    spool = tmp_path / "heartbeat-spool"
+
+    proc, hold_file = _helper(
+        tmp_path, "MUSE_QUOTA_HOLD_RECORD=0; muse_quota_record {}".format(
+            capture),
+        env={"COMMAND_CENTER_HEARTBEAT_SPOOL": str(spool)})
+
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == "2026-09-21T00:00:00Z"
+    assert hold_file.read_text().strip() == "2026-09-21T00:00:00Z"
+    assert _quota_events(spool) == []
+
+    proc, _ = _helper(
+        tmp_path, "muse_quota_record {}".format(capture),
+        env={"COMMAND_CENTER_HEARTBEAT_SPOOL": str(spool)})
+    assert proc.returncode == 0, proc.stderr
+    assert len(_quota_events(spool)) == 1
+
+
 def test_an_ordinary_failure_records_no_hold(tmp_path):
     capture = tmp_path / "stderr"
     capture.write_text("muse: the tests failed\n")

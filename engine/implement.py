@@ -25,6 +25,7 @@ import pathlib
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -52,6 +53,16 @@ class ImplementError(RuntimeError):
 
 class StrayFileError(ImplementError):
     """The ticket branch contains run scratch that must not reach a PR."""
+
+
+class CommandTimeoutError(ImplementError):
+    """A finish subprocess exceeded its bound and was abandoned."""
+
+    def __init__(self, command: Sequence[str], timeout: float):
+        self.timeout_seconds = timeout
+        self.finish_recorded = False
+        super().__init__("{} timed out after {:g}s".format(
+            _command_label(command), timeout))
 
 
 #: The blocked_on_human reason enum: the four specific human capabilities
@@ -350,41 +361,138 @@ def _read_blocked_answer(value: object) -> dict:
     return {"reason": reason, "action": action.strip()}
 
 
+CLAIM_TTL_SECONDS = 2 * 60 * 60
+
+# Measured 2026-09-28 on this checkout: local Git inventory calls took at most
+# 0.0054s, disposable-repo add/commit/merge at most 0.0216s, and GitHub
+# ls-remote/fetch 0.9282s/1.0166s. The caps retain ample headroom for repo and
+# network variance while staying below the two-hour claim TTL.
+LOCAL_GIT_TIMEOUT_SECONDS = 2 * 60
+REMOTE_GIT_TIMEOUT_SECONDS = 10 * 60
+
+# The latest green CI run (#36331008053) spent 6m54s in pytest. Allow more
+# than six times that duration while staying well below the two-hour claim TTL.
+TEST_COMMAND_TIMEOUT_SECONDS = 45 * 60
+# This checkout's CI syntax-compile command took 0.0800s across seven runs;
+# compileall took 0.1176s. Keep compilation separate from the full test suite.
+COMPILE_COMMAND_TIMEOUT_SECONDS = 2 * 60
+# The Python version probe took at most 0.0160s across seven runs. Unknown
+# helper commands share this measured cap; the live finish path has no
+# unclassified command site.
+INTERPRETER_PROBE_TIMEOUT_SECONDS = 20
+OTHER_COMMAND_TIMEOUT_SECONDS = INTERPRETER_PROBE_TIMEOUT_SECONDS
+
+
+def _command_label(command: Sequence[str]) -> str:
+    """Name a timed-out command without echoing arbitrary command arguments."""
+    if not command:
+        return "subprocess"
+    program = os.path.basename(command[0])
+    if program == "git":
+        operation = command[1] if len(command) > 1 else "operation"
+        return "git {}".format(operation)
+    if program in ("make", "npm"):
+        operation = command[1] if len(command) > 1 else "command"
+        return "{} {}".format(program, operation)
+    if program in ("pytest", "py.test") or "pytest" in command:
+        return "pytest"
+    return "{} command".format(program or "subprocess")
+
+
+def _is_compile_command(command: Sequence[str]) -> bool:
+    """Whether the command only compiles source rather than running tests."""
+    return any(
+        "compileall" in str(part).lower()
+        or re.search(r"\bcompile\s*\(", str(part))
+        for part in command
+    )
+
+
+def _command_timeout_seconds(command: Sequence[str]) -> float:
+    """Choose a per-invocation bound from the observed finish workload."""
+    if command and os.path.basename(command[0]) == "git":
+        if len(command) > 1 and command[1] in ("fetch", "ls-remote", "push"):
+            return REMOTE_GIT_TIMEOUT_SECONDS
+        return LOCAL_GIT_TIMEOUT_SECONDS
+    rendered = " ".join(str(part) for part in command)
+    if re.search(r"(?<![\w.])(?:make|npm|pytest|py\.test)(?![\w.])",
+                 rendered):
+        return TEST_COMMAND_TIMEOUT_SECONDS
+    if any("sys.version_info" in str(part) for part in command):
+        return INTERPRETER_PROBE_TIMEOUT_SECONDS
+    if _is_compile_command(command):
+        return COMPILE_COMMAND_TIMEOUT_SECONDS
+    return OTHER_COMMAND_TIMEOUT_SECONDS
+
+
+def _abandon_child(proc: subprocess.Popen) -> None:
+    """Kill the command's process group and close our pipes without waiting."""
+    try:
+        if os.name == "posix":
+            os.killpg(proc.pid, signal.SIGKILL)
+        else:
+            proc.kill()
+    except OSError:
+        # It may have exited between communicate's timeout and the kill.
+        pass
+    for stream in (proc.stdin, proc.stdout, proc.stderr):
+        if stream is not None:
+            try:
+                stream.close()
+            except OSError:
+                pass
+
+
 def _run(command: Sequence[str], *, cwd: pathlib.Path,
          env: Optional[dict] = None, input_text: Optional[str] = None,
-         check: bool = True) -> subprocess.CompletedProcess:
-    """Run one local command and turn failures into a concise engine error."""
-    proc = subprocess.run(
-        list(command), cwd=str(cwd), env=env, input=input_text,
-        capture_output=True, text=True,
+         check: bool = True, timeout: Optional[float] = None
+         ) -> subprocess.CompletedProcess:
+    """Run one bounded local command and turn failures into concise errors."""
+    bound = (_command_timeout_seconds(command)
+             if timeout is None else timeout)
+    proc = subprocess.Popen(
+        list(command), cwd=str(cwd), env=env,
+        stdin=subprocess.PIPE if input_text is not None else None,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        start_new_session=(os.name == "posix"),
     )
-    if check and proc.returncode != 0:
+    try:
+        stdout, stderr = proc.communicate(input=input_text, timeout=bound)
+    except subprocess.TimeoutExpired:
+        _abandon_child(proc)
+        raise CommandTimeoutError(command, bound) from None
+    completed = subprocess.CompletedProcess(
+        list(command), proc.returncode, stdout, stderr)
+    if check and completed.returncode != 0:
         # Both streams: `compileall` reports on stdout while make prints only
         # its own "Error 1" on stderr, and that line alone hid the cause (#953).
         detail = "\n".join(
-            part.strip() for part in (proc.stdout, proc.stderr)
+            part.strip() for part in (completed.stdout, completed.stderr)
             if part and part.strip())
         raise ImplementError(
             "{} failed{}".format(
                 shlex.join(command), ": " + detail if detail else ""
             )
         )
-    return proc
+    return completed
 
 
 def checkout_context(cwd: Optional[os.PathLike] = None) -> dict:
     """Derive ticket identity from a real clone on ticket/<n>."""
     here = pathlib.Path(cwd or os.getcwd()).resolve()
     root = pathlib.Path(
-        _run(["git", "rev-parse", "--show-toplevel"], cwd=here).stdout.strip()
+        _run(["git", "rev-parse", "--show-toplevel"], cwd=here,
+             timeout=LOCAL_GIT_TIMEOUT_SECONDS).stdout.strip()
     ).resolve()
-    branch = _run(["git", "branch", "--show-current"], cwd=root).stdout.strip()
+    branch = _run(["git", "branch", "--show-current"], cwd=root,
+                  timeout=LOCAL_GIT_TIMEOUT_SECONDS).stdout.strip()
     match = re.fullmatch(r"ticket/([1-9][0-9]*)", branch)
     if match is None:
         raise ImplementError(
             "finish-ticket requires branch ticket/<number>, found {!r}".format(branch)
         )
-    _run(["git", "remote", "get-url", "origin"], cwd=root)
+    _run(["git", "remote", "get-url", "origin"], cwd=root,
+         timeout=LOCAL_GIT_TIMEOUT_SECONDS)
     return {"root": root, "branch": branch, "number": int(match.group(1))}
 
 
@@ -736,11 +844,15 @@ PINNED_PYTHON_DIRS = ("/opt/homebrew/bin", "/usr/local/bin")
 def _python_minor(executable: str) -> Optional[str]:
     """The ``M.m`` version an interpreter reports, or None if it won't run."""
     try:
-        result = subprocess.run(
+        result = _run(
             [executable, "-c",
              "import sys; print('%d.%d' % sys.version_info[:2])"],
-            capture_output=True, text=True, timeout=20)
-    except (OSError, subprocess.SubprocessError):
+            cwd=pathlib.Path.cwd(), check=False,
+            timeout=INTERPRETER_PROBE_TIMEOUT_SECONDS,
+        )
+    except CommandTimeoutError:
+        raise
+    except (ImplementError, OSError, subprocess.SubprocessError):
         return None
     return result.stdout.strip() if result.returncode == 0 else None
 
@@ -808,7 +920,12 @@ def run_tests(root: pathlib.Path,
         # Mac has no bare `python` on PATH (#890), so run the chosen one.
         if argv and argv[0] in ("python", "python3"):
             argv[0] = python
-        _run(argv, cwd=root, env=env)
+        _run(
+            argv, cwd=root, env=env,
+            timeout=(COMPILE_COMMAND_TIMEOUT_SECONDS
+                     if _is_compile_command(argv)
+                     else TEST_COMMAND_TIMEOUT_SECONDS),
+        )
         rendered.append(shlex.join(argv))
     return rendered, source
 
@@ -828,7 +945,7 @@ def resolve_checkout_repo(root: pathlib.Path, explicit: Optional[str]) -> str:
     if explicit:
         return explicit
     remote = _run(["git", "remote", "get-url", "origin"], cwd=root,
-                  check=False).stdout.strip()
+                  check=False, timeout=LOCAL_GIT_TIMEOUT_SECONDS).stdout.strip()
     match = _GITHUB_REMOTE_RE.match(remote)
     if match:
         return match.group(1)
@@ -889,6 +1006,7 @@ def _remote_branch_exists(root: pathlib.Path, branch: str) -> bool:
          "refs/heads/{}".format(branch)],
         cwd=root,
         check=False,
+        timeout=REMOTE_GIT_TIMEOUT_SECONDS,
     )
     if proc.returncode not in (0, 2):
         detail = (proc.stderr or proc.stdout or "").strip()
@@ -913,7 +1031,8 @@ _RUN_SCRATCH_DIRECTORIES = frozenset({".scratch", "scratch", ".tmp", "tmp"})
 
 def _git_name_paths(root: pathlib.Path, command: Sequence[str]) -> List[str]:
     """Return NUL-delimited Git paths without losing unusual filenames."""
-    raw = _run(["git", *command], cwd=root).stdout
+    raw = _run(["git", *command], cwd=root,
+               timeout=LOCAL_GIT_TIMEOUT_SECONDS).stdout
     return [path for path in raw.split("\0") if path]
 
 
@@ -963,7 +1082,8 @@ def _stage_explicit_paths(root: pathlib.Path, paths: Sequence[str]) -> None:
     """Stage exactly the observed paths, never a blanket add or status sweep."""
     selected = _addable_paths(root, paths)
     if selected:
-        _run(["git", "add", "--", *selected], cwd=root)
+        _run(["git", "add", "--", *selected], cwd=root,
+             timeout=LOCAL_GIT_TIMEOUT_SECONDS)
 
 
 def _is_run_scratch(path: str) -> bool:
@@ -1018,12 +1138,13 @@ def _commit_if_needed(root: pathlib.Path, number: int, summary: str, *,
             subject = subject[:57].rstrip() + "..."
         _run(
             ["git", "commit", "-m", "Finish #{}: {}".format(number, subject)],
-            cwd=root,
+            cwd=root, timeout=LOCAL_GIT_TIMEOUT_SECONDS,
         )
         return True
     _check_no_run_scratch(root)
     ahead = _run(
-        ["git", "rev-list", "--count", "origin/main..HEAD"], cwd=root
+        ["git", "rev-list", "--count", "origin/main..HEAD"], cwd=root,
+        timeout=LOCAL_GIT_TIMEOUT_SECONDS,
     ).stdout.strip()
     if not ahead.isdigit():
         raise ImplementError("could not read changes ahead of origin/main")
@@ -1520,7 +1641,8 @@ def remote_ticket_head(root: pathlib.Path, branch: str) -> Optional[str]:
     """
     ref = "refs/heads/{}".format(branch)
     proc = _run(["git", "ls-remote", "--exit-code", "--heads", "origin", ref],
-                cwd=root, check=False)
+                cwd=root, check=False,
+                timeout=REMOTE_GIT_TIMEOUT_SECONDS)
     if proc.returncode == 2:
         return None
     if proc.returncode != 0:
@@ -1802,6 +1924,36 @@ def finish_heartbeat(agent: str, run: str, outcome: str,
         raise ImplementError("heartbeat finish refused run {}".format(run))
 
 
+def _bound_work_ref_for_run(run: str, agent: str) -> str:
+    """Recover the issued ticket ref when checkout identity lookup timed out."""
+    import heartbeat
+
+    records = heartbeat.read_github(agent)
+    binding = heartbeat.bindings(records).get(run)
+    ref = binding.get("work") if isinstance(binding, dict) else None
+    if not isinstance(ref, str) or shape.REF_RE.fullmatch(ref) is None:
+        raise ImplementError(
+            "could not resolve the ticket bound to timed-out run {}".format(run)
+        )
+    return ref
+
+
+def _record_command_timeout(
+        exc: CommandTimeoutError, *, run: str, agent: str, ref: str,
+        release: Callable[[str], None],
+        heartbeat_finish: Callable[[str, str, str, str, str], None]) -> None:
+    """Finish a timed-out run without attempting another checkout command."""
+    if exc.finish_recorded:
+        return
+    # Do not repeat either effect if one of them fails part-way through.
+    exc.finish_recorded = True
+    release(ref)
+    heartbeat_finish(
+        agent, run, "errored",
+        "{}; work NOT kept".format(exc), ref,
+    )
+
+
 def _failure_note(exc: ImplementError, kept: str = "") -> str:
     """Summarise a test failure so the next run knows what failed (#877).
 
@@ -1842,16 +1994,20 @@ def _push_ticket_branch(root: pathlib.Path, branch: str) -> None:
     """
     fetched = _run(["git", "fetch", "origin",
                     "+refs/heads/{0}:refs/remotes/origin/{0}".format(branch)],
-                   cwd=root, check=False)
+                   cwd=root, check=False,
+                   timeout=REMOTE_GIT_TIMEOUT_SECONDS)
     if fetched.returncode == 0:
         remote_ref = "origin/{}".format(branch)
         ancestor = _run(["git", "merge-base", "--is-ancestor", remote_ref, "HEAD"],
-                        cwd=root, check=False)
+                        cwd=root, check=False,
+                        timeout=LOCAL_GIT_TIMEOUT_SECONDS)
         if ancestor.returncode != 0:
             _run(["git", "merge", "-s", "ours", "--no-edit", "-m",
                   "Record the previous {} tip before pushing the rebased branch".format(branch),
-                  remote_ref], cwd=root)
-    _run(["git", "push", "--set-upstream", "origin", branch], cwd=root)
+                  remote_ref], cwd=root,
+                 timeout=LOCAL_GIT_TIMEOUT_SECONDS)
+    _run(["git", "push", "--set-upstream", "origin", branch], cwd=root,
+         timeout=REMOTE_GIT_TIMEOUT_SECONDS)
 
 
 def _remove_codex_run_checkout(root: pathlib.Path, number: int,
@@ -1917,11 +2073,13 @@ def _keep_work(root: pathlib.Path, number: int, branch: str, *,
             _stage_explicit_paths(root, paths)
             _check_no_run_scratch(root, about_to_commit=paths)
             _run(["git", "commit", "-m",
-                  "WIP #{}: {}".format(number, reason)], cwd=root)
+                  "WIP #{}: {}".format(number, reason)], cwd=root,
+                 timeout=LOCAL_GIT_TIMEOUT_SECONDS)
         else:
             _check_no_run_scratch(root)
         ahead = _run(["git", "rev-list", "--count", "origin/main..HEAD"],
-                     cwd=root).stdout.strip()
+                     cwd=root,
+                     timeout=LOCAL_GIT_TIMEOUT_SECONDS).stdout.strip()
         if not ahead.isdigit() or int(ahead) < 1:
             return "no work to keep", False
         push_attempted = True
@@ -1981,6 +2139,12 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
     ref = ticket["ref"]
     try:
         tests, test_source = run_tests(context["root"], test_commands)
+    except CommandTimeoutError as exc:
+        _record_command_timeout(
+            exc, run=run, agent=agent, ref=ref, release=release,
+            heartbeat_finish=heartbeat_finish,
+        )
+        raise
     except ImplementError as exc:
         # A failing checkout must not strand the run or lose its work (#877):
         # commit and push the ticket branch without opening a PR, release the
@@ -1994,8 +2158,8 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
             _remove_codex_run_checkout(
                 context["root"], context["number"], agent)
         raise
-    continued = _remote_branch_exists(context["root"], context["branch"])
     try:
+        continued = _remote_branch_exists(context["root"], context["branch"])
         committed = _commit_if_needed(
             context["root"], context["number"], answer["summary"],
             allow_empty=True,
@@ -2025,6 +2189,12 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
         release(ref)
         heartbeat_finish(agent, run, "errored", str(exc), ref)
         _remove_codex_run_checkout(context["root"], context["number"], agent)
+        raise
+    except CommandTimeoutError as exc:
+        _record_command_timeout(
+            exc, run=run, agent=agent, ref=ref, release=release,
+            heartbeat_finish=heartbeat_finish,
+        )
         raise
     body = render_pr_body(ticket, answer, continued=continued, tests=tests,
                          test_source=test_source)
@@ -2419,6 +2589,25 @@ def _finish_ticket(args: argparse.Namespace) -> int:
                 answer["declined"], run=args.run, agent=args.agent,
                 repo=args.repo, extra_note=args.note,
             )
+    except CommandTimeoutError as exc:
+        if not exc.finish_recorded:
+            try:
+                ref = _bound_work_ref_for_run(args.run, args.agent)
+                _record_command_timeout(
+                    exc, run=args.run, agent=args.agent, ref=ref,
+                    release=release_claim,
+                    heartbeat_finish=finish_heartbeat,
+                )
+            except (funnel.GitHubError, ImplementError, OSError,
+                    subprocess.SubprocessError) as recovery_exc:
+                print(
+                    "finish-ticket: {}; timeout outcome could not be recorded: {}"
+                    .format(exc, recovery_exc),
+                    file=sys.stderr,
+                )
+                return 1
+        print("finish-ticket: {}".format(exc), file=sys.stderr)
+        return 1
     except (funnel.GitHubError, ImplementError, OSError,
             subprocess.SubprocessError) as exc:
         print("finish-ticket: {}".format(exc), file=sys.stderr)

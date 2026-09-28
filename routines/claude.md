@@ -47,9 +47,11 @@ actual open questions in `Needs Nate`. Null categories stay out of prose and
 produce `Needs: none`.
 
 When all four categories are null, a self-approvable class with `agent` origin
-and `Risk: standard`
+and no risk the shaper declares
 advances to `Ready` with a `Self-approved:` marker that `funnel brief`
-shows; anything else stays at `Shaped`, with the reason printed. **Shaped
+shows; anything else stays at `Shaped`, with the reason printed. A
+wording-scan hit alone raises `Risk` to `escalated` and posts its reasons,
+but does not hold the plan (#1679). **Shaped
 is not approval.** If the capture origin is `agent` and Class is unset,
 pass `--class <Broken|Maintenance|Improve|New|Replace>`; otherwise add a
 `Proposed class: <one ladder name>` line and no `--class`. When Nate

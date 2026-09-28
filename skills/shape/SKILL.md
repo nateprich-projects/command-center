@@ -104,11 +104,13 @@ questions remain open; Nate-origin plans and `New` and `Replace` classes stay
 untouched. The `#258` land-now decision advances without a dependency and
 keeps its recorded ordering decision.
 
-When all four are null, a self-approvable Class with `agent` origin and
-`Risk: standard`
+When all four are null, a self-approvable Class with `agent` origin and no
+risk the shaper declares (the typed `escalated_risk`, or a `Risk: escalated`
+line in the plan)
 advances to `Ready` with a `Self-approved:` marker; anything else stays at
-`Shaped` with the reason printed. Never bypass an open question: `Shaped`
-records a plan, not approval.
+`Shaped` with the reason printed. A wording-scan hit alone raises `Risk` to
+`escalated` and posts its reasons, but does not hold the plan (#1679).
+Never bypass an open question: `Shaped` records a plan, not approval.
 
 ## Grilling
 

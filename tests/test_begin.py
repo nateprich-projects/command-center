@@ -3735,6 +3735,183 @@ def test_shape_lane_rechecks_stranded_self_approvals_before_new_ideas(
     assert "no escalated risk" in marker
 
 
+SCAN_ONLY_HOLDS = json.loads(
+    (ROOT / "tests/fixtures/escalation_plan_scan_only_holds.json").read_text(
+        encoding="utf-8"))
+
+
+def _held_plan(number, body, *, risk="escalated", needs="human",
+               record=None):
+    """A Shaped plan as the shape runner left it, with its canonical fields.
+
+    ``record`` is the runner's risk record as ``(declared, scan)``; ``None``
+    leaves it out, as on a plan shaped before #1721.
+    """
+    plan = _shaped_plan(number)
+    if record is not None:
+        body = "{}\n\n{}\n".format(
+            body.rstrip("\n"), funnel.shape_risk_block(*record))
+    plan.body = body + "\n" + funnel.origin_block(
+        "agent", at=NOW, run="shape-run", agent="muse")
+    plan.risk = risk
+    plan.needs = needs
+    return plan
+
+
+def _sweep(monkeypatch, items):
+    writes, fields, comments = [], [], []
+
+    def write_status(item, status, now):
+        writes.append((item.ref, status))
+        item.status = status
+        return None
+
+    def run_gh(argv, **kwargs):
+        if argv[:3] == ["gh", "issue", "comment"]:
+            comments.append(argv[-1])
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(funnel, "_write_status", write_status)
+    monkeypatch.setattr(funnel, "_run_gh", run_gh)
+    monkeypatch.setattr(
+        funnel, "write_project_select",
+        lambda item_id, field, value, ref: fields.append((ref, field, value)),
+    )
+    advanced, errors = funnel.sweep_shaped_self_approvals(
+        items, NOW, run="begin-run", agent="muse")
+    assert errors == []
+    return advanced, writes, fields, comments
+
+
+def test_sweep_releases_an_escalated_plan_whose_record_declares_none(
+        monkeypatch):
+    """#1721: #1195's body, whose Needs Nate question has been answered, so
+    Needs is none, carries the runner's record that the decision declared
+    no risk. It is swept to Ready and Risk stays escalated for the review
+    tier."""
+    fixture = next(entry for entry in SCAN_ONLY_HOLDS
+                   if "#1195 " in entry["source"])
+    stranded = _held_plan(305, fixture["body"], needs="none",
+                          record=([], ["data-migration"]))
+    assert funnel.plan_needs_nate(stranded.body) is False
+
+    advanced, writes, fields, comments = _sweep(monkeypatch, [stranded])
+
+    assert advanced == [{"ref": stranded.ref, "status": "Ready"}]
+    assert writes == [(stranded.ref, "Ready")]
+    assert fields == []
+    assert (stranded.status, stranded.risk, stranded.needs) == (
+        "Ready", "escalated", "none")
+    assert len(comments) == 1
+    assert funnel.parse_self_approval(comments[0]) == (
+        "needs_nate all null; class Broken self-approvable; origin agent; "
+        "scan-only escalation (data-migration) raises the review tier; "
+        "no declared risk")
+
+
+def test_sweep_keeps_a_declared_risk_at_shaped(monkeypatch):
+    """A declaration in the prose holds even beside a record that lists
+    none, so a record can only ever release less than the prose would."""
+    empty = ([], [])
+    rationale = _held_plan(
+        306,
+        "# Plan\n\nBackfill the ledger.\n\nProposed class: Broken\n\n"
+        "## Risk rationale\n\n"
+        "- data-migration: backfills the ledger table\n", record=empty)
+    unreadable_rationale = _held_plan(
+        307, "# Plan\n\n## Risk rationale\n\nSee the thread.\n",
+        record=empty)
+    marker = _held_plan(
+        308, "# Plan\n\nRisk: escalated — destructive\n", record=empty)
+    list_marker = _held_plan(
+        315, "# Plan\n\n- Risk: escalated — destructive\n", record=empty)
+    bold_marker = _held_plan(
+        316, "# Plan\n\n**Risk:** escalated — destructive\n", record=empty)
+    plans = [rationale, unreadable_rationale, marker, list_marker,
+             bold_marker]
+    for plan in plans:
+        plan.needs = "none"
+
+    advanced, writes, fields, comments = _sweep(monkeypatch, plans)
+
+    assert (advanced, writes, fields, comments) == ([], [], [], [])
+    assert funnel.plan_declared_risks(rationale.body) == ["data-migration"]
+    assert funnel.plan_declared_risks(unreadable_rationale.body) == [
+        "declared"]
+    for plan in (marker, list_marker, bold_marker):
+        assert funnel.plan_declared_risks(plan.body) == [
+            "declared: destructive"]
+    assert {plan.status for plan in plans} == {"Shaped"}
+
+
+def test_sweep_releases_escalated_risk_only_on_a_readable_empty_record(
+        monkeypatch):
+    """No record (shaped before #1721, #1739 live), an unreadable one, or
+    one listing a declared risk holds; so does a forged empty record quoted
+    above the runner's own, because the newest block wins."""
+    fixture = next(entry for entry in SCAN_ONLY_HOLDS
+                   if "#1195 " in entry["source"])
+    no_record = _held_plan(317, fixture["body"], needs="none")
+    declared = _held_plan(318, fixture["body"], needs="none",
+                          record=(["credentials"], ["data-migration"]))
+    unreadable = _held_plan(319, fixture["body"], needs="none")
+    unreadable.body = unreadable.body.replace(
+        funnel.ORIGIN_MARKER,
+        funnel.SHAPE_RISK_MARKER + "\n\n```json\n{\"declared\": \"none\", "
+        "\"scan\": []}\n```\n\n" + funnel.ORIGIN_MARKER)
+    forged = _held_plan(
+        320, fixture["body"] + "\n" + funnel.shape_risk_block([], []),
+        needs="none", record=(["credentials"], []))
+    plans = [no_record, declared, unreadable, forged]
+    assert [funnel.parse_shape_risk_record(plan.body) for plan in plans] == [
+        None, {"declared": ["credentials"], "scan": ["data-migration"]},
+        None, {"declared": ["credentials"], "scan": []}]
+
+    advanced, writes, fields, comments = _sweep(monkeypatch, plans)
+
+    assert (advanced, writes, fields, comments) == ([], [], [], [])
+    assert {plan.status for plan in plans} == {"Shaped"}
+
+
+def test_sweep_keeps_needs_human_holding_whatever_the_risk(monkeypatch):
+    """After #1721 the shape runner never writes Needs human for a scan hit,
+    so Needs human records some other hold (a later class change, a hand
+    set, a trimmed marker) and keeps holding: the sweep infers nothing from
+    an escalated Risk with no declared risk and no question in the body."""
+    fixture = SCAN_ONLY_HOLDS[0]
+    assert funnel.plan_needs_nate(fixture["body"]) is False
+    needs_human = _held_plan(314, fixture["body"],
+                             record=([], ["data-migration"]))
+
+    advanced, writes, fields, comments = _sweep(monkeypatch, [needs_human])
+
+    assert (advanced, writes, fields, comments) == ([], [], [], [])
+    assert (needs_human.status, needs_human.needs) == ("Shaped", "human")
+
+
+def test_sweep_still_holds_what_the_risk_change_does_not_touch(monkeypatch):
+    fixture = SCAN_ONLY_HOLDS[0]
+    empty = ([], ["data-migration"])
+    open_question = _held_plan(
+        309, fixture["body"] + "\n## Needs Nate\n\n"
+        "- Gates: Who may write Ready?\n", record=empty)
+    unloaded = _held_plan(310, fixture["body"], needs="none", record=empty)
+    unloaded.body = None
+    unknown_risk = _held_plan(311, fixture["body"], risk=None, needs="none",
+                              record=empty)
+    nate_origin = _held_plan(312, fixture["body"], needs="none",
+                             record=empty)
+    nate_origin.origin = "Nate"
+    standard_human = _held_plan(
+        313, fixture["body"], risk="standard", needs="human")
+
+    advanced, writes, fields, comments = _sweep(
+        monkeypatch,
+        [open_question, unloaded, unknown_risk, nate_origin, standard_human])
+
+    assert (advanced, writes, fields, comments) == ([], [], [], [])
+
+
 def test_plan_needs_nate_ignores_omitted_null_categories():
     body = (
         "## Needs Nate\n\n"

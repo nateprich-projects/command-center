@@ -106,6 +106,7 @@ def test_derive_row_covers_plan_metrics_and_preserves_rate_pairs():
     assert row["metrics"]["D"]["D2"]["funnel_vs_personal"]["value"]["funnel_tokens"] == 140
     assert row["metrics"]["D"]["D2"]["funnel_vs_personal"]["funnel_share"]["numerator"] == 140
     assert row["metrics"]["D"]["D2"]["funnel_vs_personal"]["funnel_share"]["denominator"] == 170
+    assert row["metrics"]["D"]["D3"]["value"]["estimated"]["value"] is False
     assert row["metrics"]["D"]["D5"]["graphql_points_per_run"]["value"]["codex"]["graphql_points"]["value"] == 5
     assert row["metrics"]["D"]["D5"]["graphql_points_per_run"]["value"]["codex"]["points_per_run"] == {
         "numerator": 5,
@@ -124,6 +125,20 @@ def test_derive_row_covers_plan_metrics_and_preserves_rate_pairs():
     assert row["metrics"]["E"]["E2"]["opened_this_hour"]["value"] is None
     assert row["metrics"]["E"]["E2"]["opened_this_hour"]["gap"]
     assert row["metrics"]["F"]["F2"]["value"] == 1234
+
+
+@pytest.mark.parametrize("estimated", [False, True])
+def test_claude_estimated_flag_reaches_d3_metrics_series(estimated):
+    snapshot, ledgers, usage, outcomes, commits, lines = _inputs()
+    usage["claude"]["estimated"] = estimated
+    usage["claude"]["source"] = "claude-local-estimate" if estimated else "claude"
+
+    row = metrics.derive_row(snapshot, ledgers, usage, outcomes, NOW, commits, lines)
+    fact = row["metrics"]["D"]["D3"]["value"]["estimated"]
+    series = metrics.series_from_rows([row], NOW)
+
+    assert fact["value"] is estimated
+    assert series["metrics"]["D"]["D3"]["estimated"]["daily"][-1] is estimated
 
 
 def test_missing_inputs_remain_gaps_instead_of_becoming_zero():

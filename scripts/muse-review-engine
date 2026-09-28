@@ -1955,7 +1955,8 @@ For a `plan_premises` entry labelled `inferred` that has `deferred_answer`,
 include a requirement that preserves its exact evidence pointer and says it is
 deferred until the named `reviewed_ticket` is complete. Do not emit a live-evidence
 probe requirement for that premise. An inferred entry without `deferred_answer`
-keeps the normal probe requirement.
+keeps the normal probe requirement; leave it `unsure` when a required record is
+unavailable.
 
 For a `measured` or `documented` entry with verified `label_error`, include a
 requirement to reject it explicitly as a labeling error and preserve its exact
@@ -2142,7 +2143,8 @@ below. Use unmet when the diff clearly fails it and unsure when the packet
 cannot resolve it. For each result, cite the relevant diff lines or explain
 the uncertainty.
 
-For a deferred-premise requirement, verify that the matching packet entry is
+For a deferred-premise requirement, inspect the entry's `label`, `evidence`,
+and `deferred_answer` fields, and verify that the matching packet entry is
 labelled `inferred`, its `deferred_answer.evidence_pointer` exactly matches
 the entry's `evidence`, and `deferred_answer.reviewed_ticket` matches
 `ticket.ref`. If those fields match, the pointer is visibly deferred and its

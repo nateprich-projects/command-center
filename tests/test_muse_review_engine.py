@@ -3280,7 +3280,6 @@ def test_the_lister_asks_for_requirements_before_the_judge_is_asked(tmp_path):
     assert "verified `label_error`" in lister
     assert "reject it explicitly as a" in lister
     assert "Do not defer that entry" in lister
-    assert "Use its `referenced_evidence.records`" in lister
 
     judge = (repo / "muse.prompt.2").read_text()
     # The lister framing does not survive; this call judges only its assigned
@@ -3311,7 +3310,6 @@ def test_the_lister_asks_for_requirements_before_the_judge_is_asked(tmp_path):
     assert "never defer it" in judge
     assert "without `deferred_answer` still follows the normal" in judge
     assert "inspect the entry's" in judge
-    assert "`referenced_evidence.records`" in judge
 
 
 def test_rejected_1612_premise_is_carried_as_a_visible_deferral(tmp_path):

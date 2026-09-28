@@ -115,19 +115,11 @@ PLAN_PREMISE_ROW_RE = re.compile(
 # same forms GitHub renders elsewhere: owner/repo#n, #n, or an issue URL.
 EVIDENCE_ISSUE_REF_RE = re.compile(
     r"(?P<url>https?://github\.com/(?P<url_owner>[A-Za-z0-9_.-]+)/"
-    r"(?P<url_repo>[A-Za-z0-9_.-]+)/(?:issues|pull)/"
+    r"(?P<url_repo>[A-Za-z0-9_.-]+)/issues/"
     r"(?P<url_number>[1-9][0-9]*)/?)"
     r"|(?<![A-Za-z0-9_.-])(?P<full>(?P<owner>[A-Za-z0-9_.-]+)/"
     r"(?P<repo>[A-Za-z0-9_.-]+)#(?P<number>[1-9][0-9]*))"
     r"|(?<![A-Za-z0-9_/])#(?P<bare_number>[1-9][0-9]*)")
-PULL_REQUEST_REF_RE = re.compile(
-    r"(?P<url>https?://github\.com/(?P<url_owner>[A-Za-z0-9_.-]+)/"
-    r"(?P<url_repo>[A-Za-z0-9_.-]+)/pull/"
-    r"(?P<url_number>[1-9][0-9]*)/?)"
-    r"|(?<![A-Za-z0-9_])(?:PR|pull request)\s+"
-    r"(?:(?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+)\s*)?"
-    r"#(?P<number>[1-9][0-9]*)",
-    re.IGNORECASE)
 ISSUE_REF_RE = re.compile(
     r"\A(?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+)"
     r"#(?P<number>[1-9][0-9]*)\Z")
@@ -173,11 +165,6 @@ query($owner: String!, $name: String!, $number: Int!, $after: String) {
 #: long ticket cannot flood the prompt.
 TICKET_COMMENT_LIMIT = 30
 TICKET_COMMENT_BODY_LIMIT = 4000
-
-# Keep one inferred premise from turning an ordinary review into an unbounded
-# series of GitHub reads. Any references beyond this limit stay visible in the
-# packet as omitted refs, so judges can preserve the unresolved state.
-MAX_PREMISE_EVIDENCE_REFS = 8
 
 # PR comments are durable run evidence. Keep each body bounded while carrying
 # every comment, newest last, so a reviewer can see the complete conversation.
@@ -1339,32 +1326,6 @@ def _evidence_issue_refs(evidence_pointer: object,
     return refs
 
 
-def _evidence_pull_request_refs(text: object,
-                                default_repo: str) -> List[str]:
-    """Find PR refs explicitly named in premise prose or evidence pointers."""
-    if not isinstance(text, str):
-        return []
-    refs: List[str] = []
-    seen = set()
-    for match in PULL_REQUEST_REF_RE.finditer(text):
-        if match.group("url_number"):
-            repo = "{}/{}".format(match.group("url_owner"),
-                                  match.group("url_repo"))
-            number = int(match.group("url_number"))
-        elif match.group("number"):
-            repo = ("{}/{}".format(match.group("owner"), match.group("repo"))
-                    if match.group("owner") else default_repo)
-            number = int(match.group("number"))
-        else:
-            continue
-        ref = _issue_ref(repo, number)
-        key = _issue_ref_key(ref)
-        if key not in seen:
-            seen.add(key)
-            refs.append(ref)
-    return refs
-
-
 def _read_evidence_issue(ref: str) -> Optional[Dict[str, object]]:
     """Read one issue's current state and complete native blocked-by edges."""
     parts = _issue_ref_parts(ref)
@@ -1579,10 +1540,10 @@ def evidence_ticket_is_unrunnable(evidence_pointer: object,
     """Whether an open ticket named by evidence cannot run before this review.
 
     Bare ``#n`` pointers are scoped to the reviewed ticket's repository.
-    An open evidence ticket is considered forward-only when GitHub's live
-    sub-issue order puts it later in the same plan, or its native blocked-by
-    graph reaches the ticket under review. A closed or missing issue is not
-    forward-only, so genuinely checkable evidence remains a review requirement.
+    An open evidence ticket is deferred only when GitHub's live sub-issue
+    order puts it later in the same plan, or its native blocked-by graph
+    reaches the ticket under review. A closed or missing issue does not defer
+    the premise, so genuinely checkable evidence remains a review requirement.
     """
     reviewed_parts = _issue_ref_parts(reviewed_ticket_ref)
     if reviewed_parts is None:
@@ -1844,140 +1805,6 @@ def mark_verified_premise_requirements(
         resolved["evidence"] = evidence
         marked.append(resolved)
     return marked
-
-
-def _read_premise_reference(ref: str, is_pull_request: bool) -> Dict:
-    """Fetch one cited issue or PR as packet evidence, retaining read status."""
-    parts = _issue_ref_parts(ref)
-    if parts is None:
-        raise funnel.GitHubError("cannot read an invalid premise evidence ref")
-    repo, number = parts
-    if is_pull_request:
-        view = fetch_pr(repo, number)
-        if not isinstance(view, dict):
-            view = {}
-        body_section = pr_body_section(view)
-        pr_body = body_section["pr_body"]
-        pr_body_truncated = body_section["pr_body_truncated"]
-        files = view.get("files") if isinstance(view, dict) else None
-        changed_files = None
-        if isinstance(files, list):
-            changed_files = [
-                row.get("path") for row in files
-                if isinstance(row, dict) and isinstance(row.get("path"), str)
-            ]
-        comments = fetch_pr_comments(repo, number)
-        complete = (
-            isinstance(view.get("title"), str)
-            and isinstance(view.get("state"), str)
-            and isinstance(pr_body, str)
-            and pr_body_truncated is False
-            and isinstance(files, list)
-            and isinstance(comments, dict)
-            and comments.get("status") in ("available", "empty")
-        )
-        return {
-            "ref": ref,
-            "url": "https://github.com/{}/pull/{}".format(repo, number),
-            "kind": "pull_request",
-            "status": "available" if complete else "partial",
-            "title": view.get("title"),
-            "body": pr_body,
-            "body_truncated": pr_body_truncated,
-            "departures": body_section["pr_departures"],
-            "state": view.get("state"),
-            "merged_at": view.get("mergedAt"),
-            "head_ref": view.get("headRefName"),
-            "head_sha": view.get("headRefOid"),
-            "changed_files": changed_files,
-            "comments": comments,
-        }
-
-    issue = fetch_ticket(repo, number)
-    parent_plans = packet_plan_premises([issue])
-    complete = (
-        isinstance(issue.get("state"), str)
-        and all(group.get("available") is True for group in parent_plans)
-    )
-    return {
-        "ref": ref,
-        "url": issue.get("url"),
-        "kind": "issue",
-        "status": "available" if complete else "partial",
-        "state": issue.get("state"),
-        "issue": shape_ticket(issue),
-        "parent_plan_premises": parent_plans,
-    }
-
-
-def attach_inferred_premise_evidence(packet: Dict,
-                                     default_repo: str) -> Dict:
-    """Add live records named by each non-deferred inferred premise.
-
-    The judge sees only the packet. Explicitly cited issues and PRs therefore
-    need their own bounded records here before the lister can ask it to probe
-    the pointer. A failed read stays marked as unreadable, never as empty.
-    """
-    groups = packet.get("plan_premises")
-    if not isinstance(groups, list):
-        return packet
-    verified = {
-        (row["claim"], row["evidence"])
-        for row in _verified_deferred_premises(packet)
-    }
-    cache: Dict[Tuple[str, bool], Dict] = {}
-    for group in groups:
-        if not isinstance(group, dict) or group.get("available") is not True:
-            continue
-        premises = group.get("premises")
-        if not isinstance(premises, list):
-            continue
-        for premise in premises:
-            if (not isinstance(premise, dict)
-                    or premise.get("label") != "inferred"):
-                continue
-            if (premise.get("claim"), premise.get("evidence")) in verified:
-                continue
-            texts = [premise.get("claim"), premise.get("evidence")]
-            refs: List[str] = []
-            pull_refs = set()
-            for text in texts:
-                for ref in _evidence_issue_refs(text, default_repo):
-                    if ref not in refs:
-                        refs.append(ref)
-                pull_refs.update(_evidence_pull_request_refs(
-                    text, default_repo))
-            if not refs:
-                continue
-
-            selected = refs[:MAX_PREMISE_EVIDENCE_REFS]
-            records: List[Dict] = []
-            for ref in selected:
-                is_pull_request = ref in pull_refs
-                key = (ref, is_pull_request)
-                if key not in cache:
-                    try:
-                        cache[key] = _read_premise_reference(
-                            ref, is_pull_request)
-                    except (funnel.GitHubError, OSError, TypeError, ValueError):
-                        cache[key] = {
-                            "ref": ref,
-                            "kind": ("pull_request" if is_pull_request
-                                     else "issue"),
-                            "status": "could_not_read",
-                            "message": "Could not read this cited reference.",
-                        }
-                records.append(cache[key])
-            omitted = refs[MAX_PREMISE_EVIDENCE_REFS:]
-            incomplete = any(row.get("status") != "available"
-                             for row in records)
-            premise["referenced_evidence"] = {
-                "status": "partial" if omitted or incomplete else "available",
-                "records": records,
-            }
-            if omitted:
-                premise["referenced_evidence"]["omitted_refs"] = omitted
-    return packet
 
 
 def _comment_connection_page(connection: object, label: str
@@ -2757,7 +2584,7 @@ def fetch_ticket(repo: str, number: int) -> dict:
     """
     data = funnel._gh_json(
         "gh", "issue", "view", str(number), "--repo", repo, "--json",
-        "number,title,url,state,body,parent,comments")
+        "number,title,url,body,parent,comments")
     if not data:
         raise funnel.GitHubError(
             "could not read ticket {}#{}".format(repo, number))
@@ -2986,7 +2813,7 @@ def collect(repo: Optional[str], pr_number: int, *,
     )
     # Keep build_packet pure; unrunnability depends on fresh GitHub state.
     packet = annotate_unrunnable_premises(packet)
-    return attach_inferred_premise_evidence(packet, resolved)
+    return packet
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:

@@ -1129,59 +1129,6 @@ def test_review_checklist_probes_inferred_premises_against_live_evidence():
     assert "Do not\nre-derive it from plan prose" in text
 
 
-def test_inferred_premise_packet_loads_explicitly_cited_evidence(monkeypatch):
-    view = pr_view(body="Part of #28. Implements #29.")
-    premise = {
-        "claim": "PR #31 for ticket #29 resembles PR #30",
-        "evidence": "owner/repo#31 and #29 under #28; compare PR #30",
-        "label": "inferred",
-    }
-    parent = {
-        "number": 1,
-        "ref": REPO + "#1",
-        "body": ("# Plan\n\n## Premises\n\n"
-                 "- {} (label: inferred; evidence: {})\n\n"
-                 "Proposed class: Broken\n").format(
-                     premise["claim"], premise["evidence"]),
-        "comments": [],
-    }
-    view = dict(view, headRefName="ticket/9")
-    monkeypatch.setattr(review, "fetch_pr", lambda repo, pr: view)
-    monkeypatch.setattr(review, "fetch_scope", _compare_unavailable)
-    monkeypatch.setattr(review, "fetch_diff", lambda repo, pr: "diff text")
-    monkeypatch.setattr(review, "evidence_ticket_is_unrunnable",
-                        lambda evidence, reviewed: False)
-
-    def fake_ticket(repo, number):
-        if number == 9:
-            return ticket(parent=parent)
-        return ticket(number=number, ref=repo + "#" + str(number),
-                      parent=None, state="OPEN")
-
-    monkeypatch.setattr(review, "fetch_ticket", fake_ticket)
-    monkeypatch.setattr(
-        review, "fetch_plan_md", lambda repo: ("# design record", False))
-    monkeypatch.setattr(review, "fetch_open_prs", lambda repo: [])
-    monkeypatch.setattr(review, "fetch_merged_prs", lambda repo: [])
-    monkeypatch.setattr(review, "fetch_ci_runs", lambda repo, branch: [])
-    monkeypatch.setattr(review, "fetch_verdict", lambda repo, pr: None)
-    monkeypatch.setattr(review, "fetch_pr_comments", lambda repo, pr: {
-        "status": "empty", "message": "No PR comments.", "comments": []})
-
-    found = review.collect(REPO, 7, items_loader=lambda: [])
-
-    attached = found["plan_premises"][0]["premises"][0][
-        "referenced_evidence"]
-    assert attached["status"] == "available"
-    assert {row["ref"] for row in attached["records"]} == {
-        REPO + "#28", REPO + "#29", REPO + "#30", REPO + "#31"}
-    assert all(row["body"] == "Part of #28. Implements #29."
-               for row in attached["records"]
-               if row["kind"] == "pull_request")
-    assert all(row["state"] == "OPEN"
-               for row in attached["records"] if row["kind"] == "issue")
-
-
 def test_a_ticket_without_a_comments_list_gets_an_empty_one():
     assert packet()["ticket"]["comments"] == []
 
@@ -1203,15 +1150,11 @@ def test_fetch_ticket_reads_comments_with_the_ticket(monkeypatch):
     def fake_gh_json(*args):
         seen["args"] = args
         return {"number": 9, "title": "t", "url": "u", "body": "b",
-                "state": "CLOSED", "parent": None, "comments": []}
+                "parent": None, "comments": []}
 
     monkeypatch.setattr(funnel, "_gh_json", fake_gh_json)
-    found = review.fetch_ticket(REPO, 9)
-    fields = seen["args"][-1].split(",")
-    assert found["comments"] == []
-    assert found["state"] == "CLOSED"
-    assert "comments" in fields
-    assert "state" in fields
+    assert review.fetch_ticket(REPO, 9)["comments"] == []
+    assert "comments" in seen["args"][-1].split(",")
 
 
 def test_fetch_ticket_uses_parent_comments_already_in_the_parent_row(monkeypatch):

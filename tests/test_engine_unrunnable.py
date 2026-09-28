@@ -243,6 +243,42 @@ def test_a_checkable_inferred_pointer_keeps_the_probe_path(monkeypatch):
     assert "deferred_answer" not in premise
 
 
+def test_merged_pr_evidence_pointer_keeps_the_probe_path(monkeypatch):
+    data = live_fixture()
+    data["issues"][REPO + "#1597"]["state"] = "CLOSED"
+    data["issues"][REPO + "#1613"] = {
+        "state": "CLOSED",
+        "parent": REPO + "#1581",
+        "blocked_by": [],
+    }
+    install_github_fixture(monkeypatch, data)
+
+    packet = rejected_1612_fixture()["packet"]
+    packet["ticket"] = {"ref": REPO + "#1652", "number": 1652}
+    packet["plan_premises"][0].update({
+        "parent_ref": REPO + "#1626",
+        "ticket_refs": [REPO + "#1652"],
+    })
+    premise = packet["plan_premises"][0]["premises"][0]
+    premise.update({
+        "claim": (
+            "PR #1613 for ticket #1597 has the same uncheckable later-sibling "
+            "premise shape as PR #1612"),
+        "evidence": (
+            REPO + "#1613 for #1597 shares #1581 later-sibling evidence shape"),
+    })
+    probe = (
+        "Probe the parent plan #1626 premise labelled inferred against live "
+        "evidence using its evidence pointer: '{}' (evidence pointer: {}); "
+        "cite support or contradiction, and record unsure if unresolved."
+    ).format(premise["claim"], premise["evidence"])
+
+    review.annotate_unrunnable_premises(packet)
+
+    assert "deferred_answer" not in premise
+    assert review.normalize_plan_premise_requirements(packet, [probe]) == [probe]
+
+
 def test_later_same_plan_ticket_is_unrunnable_without_dependency_edges(
         monkeypatch):
     data = live_fixture()

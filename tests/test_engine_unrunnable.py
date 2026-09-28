@@ -21,6 +21,8 @@ REJECTED_1612 = ROOT / "tests" / "fixtures" / "review_rejected_1612.json"
 REJECTED_1614 = ROOT / "tests" / "fixtures" / "review_rejected_1614.json"
 MISSING_ACCEPTANCE = ROOT / "tests" / "fixtures" / \
     "review_acceptance_missing_evidence.json"
+MISSING_BEFORE_1614 = ROOT / "tests" / "fixtures" / \
+    "review_acceptance_missing_before_1614.json"
 
 
 def live_fixture():
@@ -349,19 +351,86 @@ def test_rejected_1614_post_deploy_acceptance_is_a_verified_deferral():
     assert review.annotate_unrunnable_premises(packet) is packet
     acceptance = packet["ticket"]["deferred_acceptance"][0]
     assert acceptance["deferred_answer"] == fixture["expected_deferred_answer"]
+    assert acceptance["deferred_clause"] == fixture["expected_deferred_clause"]
+    assert acceptance["checkable_line"] == fixture["expected_checkable_line"]
 
     requirements = review.normalize_plan_premise_requirements(
-        packet, [fixture["rejected_requirement"]])
-    assert requirements == [fixture["expected_deferred_requirement"]]
+        packet, [fixture["rejected_requirement"],
+                 fixture["checkable_verification_requirement"]])
+    assert fixture["expected_checkable_requirement"] in requirements
+    assert fixture["checkable_verification_requirement"] in requirements
+    assert fixture["expected_deferred_requirement"] in requirements
     marked = review.mark_verified_premise_requirements(packet, [{
-        "requirement": requirements[0],
+        "requirement": fixture["expected_checkable_requirement"],
+        "status": "met",
+        "evidence": "the before timing and same-ticket verification are present",
+    }, {
+        "requirement": fixture["checkable_verification_requirement"],
+        "status": "met",
+        "evidence": "the verification is present on this ticket",
+    }, {
+        "requirement": fixture["expected_deferred_requirement"],
         "status": "unsure",
         "evidence": "the after-deploy run has not happened yet",
     }])
 
-    assert marked[0]["status"] == "met"
+    assert all(result["status"] == "met" for result in marked)
     assert review.derive_judge_answer(requirements, marked)["verdict"] == (
         "approved")
+
+
+def test_rejected_1614_still_rejects_when_checkable_before_evidence_is_missing():
+    fixture = json.loads(MISSING_BEFORE_1614.read_text())
+    packet = fixture["packet"]
+
+    review.annotate_unrunnable_premises(packet)
+    requirements = review.normalize_plan_premise_requirements(
+        packet, [fixture["rejected_requirement"],
+                 fixture["missing_verification_requirement"]])
+
+    assert fixture["missing_checkable_requirement"] in requirements
+    assert fixture["missing_verification_requirement"] in requirements
+    deferred_requirement = next(
+        requirement for requirement in requirements
+        if requirement.startswith("Defer the ticket acceptance clause "))
+    marked = review.mark_verified_premise_requirements(packet, [{
+        "requirement": fixture["missing_checkable_requirement"],
+        "status": "unsure",
+        "evidence": "the packet has no before-timing Run evidence comment",
+    }, {
+        "requirement": fixture["missing_verification_requirement"],
+        "status": "unsure",
+        "evidence": "the same-ticket verification is missing",
+    }, {
+        "requirement": deferred_requirement,
+        "status": "unsure",
+        "evidence": "the after-deploy run has not happened yet",
+    }])
+
+    assert marked[0]["status"] == "unsure"
+    assert marked[1]["status"] == "unsure"
+    assert marked[2]["status"] == "met"
+    answer = review.derive_judge_answer(requirements, marked)
+    assert answer["verdict"] == "rejected"
+    assert answer["blocking"]
+
+
+@pytest.mark.parametrize(("deploy_phrase", "is_deferred"), [
+    ("once this deploys", True),
+    ("once #1606 deploys", True),
+    ("once #1591 deploys", False),
+    ("after #1500 merged", False),
+])
+def test_acceptance_deferral_names_the_reviewed_ticket(
+        deploy_phrase, is_deferred):
+    fixture = rejected_1614_fixture()
+    packet = fixture["packet"]
+    packet["ticket"]["body"] = packet["ticket"]["body"].replace(
+        "once this deploys", deploy_phrase)
+
+    review.annotate_unrunnable_premises(packet)
+
+    assert ("deferred_acceptance" in packet["ticket"]) is is_deferred
 
 
 def test_checkable_acceptance_with_missing_run_evidence_still_rejects():

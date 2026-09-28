@@ -3626,7 +3626,10 @@ def test_the_lister_asks_for_requirements_before_the_judge_is_asked(tmp_path):
     assert "has `deferred_answer`" in lister
     assert "Do not emit a live-evidence" in lister
     assert "ticket.deferred_acceptance" in lister
-    assert "Do not emit a missing Run evidence requirement" in lister
+    assert "exact `deferred_clause`" in lister
+    assert "exact `checkable_line` as an ordinary acceptance" in lister
+    assert "such as a same-ticket verification" in lister
+    assert "Never defer the whole acceptance line" in lister
     assert "verified `label_error`" in lister
     assert "reject it explicitly as a" in lister
     assert "Do not defer that entry" in lister
@@ -3656,6 +3659,10 @@ def test_the_lister_asks_for_requirements_before_the_judge_is_asked(tmp_path):
     assert "deferred-premise requirement" in judge
     assert "mark that deferral requirement met, not" in judge
     assert "deferred-ticket-acceptance requirement" in judge
+    assert "`deferred_clause` is the exact after-deploy clause" in judge
+    assert "Judge the entry's" in judge
+    assert "`checkable_line` as an ordinary acceptance requirement" in judge
+    assert "same-ticket verification requirement from that" in judge
     assert "Any acceptance line without a matching deferral" in judge
     assert "For a labeling-error requirement" in judge
     assert "mark the requirement `unmet`" in judge

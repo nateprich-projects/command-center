@@ -443,6 +443,82 @@ def test_timing_lines_drop_every_line_that_quotes_requirement_text(line):
     assert replay.timing_lines((line + "\n").encode()) == []
 
 
+# Each field's accepted language, pinned by its whole edit neighbourhood: every
+# one-character insert, delete or substitute of a valid value, and every swap
+# of a word or an index for requirement-like text, is refused unless the spec
+# below accepts it. Listing counterexamples one loosening at a time left a new
+# batch of plausible widenings passing each time (#1784).
+
+#: Letters of both cases, digits, the punctuation a widening would let
+#: through, a non-ASCII digit that \\d takes, and a space.
+EDIT_ALPHABET = "azAZ09_-.:\u0663 "
+VALID_PARTS = ["judge.3", "judge.12", "shape.framer", "shape.auditor",
+               "shape.sibling.0", "shape.decider.2", "lister"]
+VALID_OUTCOMES = ["done", "retried-done", "failed"]
+
+
+def _edits(value):
+    found = set()
+    for i in range(len(value) + 1):
+        for c in EDIT_ALPHABET:
+            found.add(value[:i] + c + value[i:])
+    for i in range(len(value)):
+        found.add(value[:i] + value[i + 1:])
+        for c in EDIT_ALPHABET:
+            found.add(value[:i] + c + value[i + 1:])
+    for word in ("payouts", "Payouts", "_payouts", "ab", "a0", "0a",
+                 "\u0663"):
+        found.add(re.sub(r"[a-z]+", word, value, count=1))
+        found.add(re.sub(r"[0-9]+", word, value, count=1))
+        found.add(value + word)
+        found.add(word + value)
+    return found
+
+
+def _accepted(line):
+    return replay.timing_lines((line + "\n").encode()) != []
+
+
+def test_a_part_is_only_a_name_the_engine_gives():
+    spec = re.compile(r"judge\.[0-9]+|shape\.(?:framer|auditor"
+                      r"|(?:sibling|decider)\.[0-9]+)|lister")
+    leaked = sorted(part for valid in VALID_PARTS for part in _edits(valid)
+                    if not spec.fullmatch(part)
+                    and _accepted(_timing(part, 412, 2, "failed")))
+
+    assert leaked == []
+
+
+def test_elapsed_and_calls_are_only_ascii_digits():
+    leaked = []
+    for valid in ("412", "2"):
+        for number in _edits(valid):
+            if number and all(c in "0123456789" for c in number):
+                continue
+            if _accepted(_timing("judge.3", number, 2, "failed")):
+                leaked.append(("elapsed", number))
+            if _accepted(_timing("judge.3", 412, number, "failed")):
+                leaked.append(("calls", number))
+
+    assert leaked == []
+
+
+def test_an_outcome_is_only_one_of_the_three():
+    leaked = sorted(outcome for valid in VALID_OUTCOMES
+                    for outcome in _edits(valid)
+                    if outcome not in VALID_OUTCOMES
+                    and _accepted(_timing("judge.3", 412, 2, outcome)))
+
+    assert leaked == []
+
+
+def test_every_valid_value_is_accepted():
+    for part in VALID_PARTS:
+        assert _accepted(_timing(part, 412, 2, "failed"))
+    for outcome in VALID_OUTCOMES:
+        assert _accepted(_timing("judge.3", 412, 2, outcome))
+
+
 def test_timing_lines_pass_through_under_the_run_number(
         tmp_path, monkeypatch, capfd, stub_engine):
     monkeypatch.setenv("STUB_ENGINE_STDERR_1", "\n".join([

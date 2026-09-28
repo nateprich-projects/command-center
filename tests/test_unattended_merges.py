@@ -172,6 +172,7 @@ def test_recent_merged_pr_rows_include_number_for_cutoff_lookup(monkeypatch):
 
 
 def test_rows_outside_the_window_fall_out(monkeypatch):
+    assert funnel.MAINTENANCE_WINDOW == timedelta(days=30)
     days = funnel.MAINTENANCE_WINDOW.days
     spools = {"muse": [_finish("muse", merged=1, days_ago=days + 1),
                        _finish("muse", merged=2, days_ago=days - 1)]}

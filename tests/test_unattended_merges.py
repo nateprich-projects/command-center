@@ -176,6 +176,52 @@ def test_retired_merges_stop_at_cutoff_but_stay_out_of_silence_alarms(monkeypatc
     assert "zcode" not in read
 
 
+def test_each_retired_provider_uses_its_own_cutoff(monkeypatch):
+    zcode_cutoff = datetime(2026, 9, 7, 6, 0, tzinfo=timezone.utc)
+    legacy_cutoff = datetime(2026, 9, 9, 6, 0, tzinfo=timezone.utc)
+    merge_times = {
+        301: zcode_cutoff,
+        302: datetime(2026, 9, 7, 6, 0, 1, tzinfo=timezone.utc),
+        303: legacy_cutoff,
+        304: datetime(2026, 9, 9, 6, 0, 1, tzinfo=timezone.utc),
+    }
+    spools = {
+        "zcode": [_finish("zcode", merged=301), _finish("zcode", merged=302)],
+        "legacy": [
+            _finish("legacy", merged=303), _finish("legacy", merged=304),
+        ],
+        "claude": [_finish("claude", merged=305)],
+    }
+    read = _wire(monkeypatch, spools, retired={"zcode", "legacy"})
+    providers = dict(heartbeat.PROVIDERS)
+    providers["legacy"] = "test"
+    monkeypatch.setattr(heartbeat, "PROVIDERS", providers)
+    monkeypatch.setattr(heartbeat, "RETIRED_AGENT_CUTOFFS", {
+        "zcode": zcode_cutoff.timestamp(),
+        "legacy": legacy_cutoff.timestamp(),
+    })
+    queries = []
+
+    def fake_graphql(query, **variables):
+        queries.append(query)
+        rows = {}
+        for index, number in enumerate(sorted(merge_times)):
+            rows["pr{}".format(index)] = {
+                "mergedAt": merge_times[number].isoformat(),
+            }
+        return {"repo0": rows}
+
+    monkeypatch.setattr(funnel, "gh_graphql", fake_graphql)
+
+    found = funnel.unattended_merges(NOW)
+
+    assert {(row["pr"], row["agent"]) for row in found} == {
+        (301, "zcode"), (303, "legacy"), (305, "claude"),
+    }
+    assert {"zcode", "legacy"}.issubset(read)
+    assert len(queries) == 1
+
+
 def test_rows_outside_the_window_fall_out(monkeypatch):
     assert funnel.MAINTENANCE_WINDOW == timedelta(days=30)
     days = funnel.MAINTENANCE_WINDOW.days

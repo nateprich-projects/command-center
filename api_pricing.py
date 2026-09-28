@@ -117,6 +117,18 @@ def price_run(
     timestamp from becoming an understated total.
     """
     validated = _validated_rows(list(rate_rows))
+    for name in ("provider", "model"):
+        start_observation = run.get("start_" + name)
+        finish_observation = run.get("finish_" + name)
+        if (
+            isinstance(start_observation, str)
+            and start_observation.strip()
+            and isinstance(finish_observation, str)
+            and finish_observation.strip()
+            and start_observation.strip().casefold()
+            != finish_observation.strip().casefold()
+        ):
+            return _incomplete("conflicting_model_observations")
     provider = run.get("provider")
     model = run.get("model")
     started_at = _timestamp(run.get("started_at"))

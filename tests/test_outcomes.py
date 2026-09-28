@@ -201,6 +201,63 @@ def test_derive_prices_each_run_and_keeps_missing_tokens_unknown():
     assert incomplete["notional_api_cost"]["value"] is None
 
 
+@pytest.mark.parametrize(
+    "finish_provider, finish_model",
+    [
+        ("openai", "gpt-5.6-sol"),
+        ("anthropic", "gpt-5.6-luna"),
+    ],
+)
+def test_conflicting_start_and_finish_pricing_observations_are_not_priced(
+        finish_provider, finish_model):
+    start_provider = "openai"
+    start_model = "gpt-5.6-luna"
+    token_kinds = (
+        "fresh_input_tokens",
+        "cache_read_input_tokens",
+        "cache_write_input_tokens",
+        "output_tokens",
+    )
+    token_counts = (1000, 30000, 0, 200)
+    rates = []
+    for token_kind, amount in zip(token_kinds, (1, 2, 3, 4)):
+        rates.append({
+            "provider": finish_provider,
+            "model": finish_model,
+            "token_kind": token_kind,
+            "usd_per_million_tokens": amount,
+            "effective_from": "1970-01-01T00:00:00Z",
+            "source_url": "https://example.test/pricing",
+            "recorded_at": "2026-09-10T12:00:00Z",
+        })
+    rows = {
+        "codex": [
+            {"run": "run-1", "phase": "start", "ts": 100,
+             "provider": start_provider, "model": start_model},
+            {"run": "run-1", "phase": "bind", "ts": 101,
+             "do": "ticket", "work": "owner/repo#42"},
+            {"run": "run-1", "phase": "finish", "ts": 110,
+             "outcome": "done", "provider": finish_provider,
+             "model": finish_model, "token_usage": dict(zip(
+                 token_kinds, token_counts
+             ))},
+        ],
+    }
+
+    runs = outcomes._ticket_runs("owner/repo#42", rows)
+    record = outcomes.derive_outcome(
+        ticket(), run_observations=runs, rate_rows=rates, now=NOW
+    )
+
+    assert runs[0]["start_provider"] == start_provider
+    assert runs[0]["finish_provider"] == finish_provider
+    assert runs[0]["start_model"] == start_model
+    assert runs[0]["finish_model"] == finish_model
+    cost = record["runs"][0]["notional_api_cost"]
+    assert cost["value"] is None
+    assert cost["reason"] == "conflicting_model_observations"
+
+
 def test_cost_signal_sums_same_lane_runs_before_counting_merged_pr():
     row = signal_record(1, cost=None)
     row["runs"] = [

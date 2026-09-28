@@ -64,11 +64,11 @@ MUSE_SESSIONS = os.path.expanduser(
 #: counting it adds arithmetic without changing a decision.
 BUDGETED_MODEL = "opus"
 
-#: Calibrated from Claude's 2026-09-27 app sample: 530,879 deduplicated Opus
-#: output tokens in the trailing five hours read 43%, giving 1,234,602 tokens.
-#: This remains above the previously observed 801,303-token stretch that did
-#: not hit the limit. The app reading is preferred; this is fallback capacity.
-FIVE_HOUR_CAPACITY = 1_234_602.0
+#: The 2026-09-27 paired sample implies about 1.235M tokens (530,879 at 43%).
+#: plan.md treats this output-only window as a weaker signal and says to stay
+#: above the observed 801,303-token stretch instead of fitting the panel. Round
+#: the paired estimate down to 1.2M so the fallback errs high at that sample.
+FIVE_HOUR_CAPACITY = 1_200_000.0
 
 #: Calibrated from Claude's 2026-09-27 app sample: 937,634 deduplicated Opus
 #: output tokens since reset read 14% of the seven-day window. The base remains
@@ -76,9 +76,9 @@ FIVE_HOUR_CAPACITY = 1_234_602.0
 #: parseable percentage and a future end date.
 WEEKLY_CAPACITY = 6_697_386.0
 
-#: No extra inflation. Both capacities use deduplicated counts paired with the
-#: app sample. These transcript readings remain estimates; reserves carry the
-#: margin when no fresh app sample is available.
+#: No extra inflation factor. The five-hour denominator already rounds down;
+#: these transcript readings remain estimates, and the normal reserves still
+#: apply when no fresh app sample is available.
 ESTIMATE_HAIRCUT = 1.0
 
 #: When the weekly window resets, in local time. The estimate counts tokens
@@ -144,15 +144,16 @@ def promo_multiplier(window: str, now: float) -> float:
             continue
         month = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
                  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+        today = datetime.datetime.fromtimestamp(now, timezone.utc)
         try:
             index = month.index(through.group(1)) + 1
+            ends = datetime.datetime(
+                today.year, index, int(through.group(2)),
+                23, 59, 59, 999999, tzinfo=timezone.utc,
+            )
         except ValueError:
-            continue
-        today = datetime.datetime.fromtimestamp(now, timezone.utc)
-        ends = datetime.datetime(
-            today.year, index, int(through.group(2)), 23, 59, tzinfo=timezone.utc
-        )
-        if ends < today:
+            continue  # malformed month or day; do not assume a boost
+        if ends <= today:
             continue  # lapsed, or a stale cached notice
         return 1.0 + int(percent.group(1)) / 100.0
     return 1.0
@@ -1655,6 +1656,8 @@ def read_agent(agent: str, now: float) -> Optional[Dict]:
         # which is the failure mode a provider registry invites.
         return None
 
+    # A fresh app sample is authoritative; consult transcript usage only when
+    # app history is missing, malformed, or stale.
     app_reading = read_claude_plan_history(now)
     if app_reading is not None:
         return app_reading

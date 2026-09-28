@@ -378,10 +378,15 @@ def test_repeated_message_ids_count_once_across_transcripts(tmp_path, monkeypatc
     assert reading["opus_output_tokens"] == {"five_hour": 1300, "seven_day": 1300}
 
 
-def test_both_capacities_reproduce_the_paired_app_sample(tmp_path, monkeypatch):
+def test_deduplicated_capacities_track_the_paired_app_sample_conservatively(
+    tmp_path, monkeypatch
+):
     import time as _time
     sample_at = _time.time()
     monkeypatch.setattr(usage, "last_weekly_reset", lambda n: sample_at - 8 * 3600)
+    monkeypatch.setattr(
+        usage, "CLAUDE_APP_CONFIG", str(tmp_path / "absent-claude.json")
+    )
     plan_usage_history(tmp_path, monkeypatch, [
         plan_sample(sample_at, 43, 14),
     ])
@@ -399,14 +404,18 @@ def test_both_capacities_reproduce_the_paired_app_sample(tmp_path, monkeypatch):
     }
     assert app_reading["windows"]["five_hour"]["used_percent"] == 43.0
     assert app_reading["windows"]["seven_day"]["used_percent"] == 14.0
-    for window, tokens in (("five_hour", 530879), ("seven_day", 937634)):
-        app_percent = app_reading["windows"][window]["used_percent"]
-        assert usage.capacity(window, sample_at) == pytest.approx(
-            100.0 * tokens / app_percent
-        )
-        assert reading["windows"][window]["used_percent"] == pytest.approx(
-            app_percent
-        )
+    paired_five_hour_capacity = 100.0 * 530879 / 43.0
+    paired_weekly_capacity = 100.0 * 937634 / 14.0
+    # The plan treats the five-hour output-only estimate as weaker evidence:
+    # keep it above the 801,303-token stretch and above the paired panel's 43%.
+    assert usage.FIVE_HOUR_CAPACITY == 1_200_000.0
+    assert usage.FIVE_HOUR_CAPACITY > 801_303
+    assert usage.FIVE_HOUR_CAPACITY < paired_five_hour_capacity
+    assert reading["windows"]["five_hour"]["used_percent"] > 43.0
+    # The weekly window calibrates cleanly, so its paired estimate reproduces
+    # the app sample exactly.
+    assert usage.WEEKLY_CAPACITY == pytest.approx(paired_weekly_capacity)
+    assert reading["windows"]["seven_day"]["used_percent"] == pytest.approx(14.0)
 
 
 # -- promos are read at runtime, never written into the file ----------------
@@ -424,6 +433,29 @@ def test_a_live_promo_raises_capacity(tmp_path, monkeypatch):
     promo_config(tmp_path, monkeypatch, "+50% weekly limits promo through Dec 31")
     assert usage.promo_multiplier("seven_day", NOW) == 1.5
     assert usage.capacity("seven_day", NOW) == usage.WEEKLY_CAPACITY * 1.5
+
+
+def test_capacity_uses_only_a_parseable_promo_with_a_future_end_date(
+    tmp_path, monkeypatch
+):
+    import datetime
+
+    now = datetime.datetime(
+        2026, 9, 27, 12, tzinfo=datetime.timezone.utc
+    ).timestamp()
+    base = usage.WEEKLY_CAPACITY
+
+    promo_config(tmp_path, monkeypatch, "+50% weekly limits through Sep 28")
+    assert usage.capacity("seven_day", now) == base * 1.5
+
+    for notice in (
+        "+50% weekly limits through Sep 26",  # expired
+        "+50% weekly limits through Feb 31",  # invalid date
+        "50% weekly limits through Sep 28",   # no parseable percentage
+        "+50% weekly limits",                 # no parseable end date
+    ):
+        promo_config(tmp_path, monkeypatch, notice)
+        assert usage.capacity("seven_day", now) == base
 
 
 def test_a_lapsed_promo_is_ignored(tmp_path, monkeypatch):
@@ -503,6 +535,29 @@ def test_newest_app_sample_for_signed_in_org_beats_other_sources(tmp_path, monke
     assert reading["windows"]["seven_day"]["used_percent"] == 57.0
 
 
+def test_fresh_app_sample_wins_when_transcript_estimate_is_available(
+    tmp_path, monkeypatch
+):
+    import time as _time
+
+    now = _time.time()
+    plan_usage_history(tmp_path, monkeypatch, [plan_sample(now, 43, 14)])
+    transcript(tmp_path / "a.jsonl", [("claude-opus-5", 99999, _at(now, 1))])
+    monkeypatch.setattr(usage, "CLAUDE_TRANSCRIPTS", str(tmp_path / "*.jsonl"))
+    monkeypatch.setattr(
+        usage,
+        "read_claude_local",
+        lambda *_: pytest.fail("a fresh app sample must win before fallback"),
+    )
+
+    reading = usage.read_agent("claude", now)
+
+    assert reading["source"] == "claude"
+    assert reading["estimated"] is False
+    assert reading["windows"]["five_hour"]["used_percent"] == 43.0
+    assert reading["windows"]["seven_day"]["used_percent"] == 14.0
+
+
 def test_app_sample_within_six_hours_passes_the_gate(tmp_path, monkeypatch):
     import time as _time
     now = _time.time()
@@ -512,7 +567,9 @@ def test_app_sample_within_six_hours_passes_the_gate(tmp_path, monkeypatch):
     assert usage.main(["gate", "claude"]) == 0
 
 
-def test_stale_app_sample_falls_back_to_the_transcript_estimate(tmp_path, monkeypatch):
+def test_transcript_estimate_is_selected_only_when_app_sample_is_stale(
+    tmp_path, monkeypatch
+):
     import time as _time
     now = _time.time()
     plan_usage_history(tmp_path, monkeypatch, [plan_sample(now - 7 * 3600, 80, 90)])
@@ -522,6 +579,7 @@ def test_stale_app_sample_falls_back_to_the_transcript_estimate(tmp_path, monkey
     assert reading["source"] == "claude-local-estimate"
     assert reading["estimated"] is True
     assert reading["opus_output_tokens"]["five_hour"] == 1000
+    assert reading["windows"]["five_hour"]["used_percent"] > 0.0
 
 
 def test_missing_or_malformed_app_history_falls_back_to_the_estimate(tmp_path, monkeypatch):

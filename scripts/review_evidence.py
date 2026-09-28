@@ -20,7 +20,9 @@ What it records, as schema-versioned JSON of at most 64 KB:
 ``blocking`` is the one answer a caller acts on: the head does not merge, or
 the merge fails in a way the base does not share or cannot be shown to
 share. A pytest failure whose node ids cannot be read counts, as does one
-whose base re-run cannot be compared.
+whose base re-run cannot be compared, as does a pytest run that stopped
+early: a collection error or ``-x``/``--maxfail`` leaves the rest of the
+suite unrun, so what it would have found is unknown.
 
 The worktrees are removed on every path. A merge that cannot be made at all
 (an unknown base, a worktree git refuses) raises ``ReviewEvidenceError``, so
@@ -90,6 +92,8 @@ _SUMMARY_HEADER_RE = re.compile(r"^=+ short test summary info =+$")
 _SUMMARY_LINE_RE = re.compile(r"^(?:FAILED|ERROR) (.+)$")
 _NOT_FOUND_RE = re.compile(
     r"^ERROR: (?:file or directory )?not found: (.+)$")
+_STOPPED_RE = re.compile(
+    r"^!+ (?:Interrupted: .*|stopping after .*|KeyboardInterrupt) !+$")
 
 
 def _summary_node_id(rest: str) -> str:
@@ -107,29 +111,47 @@ def _summary_node_id(rest: str) -> str:
     return head.strip()
 
 
-def failing_node_ids(output: str) -> List[str]:
-    """The node ids pytest's short summary names as failed or errored.
+def _summary_lines(output: str) -> List[str]:
+    """The lines after pytest's last short-summary header, or none.
 
-    Only lines after the last summary header count, so a test that prints
-    ``FAILED`` into its captured output cannot add an id. Pytest's default
-    report characters (``fE``) print the summary; a repo that turns them
-    off leaves nothing to read, and the caller treats that as unknown.
+    Only these count, so a test that prints ``FAILED`` or ``Interrupted``
+    into its captured output, which comes before the summary, cannot
+    change what is read.
     """
     lines = output.splitlines()
     start = None
     for index, line in enumerate(lines):
         if _SUMMARY_HEADER_RE.match(line.strip()):
             start = index + 1
-    if start is None:
-        return []
+    return [] if start is None else lines[start:]
+
+
+def failing_node_ids(output: str) -> List[str]:
+    """The node ids pytest's short summary names as failed or errored.
+
+    Pytest's default report characters (``fE``) print the summary; a repo
+    that turns them off leaves nothing to read, and the caller treats that
+    as unknown.
+    """
     ids: List[str] = []
-    for line in lines[start:]:
+    for line in _summary_lines(output):
         match = _SUMMARY_LINE_RE.match(line)
         if match:
             node_id = _summary_node_id(match.group(1))
             if node_id and node_id not in ids:
                 ids.append(node_id)
     return ids
+
+
+def stopped_early(output: str) -> bool:
+    """Whether pytest stopped before running the whole selection.
+
+    A collection error interrupts the session before any test runs, and
+    ``-x``/``--maxfail`` stop it at the first failures; either way the
+    ids it names are not all that fails (#1824 review).
+    """
+    return any(_STOPPED_RE.match(line.strip())
+               for line in _summary_lines(output))
 
 
 def _not_found(output: str, candidates: Sequence[str]) -> List[str]:
@@ -149,11 +171,13 @@ def _not_found(output: str, candidates: Sequence[str]) -> List[str]:
 def _shares(node_id: str, base_ids: Sequence[str]) -> bool:
     """Whether the base's failures cover this id.
 
-    A collection error is reported for its file, so ``t.py`` covers
-    ``t.py::f`` either way round.
+    A collection error is reported for its file, so a base that cannot
+    collect ``t.py`` covers ``t.py::f``. Not the other way round: one red
+    test on the base does not cover a whole file the merge cannot collect
+    (#1824 review).
     """
     return any(node_id == other or node_id.startswith(other + "::")
-               or other.startswith(node_id + "::") for other in base_ids)
+               for other in base_ids)
 
 
 def pytest_prefix(argv: Sequence[str]) -> Optional[List[str]]:
@@ -337,10 +361,12 @@ def _merge_and_run(worktree, head_sha: str, base_sha: str) -> dict:
         record["result"] = "fail"
         prefix = pytest_prefix(argv)
         failing = failing_node_ids(output) if prefix else []
-        if not failing:
-            # Another runner, or pytest ids that cannot be read: nothing
+        if not failing or stopped_early(output):
+            # Another runner, pytest ids that cannot be read, or a pytest
+            # run that stopped before the rest of the suite ran: nothing
             # shows the base shares it, so it counts, and the rest of the
             # plan would not have run on the finish either.
+            record["failing"] = failing
             record["blocking"] = True
             break
         # One pytest command at most: default_test_plan has one test slot.

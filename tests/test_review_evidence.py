@@ -162,7 +162,8 @@ def test_a_merge_only_failure_blocks(tmp_path, log):
 
 def test_a_failure_already_on_base_does_not_block(tmp_path, log):
     # Main is red on its own: the head is not to blame. The " - " in the
-    # parametrize id is where a naive split of pytest's summary line breaks.
+    # parametrize id is where a naive split of pytest's summary line breaks,
+    # and the printed line is captured output, not pytest stopping early.
     red = "tests/test_base.py::test_red[a - b]"
     repo, base_sha, _ = make_repo(
         tmp_path,
@@ -170,7 +171,9 @@ def test_a_failure_already_on_base_does_not_block(tmp_path, log):
         base={"tests/test_base.py":
               "import pytest\n\nfrom calc import double\n\n\n"
               "@pytest.mark.parametrize('label', ['a - b'])\n"
-              "def test_red(label):\n    assert double(2) == 5\n"},
+              "def test_red(label):\n"
+              "    print('!!!!!!! Interrupted: 1 error during collection !!!!!!!')\n"
+              "    assert double(2) == 5\n"},
         head={"tests/test_head.py":
               "from calc import double\n\n\n"
               "def test_four():\n    assert double(4) == 8\n"},
@@ -229,6 +232,71 @@ def test_only_the_failing_node_ids_rerun_on_base(tmp_path, log):
     # The merge ran the whole suite, the base's green test included.
     assert ("merge", "tests/test_base.py::test_base_green") in ran(log)
     assert ("merge", "tests/test_calc.py::test_one") in ran(log)
+
+
+@pytest.mark.parametrize("ancestor, base", [
+    # Main has a test file that cannot be collected, which interrupts the
+    # session before any test runs.
+    ({}, {"tests/test_broken.py": "from calc import gone\n"}),
+    # The repo stops at the first failure, and main's red test runs first.
+    ({"pytest.ini": "[pytest]\naddopts = -x\n"},
+     {"tests/test_base.py": "def test_red():\n    assert False\n"}),
+], ids=["collection-error", "maxfail"])
+def test_a_pytest_run_that_stopped_early_blocks(tmp_path, log, ancestor,
+                                                base):
+    # The head breaks double, which tests/test_calc.py would catch if the
+    # run got to it; the one failure the run did report is main's own.
+    repo, base_sha, _ = make_repo(
+        tmp_path,
+        ancestor=dict({"calc.py": CALC, "tests/test_calc.py": CALC_TESTS},
+                      **ancestor),
+        base=base,
+        head={"calc.py": "def double(x):\n    return 0\n"},
+    )
+
+    record = evidence(repo, base_sha, tmp_path)
+
+    assert ("merge", "tests/test_calc.py::test_one") not in ran(log)
+    assert record["result"] == "fail"
+    assert len(record["failing"]) == 1
+    assert record["blocking"] is True
+
+
+def test_one_red_base_test_does_not_cover_a_file_the_merge_cannot_collect(
+        tmp_path, log):
+    # The head renames double, so tests/test_calc.py cannot be collected on
+    # the merge. The run is not interrupted (the repo continues past
+    # collection errors), and on the base only test_red in that file fails.
+    repo, base_sha, _ = make_repo(
+        tmp_path,
+        ancestor={"calc.py": CALC, "tests/test_calc.py": CALC_TESTS,
+                  "pytest.ini":
+                  "[pytest]\naddopts = --continue-on-collection-errors\n"},
+        base={"tests/test_calc.py":
+              CALC_TESTS + "\n\ndef test_red():\n    assert False\n"},
+        head={"calc.py": "def twice(x):\n    return x * 2\n"},
+    )
+
+    record = evidence(repo, base_sha, tmp_path)
+
+    assert record["failing"] == ["tests/test_calc.py"]
+    assert record["base_rerun"]["already_failing"] == []
+    assert record["new_failures"] == ["tests/test_calc.py"]
+    assert record["blocking"] is True
+
+
+def test_a_conftest_that_breaks_only_on_the_merge_blocks(tmp_path, log):
+    repo, base_sha, _ = make_repo(
+        tmp_path,
+        ancestor={"calc.py": CALC, "tests/test_calc.py": CALC_TESTS,
+                  "tests/conftest.py": "import calc\n"},
+        base={}, head={"tests/conftest.py": "from calc import gone\n"},
+    )
+
+    record = evidence(repo, base_sha, tmp_path)
+
+    assert record["result"] == "fail"
+    assert record["blocking"] is True
 
 
 @pytest.mark.parametrize("base_red, results, blocking", [

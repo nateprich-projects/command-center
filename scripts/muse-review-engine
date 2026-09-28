@@ -24,8 +24,8 @@
 # on z.ai answers one JSON question. Calls retry once on a parse error; a
 # shape part or a judge chunk whose call goes stream-idle is also asked once
 # more, and each writes one timing line to stderr (#1719). The review lister
-# gets the same stream-idle retry (#1730). A call whose packet is over 150 KB
-# gets a second stream-idle retry (#1785).
+# gets the same stream-idle retry (#1730) and the same timing line (#1855).
+# A call whose packet is over 150 KB gets a second stream-idle retry (#1785).
 # Breakdown rides the standard tier only; shape follows wherever begin offers
 # it.
 #
@@ -925,12 +925,12 @@ stream_idle_retried_note() {
 # One stderr line per shape part and per judge chunk, which the schedule's
 # error log keeps: #1600's closing evidence is each part's wall time, and a
 # heartbeat only times the whole run. The name is the call's directory in
-# RUN_DIR; elapsed is whole seconds over every call the part made, and calls
-# says how many that was, so a parse or stream-idle retry is not mistaken for
-# one slow call. The outcome is `done`, `retried-done` when the part answered
-# only after a stream-idle retry (idle_retried counts them, #1785), or
-# `failed` when it has no answer — a judge chunk that failed closed to
-# `unsure` included.
+# RUN_DIR, or `lister` for the review lister (#1855); elapsed is whole
+# seconds over every call the part made, and calls says how many that was,
+# so a parse or stream-idle retry is not mistaken for one slow call. The
+# outcome is `done`, `retried-done` when the part answered only after a
+# stream-idle retry (idle_retried counts them, #1785), or `failed` when it
+# has no answer — a judge chunk that failed closed to `unsure` included.
 #
 #   muse-review-engine: timing shape.decider.0 elapsed=412s calls=2 outcome=retried-done
 log_call_timing() {
@@ -2102,14 +2102,24 @@ PY
 # silent past Muse's 180-second limit on two consecutive replays (#1698), so a
 # silent lister is asked again, unbound like every call after the first,
 # before it fails the run. Any other failure still fails at once.
+#
+# Every way out writes the lister's timing line, as a judge chunk's and a
+# shape part's do (#1855): a lister failure read `failed parts: none` in
+# review-replay without it. model_failed exits the engine, so on a model
+# failure the line is written before it is called.
 list_requirements() {
   local attempt=1
+  local calls=0
+  local answered=0
   local idle_retried=0
+  local started
   local parse_err
   local muse_status
   local parse_status
+  started="$(date +%s)"
   printf '%s\n\n%s' "$(lister_header)" "$PROMPT" >"$PROMPT_FILE"
   while true; do
+    calls=$((calls + 1))
     call_model
     muse_status=$?
     if (( muse_status != 0 )); then
@@ -2120,6 +2130,8 @@ list_requirements() {
         log_stream_idle_retry "the lister" "$idle_retried" "$DIAG_FILE"
         continue
       fi
+      log_call_timing "lister" "$started" "$calls" "$answered" \
+        "$idle_retried"
       model_failed "$muse_status"
     fi
     # Read the status directly, for the same reason the judging loop does:
@@ -2127,6 +2139,9 @@ list_requirements() {
     parse_requirements 2>"$DIAG_FILE"
     parse_status=$?
     if (( parse_status == 0 )); then
+      answered=1
+      log_call_timing "lister" "$started" "$calls" "$answered" \
+        "$idle_retried"
       return 0
     fi
     parse_err="$(cat "$DIAG_FILE")"
@@ -2137,6 +2152,7 @@ list_requirements() {
       continue
     fi
     echo "muse-review-engine: the requirement list could not be parsed: $parse_err" >&2
+    log_call_timing "lister" "$started" "$calls" "$answered" "$idle_retried"
     failure "could not list the requirements for PR #$BEGIN_PR in $BEGIN_REPO: $parse_err" || true
     return 1
   done

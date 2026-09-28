@@ -2205,9 +2205,13 @@ def add_declined_prerequisite_edge(repo: str, number: int, prerequisite: str,
 def close_declined_defer_note_proof(
         repo: str, number: int, reason: str, *, run: str, agent: str,
         cwd: pathlib.Path) -> None:
-    """Close an explicitly accepted defer-note proof as completed."""
+    """Close an explicitly accepted defer-note proof as completed.
+
+    The reason is the model's words, so it is made inert (#1798).
+    """
     comment = funnel.append_provenance(
-        "{} {}".format(funnel.DECLINED_PREFIX, reason), "agent",
+        "{} {}".format(funnel.DECLINED_PREFIX,
+                       funnel.inert_comment_text(reason)), "agent",
         at=datetime.now(timezone.utc), run=run, agent=agent,
     )
     proc = funnel._run_gh(
@@ -2494,7 +2498,9 @@ def _failure_comment(exc: ImplementError, kept: str = "") -> str:
 
     The failing test ids, pytest's counts line and, when pytest named no
     test, the first line of the output: what the note carried before. The
-    next run reads it in its packet's issue thread.
+    next run reads it in its packet's issue thread. The branch prints that
+    output, so the free-text lines are made inert (#1798); an id is one
+    ``\\S+`` token, which no marker fits.
     """
     text = str(exc)
     ids = _failed_test_ids(text)
@@ -2516,9 +2522,10 @@ def _failure_comment(exc: ImplementError, kept: str = "") -> str:
         lines.append("")
     elif counts is None:
         lines.extend(["First line of the output:", "", "```text",
-                      _first_output_line(text), "```", ""])
+                      funnel.inert_comment_text(_first_output_line(text)),
+                      "```", ""])
     if counts is not None:
-        lines.append("Counts: `{}`".format(counts))
+        lines.append("Counts: `{}`".format(funnel.inert_comment_text(counts)))
     if kept:
         lines.append("Work: {}".format(kept))
     return "\n".join(lines).rstrip() + "\n"
@@ -3203,7 +3210,10 @@ def finish_declined(
         # a blocked ticket in the silent Needs=agent lane.
         human_needs_effect(ticket["url"], ref)
         block_effect(resolved, context["number"], cwd=context["root"])
-    declined_comment = "{} {}".format(funnel.DECLINED_PREFIX, reason)
+    # The reason is the model's words: one line with no ``<!--``, so it can
+    # never form a runner marker in the owner's comment (#1798).
+    declined_comment = "{} {}".format(
+        funnel.DECLINED_PREFIX, funnel.inert_comment_text(reason))
     if prerequisite_evidence is not None:
         declined_comment += "\n\n" + prerequisite_evidence
     comment_effect(resolved, context["number"], declined_comment,

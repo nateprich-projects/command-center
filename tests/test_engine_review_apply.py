@@ -618,7 +618,17 @@ def _review_comment(verdict="approved", head=SHA,
         json.dumps({"verdict": verdict, "head_sha": head}),
         funnel.provenance_block("agent", run=run, agent=agent),
     )
-    return {"body": body}
+    return {"body": body, "author": {"login": "nateprich"}}
+
+
+def _authored(row, author):
+    """The same comment row posted by someone else, or by no readable author."""
+    found = dict(row)
+    if author is None:
+        found.pop("author", None)
+    else:
+        found["author"] = {"login": author}
+    return found
 
 
 def _merged_fact(comments, **kw):
@@ -681,6 +691,15 @@ def test_recorded_284_race_finishes_skipped_locked(
          "latest verdict is rejected"),
         (_merged_fact([_review_comment(run="current-run")]),
          "does not identify another run and agent"),
+        # Only the owner's comments carry verdicts (#1787): another author's
+        # approval, or one with no author, is not the approval that raced us.
+        (_merged_fact([_review_comment(verdict="rejected"),
+                       _authored(_review_comment(), "mallory")]),
+         "latest verdict is rejected"),
+        (_merged_fact([_authored(_review_comment(), "mallory")]),
+         "no readable covering approved verdict"),
+        (_merged_fact([_authored(_review_comment(), None)]),
+         "no readable covering approved verdict"),
         ({"number": 7, "state": "CLOSED", "headRefOid": SHA,
           "mergedAt": None, "comments": []}, "CLOSED unmerged"),
         ({"number": 7, "state": "OPEN", "headRefOid": SHA,

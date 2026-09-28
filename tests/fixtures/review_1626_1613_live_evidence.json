@@ -1,0 +1,50 @@
+{
+  "captured_at": "2026-09-28",
+  "reviewed_ticket": "nateprich-projects/command-center#1652",
+  "plan_premise": {
+    "claim": "PR #1613 for ticket #1597 has the same uncheckable later-sibling premise shape as PR #1612",
+    "evidence": "nateprich-projects/command-center#1613 for #1597 shares #1581 later-sibling evidence shape",
+    "label": "inferred"
+  },
+  "issue_states": {
+    "nateprich-projects/command-center#1613": {
+      "state": "CLOSED",
+      "parent": "nateprich-projects/command-center#1581",
+      "blocked_by": []
+    },
+    "nateprich-projects/command-center#1597": {
+      "state": "CLOSED",
+      "parent": "nateprich-projects/command-center#1581",
+      "blocked_by": ["nateprich-projects/command-center#1598"]
+    }
+  },
+  "records": {
+    "pr_1613": {
+      "url": "https://github.com/nateprich-projects/command-center/pull/1613",
+      "title": "Shape and breakdown subjects wait out the repeated-failure backoff in the review-lane begin (#1597)",
+      "body_excerpt": "Implements #1597. The review-lane begin reads the repeated-failure backoff before choosing a breakdown or shape job.",
+      "state": "MERGED",
+      "merged_at": "2026-09-26T18:22:02Z",
+      "approval": {
+        "url": "https://github.com/nateprich-projects/command-center/pull/1613#issuecomment-5848693337",
+        "reviewed_at": "2026-09-26T18:20:45.040808Z",
+        "verdict": "approved",
+        "ci": "green",
+        "blocking": []
+      }
+    },
+    "pr_1612_rejection": {
+      "url": "https://github.com/nateprich-projects/command-center/pull/1612#issuecomment-5848538609",
+      "reviewed_at": "2026-09-26T17:59:33.983240Z",
+      "verdict": "rejected",
+      "blocking_excerpt": "The split-framer premise points to #1600 run evidence, which was unavailable while #1600 was blocked by #1597 and #1599."
+    },
+    "plan_1581_edit": {
+      "url": "https://github.com/nateprich-projects/command-center/issues/1581#issuecomment-5849540427",
+      "created_at": "2026-09-26T20:17:22Z",
+      "provenance_at": "2026-09-26T20:16:20.817523Z",
+      "change_excerpt": "Moved the split-framer premise from Premises to Open risk after #1612 was rejected for evidence only #1600 could provide."
+    }
+  },
+  "finding": "The same-review-shape claim is contradicted by the live history: #1613 was approved with no blockers before it merged, while #1612 was rejected over unavailable #1600 evidence; the #1581 edit happened later. Since #1613 and #1597 are closed, this pointer remains checkable and follows the normal probe path."
+}

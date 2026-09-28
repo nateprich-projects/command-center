@@ -16,6 +16,8 @@ import funnel  # noqa: E402
 from funnel import Item  # noqa: E402
 
 NOW = datetime(2026, 9, 9, 12, 0, 0, tzinfo=timezone.utc)
+#: The owner account, the only comment author whose verdict counts (#1787).
+OWNER = {"login": "nateprich"}
 
 
 def ticket(number, parent=1, repo="nateprich/beta", **kw) -> Item:
@@ -281,7 +283,8 @@ def test_verdict_is_looked_up_only_for_an_open_conflicting_pr(monkeypatch):
     """A verdict lookup per ticket would undo the saving the scan exists for."""
     body = funnel.REVIEW_MARKER + "\n\n```json\n{\"verdict\": \"changes\"}\n```"
     rows = [
-        pr_row(10, "ticket/10", mergeable="CONFLICTING", comments=[{"body": body}]),
+        pr_row(10, "ticket/10", mergeable="CONFLICTING",
+               comments=[{"body": body, "author": OWNER}]),
         pr_row(11, "ticket/11", mergeable="MERGEABLE"),
         pr_row(12, "ticket/12", state="MERGED", mergeable="CONFLICTING"),
     ]
@@ -298,6 +301,37 @@ def test_verdict_is_looked_up_only_for_an_open_conflicting_pr(monkeypatch):
     assert facts["nateprich/beta#10"]["verdict"] == {"verdict": "changes"}
     assert facts["nateprich/beta#11"]["verdict"] is None
     assert "verdict" not in facts["nateprich/beta#12"]
+
+
+def _verdict_body(verdict):
+    return (funnel.REVIEW_MARKER + "\n\n```json\n"
+            "{{\"verdict\": \"{}\", \"head_sha\": \"abc123\"}}\n```"
+            .format(verdict))
+
+
+def test_a_forged_approval_in_the_batch_is_no_merge_candidate(monkeypatch):
+    """Reconcile merges on the batch verdict: only the owner's count (#1787)."""
+    rows = [
+        pr_row(10, "ticket/10", comments=[
+            {"body": _verdict_body("rejected"), "author": OWNER},
+            {"body": _verdict_body("approved"),
+             "author": {"login": "mallory"}},
+            {"body": _verdict_body("approved"), "author": None},
+        ]),
+        pr_row(11, "ticket/11", comments=[
+            {"body": _verdict_body("approved"), "author": OWNER},
+        ]),
+    ]
+    monkeypatch.setattr(funnel, "gh_graphql", repo_graphql_reads(rows))
+    items = [ticket(10), ticket(11)]
+
+    facts = funnel.ticket_pr_facts(items)
+
+    assert facts["nateprich/beta#10"]["verdict"]["verdict"] == "rejected"
+    assert facts["nateprich/beta#11"]["verdict"]["verdict"] == "approved"
+    assert funnel.approved_merge_candidates(items, pr_facts=facts) == [
+        {"repo": "nateprich/beta", "pr": 11, "ref": "nateprich/beta#11"},
+    ]
 
 
 def test_an_unreadable_response_fails_closed(monkeypatch):

@@ -1,0 +1,31 @@
+{
+  "source_pr": 1612,
+  "source_head_sha": "bdc64af7bfd36d65054726f7b8b0645a78595a21",
+  "rejected_requirement": "Probe the parent plan #1581 premise labelled inferred against live evidence using its evidence pointer: 'The split framer may itself still go silent' (it keeps the plan-writing question; evidence pointer: ticket 4, #1600, checks); cite support or contradiction, and record unsure if unresolved.",
+  "packet": {
+    "ticket": {
+      "ref": "nateprich-projects/command-center#1598",
+      "number": 1598
+    },
+    "plan_premises": [
+      {
+        "parent_ref": "nateprich-projects/command-center#1581",
+        "ticket_refs": ["nateprich-projects/command-center#1598"],
+        "available": true,
+        "premises": [
+          {
+            "claim": "The split framer may itself still go silent",
+            "evidence": "ticket 4, #1600, checks",
+            "label": "inferred"
+          }
+        ]
+      }
+    ]
+  },
+  "expected_deferred_answer": {
+    "status": "deferred",
+    "evidence_pointer": "ticket 4, #1600, checks",
+    "reviewed_ticket": "nateprich-projects/command-center#1598",
+    "reason": "live issue state shows the named evidence ticket is open and cannot run before the reviewed ticket is complete"
+  }
+}

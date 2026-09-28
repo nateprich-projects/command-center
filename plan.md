@@ -1,7 +1,7 @@
 ---
 title: Command Center — Design Record
 tags: [command-center, funnel, design-record, plan]
-last_updated: 2026-09-19
+last_updated: 2026-09-27
 status: Design settled. v0 in progress.
 ---
 
@@ -522,15 +522,16 @@ Counting Sonnet adds arithmetic without changing a decision, so it is not counte
 
 Capacity is calibrated against Claude's own usage panel, not assumed. **The weekly window
 calibrates cleanly** — 1,667,023 Opus output tokens reading 61% — and it is the
-load-bearing gate.
+load-bearing gate. On 2026-09-27, #1704 paired the signed-in app sample with deduplicated
+transcript counts and recalibrated both fallback capacities.
 
-**The five-hour window does not calibrate, and is treated as the weaker signal.** Its two
-observations contradict each other: 262,413 tokens read 45% on the panel, implying a
-583k capacity, while a measured 801,303-token five-hour stretch did not hit the limit at
-all. The five-hour limit is therefore not a function of Opus output tokens alone — cache
-reads dwarf output in volume and very likely carry weight. Its capacity is set above the
-largest stretch actually observed so it does not produce false refusals, rather than
-tuned until it looks correct.
+**The five-hour window remains the weaker signal.** Its earlier observations contradicted
+each other: 262,413 tokens read 45% on the panel, implying a 583k capacity, while a
+measured 801,303-token five-hour stretch did not hit the limit at all. Cache reads dwarf
+output in volume and very likely carry weight. #1704 recalibrates the transcript fallback
+from a newer paired app sample; that pairing sets the current estimate above the observed
+stretch, but does not remove the uncertainty in an output-only count. A fresh app reading
+is preferred whenever available, and the fallback remains marked `estimated: true`.
 
 _A caution recorded for later: a single 5-hour interactive session consumed 29% of the
 whole weekly window. Nate's own sessions, not the routines, are what fill the budget — a

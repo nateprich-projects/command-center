@@ -378,13 +378,13 @@ def test_repeated_message_ids_count_once_across_transcripts(tmp_path, monkeypatc
     assert reading["opus_output_tokens"] == {"five_hour": 1300, "seven_day": 1300}
 
 
-def test_weekly_capacity_uses_the_paired_sample_and_five_hour_stays_conservative(
-        tmp_path, monkeypatch):
-    """Only the cleanly calibrating weekly window is fitted to the app sample."""
+def test_both_capacities_reproduce_the_paired_app_sample(tmp_path, monkeypatch):
     import time as _time
     sample_at = _time.time()
     monkeypatch.setattr(usage, "last_weekly_reset", lambda n: sample_at - 8 * 3600)
-    promo_config(tmp_path, monkeypatch, "weekly limits without a confirmed promo")
+    plan_usage_history(tmp_path, monkeypatch, [
+        plan_sample(sample_at, 43, 14),
+    ])
     transcript(tmp_path / "paired.jsonl", [
         ("claude-opus-5", 530879, _at(sample_at, 1), "five-hour-message"),
         ("claude-opus-5", 406755, _at(sample_at, 6), "weekly-only-message"),
@@ -392,15 +392,21 @@ def test_weekly_capacity_uses_the_paired_sample_and_five_hour_stays_conservative
     monkeypatch.setattr(usage, "CLAUDE_TRANSCRIPTS", str(tmp_path / "*.jsonl"))
 
     reading = usage.read_claude_local(sample_at)
+    app_reading = usage.read_claude_plan_history(sample_at)
 
     assert reading["opus_output_tokens"] == {
         "five_hour": 530879, "seven_day": 937634,
     }
-    assert usage.FIVE_HOUR_CAPACITY > 801303 * 5
-    assert reading["windows"]["five_hour"]["used_percent"] == pytest.approx(
-        100.0 * 530879 / usage.FIVE_HOUR_CAPACITY
-    )
-    assert reading["windows"]["seven_day"]["used_percent"] == pytest.approx(14.0)
+    assert app_reading["windows"]["five_hour"]["used_percent"] == 43.0
+    assert app_reading["windows"]["seven_day"]["used_percent"] == 14.0
+    for window, tokens in (("five_hour", 530879), ("seven_day", 937634)):
+        app_percent = app_reading["windows"][window]["used_percent"]
+        assert usage.capacity(window, sample_at) == pytest.approx(
+            100.0 * tokens / app_percent
+        )
+        assert reading["windows"][window]["used_percent"] == pytest.approx(
+            app_percent
+        )
 
 
 # -- promos are read at runtime, never written into the file ----------------
@@ -518,7 +524,7 @@ def test_app_sample_within_six_hours_passes_the_gate(tmp_path, monkeypatch):
     assert usage.main(["gate", "claude"]) == 0
 
 
-def test_stale_app_sample_falls_back_to_the_unchanged_estimate(tmp_path, monkeypatch):
+def test_stale_app_sample_falls_back_to_the_transcript_estimate(tmp_path, monkeypatch):
     import time as _time
     now = _time.time()
     plan_usage_history(tmp_path, monkeypatch, [plan_sample(now - 7 * 3600, 80, 90)])

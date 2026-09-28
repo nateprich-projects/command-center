@@ -64,22 +64,21 @@ MUSE_SESSIONS = os.path.expanduser(
 #: counting it adds arithmetic without changing a decision.
 BUDGETED_MODEL = "opus"
 
-#: The five-hour percentage does not calibrate cleanly: 262,413 tokens read
-#: 45%, while an 801,303-token stretch did not hit the limit. plan.md says to
-#: keep this capacity above the observed stretch instead of fitting one sample.
-#: The recorded stretch scales to 4,006,515 tokens under the documented 5x
-#: plan increase, so retain the conservative 4,500,000-token capacity.
-FIVE_HOUR_CAPACITY = 4_500_000.0
+#: Calibrated from Claude's 2026-09-27 app sample: 530,879 deduplicated Opus
+#: output tokens in the trailing five hours read 43%, giving 1,234,602 tokens.
+#: This remains above the previously observed 801,303-token stretch that did
+#: not hit the limit. The app reading is preferred; this is fallback capacity.
+FIVE_HOUR_CAPACITY = 1_234_602.0
 
-#: Weekly capacity is recalibrated from Claude's 2026-09-27 account sample:
-#: 937,634 deduplicated Opus output tokens read 14% of the seven-day window.
-#: The base remains subject to a promo multiplier only when the app's cached
-#: notice includes a parseable percentage and a future end date.
+#: Calibrated from Claude's 2026-09-27 app sample: 937,634 deduplicated Opus
+#: output tokens since reset read 14% of the seven-day window. The base remains
+#: subject to a promo multiplier only when the app's cached notice includes a
+#: parseable percentage and a future end date.
 WEEKLY_CAPACITY = 6_697_386.0
 
-#: No extra inflation. The weekly capacity uses the same deduplicated count as
-#: its paired sample; the five-hour capacity stays conservative, and the
-#: reserves carry the margin.
+#: No extra inflation. Both capacities use deduplicated counts paired with the
+#: app sample. These transcript readings remain estimates; reserves carry the
+#: margin when no fresh app sample is available.
 ESTIMATE_HAIRCUT = 1.0
 
 #: When the weekly window resets, in local time. The estimate counts tokens

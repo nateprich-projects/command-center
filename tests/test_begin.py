@@ -2103,6 +2103,28 @@ def test_codex_begin_skips_the_other_tier_before_claiming(monkeypatch, capsys):
     assert [ref for ref, value in writes if value] == [standard.ref]
 
 
+def test_begin_routes_tickets_by_canonical_risk_field_not_issue_text():
+    standard_project, standard = _ticket(
+        8, 9, body="Risk: escalated — database migration"
+    )
+    escalated_project, escalated = _ticket(
+        10, 11, body="ordinary implementation details"
+    )
+    standard.risk = "standard"
+    escalated.risk = "escalated"
+    rows = [
+        standard_project, standard,
+        escalated_project, escalated,
+    ]
+
+    assert funnel.next_ticket_for_tier(
+        rows, NOW, tier="standard",
+    ) is standard
+    assert funnel.next_ticket_for_tier(
+        rows, NOW, tier="escalated",
+    ) is escalated
+
+
 def test_queue_and_begin_share_one_startable_view_for_the_165_regression(
     monkeypatch, capsys,
 ):
@@ -2112,7 +2134,7 @@ def test_queue_and_begin_share_one_startable_view_for_the_165_regression(
     project = funnel.Item(
         repo=repo, number=162, title="Project 162",
         url="https://github.com/{}/issues/162".format(repo),
-        state="OPEN", status="Building", klass="Investigate",
+        state="OPEN", status="Building", klass="Broken",
         origin="agent", risk="standard", needs="none", children_total=1,
     )
     ticket = funnel.Item(
@@ -2121,6 +2143,34 @@ def test_queue_and_begin_share_one_startable_view_for_the_165_regression(
         state="OPEN", body="Risk: standard", origin="agent",
         risk="standard", needs="none", parent=project.ref,
         item_id="item-165",
+        status_since=NOW - timedelta(days=30),
+    )
+    newer_project = funnel.Item(
+        repo=repo, number=169, title="Newer Broken project",
+        url="https://github.com/{}/issues/169".format(repo),
+        state="OPEN", status="Building", klass="Broken",
+        origin="agent", risk="standard", needs="none", children_total=1,
+    )
+    newer_ticket = funnel.Item(
+        repo=repo, number=170, title="Newer Broken ticket",
+        url="https://github.com/{}/issues/170".format(repo),
+        state="OPEN", body="Risk: standard", origin="agent",
+        risk="standard", needs="none", parent=newer_project.ref,
+        item_id="item-170", status_since=NOW - timedelta(days=2),
+    )
+    pinned_project = funnel.Item(
+        repo=repo, number=167, title="Pinned project",
+        url="https://github.com/{}/issues/167".format(repo),
+        state="OPEN", status="Building", klass="Replace",
+        origin="agent", risk="standard", needs="none", children_total=1,
+        pinned=True,
+    )
+    pinned_ticket = funnel.Item(
+        repo=repo, number=168, title="Pinned ticket",
+        url="https://github.com/{}/issues/168".format(repo),
+        state="OPEN", body="Risk: standard", origin="agent",
+        risk="standard", needs="none", parent=pinned_project.ref,
+        item_id="item-168", status_since=NOW - timedelta(days=2),
     )
     records = [
         {"run": "e1b3abbcf90a", "phase": "bind", "do": "ticket",
@@ -2140,10 +2190,16 @@ def test_queue_and_begin_share_one_startable_view_for_the_165_regression(
     )
 
     view = funnel.ScopedItems(
-        [project, ticket],
+        [
+            project, ticket, newer_project, newer_ticket,
+            pinned_project, pinned_ticket,
+        ],
         scope="full",
-        startable_candidates=[ticket],
-        startable_items=[project, ticket],
+        startable_candidates=[ticket, newer_ticket, pinned_ticket],
+        startable_items=[
+            project, ticket, newer_project, newer_ticket,
+            pinned_project, pinned_ticket,
+        ],
         startable_agent="codex",
     )
     readiness = {
@@ -2153,18 +2209,30 @@ def test_queue_and_begin_share_one_startable_view_for_the_165_regression(
         ),
     }
     calls = []
+    events = []
     original_listing = funnel.startable_listing
+    original_next = funnel.next_ticket_for_tier
 
     def counted_listing(items, *args, **kwargs):
         result = original_listing(items, *args, **kwargs)
+        refs = [item.ref for item in result]
+        events.append(("listing", refs))
         calls.append((
             items is view.startable_items,
             kwargs.get("candidate_items") is view.startable_candidates,
-            [item.ref for item in result],
+            refs,
         ))
         return result
 
+    def counted_next(*args, **kwargs):
+        events.append((
+            "select",
+            [item.ref for item in kwargs["startable_order"]],
+        ))
+        return original_next(*args, **kwargs)
+
     monkeypatch.setattr(funnel, "startable_listing", counted_listing)
+    monkeypatch.setattr(funnel, "next_ticket_for_tier", counted_next)
     result, writes = _implementing_begin(
         monkeypatch, capsys, view, tier="standard",
         repo_readiness=readiness,
@@ -2177,11 +2245,18 @@ def test_queue_and_begin_share_one_startable_view_for_the_165_regression(
         view, NOW, repo_readiness=readiness, pr_facts={},
     ) == 0
     queue_output = capsys.readouterr().out
-    assert "Startable by Codex (1)" in queue_output
+    assert "Startable by Codex (3)" in queue_output
     assert ticket.ref in queue_output
+    assert newer_ticket.ref in queue_output
+    assert pinned_ticket.ref in queue_output
     assert calls == [
-        (True, True, [ticket.ref]),
-        (True, True, [ticket.ref]),
+        (True, True, [ticket.ref, newer_ticket.ref, pinned_ticket.ref]),
+        (True, True, [ticket.ref, newer_ticket.ref, pinned_ticket.ref]),
+    ]
+    assert events == [
+        ("listing", [ticket.ref, newer_ticket.ref, pinned_ticket.ref]),
+        ("select", [ticket.ref, newer_ticket.ref, pinned_ticket.ref]),
+        ("listing", [ticket.ref, newer_ticket.ref, pinned_ticket.ref]),
     ]
 
 

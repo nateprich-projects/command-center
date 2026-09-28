@@ -2066,6 +2066,10 @@ def _startable_without_repo_readiness(
         or item.open_blockers
         or item.children_total
         or needs not in NEEDS_OPTIONS
+        # Routing fields are canonical Project values. A ticket with no known
+        # Risk cannot be assigned to a begin lane; its body is explanatory,
+        # not a second machine-readable routing source.
+        or item.risk not in RISK_OPTIONS
         or (
             needs in ("agent", "external-event")
             and item.block_comments_error is not None
@@ -4495,9 +4499,10 @@ def next_ticket_for_tier(items: Sequence[Item], now: datetime,
         if ticket is None or tier is None:
             return ticket
 
-        reasons = escalation_reasons(ticket.title, _loaded_item_body(ticket))
-        wanted = bool(reasons) if tier == "escalated" else not reasons
-        if wanted:
+        if ticket.risk not in RISK_OPTIONS:
+            excluded.add(ticket.ref)
+            continue
+        if ticket.risk == tier:
             return ticket
         excluded.add(ticket.ref)
 
@@ -8824,8 +8829,9 @@ ITEM_NODE_FIELDS = """\
 # the fields the startable predicate, parent checks, and ordering need. The
 # issue body is needed for startability checks; timeline and child history are
 # read only after the candidate set is known.
-# The response aliases name the five parts of the listing contract:
-# startable issue facts, Status, Class, gate (Needs), and claim.
+# The response aliases name the shared listing contract: startable issue
+# facts, Status, Class, gate (Needs), Risk, and claim. Pinned is also read for
+# the settled ordering rule; Origin is not used to route ticket work.
 STARTABLE_ITEM_NODE_FIELDS = """\
           id
           claim: fieldValueByName(name: "In motion since") {
@@ -8838,6 +8844,9 @@ STARTABLE_ITEM_NODE_FIELDS = """\
             ... on ProjectV2ItemFieldSingleSelectValue { name }
           }
           gate: fieldValueByName(name: "Needs") {
+            ... on ProjectV2ItemFieldSingleSelectValue { name }
+          }
+          risk: fieldValueByName(name: "Risk") {
             ... on ProjectV2ItemFieldSingleSelectValue { name }
           }
           pinned: fieldValueByName(name: "Pinned") {
@@ -11070,9 +11079,13 @@ def load_items(
             if include_startable else None
         )
         if include_details:
+            details = (
+                _startable_detail_items(begin_items, candidates)
+                if candidates is not None else begin_items
+            )
             _begin_load_timed(
                 timings, "item_details",
-                lambda: hydrate_item_details(begin_items),
+                lambda: hydrate_item_details(begin_items, details),
             )
         return ScopedItems(
             begin_items,
@@ -18018,9 +18031,10 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
             if entry.get("result") == "error" and entry.get("ref")
         )
         begin_backed_off = _backed_off_work(items, now)
-        # Compute the shared best-first startable listing once, before any
-        # selected ticket is hydrated. The queue uses the same listing helper;
-        # begin's WIP, claim, and tier checks consume this exact ordering.
+        # The run-level config/usage preflight already passed before the
+        # Project read. Compute the per-ticket startable listing once before
+        # selection, ticket-specific reads, or claims. Queue uses this same
+        # helper; begin's WIP, claim, and tier checks consume this exact order.
         candidate_items = (
             getattr(items, "startable_candidates", None)
             if getattr(items, "startable_agent", None) == agent
@@ -20119,9 +20133,10 @@ def main(argv: Optional[Sequence[str]] = None, *,
     if args.command == "snapshot":
         return cmd_snapshot()
 
-    # ``begin`` can refuse on local usage or presence facts without consulting
-    # the Project. Keep that gate ahead of the shared loader; an ordinary poll
-    # must not spend the full Project read merely to learn that it cannot run.
+    # Begin can refuse on local usage or presence facts without consulting
+    # the Project. Keep this run-level gate ahead of the shared loader; after
+    # it passes, the shared listing filters candidates before item detail
+    # hydration and ticket-specific selection checks.
     begin_preflight = None
     begin_phase_started: Optional[float] = None
     begin_timings: Optional[Dict[str, object]] = None

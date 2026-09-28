@@ -47,6 +47,7 @@ def _node(
         "lock": {"text": lock} if lock else None,
         "status": {"name": status} if status else None,
         "class": {"name": "New"},
+        "risk": {"name": "standard"},
         "needs": {"name": needs} if needs else None,
         "content": {
             "number": number,
@@ -184,11 +185,12 @@ def test_startable_scan_projects_only_shared_listing_fields():
         'status: fieldValueByName(name: "Status")',
         'class: fieldValueByName(name: "Class")',
         'gate: fieldValueByName(name: "Needs")',
+        'risk: fieldValueByName(name: "Risk")',
+        'pinned: fieldValueByName(name: "Pinned")',
         "startable: content",
     ):
         assert field in query
-    for detail in ('fieldValueByName(name: "Origin")',
-                   'fieldValueByName(name: "Risk")', "assignees"):
+    for detail in ('fieldValueByName(name: "Origin")', "assignees"):
         assert detail not in query
 
 
@@ -200,6 +202,7 @@ def test_from_node_accepts_shared_startable_projection_aliases():
         "status": source["status"],
         "class": source["class"],
         "gate": source["needs"],
+        "risk": {"name": "standard"},
         "pinned": None,
         "startable": source["content"],
     })
@@ -208,7 +211,90 @@ def test_from_node_accepts_shared_startable_projection_aliases():
     assert item.ref == REPO + "#2"
     assert item.parent == REPO + "#1"
     assert item.needs == "none"
+    assert item.risk == "standard"
     assert item.item_id == source["id"]
+
+
+@pytest.mark.parametrize(
+    ("risk", "needs"),
+    [
+        (None, "none"),
+        ("unknown", "none"),
+        ("standard", None),
+        ("standard", "unknown"),
+    ],
+)
+def test_startable_filter_fails_closed_on_missing_or_unknown_routing(
+    risk, needs,
+):
+    parent = funnel.Item(
+        repo=REPO, number=1, title="parent", url="", state="OPEN",
+        status="Building", klass="Improve", origin="agent",
+        risk="standard", needs="none", children_total=1,
+    )
+    ticket = funnel.Item(
+        repo=REPO, number=2, title="ticket", url="", state="OPEN",
+        parent=parent.ref, origin="agent", risk=risk, needs=needs,
+    )
+
+    assert funnel._startable_candidate_items([parent, ticket]) == []
+
+
+def test_begin_filters_startable_candidates_before_detail_hydration(
+    monkeypatch,
+):
+    parent = funnel.Item(
+        repo=REPO, number=1, title="parent", url="", state="OPEN",
+        status="Building", klass="Improve", origin="agent",
+        risk="standard", needs="none", children_total=1,
+    )
+    eligible = funnel.Item(
+        repo=REPO, number=2, title="eligible", url="", state="OPEN",
+        parent=parent.ref, origin="agent", risk="standard", needs="none",
+    )
+    unknown_risk = funnel.Item(
+        repo=REPO, number=3, title="unknown risk", url="", state="OPEN",
+        parent=parent.ref, origin="agent", risk=None, needs="none",
+    )
+    rows = [parent, eligible, unknown_risk]
+    events = []
+    hydrated = []
+    original_filter = funnel._startable_candidate_items
+
+    def load_minimal(_members, _timings, _shape_issue=None,
+                     minimal_startable=False, require_open=True):
+        assert minimal_startable
+        events.append("minimal-list")
+        return list(rows)
+
+    monkeypatch.setattr(funnel, "_load_begin_items", load_minimal)
+    monkeypatch.setattr(
+        funnel, "_load_begin_anchor_items",
+        lambda *_args, **_kwargs: [],
+    )
+
+    def filter_candidates(items, agent="codex"):
+        events.append("filter")
+        return original_filter(items, agent=agent)
+
+    def hydrate(items, candidates=None):
+        events.append("hydrate")
+        hydrated.extend(item.ref for item in (candidates or items))
+
+    monkeypatch.setattr(funnel, "_startable_candidate_items", filter_candidates)
+    monkeypatch.setattr(funnel, "hydrate_item_details", hydrate)
+
+    loaded = funnel.load_items(
+        member_repo_names=[REPO],
+        scope="begin",
+        include_startable=True,
+        include_details=True,
+    )
+
+    assert loaded.startable_candidates == [eligible]
+    assert events == ["minimal-list", "filter", "hydrate"]
+    assert eligible.ref in hydrated
+    assert unknown_risk.ref not in hydrated
 
 
 def test_second_page_is_requested_for_the_paging_alias_only(monkeypatch):

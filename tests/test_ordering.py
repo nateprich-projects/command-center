@@ -646,6 +646,89 @@ def test_two_pinned_projects_keep_the_ladders_order_between_them():
     assert [i.number for i in startable(rows)] == [4, 2]
 
 
+def test_shared_startable_order_puts_finite_work_before_pins_and_pins_before_class():
+    rows = [
+        project(1, "Building", "Improve"), ticket(2, 1),
+        project(3, "Building", "Replace", pinned=True), ticket(4, 3),
+        project(5, "Building", "Broken"), ticket(6, 5),
+    ]
+
+    assert [i.number for i in startable(rows)] == [6, 4, 2]
+
+
+def test_shared_startable_order_uses_tier_before_building_then_ladder():
+    rows = [
+        repo_project("nateprich/command-center", 1, "Ready", "Improve"),
+        repo_ticket("nateprich/command-center", 2, 1),
+        repo_project("nateprich/career-toolset", 3, "Building", "New"),
+        repo_ticket("nateprich/career-toolset", 4, 3),
+        repo_project("nateprich/career-toolset", 5, "Building", "Replace"),
+        repo_ticket("nateprich/career-toolset", 6, 5),
+        repo_project("nateprich/career-toolset", 7, "Ready", "New"),
+        repo_ticket("nateprich/career-toolset", 8, 7),
+    ]
+
+    assert [item.number for item in startable(rows)] == [2, 4, 6, 8]
+
+
+def test_shared_startable_order_inherits_blocker_class_and_higher_tier():
+    dependent_project = repo_project(
+        "nateprich/command-center", 1, "Building", "Broken"
+    )
+    dependent = repo_ticket("nateprich/command-center", 2, 1)
+    blocker_project = repo_project(
+        "nateprich/hobby", 3, "Building", "New"
+    )
+    blocker = repo_ticket("nateprich/hobby", 4, 3)
+    dependent.open_blockers = [blocker.ref]
+    other_project = repo_project(
+        "nateprich/career-toolset", 5, "Building", "Broken"
+    )
+    other = repo_ticket("nateprich/career-toolset", 6, 5)
+    rows = [
+        dependent_project, dependent, blocker_project, blocker,
+        other_project, other,
+    ]
+
+    assert funnel.queue_classes(
+        rows, funnel.dependency_descendants(rows)
+    )[blocker.ref] == "Broken"
+    assert [item.ref for item in startable(rows)] == [blocker.ref, other.ref]
+
+
+def test_shared_startable_order_unblocks_more_then_uses_longest_wait():
+    two_dependents_project = project(1, "Building", "Improve")
+    two_dependents = ticket(2, 1, days=2)
+    one_dependent_project = project(3, "Building", "Improve")
+    one_dependent = ticket(4, 3, days=3)
+    oldest_project = project(5, "Building", "Improve")
+    oldest = ticket(6, 5, days=40)
+    newest_project = project(7, "Building", "Improve")
+    newest = ticket(8, 7, days=2)
+    dependent_a_project = project(9, "Building", "Improve")
+    dependent_a = ticket(
+        10, 9, open_blockers=[two_dependents.ref],
+    )
+    dependent_b_project = project(11, "Building", "Improve")
+    dependent_b = ticket(
+        12, 11, open_blockers=[two_dependents.ref],
+    )
+    dependent_c_project = project(13, "Building", "Improve")
+    dependent_c = ticket(
+        14, 13, open_blockers=[one_dependent.ref],
+    )
+    rows = [
+        two_dependents_project, two_dependents,
+        one_dependent_project, one_dependent,
+        oldest_project, oldest, newest_project, newest,
+        dependent_a_project, dependent_a,
+        dependent_b_project, dependent_b,
+        dependent_c_project, dependent_c,
+    ]
+
+    assert [item.number for item in startable(rows)] == [2, 4, 6, 8]
+
+
 def test_an_unpinned_queue_is_unchanged_by_the_pin_rule():
     rows = [
         project(1, "Building", "New"), ticket(2, 1),
@@ -655,11 +738,20 @@ def test_an_unpinned_queue_is_unchanged_by_the_pin_rule():
 
 
 def test_a_pin_does_not_preempt_the_wip_cap_for_an_unbounded_class():
-    """Ordering only: a pinned Improve waits for a slot like any other."""
-    rows = [project(1, "Ready", "Improve", days=1, pinned=True), ticket(2, 1)]
+    """A pin outranks the class ladder but does not grant a WIP exception."""
+    pinned_project = project(1, "Ready", "Improve", days=1, pinned=True)
+    pinned_ticket = ticket(2, 1)
+    unpinned_project = project(3, "Ready", "New", days=1)
+    unpinned_ticket = ticket(4, 3)
+    rows = [
+        pinned_project, pinned_ticket, unpinned_project, unpinned_ticket,
+    ]
     in_flight = [project(n, "Building", "Improve") for n in (10, 20, 30, 40)]
     in_flight_tickets = [
         ticket(n + 1, n, in_motion_since=at(0.01)) for n in (10, 20, 30, 40)
+    ]
+    assert [i.ref for i in startable(rows)] == [
+        pinned_ticket.ref, unpinned_ticket.ref,
     ]
     assert next_ticket(rows + in_flight + in_flight_tickets, at(0)) is None
 
@@ -1103,6 +1195,8 @@ def _at_limit(extra):
 def test_broken_preempts_the_limit():
     """The one sanctioned preemption, and only because Broken is finite."""
     rows = _at_limit([project(3, "Building", "Broken"), ticket(4, 3)])
+    assert len(funnel.in_motion(rows, NOW)) == funnel.WIP_LIMIT
+    assert funnel.stale_locks(rows, NOW) == []
     assert next_ticket(rows, NOW).number == 4
 
 
@@ -1138,6 +1232,11 @@ def test_an_unparseable_claim_reads_as_unlocked():
     """A garbled field must not wedge the queue until somebody notices."""
     assert funnel.parse_time("whenever") is None
     assert funnel.parse_time("") is None
+    garbled = ticket(
+        2, 1, in_motion_since=funnel.parse_time("hand edited"),
+    )
+    assert funnel.in_motion([garbled], NOW) == []
+    assert lock_holder([garbled], NOW) is None
 
 
 def test_next_returns_nothing_when_there_is_nothing_to_do():

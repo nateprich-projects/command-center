@@ -1082,8 +1082,16 @@ def derive_row(
                         "Claude reset time is unavailable",
                     ),
                 }
+    claude_value = {"windows": claude_windows} if claude_windows else None
+    if claude_value is not None:
+        estimated = claude.get("estimated") if isinstance(claude, Mapping) else None
+        claude_value["estimated"] = _fact(
+            estimated if isinstance(estimated, bool) else None,
+            "usage.py claude estimated",
+            "Claude estimate status is unavailable",
+        )
     metrics["D"]["D3"] = _fact(
-        claude_windows if claude_windows else None,
+        claude_value,
         "usage.py claude windows",
         "Claude usage reading is unavailable",
     )
@@ -2074,6 +2082,7 @@ _SERIES_SUM_PREFIXES = (
 )
 _SERIES_IDENTITY_KEYS = ("lane", "repo", "agent", "job", "reason", "stage", "name")
 _SERIES_MISSING = object()
+_SERIES_CATEGORY_PATHS = {("D", "D3", "estimated")}
 
 
 def _series_number(value: object, *, signed: bool = False) -> Optional[float]:
@@ -2090,6 +2099,8 @@ def _series_render_number(value: float) -> object:
 
 
 def _series_kind(path: Tuple[str, ...]) -> str:
+    if path in _SERIES_CATEGORY_PATHS:
+        return "category"
     if any(path[:len(prefix)] == prefix for prefix in _SERIES_SUM_PREFIXES):
         return "sum"
     return "mean"
@@ -2121,7 +2132,10 @@ def _flatten_series_row(row: Mapping[str, object]):
             valid = valid and top is not None and bottom is not None and bottom > 0
             numerator, denominator = top, bottom
         elif kind == "category":
-            valid = valid and isinstance(value, str)
+            valid = valid and (
+                isinstance(value, str)
+                or (path in _SERIES_CATEGORY_PATHS and isinstance(value, bool))
+            )
         else:
             number = _series_number(
                 value,
@@ -2271,7 +2285,10 @@ def _daily_series_leaf(path: Tuple[str, ...], kind: str,
             return None, None, None, None
         value = numerator / denominator
     elif kind == "category":
-        if not values or not isinstance(values[-1], str):
+        if not values or not (
+            isinstance(values[-1], str)
+            or (path in _SERIES_CATEGORY_PATHS and isinstance(values[-1], bool))
+        ):
             return None, None, None, None
         value = values[-1]
         numerator = denominator = None

@@ -40,7 +40,7 @@ ALIASES = list(EXPECTED_FILTERS)
 def _node(
     number, *, state="OPEN", reason=None, status="Building", parent=None,
     labels=(), lock=None, title=None, repo=REPO, closed_at=None, needs=None,
-    parent_repo=None,
+    parent_repo=None, children_total=0,
 ):
     return {
         "id": "item-{}-{}".format(repo, number),
@@ -67,7 +67,7 @@ def _node(
                 if parent is not None
                 else None
             ),
-            "subIssuesSummary": {"total": 0, "completed": 0},
+            "subIssuesSummary": {"total": children_total, "completed": 0},
             "blockedBy": {"nodes": []},
         },
     }

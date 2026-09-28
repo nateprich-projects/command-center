@@ -54,6 +54,14 @@ class ImplementError(RuntimeError):
 class StrayFileError(ImplementError):
     """The ticket branch contains run scratch that must not reach a PR."""
 
+    def __init__(self, paths: Sequence[str]):
+        # Kept apart from the message so a member-repo finish note can count
+        # them without naming them (#1796).
+        self.paths = list(paths)
+        super().__init__(
+            "pre-PR stray-file check refused; remove and re-stage run scratch: "
+            "{}".format(", ".join(self.paths)))
+
 
 class CommandTimeoutError(ImplementError):
     """A finish subprocess exceeded its bound and was abandoned."""
@@ -222,12 +230,24 @@ def fetch_agents_md(repo: str) -> Tuple[str, bool, bool]:
     return cut, False, True
 
 
+def fetch_ticket_comments(repo: str, number: int) -> List[Dict[str, object]]:
+    """Read the ticket's whole comment thread, oldest first; fail closed.
+
+    A member-repo test failure's ids are posted to its ticket rather than to
+    the public heartbeat note (#1796), so this is how the next run learns
+    what failed. The shape and breakdown packets' paginated reader (#1549,
+    #1605): a short read raises rather than handing over part of a thread.
+    """
+    return funnel.read_issue_comments(repo, number)
+
+
 def build_packet(*, repo: str, ticket: dict, plan: Optional[dict],
                  verdict: dict, prior_run: Optional[dict],
                  agents_md: str = "", agents_md_missing: bool = False,
-                 agents_md_truncated: bool = False) -> dict:
+                 agents_md_truncated: bool = False,
+                 issue_comments: Optional[Sequence[Dict]] = None) -> dict:
     """Build one JSON-serialisable implementation packet from fetched facts."""
-    return {
+    packet = {
         "repo": repo,
         "ticket": ticket,
         "plan": plan,
@@ -241,12 +261,21 @@ def build_packet(*, repo: str, ticket: dict, plan: Optional[dict],
         "agents_md_truncated": agents_md_truncated,
         "collected_at": datetime.now(timezone.utc).isoformat(),
     }
+    # Rendered as the breakdown packet renders its parent's thread (#1605),
+    # and absent when the ticket has no comments, so that packet keeps its
+    # old shape.
+    issue_thread = shape.issue_thread_section(
+        issue_comments if issue_comments is not None else [])
+    if issue_thread is not None:
+        packet["issue_thread"] = issue_thread
+    return packet
 
 
 def collect(repo: Optional[str], number: int, *, agent: str = "codex") -> dict:
     """Fetch every read-only input needed to implement one ticket."""
     resolved = funnel.resolve_repo(repo)
     ticket = fetch_ticket(resolved, number)
+    issue_comments = fetch_ticket_comments(resolved, number)
     # The ticket's own repo, which for a member-repo ticket is not this one.
     agents_md, agents_md_missing, agents_md_truncated = fetch_agents_md(
         parent_repo(resolved, ticket)
@@ -260,6 +289,7 @@ def collect(repo: Optional[str], number: int, *, agent: str = "codex") -> dict:
         agents_md=agents_md,
         agents_md_missing=agents_md_missing,
         agents_md_truncated=agents_md_truncated,
+        issue_comments=issue_comments,
     )
 
 
@@ -1131,9 +1161,7 @@ def _check_no_run_scratch(root: pathlib.Path,
     stray = [path for path in _pre_pr_files(root, about_to_commit)
              if _is_run_scratch(path)]
     if stray:
-        raise StrayFileError(
-            "pre-PR stray-file check refused; remove and re-stage run scratch: "
-            "{}".format(", ".join(stray)))
+        raise StrayFileError(stray)
 
 
 def _commit_if_needed(root: pathlib.Path, number: int, summary: str, *,
@@ -2035,31 +2063,201 @@ def _record_command_timeout(
     )
 
 
-def _failure_note(exc: ImplementError, kept: str = "") -> str:
-    """Summarise a test failure so the next run knows what failed (#877).
+def _is_public_repo(repo: str) -> bool:
+    """Whether a heartbeat finish note may quote ``repo``'s content (#1796).
 
-    Names up to five FAILED or ERROR test ids and pytest's counts line, rather
-    than the first line of output, which is only the progress dots.
+    Heartbeat ledgers are committed to command-center's ``heartbeat`` branch,
+    which is public, and command-center is the one public repository in the
+    funnel. Every member repository is private, so a note about one carries
+    counts and this module's own words only: never a test id, a file path,
+    command output or error text. What such a note withholds goes to the
+    ticket in its own repository, or is already there. GitHub compares
+    repository names without case.
     """
-    text = str(exc)
-    ids = []
-    for match in re.finditer(r"^(?:FAILED|ERROR) (\S+)", text, re.M):
+    return (repo or "").casefold() == funnel.REPO.casefold()
+
+
+def _with_markers(full: str, member: str) -> str:
+    """Keep the classifier phrases a member note would otherwise lose.
+
+    ``heartbeat.classify_error`` sorts errored finishes into weather, setup
+    and regressions by fixed phrases in the note (``connection timed out``,
+    ``could not derive a test command``, ``tests failed:``), and the brief
+    shows the regressions (#1289). The phrases are the classifier's words,
+    not the repository's, so a member note names any that the full note
+    held and the finish classifies exactly as it would have (#1796).
+    """
+    import heartbeat
+
+    full_text, member_text = full.casefold(), member.casefold()
+    found = [
+        marker for marker in (
+            heartbeat.BEGIN_TIMEOUT_ERROR_MARKERS
+            + heartbeat.FLOOR_ERROR_MARKERS
+            + heartbeat.UNCLASSIFIED_ERROR_MARKERS
+            + heartbeat.REGRESSION_ERROR_MARKERS
+        )
+        if marker in full_text and marker not in member_text
+    ]
+    if not found:
+        return member
+    return "{} | withheld text named: {}".format(member, ", ".join(found))
+
+
+def _member_kept(kept: str) -> str:
+    """``_keep_work``'s phrase without the git error a failure quotes."""
+    return "work NOT kept" if kept.startswith("work NOT kept") else kept
+
+
+_FAILED_TEST_RE = re.compile(r"^(?:FAILED|ERROR) (\S+)", re.M)
+_PYTEST_COUNTS_RE = re.compile(
+    r"^=* ?(\d+ (?:failed|passed|error)[^=\n]*?) ?=*$", re.M)
+
+#: One count on pytest's summary line. A member note is rebuilt from these
+#: alone, so nothing else on that line -- nor a line some test printed that
+#: merely looks like one -- reaches the public heartbeat (#1796).
+_PYTEST_COUNT_RE = re.compile(
+    r"\b(\d+) (failed|passed|skipped|deselected|xfailed|xpassed|warnings?|"
+    r"errors?|rerun)\b")
+
+#: How many failing test ids a member-repo ticket comment lists. The note
+#: stopped at five to stay one line; the comment is where the next run finds
+#: them now (#1796), so it keeps more and counts the rest.
+MAX_FAILED_TEST_IDS_IN_COMMENT = 50
+
+
+def _failed_test_ids(text: str) -> List[str]:
+    """The FAILED and ERROR test ids pytest printed, first mention first."""
+    ids: List[str] = []
+    for match in _FAILED_TEST_RE.finditer(text):
         if match.group(1) not in ids:
             ids.append(match.group(1))
-    counts = re.findall(r"^=* ?(\d+ (?:failed|passed|error)[^=\n]*?) ?=*$", text, re.M)
+    return ids
+
+
+def _pytest_counts(text: str) -> Optional[str]:
+    """pytest's last counts line as printed, or None when there is none."""
+    counts = _PYTEST_COUNTS_RE.findall(text)
+    return counts[-1].strip() if counts else None
+
+
+def _first_output_line(text: str) -> str:
+    """The failure's first line, cut to fit one note."""
+    first = text.splitlines()[0] if text else "unknown test failure"
+    return first[:197].rstrip() + "..." if len(first) > 200 else first
+
+
+def _failure_note(exc: ImplementError, kept: str = "", *, repo: str) -> str:
+    """Summarise a test failure for the heartbeat finish note.
+
+    command-center's note names up to five FAILED or ERROR test ids and
+    pytest's counts line, so the next run knows what failed (#877), rather
+    than the first line of output, which is only the progress dots.
+
+    Any other repository's note carries pytest's counts alone, rebuilt from
+    the numbers (#1796). The ids -- or, when pytest named no test, the first
+    line -- go to the ticket in its own repository through
+    ``_failure_comment``, where the next run's packet reads them.
+    """
+    text = str(exc)
+    ids = _failed_test_ids(text)
+    counts = _pytest_counts(text)
     parts = []
     if ids:
         more = " (+{} more)".format(len(ids) - 5) if len(ids) > 5 else ""
         parts.append("; ".join(ids[:5]) + more)
     if counts:
-        parts.append(counts[-1].strip())
+        parts.append(counts)
     if not parts:
-        first = text.splitlines()[0] if text else "unknown test failure"
-        parts.append(first[:197].rstrip() + "..." if len(first) > 200 else first)
+        parts.append(_first_output_line(text))
     note = "tests failed: " + " | ".join(parts)
     if kept:
         note += " | " + kept
-    return note
+    if _is_public_repo(repo):
+        return note
+    numbers = ", ".join(
+        "{} {}".format(number, word)
+        for number, word in _PYTEST_COUNT_RE.findall(counts or ""))
+    member = "tests failed: " + (numbers or "no pytest counts line")
+    if kept:
+        member += " | " + _member_kept(kept)
+    return _with_markers(note, member)
+
+
+def _failure_comment(exc: ImplementError, kept: str = "") -> str:
+    """What a member-repo failure note withholds, for its ticket (#1796).
+
+    The failing test ids, pytest's counts line and, when pytest named no
+    test, the first line of the output: what the note carried before. The
+    next run reads it in its packet's issue thread.
+    """
+    text = str(exc)
+    ids = _failed_test_ids(text)
+    counts = _pytest_counts(text)
+    # No issue number in the text: posted in a member repository, ``#1796``
+    # would link that repository's own issue of the same number.
+    lines = [
+        "**Tests failed** when this run finished the ticket. The heartbeat "
+        "note carries pytest's counts only, because the heartbeat is public "
+        "and this repository is not; what failed is recorded here for the "
+        "next run.",
+        "",
+    ]
+    if ids:
+        shown = ids[:MAX_FAILED_TEST_IDS_IN_COMMENT]
+        lines.extend(["Failing tests:", "", "```text", *shown, "```"])
+        if len(ids) > len(shown):
+            lines.append("(+{} more)".format(len(ids) - len(shown)))
+        lines.append("")
+    elif counts is None:
+        lines.extend(["First line of the output:", "", "```text",
+                      _first_output_line(text), "```", ""])
+    if counts is not None:
+        lines.append("Counts: `{}`".format(counts))
+    if kept:
+        lines.append("Work: {}".format(kept))
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _checkpoint_note(exc: ImplementError, kept: str, *, repo: str) -> str:
+    """The note for a checkpoint that failed before the tests ran.
+
+    Its first line is the failed git command, which for ``git add`` lists
+    the checkout's paths, then git's own output. A member note says only
+    that the checkpoint failed (#1796).
+    """
+    first = (str(exc).splitlines() or ["unknown error"])[0][:200]
+    note = "checkpoint failed: {}; {}".format(first, kept)
+    if _is_public_repo(repo):
+        return note
+    return _with_markers(
+        note, "checkpoint failed; {}".format(_member_kept(kept)))
+
+
+def _stray_note(exc: StrayFileError, *, repo: str) -> str:
+    """The stray-file refusal, naming a member repo's paths only by count.
+
+    A scratch directory (``tmp/``, ``scratch/``) matches at any depth, so
+    the refusal can list the repository's own paths (#1796).
+    """
+    if _is_public_repo(repo):
+        return str(exc)
+    count = len(exc.paths)
+    return _with_markers(str(exc), (
+        "pre-PR stray-file check refused {} run-scratch path{}; "
+        "names withheld".format(count, "" if count == 1 else "s")))
+
+
+def _note_test_source(source: str, *, repo: str) -> str:
+    """Name the test command's source; a member repo's CI step by kind only.
+
+    A CI source names the workflow file and the step's name, or its run line
+    when the step has none (``override_test_command``). The PR body keeps
+    it; a member repo's public note says only that it was a CI step (#1796).
+    """
+    if _is_public_repo(repo) or not source.startswith("CI "):
+        return source
+    return "CI workflow step"
 
 
 def _push_ticket_branch(root: pathlib.Path, branch: str, *, ref: str,
@@ -2229,6 +2427,11 @@ def _recover_answer_error(
     release_effect(ref)
     first = str(exc).splitlines()[0] if str(exc) else "unknown answer error"
     note = "answer error: {} | {}".format(first[:200], kept)
+    if not _is_public_repo(resolved):
+        # The answer error is this module's validation text; the kept phrase
+        # can quote a failed git command over the checkout's paths (#1796).
+        note = _with_markers(note, "answer error: {} | {}".format(
+            first[:200], _member_kept(kept)))
     heartbeat_finish(agent, run, "errored", note, ref)
     if not push_failed:
         _remove_codex_run_checkout(context["root"], context["number"], agent)
@@ -2245,8 +2448,13 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
                 = create_or_update_pr,
                 close_effect: Callable[..., None]
                 = close_no_diff_ticket,
+                comment_effect: Callable[..., None] = post_agent_comment,
                 extra_note: Optional[str] = None) -> dict:
-    """Perform every happy-path effect and return the resulting PR identity."""
+    """Perform every happy-path effect and return the resulting PR identity.
+
+    A member repository's notes withhold its content (#1796): a failing
+    test's ids go to the ticket through ``comment_effect`` instead.
+    """
     context = checkout_context(cwd)
     resolved = resolve_checkout_repo(context["root"], repo)
     ticket = fetch_ticket(resolved, context["number"])
@@ -2268,7 +2476,8 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
         raise
     except StrayFileError as exc:
         release_effect(ref)
-        heartbeat_finish(agent, run, "errored", str(exc), ref)
+        heartbeat_finish(
+            agent, run, "errored", _stray_note(exc, repo=resolved), ref)
         _remove_codex_run_checkout(context["root"], context["number"], agent)
         raise
     except CommandTimeoutError as exc:
@@ -2289,13 +2498,26 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
             ref=ref, run=run, agent=agent,
             reason=("tests failed" if phase == "tests" else "checkpoint retry"),
         )
+        posted = None
+        if phase == "tests" and not _is_public_repo(resolved):
+            # The ids leave the public note, so they go to the ticket, and
+            # before the release: the run that claims it next reads them in
+            # its packet (#1796). A failed post must not strand the run.
+            try:
+                comment_effect(
+                    resolved, context["number"], _failure_comment(exc, kept),
+                    run=run, agent=agent, cwd=context["root"],
+                )
+                posted = True
+            except (funnel.GitHubError, OSError, subprocess.SubprocessError):
+                posted = False
         release_effect(ref)
         note = (
-            _failure_note(exc, kept) if phase == "tests" else
-            "checkpoint failed: {}; {}".format(
-                str(exc).splitlines()[0][:200], kept,
-            )
+            _failure_note(exc, kept, repo=resolved) if phase == "tests" else
+            _checkpoint_note(exc, kept, repo=resolved)
         )
+        if posted is False:
+            note += " | failing tests NOT posted to the ticket"
         heartbeat_finish(agent, run, "errored", note, ref)
         if not push_failed:
             _remove_codex_run_checkout(
@@ -2340,7 +2562,8 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
         raise
     except StrayFileError as exc:
         release_effect(ref)
-        heartbeat_finish(agent, run, "errored", str(exc), ref)
+        heartbeat_finish(
+            agent, run, "errored", _stray_note(exc, repo=resolved), ref)
         _remove_codex_run_checkout(context["root"], context["number"], agent)
         raise
     except CommandTimeoutError as exc:
@@ -2358,7 +2581,8 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
     release_effect(ref)
     note = "PR #{}".format(pr["number"])
     if test_source is not None:
-        note += " (tests: {})".format(test_source)
+        note += " (tests: {})".format(
+            _note_test_source(test_source, repo=resolved))
     if extra_note:
         note += "; " + extra_note.strip()
     heartbeat_finish(agent, run, "done", note, ref)
@@ -2665,6 +2889,11 @@ def finish_declined(
     if len(first) > 200:
         first = first[:197].rstrip() + "..."
     note = "declined: {}".format(first)
+    if not _is_public_repo(resolved):
+        # The reason is the model's prose about a private ticket and can
+        # quote its files and tests. The declined comment above already put
+        # it on the ticket (#1796).
+        note = "declined; reason on the ticket"
     if accept_conflict_routed and not routing_failed:
         note += "; routed to review for Accept/body conflict"
     elif false_unlanded_prerequisite_routed:

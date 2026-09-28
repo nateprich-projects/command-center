@@ -173,6 +173,44 @@ def test_query_document_carries_each_filter_string_exactly():
     assert funnel.ITEM_NODE_FIELDS in funnel.ITEM_QUERY
 
 
+def test_startable_scan_projects_only_shared_listing_fields():
+    query = funnel._begin_item_query(("open",), minimal_startable=True)
+
+    assert "nodes { ...StartableItem }" in query
+    assert funnel.STARTABLE_ITEM_NODE_FIELDS in query
+    assert funnel.ITEM_NODE_FIELDS not in query
+    for field in (
+        'claim: fieldValueByName(name: "In motion since")',
+        'status: fieldValueByName(name: "Status")',
+        'class: fieldValueByName(name: "Class")',
+        'gate: fieldValueByName(name: "Needs")',
+        "startable: content",
+    ):
+        assert field in query
+    for detail in ('fieldValueByName(name: "Origin")',
+                   'fieldValueByName(name: "Risk")', "assignees"):
+        assert detail not in query
+
+
+def test_from_node_accepts_shared_startable_projection_aliases():
+    source = _node(2, parent=1, needs="none")
+    item = funnel._from_node({
+        "id": source["id"],
+        "claim": source["lock"],
+        "status": source["status"],
+        "class": source["class"],
+        "gate": source["needs"],
+        "pinned": None,
+        "startable": source["content"],
+    })
+
+    assert item is not None
+    assert item.ref == REPO + "#2"
+    assert item.parent == REPO + "#1"
+    assert item.needs == "none"
+    assert item.item_id == source["id"]
+
+
 def test_second_page_is_requested_for_the_paging_alias_only(monkeypatch):
     funnel.reset_api_usage()
     board = FakeBoard({

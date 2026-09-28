@@ -8820,6 +8820,44 @@ ITEM_NODE_FIELDS = """\
           }
 """
 
+# Shared queue/begin startability scan. Keep this Project list projection to
+# the fields the startable predicate, parent checks, and ordering need. The
+# issue body is needed for startability checks; timeline and child history are
+# read only after the candidate set is known.
+# The response aliases name the five parts of the listing contract:
+# startable issue facts, Status, Class, gate (Needs), and claim.
+STARTABLE_ITEM_NODE_FIELDS = """\
+          id
+          claim: fieldValueByName(name: "In motion since") {
+            ... on ProjectV2ItemFieldTextValue { text }
+          }
+          status: fieldValueByName(name: "Status") {
+            ... on ProjectV2ItemFieldSingleSelectValue { name }
+          }
+          class: fieldValueByName(name: "Class") {
+            ... on ProjectV2ItemFieldSingleSelectValue { name }
+          }
+          gate: fieldValueByName(name: "Needs") {
+            ... on ProjectV2ItemFieldSingleSelectValue { name }
+          }
+          pinned: fieldValueByName(name: "Pinned") {
+            ... on ProjectV2ItemFieldSingleSelectValue { name }
+          }
+          startable: content {
+            ... on Issue {
+              number title url body state stateReason createdAt closedAt
+              repository { nameWithOwner }
+              labels(first: 25) { nodes { name } }
+              parent { number repository { nameWithOwner } }
+              subIssuesSummary { total completed }
+              blockedBy(first: 50) {
+                totalCount
+                nodes { number state stateReason repository { nameWithOwner } }
+              }
+            }
+          }
+"""
+
 ITEM_QUERY = """
 query($login: String!, $number: Int!, $cursor: String) {
   rateLimit { cost remaining resetAt }
@@ -8856,6 +8894,7 @@ BEGIN_ITEM_CONNECTIONS: Tuple[Tuple[str, str], ...] = (
 
 def _begin_item_query(
     aliases: Sequence[str], extra_field: str = "",
+    minimal_startable: bool = False,
 ) -> str:
     """One aliased Project query carrying only the named begin connections.
 
@@ -8881,13 +8920,29 @@ def _begin_item_query(
         "      {alias}: items(first: {size}, after: ${alias}Cursor, "
         "query: {query}) {{\n"
         "        pageInfo {{ hasNextPage endCursor }}\n"
-        "        nodes {{ ...BeginItem }}\n"
+        "        nodes {{ ...{fragment} }}\n"
         "      }}\n".format(
             alias=alias, size=PROJECT_ITEM_PAGE_SIZE,
             query=json.dumps(filters[alias]),
+            fragment=(
+                "StartableItem"
+                if minimal_startable and alias == "open"
+                else "BeginItem"
+            ),
         )
         for alias in aliases
     )
+    fragments = []
+    if any(not (minimal_startable and alias == "open") for alias in aliases):
+        fragments.append(
+            "\nfragment BeginItem on ProjectV2Item {{\n{fields}}}\n"
+            .format(fields=ITEM_NODE_FIELDS)
+        )
+    if minimal_startable and "open" in aliases:
+        fragments.append(
+            "\nfragment StartableItem on ProjectV2Item {{\n{fields}}}\n"
+            .format(fields=STARTABLE_ITEM_NODE_FIELDS)
+        )
     return (
         "\nquery($login: String!, $number: Int!{declarations}) {{\n"
         "  rateLimit {{ cost remaining resetAt }}\n"
@@ -8898,12 +8953,10 @@ def _begin_item_query(
         "  }}\n"
         "{extra}"
         "}}\n"
-        "\nfragment BeginItem on ProjectV2Item {{\n"
-        "{fields}"
-        "}}\n"
+        "{fragments}"
     ).format(
         declarations=declarations, connections=connections,
-        fields=ITEM_NODE_FIELDS, extra=extra_field,
+        fragments="".join(fragments), extra=extra_field,
     )
 
 
@@ -10188,13 +10241,18 @@ def _blocked_by_refs_from_connection(connection: object) -> Optional[List[str]]:
 
 
 def _from_node(node: dict) -> Optional[Item]:
-    content = node.get("content") or {}
+    # The shared startable-list query aliases its issue payload as `startable`
+    # and projects the gate/claim values under their contract names. Full item
+    # queries retain the original field names.
+    content = node.get("startable") or node.get("content") or {}
     if not content.get("number"):
         return None  # a draft issue, or a pull request
 
     status = (node.get("status") or {}).get("name")
     parent = content.get("parent")
     summary = content.get("subIssuesSummary") or {}
+    labels = content.get("labels") or {}
+    assignees = content.get("assignees") or {}
 
     item = Item(
         repo=content["repository"]["nameWithOwner"],
@@ -10210,9 +10268,9 @@ def _from_node(node: dict) -> Optional[Item]:
         origin=(node.get("origin") or {}).get("name"),
         risk=(node.get("risk") or {}).get("name"),
         pinned=(node.get("pinned") or {}).get("name") == "Pinned",
-        needs=(node.get("needs") or {}).get("name"),
-        labels=[n["name"] for n in content["labels"]["nodes"]],
-        assignees=[n["login"] for n in content["assignees"]["nodes"]],
+        needs=(node.get("gate") or node.get("needs") or {}).get("name"),
+        labels=[n["name"] for n in labels.get("nodes", [])],
+        assignees=[n["login"] for n in assignees.get("nodes", [])],
         parent=(
             "{}#{}".format(parent["repository"]["nameWithOwner"], parent["number"])
             if parent
@@ -10222,7 +10280,9 @@ def _from_node(node: dict) -> Optional[Item]:
         children_done=summary.get("completed") or 0,
         closed_at=parse_time(content.get("closedAt")),
         item_id=node.get("id"),
-        in_motion_since=parse_time((node.get("lock") or {}).get("text")),
+        in_motion_since=parse_time(
+            (node.get("claim") or node.get("lock") or {}).get("text")
+        ),
         blocked_by_refs=_blocked_by_refs_from_connection(
             content.get("blockedBy")
         ),
@@ -10479,6 +10539,8 @@ def _load_begin_items(
     members: Set[str],
     timings: Optional[Dict[str, object]],
     shape_issue: Optional[Tuple[str, int]] = None,
+    minimal_startable: bool = False,
+    require_open: bool = True,
 ) -> List[Item]:
     """Page the filtered begin connections and return the member items.
 
@@ -10515,7 +10577,9 @@ def _load_begin_items(
             _PROJECT_ITEM_PAGE_COUNT += 1
             response = gh_graphql(
                 _begin_item_query(
-                    paging, shape_field if first_request else ""
+                    paging,
+                    shape_field if first_request else "",
+                    minimal_startable=minimal_startable,
                 ),
                 **variables,
             )
@@ -10566,7 +10630,7 @@ def _load_begin_items(
                     cursors[alias] = cursor
                     still_paging.append(alias)
             paging = still_paging
-        if open_rows == 0:
+        if require_open and open_rows == 0:
             raise GitHubError(
                 "begin Project connection open returned no items"
             )
@@ -10826,6 +10890,19 @@ def _load_begin_anchor_items(
             )
 
 
+def _load_minimal_startable_view(
+    members: Set[str],
+) -> List[Item]:
+    """Load the shared queue/begin projection plus the anchors it ranks."""
+    items = _load_begin_items(
+        members, None,
+        minimal_startable=True,
+        require_open=False,
+    )
+    items.extend(_load_begin_anchor_items(items, members, None))
+    return items
+
+
 class ScopedItems(list):
     """A Project read that says which view it is.
 
@@ -10840,6 +10917,7 @@ class ScopedItems(list):
         items: Iterable[Item] = (),
         scope: str = "full",
         startable_candidates: Optional[Sequence[Item]] = None,
+        startable_items: Optional[Sequence[Item]] = None,
         startable_agent: Optional[str] = None,
     ):
         super().__init__(items)
@@ -10847,6 +10925,9 @@ class ScopedItems(list):
         self.startable_candidates = (
             list(startable_candidates)
             if startable_candidates is not None else None
+        )
+        self.startable_items = (
+            list(startable_items) if startable_items is not None else None
         )
         self.startable_agent = startable_agent
 
@@ -10859,17 +10940,38 @@ def items_scope(items: Optional[Sequence[Item]]) -> str:
 def _ensure_startable_view(
     items: Sequence[Item], agent: str = "codex",
 ) -> ScopedItems:
-    """Attach the cheap shared candidate view to a cached item list."""
+    """Attach the shared minimal startable view to a cached item list."""
     if (
         isinstance(items, ScopedItems)
         and items.startable_candidates is not None
+        and items.startable_items is not None
         and items.startable_agent == agent
     ):
         return items
+    if not items:
+        return ScopedItems(
+            items,
+            scope=items_scope(items),
+            startable_candidates=[],
+            startable_items=[],
+            startable_agent=agent,
+        )
+    if (
+        isinstance(items, ScopedItems)
+        and items.startable_items is not None
+    ):
+        startable_items = list(items.startable_items)
+    else:
+        startable_items = _load_minimal_startable_view(
+            {item.repo for item in items}
+        )
     return ScopedItems(
         items,
         scope=items_scope(items),
-        startable_candidates=_startable_candidate_items(items, agent=agent),
+        startable_candidates=_startable_candidate_items(
+            startable_items, agent=agent
+        ),
+        startable_items=startable_items,
         startable_agent=agent,
     )
 
@@ -10956,7 +11058,10 @@ def load_items(
         else _begin_load_timed(timings, "member_repos", member_repos)
     )
     if scope == "begin":
-        begin_items = _load_begin_items(members, timings, shape_issue)
+        begin_items = _load_begin_items(
+            members, timings, shape_issue,
+            minimal_startable=include_startable,
+        )
         begin_items.extend(
             _load_begin_anchor_items(begin_items, members, timings)
         )
@@ -10973,6 +11078,7 @@ def load_items(
             begin_items,
             scope="begin",
             startable_candidates=candidates,
+            startable_items=begin_items if include_startable else None,
             startable_agent=startable_agent if include_startable else None,
         )
     items: List[Item] = []
@@ -11042,10 +11148,17 @@ def load_items(
             )
     if shape_issue is not None:
         _attach_shape_comments(items, shape_issue, shape_comments)
-    candidates = (
-        _startable_candidate_items(items, agent=startable_agent)
-        if include_startable else None
-    )
+    candidates = None
+    startable_items = None
+    if include_startable:
+        # Queue still needs the full board for its decision sections, but its
+        # work list uses the same minimal, filtered Project scan as begin.
+        # Candidate eligibility and ordering therefore share one row shape
+        # instead of deriving work from this full-board response.
+        startable_items = _load_minimal_startable_view(members)
+        candidates = _startable_candidate_items(
+            startable_items, agent=startable_agent
+        )
     if include_details:
         details = (
             _startable_detail_items(items, candidates)
@@ -11060,6 +11173,7 @@ def load_items(
             items,
             scope="full",
             startable_candidates=candidates,
+            startable_items=startable_items,
             startable_agent=startable_agent,
         )
     return items
@@ -13695,8 +13809,14 @@ def cmd_queue(
         if getattr(items, "startable_agent", None) == "codex"
         else None
     )
+    listing_items = (
+        getattr(items, "startable_items", None)
+        if getattr(items, "startable_agent", None) == "codex"
+        else None
+    )
     tickets = startable_listing(
-        items, awaiting_review=set(in_review) | set(finished),
+        listing_items if listing_items is not None else items,
+        awaiting_review=set(in_review) | set(finished),
         repo_readiness=repo_readiness,
         candidate_items=candidate_items,
     )
@@ -17906,8 +18026,13 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
             if getattr(items, "startable_agent", None) == agent
             else None
         )
+        listing_items = (
+            getattr(items, "startable_items", None)
+            if getattr(items, "startable_agent", None) == agent
+            else None
+        )
         startable_order = startable_listing(
-            items,
+            listing_items if listing_items is not None else items,
             awaiting_review=blocked,
             agent=agent,
             repo_readiness=repo_readiness,
@@ -20866,6 +20991,10 @@ class FunnelSession:
             include_startable=include_startable,
             startable_agent=startable_agent,
         )
+        if include_startable:
+            self.items = _ensure_startable_view(
+                self.items, agent=startable_agent
+            )
         self._history_pending = (
             not include_details and self._command != "begin"
         )

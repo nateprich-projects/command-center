@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pathlib
+import re
 import sys
 
 import pytest
@@ -316,6 +317,22 @@ def test_shared_startable_candidates_are_filtered_before_hydration(monkeypatch):
                     "content": {"timelineItems": {"nodes": []}},
                 }],
             }
+        if "open: items(" in query:
+            aliases = re.findall(r"(\w+): items\(", query)
+            return {
+                "user": {
+                    "projectV2": {
+                        alias: {
+                            "nodes": [project, ticket] if alias == "open" else [],
+                            "pageInfo": {
+                                "hasNextPage": False,
+                                "endCursor": None,
+                            },
+                        }
+                        for alias in aliases
+                    },
+                },
+            }
         return {
             "user": {
                 "projectV2": {
@@ -332,11 +349,19 @@ def test_shared_startable_candidates_are_filtered_before_hydration(monkeypatch):
 
     monkeypatch.setattr(funnel, "member_repos", lambda: [REPO])
     monkeypatch.setattr(funnel, "gh_graphql", graphql)
+    monkeypatch.setattr(funnel, "_load_begin_anchor_items", lambda *args: [])
 
     items = funnel.load_items(include_startable=True)
 
+    assert [item.number for item in items.startable_items] == [1, 2]
     assert [item.number for item in items.startable_candidates] == [2]
-    assert [variables["ids"] for _query, variables in calls[1:]] == [
+    assert items.startable_candidates[0] is items.startable_items[1]
+    assert funnel.STARTABLE_ITEM_NODE_FIELDS in calls[1][0]
+    detail_calls = [
+        variables for query, variables in calls
+        if "nodes(ids: $ids)" in query
+    ]
+    assert [variables["ids"] for variables in detail_calls] == [
         ["project-item-2"]
     ]
 

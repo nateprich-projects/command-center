@@ -1659,6 +1659,9 @@ def test_brief_skips_a_zero_budget_informational_section_as_unknown(
     monkeypatch.setitem(funnel.BRIEF_SECTION_BUDGETS,
                         "working_tree_touched", 0.0)
     monkeypatch.setattr(funnel, "working_tree_touched", lambda now: [])
+    monkeypatch.setattr(
+        funnel, "connector_gate_answers", lambda *args, **kwargs: []
+    )
 
     assert funnel.cmd_brief([item], NOW) == 0
     brief = json.loads(capsys.readouterr().out)
@@ -1780,6 +1783,9 @@ def test_closed_itself_degrades_explicitly_when_over_budget(
         klass="Improve", children_total=1, children_done=1, closed_at=NOW,
     )
     monkeypatch.setitem(funnel.BRIEF_SECTION_BUDGETS, "closed_itself", 0.0)
+    monkeypatch.setattr(
+        funnel, "connector_gate_answers", lambda *args, **kwargs: []
+    )
 
     assert funnel.cmd_brief([item], NOW) == 0
     brief = json.loads(capsys.readouterr().out)

@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import glob
 import json
+import math
 import os
 import subprocess
 import datetime
@@ -37,6 +38,9 @@ from datetime import timezone
 from typing import Dict, List, Optional, Tuple
 
 CLAUDE_CACHE = os.path.expanduser("~/.claude/command-center-usage.json")
+CLAUDE_PLAN_USAGE_HISTORY = os.path.expanduser(
+    "~/Library/Application Support/Claude/plan-usage-history.json"
+)
 CLAUDE_TRANSCRIPTS = os.path.expanduser("~/.claude/projects/*/*.jsonl")
 CODEX_SESSIONS = os.path.expanduser("~/.codex/sessions/*/*/*/*.jsonl")
 MUSE_SESSIONS = os.path.expanduser(
@@ -44,20 +48,15 @@ MUSE_SESSIONS = os.path.expanduser(
 
 # -- The local token estimate -------------------------------------------------
 #
-# Claude's real usage percentages are only readable through the statusline
-# cache, and a scheduled run never writes one — the desktop app renders no
-# status line. So for scheduled work the real signal is never available, and a
-# gate that fails closed on it is not a safety property but an off switch.
-#
-# The fallback measures what Claude Code itself actually spent, from the
-# transcripts it writes anyway, and converts that to a percentage of an observed
-# capacity.
+# Claude's own plan percentages are recorded by the desktop app. The transcript
+# estimate below is only a fallback for when that history is unavailable.
+# It measures what Claude Code itself actually spent and converts that to a
+# percentage of an observed capacity.
 #
 # **This undercounts.** It cannot see claude.ai or mobile usage on the same
 # subscription, which is exactly the objection plan.md raised against estimating
-# from these files. That objection stands: this is an estimate, it errs low, and
-# it carries an explicit haircut below to lean the other way. It is used only
-# when the real reading is unavailable.
+# from these files. It remains explicitly marked as an estimate and is used only
+# when the account-level app reading is unavailable.
 
 #: Only Opus is budgeted. It is what actually consumes a subscription window —
 #: the 5-hour window that came closest to the limit on 2026-09-05 carried 713k
@@ -65,41 +64,20 @@ MUSE_SESSIONS = os.path.expanduser(
 #: counting it adds arithmetic without changing a decision.
 BUDGETED_MODEL = "opus"
 
-#: Base capacity in Opus output tokens, calibrated 2026-09-05 against Claude's
-#: own usage panel: 1,667,023 tokens since the weekly reset reading 61% used,
-#: and 262,413 in the trailing five hours reading 45%. The weekly figure has the
-#: +50% promo of that day divided back out.
-#:
-#: An earlier pair of numbers was wrong in both directions, because the weekly
-#: one was calibrated against a percentage read off the *ChatGPT* usage panel
-#: rather than Claude's. Cross-wiring two providers' figures produces a
-#: confidently wrong constant, so re-derive these only from Claude's own panel.
-#: The five-hour figure is deliberately generous, and is the weaker of the two.
-#: Its calibration is self-contradictory: 262,413 tokens read 45% on the panel,
-#: implying 583k capacity, yet a measured 801,303-token five-hour stretch did not
-#: hit the limit. Both cannot hold, so the five-hour limit is evidently not a
-#: function of Opus output tokens alone — cache reads dwarf output in volume and
-#: very likely carry weight. Set above the largest stretch actually observed, so
-#: this window does not produce false refusals; the weekly window, which
-#: calibrates cleanly, is the load-bearing gate.
-#:
-#: **Scaled 5× on 2026-09-10 from Nate's plan change, not from a panel reading.**
-#: The figures above (1,822,000 weekly, 900,000 five-hour) were calibrated on the
-#: plan he had on 2026-09-05; he has since moved to a plan with five times the
-#: bandwidth, and the constants had not moved with it. A gate five times too
-#: tight is worse than one scaled from a known ratio, so the ratio is applied
-#: here with its provenance stated. Recalibrate from Claude's own panel at the
-#: first opportunity — tokens since the weekly reset against the percentage it
-#: shows — and replace both numbers and this paragraph when that is done. The
-#: five-hour figure carries the same 5× and the same caveats as before.
-FIVE_HOUR_CAPACITY = 4_500_000.0
-WEEKLY_CAPACITY = 9_110_000.0
+#: The 2026-09-27 paired sample had 530,879 deduplicated Opus output tokens in
+#: five hours and read 43% in Claude's app, implying about 1.235M tokens. Since
+#: output tokens are a weaker signal for this window, keep the denominator above
+#: the observed 801,303-token stretch and below the paired estimate. This makes
+#: the transcript fallback read higher than the paired app percentage.
+FIVE_HOUR_CAPACITY = 1_200_000.0
 
-#: No inflation. The capacities above are calibrated from the real panel using
-#: these same token counts, so any systematic blind spot is already absorbed
-#: into them — a haircut on top would double-count the conservatism. The
-#: reserves below carry the margin instead. Raise this only if the estimate is
-#: observed reading low against the panel.
+#: The same paired sample had 937,634 deduplicated tokens since reset and read
+#: 14% in the app: 937,634 / 0.14 = 6,697,385.7. Round to the nearest token so
+#: the transcript fallback reproduces that weekly sample.
+WEEKLY_CAPACITY = 6_697_386.0
+
+#: No additional inflation factor; these readings remain estimates, and the
+#: normal reserves below carry the safety margin.
 ESTIMATE_HAIRCUT = 1.0
 
 #: When the weekly window resets, in local time. The estimate counts tokens
@@ -183,10 +161,10 @@ def capacity(window: str, now: float) -> float:
     base = FIVE_HOUR_CAPACITY if window == "five_hour" else WEEKLY_CAPACITY
     return base * promo_multiplier(window, now)
 
-#: A reading older than this is not trusted. Both sources are refreshed by the
-#: reading session itself, so anything older than a few minutes means the gate
-#: was called before the session did any work — or that the app is not running.
+#: The normal freshness limit for readings refreshed by a running session.
+#: Claude's desktop history has its own longer limit below.
 MAX_AGE = 15 * 60
+CLAUDE_PLAN_HISTORY_MAX_AGE = 6 * 60 * 60
 
 #: The week's budget: aim to have used no more than this by the end of the
 #: 7-day window, leaving ~10% for Nate.
@@ -453,6 +431,8 @@ def read_claude_local(now: Optional[float] = None) -> Optional[Dict]:
     cutoff = min(reset, now - FIVE_HOUR)
     five_hour = weekly = 0.0
     seen = False
+    seen_five_hour_message_ids = set()
+    seen_weekly_message_ids = set()
 
     for path in glob.glob(CLAUDE_TRANSCRIPTS):
         try:
@@ -478,10 +458,22 @@ def read_claude_local(now: Optional[float] = None) -> Optional[Dict]:
                     if not tokens or stamp is None or stamp < cutoff:
                         continue
                     seen = True
-                    if stamp >= reset:
+                    message_id = message.get("id")
+                    has_message_id = isinstance(message_id, str) and bool(message_id)
+                    if stamp >= reset and (
+                        not has_message_id
+                        or message_id not in seen_weekly_message_ids
+                    ):
                         weekly += tokens
-                    if stamp >= now - FIVE_HOUR:
+                        if has_message_id:
+                            seen_weekly_message_ids.add(message_id)
+                    if stamp >= now - FIVE_HOUR and (
+                        not has_message_id
+                        or message_id not in seen_five_hour_message_ids
+                    ):
                         five_hour += tokens
+                        if has_message_id:
+                            seen_five_hour_message_ids.add(message_id)
         except OSError:
             continue
 
@@ -538,6 +530,89 @@ def read_claude() -> Optional[Dict]:
                 "resets_at": w.get("resets_at"),
             }
             for name, w in windows.items()
+        },
+    }
+
+
+def read_claude_plan_history(now: Optional[float] = None) -> Optional[Dict]:
+    """Read Claude's latest app-reported percentages for the signed-in org.
+
+    The desktop app keeps samples for every organization in one file. Only the
+    organization in Claude Code's current OAuth account is relevant here. A
+    missing, malformed, stale, or future-dated sample is unavailable so the
+    caller can use the existing transcript estimate.
+    """
+    now = time.time() if now is None else now
+    try:
+        with open(CLAUDE_APP_CONFIG) as fh:
+            account = json.load(fh).get("oauthAccount", {})
+        org = account.get("organizationUuid") if isinstance(account, dict) else None
+        if not isinstance(org, str) or not org:
+            return None
+
+        with open(CLAUDE_PLAN_USAGE_HISTORY) as fh:
+            history = json.load(fh)
+        samples = history.get("samples") if isinstance(history, dict) else None
+    except (OSError, ValueError, AttributeError, TypeError):
+        return None
+
+    if not isinstance(samples, list):
+        return None
+
+    newest = None
+    for sample in samples:
+        if not isinstance(sample, dict) or sample.get("org") != org:
+            continue
+        stamp_ms = sample.get("t")
+        if isinstance(stamp_ms, bool) or not isinstance(stamp_ms, (int, float)):
+            continue
+        try:
+            stamp_ms = float(stamp_ms)
+        except (OverflowError, TypeError, ValueError):
+            continue
+        if not math.isfinite(stamp_ms):
+            continue
+        if newest is None or stamp_ms > newest[0]:
+            newest = (stamp_ms, sample)
+
+    if newest is None:
+        return None
+
+    captured_at = newest[0] / 1000.0
+    age = now - captured_at
+    if age > CLAUDE_PLAN_HISTORY_MAX_AGE or age < -60:
+        return None
+
+    usage = newest[1].get("u")
+    if not isinstance(usage, dict):
+        return None
+    percentages = {}
+    for source_key, window in (("fh", "five_hour"), ("sd", "seven_day")):
+        value = usage.get(source_key)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        try:
+            value = float(value)
+        except (OverflowError, TypeError, ValueError):
+            return None
+        if not math.isfinite(value) or not 0.0 <= value <= 100.0:
+            return None
+        percentages[window] = value
+
+    return {
+        "source": "claude",
+        "captured_at": captured_at,
+        "estimated": False,
+        "windows": {
+            "five_hour": {
+                "used_percent": percentages["five_hour"],
+                "resets_at": now + FIVE_HOUR,
+                "rolling": True,
+            },
+            "seven_day": {
+                "used_percent": percentages["seven_day"],
+                "resets_at": last_weekly_reset(now) + SEVEN_DAY,
+            },
         },
     }
 
@@ -1559,10 +1634,9 @@ def read_zai(now: float) -> Optional[Dict]:
 def read_agent(agent: str, now: float) -> Optional[Dict]:
     """Best available reading for an agent, preferring a real measurement.
 
-    Codex records its own rate limits, so it always has one. Claude does not in
-    a scheduled run, so a fresh statusline cache is used when it exists — which
-    it will on days Nate has worked in a terminal — and the local token estimate
-    fills in otherwise. The estimate is never preferred over a real reading.
+    Codex records its own rate limits, so it always has one. Claude's desktop
+    app keeps its own percentages; the local token estimate fills in when that
+    history is unavailable. The estimate is never preferred over a real reading.
     """
     provider = provider_of(agent)
     if provider is None:
@@ -1588,11 +1662,10 @@ def read_agent(agent: str, now: float) -> Optional[Dict]:
         # which is the failure mode a provider registry invites.
         return None
 
-    cached = read_claude()
-    age = now - cached["captured_at"] if cached and cached.get("captured_at") else None
-    if age is not None and -60 <= age <= MAX_AGE:
-        return cached
-    return read_claude_local(now) or cached
+    app_reading = read_claude_plan_history(now)
+    if app_reading is not None:
+        return app_reading
+    return read_claude_local(now)
 
 
 def main(argv=None) -> int:
@@ -1629,7 +1702,12 @@ def main(argv=None) -> int:
     # or a malformed timestamp would otherwise sail straight through the gate,
     # and every failure here reads *low*, which is the direction that burns the
     # week.
-    if age is None or age > MAX_AGE or age < -60:
+    max_age = (
+        CLAUDE_PLAN_HISTORY_MAX_AGE
+        if reading.get("source") == "claude" and not reading.get("estimated")
+        else MAX_AGE
+    )
+    if age is None or age > max_age or age < -60:
         if age is None:
             why = "undated"
         elif age < 0:

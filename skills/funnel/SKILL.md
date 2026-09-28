@@ -39,8 +39,9 @@ The code template documents these: `generated_at`, `counts_by_gate`,
 `unclassed_captures`, `in_motion`, `wip_limit`, `stale_locks_taken_over`,
 `stranded`, `working_tree_touched`, `maintenance_load`, `disposal`,
 `recorded_cause_regressions`, `command_center_ticket_pr_share`,
-`resend_ratio`, `outcome_signals`, `blocked`, `blocked_human_steps`,
-`blocked_machine_local_steps`, `suspected_human_steps`, `parked`,
+`resend_ratio`, `outcome_signals`, `blocked`, `held_at_accept`,
+`blocked_human_steps`, `blocked_machine_local_steps`,
+`suspected_human_steps`, `parked`,
 `closed_itself`, `cleared_blocks`, `awaiting_breakdown`,
 `prose_dependencies`, `unattended_approvals`, `connector_gate_answers`,
 `run_summary`, `agent_health`,
@@ -72,6 +73,12 @@ Offer the top `launch` command. Do not run it.
 `funnel approve` / `accept` are dry runs unless `--yes` is passed; run one
 only on his explicit instruction naming item and gate, then comment who
 decided and what moved. Moving to `Shaped` records a plan, not approval.
+
+To hold a finished project at Accept on his instruction, use `funnel hold
+<ref> (--until YYYY-MM-DD | --on N ...) --reason "<why>"`, never prose: it
+writes the `blocked` label and a canonical block comment, which lifts itself
+when the condition is met. Dry run unless `--yes`; it refuses a project that
+closes itself, since the unattended close ignores `blocked` (#1724).
 
 ### Adopt an explicit Proposed class at approval
 

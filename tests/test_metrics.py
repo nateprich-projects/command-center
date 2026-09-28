@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import copy
 import json
 import os
 import pathlib
@@ -104,6 +106,7 @@ def test_derive_row_covers_plan_metrics_and_preserves_rate_pairs():
     assert row["metrics"]["D"]["D2"]["funnel_vs_personal"]["value"]["funnel_tokens"] == 140
     assert row["metrics"]["D"]["D2"]["funnel_vs_personal"]["funnel_share"]["numerator"] == 140
     assert row["metrics"]["D"]["D2"]["funnel_vs_personal"]["funnel_share"]["denominator"] == 170
+    assert row["metrics"]["D"]["D3"]["value"]["estimated"]["value"] is False
     assert row["metrics"]["D"]["D5"]["graphql_points_per_run"]["value"]["codex"]["graphql_points"]["value"] == 5
     assert row["metrics"]["D"]["D5"]["graphql_points_per_run"]["value"]["codex"]["points_per_run"] == {
         "numerator": 5,
@@ -122,6 +125,20 @@ def test_derive_row_covers_plan_metrics_and_preserves_rate_pairs():
     assert row["metrics"]["E"]["E2"]["opened_this_hour"]["value"] is None
     assert row["metrics"]["E"]["E2"]["opened_this_hour"]["gap"]
     assert row["metrics"]["F"]["F2"]["value"] == 1234
+
+
+@pytest.mark.parametrize("estimated", [False, True])
+def test_claude_estimated_flag_reaches_d3_metrics_series(estimated):
+    snapshot, ledgers, usage, outcomes, commits, lines = _inputs()
+    usage["claude"]["estimated"] = estimated
+    usage["claude"]["source"] = "claude-local-estimate" if estimated else "claude"
+
+    row = metrics.derive_row(snapshot, ledgers, usage, outcomes, NOW, commits, lines)
+    fact = row["metrics"]["D"]["D3"]["value"]["estimated"]
+    series = metrics.series_from_rows([row], NOW)
+
+    assert fact["value"] is estimated
+    assert series["metrics"]["D"]["D3"]["estimated"]["daily"][-1] is estimated
 
 
 def test_missing_inputs_remain_gaps_instead_of_becoming_zero():
@@ -274,6 +291,128 @@ def test_stale_outcomes_leave_hourly_counts_as_gaps():
     assert metrics_by_group["B"]["B1"]["gap"]
     assert metrics_by_group["C"]["C6"]["value"] is None
     assert metrics_by_group["C"]["C6"]["gap"]
+
+
+def _stale_outcome_rows():
+    snapshot, ledgers, usage, outcomes, commits, lines = _inputs()
+    stale_outcomes = copy.deepcopy(outcomes)
+    stale_outcomes[0]["derived_at"] = "2026-09-23T04:59:59Z"
+    old_hour = datetime(2026, 9, 23, 4, tzinfo=timezone.utc)
+    stale_row = metrics.derive_row(
+        snapshot, ledgers, usage, stale_outcomes, NOW, commits, lines,
+        hour_start=old_hour,
+    )
+
+    fresh_outcomes = copy.deepcopy(outcomes)
+    fresh_outcomes[0]["derived_at"] = "2026-09-23T06:00:00Z"
+    current_now = NOW + timedelta(hours=1)
+    current_row = metrics.derive_row(
+        snapshot, ledgers, usage, fresh_outcomes, current_now, commits, lines,
+    )
+    return (
+        stale_row, current_row, snapshot, ledgers, usage, fresh_outcomes,
+        commits, lines, old_hour, current_now,
+    )
+
+
+def _without_outcome_tiles(row):
+    preserved = copy.deepcopy(row)
+    for path in metrics.OUTCOME_TILE_PATHS:
+        parent = preserved
+        for key in ("metrics",) + path[:-1]:
+            parent = parent[key]
+        parent[path[-1]] = "<outcome tile>"
+    return preserved
+
+
+def _nested(row, path):
+    value = row
+    for key in ("metrics",) + path:
+        value = value[key]
+    return value
+
+
+def test_remeasure_recent_outcome_tiles_and_preserve_the_current_append():
+    (
+        stale_row, current_row, snapshot, ledgers, usage, fresh_outcomes,
+        commits, lines, old_hour, current_now,
+    ) = _stale_outcome_rows()
+    previous = copy.deepcopy(stale_row)
+    expected = metrics.derive_row(
+        snapshot, ledgers, usage, fresh_outcomes, current_now, commits, lines,
+        hour_start=old_hour,
+    )
+
+    refreshed, updated_count = metrics.remeasure_stale_outcome_rows(
+        [stale_row, current_row], ledgers, fresh_outcomes, current_now,
+    )
+
+    assert updated_count == 1
+    for path in metrics.OUTCOME_TILE_PATHS:
+        assert _nested(refreshed[0], path) == _nested(expected, path)
+    assert refreshed[0]["metrics"]["A"]["A1"]["value"] is not None
+    assert refreshed[0]["metrics"]["A"]["A6"]["reopened_tickets"]["value"] is not None
+    assert refreshed[0]["metrics"]["B"]["B1"]["numerator"] is not None
+    assert refreshed[0]["metrics"]["C"]["C6"]["value"] is not None
+    assert _without_outcome_tiles(refreshed[0]) == _without_outcome_tiles(previous)
+    assert refreshed[1] == current_row
+
+
+def test_remeasure_keeps_uncovered_and_over_48_hour_rows_unchanged():
+    stale_row, _, _, ledgers, _, fresh_outcomes, _, _, _, current_now = _stale_outcome_rows()
+    uncovered = copy.deepcopy(stale_row)
+    uncovered_records = copy.deepcopy(fresh_outcomes)
+    uncovered_records[0]["derived_at"] = "2026-09-23T04:59:59Z"
+
+    unchanged, count = metrics.remeasure_stale_outcome_rows(
+        [uncovered], ledgers, uncovered_records, current_now,
+    )
+    assert count == 0
+    assert unchanged == [uncovered]
+
+    old = copy.deepcopy(stale_row)
+    beyond_window = current_now + timedelta(hours=49)
+    unchanged, count = metrics.remeasure_stale_outcome_rows(
+        [old], ledgers, fresh_outcomes, beyond_window,
+    )
+    assert count == 0
+    assert unchanged == [old]
+
+
+def test_remote_remeasure_writes_rows_with_compare_and_swap(monkeypatch):
+    (
+        stale_row, current_row, _, ledgers, _, fresh_outcomes,
+        _, _, _, current_now,
+    ) = _stale_outcome_rows()
+    source_rows = [stale_row, current_row]
+    writes = []
+
+    monkeypatch.setattr(
+        metrics, "_read_remote",
+        lambda repo, branch: (copy.deepcopy(source_rows), "blob-sha"),
+    )
+
+    def fake_gh(args, stdin=None):
+        writes.append((args, stdin))
+        return subprocess.CompletedProcess(args, 0, "{}", "")
+
+    monkeypatch.setattr(metrics, "_gh", fake_gh)
+
+    updated_count = metrics.remeasure_remote_stale_outcome_rows(
+        ledgers, fresh_outcomes, current_now, repo="owner/repo", branch="heartbeat",
+    )
+
+    assert updated_count == 1
+    assert len(writes) == 1
+    args, stdin = writes[0]
+    assert "repos/owner/repo/contents/metrics.jsonl" in args
+    payload = json.loads(stdin)
+    assert payload["sha"] == "blob-sha"
+    written_rows = metrics._decode_rows(
+        base64.b64decode(payload["content"]).decode("utf-8")
+    )
+    assert written_rows[1] == current_row
+    assert written_rows[0]["metrics"]["A"]["A1"]["value"] is not None
 
 
 def test_old_snapshot_leaves_in_hour_counts_as_gaps():
@@ -522,3 +661,178 @@ def test_series_accepts_the_complete_derived_hourly_schema():
     points_per_run = payload["metrics"]["D"]["D5"]["graphql_points_per_run"]["codex"]["points_per_run"]
     assert points_per_run["kind"] == "rate"
     assert points_per_run["daily"][-1] == 5
+
+
+def test_b3_reads_the_fix_recurrence_measurement():
+    """#1685: Panel B3 is fix-on-fix from git, not capture markers."""
+    snapshot, ledgers, usage, outcomes, commits, lines = _inputs()
+    result = {
+        "numerator": 15, "denominator": 88, "share": 0.17,
+        "hotspots": [{"path": "funnel.py", "function": "cmd_begin",
+                      "count": 9, "projects": [1, 2], "extra": "dropped"}],
+    }
+
+    b3 = metrics.derive_row(
+        snapshot, ledgers, usage, outcomes, NOW, commits, lines,
+        fix_recurrence_result=result,
+    )["metrics"]["B"]["B3"]
+
+    assert (b3["numerator"], b3["denominator"]) == (15, 88)
+    assert "gap" not in b3
+    assert b3["source"] == metrics.FIX_RECURRENCE_SOURCE
+    assert b3["hotspots"] == [{"path": "funnel.py", "function": "cmd_begin",
+                               "count": 9, "projects": [1, 2]}]
+
+
+@pytest.mark.parametrize("result, reason", [
+    (None, "not measured"),
+    ({"gap": "fix recurrence could not be measured: no broken_fix_tickets"},
+     "no broken_fix_tickets"),
+    ({"numerator": 0, "denominator": 0}, "no denominator"),
+])
+def test_b3_is_a_gap_never_zero_without_a_measurement(result, reason):
+    snapshot, ledgers, usage, outcomes, commits, lines = _inputs()
+
+    b3 = metrics.derive_row(
+        snapshot, ledgers, usage, outcomes, NOW, commits, lines,
+        fix_recurrence_result=result,
+    )["metrics"]["B"]["B3"]
+
+    assert b3["numerator"] is None and b3["denominator"] is None
+    assert reason in b3["gap"]
+
+
+def test_measure_fix_recurrence_reports_a_missing_field_as_a_gap():
+    result = metrics.measure_fix_recurrence(
+        {"brief": {"recorded_cause_regressions": {}}}, NOW)
+
+    assert "broken_fix_tickets" in result["gap"]
+
+
+def test_derive_cli_reads_a_fix_recurrence_fixture(tmp_path, capsys):
+    fixture = tmp_path / "fix.json"
+    fixture.write_text(json.dumps({"numerator": 1, "denominator": 4}))
+
+    code = metrics.main([
+        "derive", "--snapshot", str(FIXTURES / "metrics_snapshot.json"),
+        "--fix-recurrence", str(fixture), "--now", NOW.isoformat(),
+    ])
+
+    assert code == 0
+    row = json.loads(capsys.readouterr().out)
+    assert (row["metrics"]["B"]["B3"]["numerator"],
+            row["metrics"]["B"]["B3"]["denominator"]) == (1, 4)
+
+
+def _git_repo_with_fix_on_fix(root):
+    """Two Broken fixes for different projects, the second rewriting the first."""
+    env = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@example.com",
+               GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@example.com")
+
+    def commit(text, subject, when):
+        (root / "app.py").write_text("def run():\n    a = {}\n".format(text))
+        stamp = when.strftime("%Y-%m-%dT%H:%M:%S+0000")
+        env.update(GIT_AUTHOR_DATE=stamp, GIT_COMMITTER_DATE=stamp)
+        subprocess.run(["git", "-C", str(root), "add", "app.py"], check=True, env=env)
+        subprocess.run(["git", "-C", str(root), "commit", "-q", "-m", subject],
+                       check=True, env=env)
+
+    subprocess.run(["git", "init", "-q", "-b", "main", str(root)], check=True)
+    commit(1, "Initial", NOW - timedelta(days=30))
+    commit(2, "Fix (#11) (#101)", NOW - timedelta(days=2))
+    commit(3, "Fix again (#21) (#102)", NOW - timedelta(days=1))
+
+
+def test_measure_fix_recurrence_reads_the_snapshot_tickets_against_git(tmp_path):
+    """#1685 Accept: a fixture hour with the field yields the expected pair."""
+    repo = tmp_path / "repo"
+    _git_repo_with_fix_on_fix(repo)
+    snapshot = {"brief": {"recorded_cause_regressions": {"broken_fix_tickets": [
+        {"ticket": 11, "project": 10}, {"ticket": 21, "project": 20}]}}}
+
+    result = metrics.measure_fix_recurrence(snapshot, NOW, repo=repo)
+    b3 = metrics._fix_recurrence_pair(result)
+
+    assert (b3["numerator"], b3["denominator"]) == (1, 2)
+
+
+def test_live_derive_measures_at_the_hour_end_with_the_snapshot(monkeypatch, capsys):
+    snapshot, ledgers, usage, outcomes, commits, lines = _inputs()
+    calls = []
+
+    def fake_measure(snap, at, repo=None):
+        calls.append((snap, at))
+        return {"numerator": 2, "denominator": 5}
+
+    monkeypatch.setattr(metrics, "_read_snapshot", lambda path: snapshot)
+    monkeypatch.setattr(metrics, "_live_inputs",
+                        lambda now: (ledgers, usage, outcomes, commits, lines))
+    monkeypatch.setattr(metrics, "measure_fix_recurrence", fake_measure)
+
+    assert metrics.main(["derive", "--dry-run", "--now", NOW.isoformat()]) == 0
+
+    row = json.loads(capsys.readouterr().out)
+    assert calls == [(snapshot, metrics._interval(NOW)[1])]
+    assert (row["metrics"]["B"]["B3"]["numerator"],
+            row["metrics"]["B"]["B3"]["denominator"]) == (2, 5)
+
+
+def test_live_derive_appends_before_remeasuring_recent_rows(monkeypatch, capsys):
+    snapshot, ledgers, usage, outcomes, commits, lines = _inputs()
+    calls = []
+
+    monkeypatch.setattr(metrics, "_read_snapshot", lambda path: snapshot)
+    monkeypatch.setattr(
+        metrics, "_live_inputs",
+        lambda now: (ledgers, usage, outcomes, commits, lines),
+    )
+    monkeypatch.setattr(metrics, "measure_fix_recurrence", lambda snapshot, at: None)
+
+    def fake_append(row):
+        calls.append(("append", row))
+        return 1
+
+    def fake_remeasure(actual_ledgers, records, now):
+        calls.append(("remeasure", actual_ledgers, records, now))
+        return 2
+
+    monkeypatch.setattr(metrics, "append_remote", fake_append)
+    monkeypatch.setattr(metrics, "remeasure_remote_stale_outcome_rows", fake_remeasure)
+
+    assert metrics.main(["derive", "--now", NOW.isoformat()]) == 0
+
+    output = json.loads(capsys.readouterr().out)
+    assert [call[0] for call in calls] == ["append", "remeasure"]
+    assert calls[0][1]["hour"] == "2026-09-23T04:00:00Z"
+    assert calls[1][1:] == (ledgers, outcomes, NOW)
+    assert output == {
+        "hour": "2026-09-23T04:00:00Z", "appended": 1, "remeasured": 2,
+    }
+
+
+def test_series_never_blends_b3_rows_from_the_retired_definition():
+    snapshot, ledgers, usage, outcomes, commits, lines = _inputs()
+    day = datetime(2026, 9, 20, tzinfo=timezone.utc)
+
+    def row(hour, b3):
+        built = metrics.derive_row(snapshot, ledgers, usage, outcomes,
+                                   day + timedelta(hours=hour, minutes=30),
+                                   commits, lines, fix_recurrence_result=b3)
+        return built
+
+    old_style = [row(h, None) for h in range(1, 25)]
+    for item in old_style:
+        item["metrics"]["B"]["B3"] = {
+            "numerator": 3, "denominator": 237,
+            "source": "brief.recorded_cause_regressions.with_recorded_cause/broken_projects",
+        }
+    new_day = [row(h, {"numerator": 16, "denominator": 93})
+               for h in range(25, 49)]
+
+    series = metrics.series_from_rows(old_style + new_day,
+                                      day + timedelta(days=2, hours=1))
+    b3 = series["metrics"]["B"]["B3"]
+    days = series["days"]
+
+    assert b3["daily"][days.index("2026-09-20")] is None
+    assert b3["daily"][days.index("2026-09-21")] == pytest.approx(16 / 93)

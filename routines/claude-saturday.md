@@ -73,9 +73,19 @@ local checkout, and go back to step 1. Never force-push.
 5. Implement only what the ticket and plan require. Do not review or merge any
    PR, do not change project `Status` or `Class`, and do not fix unrelated
    defects.
+   - Test at the ticket's named seams (else the public interface), one
+     behaviour each.
+   - A `Reproduction:` first Accept item: write that test first and see it fail.
+   - Expected values: from an independent source, never recomputed the code's
+     way.
+   - No refactoring beyond the ticket; a needed one is a departure and its own
+     ticket.
+   - Run the affected test files while working; `finish-ticket` runs the full
+     suite.
 6. Write exactly one structured answer to a file outside the checkout:
    - success: `{"done":true,"summary":"...","departures":[]}`; for a no-diff
-     ticket add the `evidence` list of GitHub URLs its Accept names
+     ticket add the `evidence` list of GitHub URLs its Accept names; optional
+     `risks`: where review should look hardest
    - a required unavailable human action:
      `{"blocked_on_human":{"reason":"<allowlisted reason>","action":"..."}}`
    - an unlanded named prerequisite before any change: `{"declined":"..."}`

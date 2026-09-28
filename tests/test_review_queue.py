@@ -7,6 +7,8 @@ import pathlib
 import sys
 from types import SimpleNamespace
 
+import pytest
+
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
@@ -67,19 +69,31 @@ def _capture_conflict_writes(monkeypatch, facts):
     return writes
 
 
-def _row(pr, ticket, opened, head="abc"):
-    return {"number": pr, "headRefName": "ticket/{}".format(ticket),
-            "headRefOid": head, "createdAt": opened}
+#: The fields that make a row the funnel's own PR (#1794): a same-repository
+#: head opened by the owner account.
+OWNER_PR = {"isCrossRepository": False,
+            "headRepository": {"nameWithOwner": REPO},
+            "author": {"login": "nateprich"}}
+
+
+def _row(pr, ticket, opened, head="abc", **trust):
+    row = {"number": pr, "headRefName": "ticket/{}".format(ticket),
+           "headRefOid": head, "createdAt": opened}
+    row.update(OWNER_PR)
+    row.update(trust)
+    return row
 
 
 def _queue_with_verdict_history(monkeypatch, verdict, verdict_at,
-                                comment_times=()):
+                                comment_times=(), comment_author="nateprich"):
     comments = [{
         "body": funnel.REVIEW_MARKER + "\n" + json.dumps(verdict),
         "createdAt": verdict_at,
+        "author": {"login": "nateprich"},
     }]
-    comments.extend({"body": "later PR comment", "createdAt": created_at}
-                     for created_at in comment_times)
+    comments.extend({"body": "later PR comment", "createdAt": created_at,
+                     "author": {"login": comment_author}}
+                    for created_at in comment_times)
     row = _row(10, 1, "2026-09-10T05:00:00Z", head="same")
     row["comments"] = comments
     parsed = funnel._latest_verdict_from_comments(comments)
@@ -122,6 +136,22 @@ def test_later_pr_comment_requeues_a_requirement_unsure_head(monkeypatch):
     # The engineer still owns the rejected head until a fresh review verdict.
     assert REPO + "#1" not in funnel.awaiting_review(
         [_ticket(1)], pr_facts=facts)
+
+
+def test_an_outsiders_later_comment_does_not_requeue_the_head(monkeypatch):
+    """Only a trusted comment reopens a requirement-unsure rejection (#1788).
+
+    Otherwise anyone could comment on a public PR and send it back to the
+    review lane on every tick.
+    """
+    verdict_at = "2026-09-10T05:00:00Z"
+    unsure = {"verdict": "rejected", "head_sha": "same",
+              "blocking": ["requirement unsure: verify the run"]}
+    _, _, queue = _queue_with_verdict_history(
+        monkeypatch, unsure, verdict_at, ("2026-09-10T05:01:00Z",),
+        comment_author="mallory")
+
+    assert queue == []
 
 
 def test_requirement_unsure_stays_covered_without_a_later_comment(monkeypatch):
@@ -229,6 +259,61 @@ def test_no_snapshot_offers_the_same_ticket_head_to_both_selectors(monkeypatch):
     assert not (review & engineering)
     assert engineering == {"{}#1".format(REPO)}
     assert review == {"{}#2".format(REPO), "{}#3".format(REPO)}
+
+
+# -- only the funnel's own PRs are offered (#1794) -----------------------------
+#
+# command-center is public: anyone can fork it and open a PR from a branch
+# named ticket/<n>. Offering it would hand a stranger's diff and description
+# to the review lane; blocking on it would let a stranger hold the ticket.
+
+NOT_THE_FUNNELS = [
+    pytest.param({"isCrossRepository": True,
+                  "headRepository": {"nameWithOwner": "mallory/beta"},
+                  "author": {"login": "mallory"}}, id="fork"),
+    pytest.param({"isCrossRepository": True,
+                  "headRepository": {"nameWithOwner": "nateprich/beta-fork"}},
+                 id="owner-fork"),
+    pytest.param({"author": {"login": "mallory"}}, id="another-author"),
+    pytest.param({"author": None}, id="author-unreadable"),
+    pytest.param({"isCrossRepository": None, "headRepository": None},
+                 id="head-unreadable"),
+]
+
+
+@pytest.mark.parametrize("trust", NOT_THE_FUNNELS)
+def test_a_pr_that_is_not_the_funnels_own_is_never_offered_nor_blocks(
+        monkeypatch, trust):
+    rows = [_row(10, 1, "2026-09-10T05:00:00Z", **trust),
+            _row(20, 2, "2026-09-10T05:01:00Z")]
+    review, blocked = _both(monkeypatch, rows, {})
+    # The owner's same-repository PR behaves as it always has.
+    assert review == {"{}#2".format(REPO)}
+    assert blocked == {"{}#2".format(REPO)}
+
+
+@pytest.mark.parametrize("trust", NOT_THE_FUNNELS)
+def test_a_foreign_pr_on_the_same_branch_does_not_displace_the_owners(
+        monkeypatch, trust):
+    rows = [_row(30, 1, "2026-09-10T04:00:00Z", **trust),
+            _row(10, 1, "2026-09-10T05:00:00Z")]
+    _wire(monkeypatch, rows)
+
+    queue = funnel.review_queue([_ticket(1)])
+
+    assert [entry["pr"] for entry in queue] == [10]
+
+
+@pytest.mark.parametrize("trust", NOT_THE_FUNNELS)
+def test_a_conflicting_foreign_pr_is_neither_offered_nor_rejected(
+        monkeypatch, trust):
+    row = _row(10, 1, "2026-09-15T23:10:00Z", **trust)
+    row.update(state="OPEN", mergeable="CONFLICTING")
+    facts = _wire(monkeypatch, [row])
+    writes = _capture_conflict_writes(monkeypatch, facts)
+
+    assert funnel.review_queue([_ticket(1)], pr_facts=facts) == []
+    assert writes == []
 
 
 def test_the_predicates_fail_closed_without_a_head():

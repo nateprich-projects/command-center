@@ -17,6 +17,9 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 import funnel  # noqa: E402
 
+#: Block comments count only from the owner account (#1788).
+OWNER = {"login": "nateprich"}
+
 _REAL_HEARTBEAT_BOUND_REFS = funnel._heartbeat_bound_refs
 
 
@@ -413,7 +416,8 @@ def test_members_and_block_comments_are_handled_as_in_the_full_load(
     def gh_json(*args):
         comment_reads.append(args)
         return {"comments": [
-            {"body": "**Blocked on #84:** Wait for the decision."}
+            {"author": OWNER,
+             "body": "**Blocked on #84:** Wait for the decision."}
         ]}
 
     monkeypatch.setattr(funnel, "_gh_json", gh_json)
@@ -528,7 +532,8 @@ NOW = funnel.datetime(2026, 9, 26, 18, 0, tzinfo=funnel.timezone.utc)
 
 def _blocked_on(monkeypatch, body):
     monkeypatch.setattr(
-        funnel, "_gh_json", lambda *args: {"comments": [{"body": body}]}
+        funnel, "_gh_json",
+        lambda *args: {"comments": [{"author": OWNER, "body": body}]},
     )
 
 
@@ -579,6 +584,9 @@ def test_the_closed_freeze_owner_is_fetched_so_the_freeze_stays_inert(
 def test_a_closed_parent_is_fetched_so_its_ticket_stays_startable(
     monkeypatch,
 ):
+    monkeypatch.setattr(
+        funnel, "_gh_json", lambda *args, **kwargs: {"comments": []},
+    )
     parent = _node(3, state="CLOSED", reason="COMPLETED", status="Building")
     board = FakeBoard(
         {"open": [([_node(1), _node(5, parent=3, needs="agent")], None)]},

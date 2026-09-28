@@ -1612,6 +1612,8 @@ def usage_snapshot(agent: str) -> Optional[Dict]:
         # *which* five-hour window a run belonged to, and the idle gate in
         # usage.py needs that to ask whether this window was already open.
         snapshots = {}
+        if agent == "claude" and isinstance(reading.get("estimated"), bool):
+            snapshots["estimated"] = reading["estimated"]
         for name, window in reading.get("windows", {}).items():
             snapshot = {
                 "used_percent": window.get("used_percent"),
@@ -1841,6 +1843,22 @@ def _parse_records(content: Optional[str]) -> List[Dict]:
     return records
 
 
+def _parse_records_strict(content: str) -> List[Dict]:
+    """Parse durable JSONL without hiding a possibly relevant bad record."""
+    records = []
+    for line in content.splitlines():
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except ValueError as exc:
+            raise HeartbeatError("heartbeat contains an unreadable record") from exc
+        if not isinstance(record, dict):
+            raise HeartbeatError("heartbeat contains a non-object record")
+        records.append(record)
+    return records
+
+
 def read_github(agent: str, timeout: Optional[float] = None) -> List[Dict]:
     """Read only the durable records on GitHub, excluding the local spool."""
     if timeout is None:
@@ -1848,6 +1866,47 @@ def read_github(agent: str, timeout: Optional[float] = None) -> List[Dict]:
     else:
         content, _ = _fetch(agent, timeout=timeout)
     return _parse_records(content)
+
+
+def read_github_strict(agent: str, timeout: Optional[float] = None) -> List[Dict]:
+    """Read durable records or raise when their contents cannot be established.
+
+    Most heartbeat readers are best-effort instrumentation and treat an
+    unavailable GitHub read as no records. Finish-time claim ownership cannot:
+    an absent binding means the holder is unknown, so this path preserves API
+    and parse failures instead of confusing them with an empty file.
+    """
+    args = (
+        "api",
+        "repos/{}/contents/{}?ref={}".format(REPO, _path(agent), BRANCH),
+    )
+    options = {"timeout": timeout} if timeout is not None else {}
+    raw = gh(*args, **options)
+    try:
+        payload = json.loads(raw)
+    except (TypeError, ValueError) as exc:
+        raise HeartbeatError("GitHub returned unreadable heartbeat metadata") from exc
+    if not isinstance(payload, dict):
+        raise HeartbeatError("GitHub returned unreadable heartbeat metadata")
+
+    if (
+        payload.get("encoding") == "none"
+        or (payload.get("size") and not payload.get("content"))
+    ):
+        content = gh(
+            *args, "-H", "Accept: application/vnd.github.raw", **options,
+        )
+    else:
+        encoded = payload.get("content")
+        if payload.get("encoding") != "base64" or not isinstance(encoded, str):
+            raise HeartbeatError("GitHub returned unreadable heartbeat content")
+        try:
+            content = base64.b64decode(encoded).decode("utf-8", "replace")
+        except Exception as exc:
+            raise HeartbeatError(
+                "GitHub returned unreadable heartbeat content"
+            ) from exc
+    return _parse_records_strict(content)
 
 
 def read(agent: str, timeout: Optional[float] = None) -> List[Dict]:

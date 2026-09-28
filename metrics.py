@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Derive and append one completed-hour execution-metrics row.
+"""Derive the current hour and refresh recent stale outcome tiles.
 
-``metrics.jsonl`` is an append-only projection on the heartbeat branch. Rows
-keep source facts (and numerator/denominator pairs for rates) so ``series`` can
-roll up days without averaging rounded daily percentages.
+``metrics.jsonl`` is a projection on the heartbeat branch. Rows keep source
+facts (and numerator/denominator pairs for rates) so ``series`` can roll up
+days without averaging rounded percentages. Outcome-dependent gaps in recent
+rows are refreshed when the outcomes source catches up.
 Missing evidence stays ``null`` with a source and reason; an empty observation
 is represented by a real zero only when the source was readable.
 
@@ -18,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import copy
 import glob
 import json
 import math
@@ -45,6 +47,16 @@ FINISH_OUTCOMES = (
 )
 HISTORY_AGENT_PATHS = {agent: "{}.jsonl".format(agent) for agent in AGENTS}
 HISTORY_OVERLAP_GRACE = HOUR_SECONDS
+OUTCOMES_STALE_GAP = (
+    "outcomes.jsonl is stale; newest derived_at precedes this hour's end"
+)
+OUTCOME_TILE_PATHS = (
+    ("A", "A1"),
+    ("A", "A6", "reopened_tickets"),
+    ("B", "B1"),
+    ("C", "C6"),
+)
+OUTCOME_REMEASURE_WINDOW = timedelta(hours=48)
 
 
 class MetricsError(RuntimeError):
@@ -324,7 +336,7 @@ def _outcomes_freshness_gap(
     if not derived_at:
         return "outcomes.jsonl has no parseable derived_at timestamp"
     if max(derived_at) < hour_end:
-        return "outcomes.jsonl is stale; newest derived_at precedes this hour's end"
+        return OUTCOMES_STALE_GAP
     return None
 
 
@@ -594,6 +606,49 @@ def _latency_sums(
     return {"by_agent_and_job": grouped}, None
 
 
+FIX_RECURRENCE_SOURCE = (
+    "fix_recurrence.py: Broken fixes whose modified lines were mostly written "
+    "by another Broken project's fix in the prior 7 days / Broken fixes that "
+    "modify existing code (#1682)"
+)
+
+
+def _fix_recurrence_pair(result: Optional[Mapping[str, object]]) -> Dict:
+    """B3 from a fix_recurrence measurement, or a gap that says why not."""
+    if not isinstance(result, Mapping):
+        return _pair(None, None, FIX_RECURRENCE_SOURCE,
+                     "fix recurrence was not measured for this hour")
+    if result.get("gap"):
+        return _pair(None, None, FIX_RECURRENCE_SOURCE, str(result["gap"]))
+    pair = _rate_pair(result.get("numerator"), result.get("denominator"),
+                      FIX_RECURRENCE_SOURCE,
+                      "fix recurrence numerator or denominator is missing")
+    hotspots = result.get("hotspots")
+    if isinstance(hotspots, list):
+        pair["hotspots"] = [
+            {key: row.get(key) for key in ("path", "function", "count", "projects")}
+            for row in hotspots[:10] if isinstance(row, Mapping)
+        ]
+    return pair
+
+
+def measure_fix_recurrence(snapshot: Mapping[str, object], at: datetime,
+                           repo: Optional[Path] = None) -> Dict[str, object]:
+    """Measure fix-on-fix in this checkout for the window ending ``at``.
+
+    The snapshot supplies the Broken-fix tickets (#1683); git supplies the
+    rest. Any failure is returned as a gap, never as zero.
+    """
+    import fix_recurrence
+
+    try:
+        projects = fix_recurrence.fix_projects_from_snapshot(snapshot)
+        return fix_recurrence.measure(
+            repo or Path(__file__).resolve().parent, projects, at)
+    except (fix_recurrence.RecurrenceError, OSError, ValueError) as exc:
+        return {"gap": "fix recurrence could not be measured: {}".format(exc)}
+
+
 def derive_row(
     snapshot: Mapping[str, object],
     ledgers: Optional[Mapping[str, Optional[Sequence[Mapping[str, object]]]]],
@@ -604,6 +659,7 @@ def derive_row(
     funnel_line_count: Optional[int] = None,
     hour_start: Optional[datetime] = None,
     derived_at: Optional[datetime] = None,
+    fix_recurrence_result: Optional[Mapping[str, object]] = None,
 ) -> Dict:
     """Build a JSON-safe UTC-hour observation from fixture or live inputs."""
     observed_at = now or datetime.now(timezone.utc)
@@ -765,13 +821,7 @@ def derive_row(
                        if isinstance(rework, Mapping) else None)
         or "rework signal unavailable",
     )
-    causes, causes_gap = _section(brief, "recorded_cause_regressions", "brief.recorded_cause_regressions")
-    metrics["B"]["B3"] = _rate_pair(
-        causes.get("with_recorded_cause") if causes else None,
-        causes.get("broken_projects") if causes else None,
-        "brief.recorded_cause_regressions.with_recorded_cause/broken_projects",
-        causes_gap or "recorded-cause signal unavailable",
-    )
+    metrics["B"]["B3"] = _fix_recurrence_pair(fix_recurrence_result)
     main_ci = brief.get("main_ci")
     main_ci_problem = _section_gap(brief, "main_ci")
     if not isinstance(main_ci, list) or main_ci_problem:
@@ -1032,8 +1082,16 @@ def derive_row(
                         "Claude reset time is unavailable",
                     ),
                 }
+    claude_value = {"windows": claude_windows} if claude_windows else None
+    if claude_value is not None:
+        estimated = claude.get("estimated") if isinstance(claude, Mapping) else None
+        claude_value["estimated"] = _fact(
+            estimated if isinstance(estimated, bool) else None,
+            "usage.py claude estimated",
+            "Claude estimate status is unavailable",
+        )
     metrics["D"]["D3"] = _fact(
-        claude_windows if claude_windows else None,
+        claude_value,
         "usage.py claude windows",
         "Claude usage reading is unavailable",
     )
@@ -1918,6 +1976,89 @@ def append_rows_many(
         appended += 1
     return found, appended
 
+
+def _nested_value(value: object, path: Sequence[str]) -> object:
+    current = value
+    for key in path:
+        if not isinstance(current, Mapping):
+            return None
+        current = current.get(key)
+    return current
+
+
+def _set_nested_value(value: Dict, path: Sequence[str], replacement: object) -> None:
+    current = value
+    for key in path[:-1]:
+        child = current.get(key)
+        if not isinstance(child, dict):
+            raise MetricsError(
+                "cannot update missing metrics path {}".format(".".join(path))
+            )
+        current = child
+    current[path[-1]] = copy.deepcopy(replacement)
+
+
+def remeasure_stale_outcome_rows(
+    rows: Sequence[Mapping[str, object]],
+    ledgers: Optional[Mapping[str, Optional[Sequence[Mapping[str, object]]]]],
+    outcome_records: Optional[Sequence[Mapping[str, object]]],
+    now: datetime,
+) -> Tuple[List[Dict], int]:
+    """Refresh stale outcome tiles in rows whose hours are still recent."""
+    observed_at = _timestamp(now)
+    if observed_at is None:
+        raise MetricsError("remeasure time must be a parseable timestamp")
+    observed_at = observed_at.astimezone(timezone.utc)
+    cutoff = observed_at - OUTCOME_REMEASURE_WINDOW
+    updated_rows = [copy.deepcopy(dict(row)) for row in rows]
+    updated_count = 0
+
+    for original, row in zip(rows, updated_rows):
+        hour_start = _timestamp(row.get("hour"))
+        if hour_start is None:
+            continue
+        hour_start = hour_start.astimezone(timezone.utc)
+        if (
+            hour_start < cutoff
+            or hour_start > observed_at
+            or hour_start.minute != 0
+            or hour_start.second != 0
+            or hour_start.microsecond != 0
+        ):
+            continue
+
+        stale_paths = [
+            path for path in OUTCOME_TILE_PATHS
+            if isinstance((tile := _nested_value(row, ("metrics",) + path)), Mapping)
+            and tile.get("gap") == OUTCOMES_STALE_GAP
+        ]
+        if not stale_paths:
+            continue
+        hour_end = hour_start + timedelta(hours=1)
+        if _outcomes_freshness_gap(outcome_records, hour_end) is not None:
+            continue
+
+        recomputed = derive_row(
+            {},
+            ledgers,
+            None,
+            outcome_records,
+            now=observed_at,
+            hour_start=hour_start,
+        )
+        for path in stale_paths:
+            replacement = _nested_value(recomputed, ("metrics",) + path)
+            if not isinstance(replacement, Mapping):
+                raise MetricsError(
+                    "derived metrics are missing path {}".format(".".join(path))
+                )
+            _set_nested_value(row, ("metrics",) + path, replacement)
+        if row != original:
+            updated_count += 1
+
+    return updated_rows, updated_count
+
+
 _SERIES_SUM_PREFIXES = (
     ("A", "A1"),
     ("A", "A4", "new_projects_started"),
@@ -1941,6 +2082,7 @@ _SERIES_SUM_PREFIXES = (
 )
 _SERIES_IDENTITY_KEYS = ("lane", "repo", "agent", "job", "reason", "stage", "name")
 _SERIES_MISSING = object()
+_SERIES_CATEGORY_PATHS = {("D", "D3", "estimated")}
 
 
 def _series_number(value: object, *, signed: bool = False) -> Optional[float]:
@@ -1957,9 +2099,17 @@ def _series_render_number(value: float) -> object:
 
 
 def _series_kind(path: Tuple[str, ...]) -> str:
+    if path in _SERIES_CATEGORY_PATHS:
+        return "category"
     if any(path[:len(prefix)] == prefix for prefix in _SERIES_SUM_PREFIXES):
         return "sum"
     return "mean"
+
+
+#: Leaves whose definition changed: an hour measured under another source is
+#: not an observation of the current leaf, so old and new never blend in one
+#: series (#1685: B3 moved from capture markers to fix_recurrence.py).
+SERIES_LEAF_SOURCES = {("B", "B3"): FIX_RECURRENCE_SOURCE}
 
 
 def _flatten_series_row(row: Mapping[str, object]):
@@ -1982,7 +2132,10 @@ def _flatten_series_row(row: Mapping[str, object]):
             valid = valid and top is not None and bottom is not None and bottom > 0
             numerator, denominator = top, bottom
         elif kind == "category":
-            valid = valid and isinstance(value, str)
+            valid = valid and (
+                isinstance(value, str)
+                or (path in _SERIES_CATEGORY_PATHS and isinstance(value, bool))
+            )
         else:
             number = _series_number(
                 value,
@@ -2077,6 +2230,10 @@ def _flatten_series_row(row: Mapping[str, object]):
             code_path = (group, code)
             present_codes.add(code_path)
             walk(value, code_path)
+    for leaf_path, expected in SERIES_LEAF_SOURCES.items():
+        for path in [key for key in leaves if key[:len(leaf_path)] == leaf_path]:
+            if leaves[path].get("source") != expected:
+                del leaves[path]
     return leaves, present_codes, code_gaps
 
 
@@ -2128,7 +2285,10 @@ def _daily_series_leaf(path: Tuple[str, ...], kind: str,
             return None, None, None, None
         value = numerator / denominator
     elif kind == "category":
-        if not values or not isinstance(values[-1], str):
+        if not values or not (
+            isinstance(values[-1], str)
+            or (path in _SERIES_CATEGORY_PATHS and isinstance(values[-1], bool))
+        ):
             return None, None, None, None
         value = values[-1]
         numerator = denominator = None
@@ -2409,6 +2569,47 @@ def append_remote_rows(
             raise MetricsError(result.stderr.strip() or "could not write {}".format(METRICS_PATH))
         if attempt >= len(STORE_BACKOFF):
             raise MetricsError("could not append backfill after compare-and-swap retries")
+        time.sleep(STORE_BACKOFF[attempt])
+    return 0
+
+
+def remeasure_remote_stale_outcome_rows(
+    ledgers: Optional[Mapping[str, Optional[Sequence[Mapping[str, object]]]]],
+    outcome_records: Optional[Sequence[Mapping[str, object]]],
+    now: datetime,
+    repo: str = REPO,
+    branch: str = BRANCH,
+) -> int:
+    """Refresh recent stale outcome tiles with Contents API compare-and-swap."""
+    for attempt in range(len(STORE_BACKOFF) + 1):
+        existing, sha = _read_remote(repo, branch)
+        refreshed, updated_count = remeasure_stale_outcome_rows(
+            existing, ledgers, outcome_records, now
+        )
+        if not updated_count:
+            return 0
+        payload = {
+            "message": "metrics: refresh outcomes for recent rows",
+            "branch": branch,
+            "content": base64.b64encode(
+                _encode_rows(refreshed).encode("utf-8")
+            ).decode("ascii"),
+        }
+        if sha:
+            payload["sha"] = sha
+        result = _gh([
+            "api", "-X", "PUT", "repos/{}/contents/{}".format(repo, METRICS_PATH),
+            "--input", "-",
+        ], stdin=json.dumps(payload))
+        if result.returncode == 0:
+            return updated_count
+        detail = (result.stderr or result.stdout or "").lower()
+        if "409" not in detail and "sha" not in detail and "conflict" not in detail:
+            raise MetricsError(
+                result.stderr.strip() or "could not refresh {}".format(METRICS_PATH)
+            )
+        if attempt >= len(STORE_BACKOFF):
+            raise MetricsError("could not refresh {} after compare-and-swap retries".format(METRICS_PATH))
         time.sleep(STORE_BACKOFF[attempt])
     return 0
 
@@ -2786,13 +2987,16 @@ def _backfill_command(args) -> int:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Derive and report execution metrics")
     sub = parser.add_subparsers(dest="command", required=True)
-    derive = sub.add_parser("derive", help="derive one UTC-hour metrics row")
+    derive = sub.add_parser(
+        "derive", help="derive the current UTC-hour row and refresh recent outcome gaps"
+    )
     derive.add_argument("--snapshot", help="fixture snapshot JSON; default reads the newest brief")
     derive.add_argument("--ledger", action="append", help="fixture heartbeat JSONL as AGENT=PATH")
     derive.add_argument("--outcomes", help="fixture outcomes.jsonl")
     derive.add_argument("--usage", help="fixture usage readings JSON")
     derive.add_argument("--commits", help="fixture commit activity JSON")
     derive.add_argument("--line-count", type=int, help="fixture funnel.py line count")
+    derive.add_argument("--fix-recurrence", help="fixture fix_recurrence.py result JSON")
     derive.add_argument("--now", help="UTC hour timestamp, for fixture reproduction")
     derive.add_argument("--dry-run", action="store_true", help="print the row without appending")
     backfill = sub.add_parser(
@@ -2828,17 +3032,34 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         fixture_mode = bool(
             args.snapshot or args.ledger or args.outcomes or args.usage
             or args.commits or args.line_count is not None
+            or args.fix_recurrence
         )
         if fixture_mode:
             ledgers, readings, records, activity, line_count = _load_fixture_inputs(args)
+            fix_result = None
+            if args.fix_recurrence:
+                try:
+                    fix_result = json.loads(
+                        Path(args.fix_recurrence).read_text(encoding="utf-8"))
+                except (OSError, ValueError) as exc:
+                    raise MetricsError(
+                        "could not read fix recurrence fixture: {}".format(exc)
+                    ) from exc
         else:
             ledgers, readings, records, activity, line_count = _live_inputs(now)
-        row = derive_row(snapshot, ledgers, readings, records, now, activity, line_count)
+            fix_result = measure_fix_recurrence(snapshot, _interval(now)[1])
+        row = derive_row(snapshot, ledgers, readings, records, now, activity,
+                         line_count, fix_recurrence_result=fix_result)
         if args.dry_run or fixture_mode:
             print(json.dumps(row, indent=2, sort_keys=True))
             return 0
         appended = append_remote(row)
-        print(json.dumps({"hour": row["hour"], "appended": appended}, sort_keys=True))
+        remeasured = remeasure_remote_stale_outcome_rows(ledgers, records, now)
+        print(json.dumps({
+            "hour": row["hour"],
+            "appended": appended,
+            "remeasured": remeasured,
+        }, sort_keys=True))
         return 0
     except Exception as exc:
         print("metrics: {}".format(exc), file=sys.stderr)

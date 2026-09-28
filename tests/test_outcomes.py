@@ -48,6 +48,9 @@ def pr(number, *, created="2026-09-10T08:00:00Z", state="CLOSED",
         "closedAt": merged or "2026-09-10T09:00:00Z",
         "mergedAt": merged,
         "statusCheckRollup": checks,
+        # The funnel's own PR: same-repository head, owner author (#1794).
+        "isCrossRepository": False,
+        "author": {"login": "nateprich"},
     }
 
 
@@ -114,6 +117,27 @@ def test_latest_verdict_is_chronological_not_pr_list_order():
 
     assert record["review_result"] == "rejected"
     assert record["turns"] == 2
+
+
+def test_only_the_owners_verdicts_are_outcomes():
+    """A forged verdict is neither a turn nor the review result (#1787)."""
+    owner = verdict_comment("rejected", at="2026-09-10T08:30:00Z")
+    forged = verdict_comment("approved", at="2026-09-10T08:45:00Z",
+                             author="mallory")
+    unauthored = dict(verdict_comment("approved", at="2026-09-10T08:50:00Z"))
+    unauthored.pop("author")
+    rest_owner = verdict_comment("rejected", at="2026-09-10T08:40:00Z")
+    rest_owner["user"] = rest_owner.pop("author")
+    record = outcomes.derive_outcome(
+        ticket(),
+        [pr(10, created="2026-09-10T08:00:00Z")],
+        {10: {"comments": [owner, rest_owner, forged, unauthored]}},
+        now=NOW,
+    )
+
+    assert record["review_result"] == "rejected"
+    assert record["turns"] == 2
+    assert record["prs"][0]["first_review_result"] == "rejected"
 
 
 def test_no_verdicts_are_unknown_turns_not_zero():
@@ -762,9 +786,54 @@ def test_repository_walk_uses_index_rows_once_and_writes_no_partial_scan(
     assert records[0]["merged"] is True
 
 
+@pytest.mark.parametrize("trust", [
+    {"isCrossRepository": True,
+     "headRepository": {"nameWithOwner": "mallory/repo"},
+     "author": {"login": "mallory"}},
+    {"author": {"login": "mallory"}},
+    {"author": None},
+    {"isCrossRepository": None},
+])
+def test_a_foreign_pr_is_never_a_tickets_attempt(monkeypatch, trust):
+    """A fork's PR can carry the branch name or a closing reference (#1794)."""
+    ticket_row = ticket(42)
+    owner = pr(10, created="2026-09-10T08:00:00Z")
+    by_branch = dict(pr(11, created="2026-09-10T09:00:00Z",
+                        merged="2026-09-10T09:30:00Z"), **trust)
+    by_link = dict(pr(12, branch="feature/x"), **trust)
+    by_link["closingIssuesReferences"] = [
+        {"number": 42, "repository": {"nameWithOwner": REPO}}]
+
+    class Index(dict):
+        all_rows = (owner, by_branch, by_link)
+
+    monkeypatch.setattr(
+        outcomes, "list_closed_tickets", lambda repo, limit: [ticket_row])
+    monkeypatch.setattr(
+        funnel, "ticket_pr_index", lambda repo, limit: (Index(), False))
+    monkeypatch.setattr(outcomes, "read_heartbeat_records", lambda: {})
+
+    def gh_json(*args):
+        if args[0] == "pr":
+            return {"number": args[2], "comments": []}
+        if args[0] == "issue":
+            return {"comments": []}
+        return [[]]
+
+    monkeypatch.setattr(outcomes, "gh_json", gh_json)
+
+    records = outcomes.derive_repository(REPO, limit=77, now=NOW)
+
+    assert records[0]["attempts"] == 1
+    assert records[0]["merged"] is False
+
+
 def test_repository_walk_rejects_a_truncated_pr_scan(monkeypatch):
     monkeypatch.setattr(outcomes, "list_closed_tickets", lambda repo, limit: [])
     monkeypatch.setattr(funnel, "ticket_pr_index", lambda repo, limit: ({}, True))
+    # The offline `gh` used to read as empty heartbeat ledgers; since #1717
+    # an unreadable ledger raises, so stub it as the sibling walks do.
+    monkeypatch.setattr(outcomes, "read_heartbeat_records", lambda: {})
 
     with pytest.raises(outcomes.OutcomeError, match="refusing partial"):
         outcomes.derive_repository(REPO, limit=77, now=NOW)
@@ -832,6 +901,73 @@ def test_closed_ticket_list_requests_comments_for_the_full_walk(monkeypatch):
 
     assert outcomes.list_closed_tickets(REPO, limit=77) == []
     assert "comments" in calls[0][-1]
+
+
+def _closed_rows(count):
+    return [
+        {"number": number, "title": "t", "url": "u",
+         "closedAt": "2026-09-01T00:00:00Z", "stateReason": "COMPLETED",
+         "comments": []}
+        for number in range(1, count + 1)
+    ]
+
+
+def test_closed_ticket_scan_of_todays_size_derives_at_the_default_ceiling(
+    monkeypatch,
+):
+    # command-center had 1,017 closed issues on 2026-09-27; the old 1,000-row
+    # ceiling refused that scan outright (#1751).
+    requested = []
+
+    def gh_json(*args):
+        requested.append(args[args.index("--limit") + 1])
+        return _closed_rows(1017)
+
+    monkeypatch.setattr(outcomes, "gh_json", gh_json)
+
+    assert len(outcomes.list_closed_tickets(REPO)) == 1017
+    assert requested == [str(outcomes.PR_SCAN_LIMIT + 1)]
+    assert outcomes.PR_SCAN_LIMIT >= 10000
+
+
+def test_closed_ticket_scan_past_the_ceiling_still_refuses(monkeypatch):
+    monkeypatch.setattr(
+        outcomes, "gh_json",
+        lambda *args: _closed_rows(outcomes.PR_SCAN_LIMIT + 1),
+    )
+
+    with pytest.raises(outcomes.OutcomeError, match="refusing partial"):
+        outcomes.list_closed_tickets(REPO)
+
+
+def test_repository_walk_scans_prs_to_the_default_ceiling(monkeypatch):
+    seen = []
+
+    def index(repo, limit, include_comments=False):
+        seen.append(limit)
+        return {}, False
+
+    monkeypatch.setattr(outcomes, "list_closed_tickets", lambda repo, limit: [])
+    monkeypatch.setattr(funnel, "ticket_pr_index", index)
+    monkeypatch.setattr(outcomes, "read_heartbeat_records", lambda: {})
+    monkeypatch.setattr(outcomes, "_repository_issue_events", lambda repo: {})
+
+    assert outcomes.derive_repository(REPO, now=NOW) == []
+    assert seen == [outcomes.PR_SCAN_LIMIT]
+
+
+def test_repository_walk_refuses_a_pr_scan_truncated_at_the_default_ceiling(
+    monkeypatch,
+):
+    monkeypatch.setattr(outcomes, "list_closed_tickets", lambda repo, limit: [])
+    monkeypatch.setattr(
+        funnel, "ticket_pr_index",
+        lambda repo, limit, include_comments=False: ({}, True),
+    )
+    monkeypatch.setattr(outcomes, "read_heartbeat_records", lambda: {})
+
+    with pytest.raises(outcomes.OutcomeError, match="PR scan .* exceeded 10000"):
+        outcomes.derive_repository(REPO, now=NOW)
 
 
 def test_remote_append_uses_sha_and_retries_a_contents_conflict(monkeypatch):
@@ -1087,3 +1223,270 @@ def test_an_empty_ledger_is_still_read_as_empty(monkeypatch):
     assert got == []
     assert sha == "abc123"
     assert len(calls) == 1
+
+
+# --- #1717: heartbeat ledgers over 1 MB, and healing records they emptied ---
+
+def _heartbeat_rows(ticket_ref="owner/repo#42", run="run-1", agent="codex"):
+    return [
+        {"run": run, "agent": agent, "phase": "start", "ts": 100,
+         "session_id": "session-1", "model": "gpt-6-luna"},
+        {"run": run, "agent": agent, "phase": "bind", "ts": 101,
+         "do": "ticket", "work": ticket_ref},
+        {"run": run, "agent": agent, "phase": "finish", "ts": 110,
+         "outcome": "done", "token_usage": {
+             "fresh_input_tokens": 40, "cache_read_input_tokens": 60,
+             "cache_write_input_tokens": 2, "output_tokens": 8}},
+    ]
+
+
+def _jsonl(rows):
+    return "".join(json.dumps(row) + "\n" for row in rows)
+
+
+def _heartbeat_gh(ledgers, *, large=(), blob_failures=()):
+    """A stubbed `gh` over the heartbeat branch. An agent absent from
+    `ledgers` is a missing file (404). A ledger in `large` answers as the
+    Contents API does above 1 MB, measured on codex.jsonl on 2026-09-27:
+    `encoding: none`, an empty `content`, and the real size and sha."""
+    calls = []
+
+    def run(args, stdin=None):
+        calls.append(list(args))
+        path = args[1]
+        for agent, rows in ledgers.items():
+            text = _jsonl(rows)
+            sha = "sha-{}".format(agent)
+            if path == "repos/{}/contents/{}.jsonl?ref=heartbeat".format(
+                    outcomes.REPO, agent):
+                payload = {"size": 3542750 if agent in large else len(text),
+                           "sha": sha}
+                if agent in large:
+                    payload.update(encoding="none", content="")
+                else:
+                    payload.update(encoding="base64", content=base64.b64encode(
+                        text.encode()).decode())
+                return SimpleNamespace(
+                    returncode=0, stdout=json.dumps(payload), stderr="")
+            if path == "repos/{}/git/blobs/{}".format(outcomes.REPO, sha):
+                if agent in blob_failures:
+                    return SimpleNamespace(
+                        returncode=1, stdout="", stderr="HTTP 502: Bad Gateway")
+                return SimpleNamespace(returncode=0, stdout=json.dumps({
+                    "encoding": "base64",
+                    "content": base64.b64encode(text.encode()).decode(),
+                }), stderr="")
+        return SimpleNamespace(
+            returncode=1, stdout="", stderr="gh: Not Found (HTTP 404)")
+
+    return run, calls
+
+
+def test_a_heartbeat_ledger_over_one_megabyte_returns_its_rows(monkeypatch):
+    """#1717. Above 1 MB the Contents API sends `encoding: none` and an empty
+    `content`; decoding that gave zero rows, so every outcome derived from
+    2026-09-24 carried `runs=[]` although the runs were in the ledger."""
+    rows = _heartbeat_rows()
+    run, calls = _heartbeat_gh({"codex": rows}, large={"codex"})
+    monkeypatch.setattr(outcomes, "_run_gh", run)
+
+    found = outcomes.read_heartbeat_records()
+
+    assert found["codex"] == rows
+    assert ["api", "repos/{}/git/blobs/sha-codex".format(outcomes.REPO)] in calls
+    # And the rows reach the record, which is what the loss was.
+    assert outcomes._ticket_runs("owner/repo#42", found)[0]["token_usage"] == (
+        rows[-1]["token_usage"])
+
+
+def test_a_small_heartbeat_ledger_is_still_read_inline(monkeypatch):
+    rows = _heartbeat_rows(agent="claude")
+    run, calls = _heartbeat_gh({"claude": rows})
+    monkeypatch.setattr(outcomes, "_run_gh", run)
+
+    assert outcomes.read_heartbeat_records()["claude"] == rows
+    assert not any("git/blobs" in call[1] for call in calls)
+
+
+def test_a_failed_large_heartbeat_read_raises_rather_than_reading_no_rows(
+        monkeypatch):
+    """Fail closed. The store is append-only, so a ledger that could not be
+    read must stop the derive, not be stored as tickets with no runs."""
+    run, _calls = _heartbeat_gh(
+        {"muse": _heartbeat_rows(agent="muse")},
+        large={"muse"}, blob_failures={"muse"})
+    monkeypatch.setattr(outcomes, "_run_gh", run)
+
+    with pytest.raises(outcomes.OutcomeError) as caught:
+        outcomes.read_heartbeat_records()
+
+    assert "502" in str(caught.value)
+
+
+def test_a_failed_heartbeat_read_that_is_not_a_missing_file_raises(
+        monkeypatch):
+    """The same silent-empty shape one call earlier: a 5xx on the Contents
+    read itself used to read as an agent with no runs."""
+    monkeypatch.setattr(outcomes, "_run_gh", lambda args, stdin=None: (
+        SimpleNamespace(returncode=1, stdout="", stderr="HTTP 502: Bad Gateway")))
+
+    with pytest.raises(outcomes.OutcomeError):
+        outcomes.read_heartbeat_records()
+
+
+def test_a_missing_heartbeat_ledger_reads_as_no_rows(monkeypatch):
+    """An agent that has never written a heartbeat is not a failed read."""
+    rows = _heartbeat_rows()
+    run, _calls = _heartbeat_gh({"codex": rows})
+    monkeypatch.setattr(outcomes, "_run_gh", run)
+
+    found = outcomes.read_heartbeat_records()
+
+    assert found == {"claude": [], "codex": rows, "muse": [], "zcode": []}
+
+
+def _outcome(number, runs):
+    return outcomes.derive_outcome(ticket(number), now=NOW, run_observations=runs)
+
+
+def _run(agent="codex", run="run-1", usage=True):
+    return {"run": run, "agent": agent, "token_usage": {
+        "fresh_input_tokens": 1, "cache_read_input_tokens": 2,
+        "cache_write_input_tokens": 3, "output_tokens": 4,
+    } if usage else None}
+
+
+def test_heal_replaces_only_empty_runs_records_whose_fresh_derivation_has_runs():
+    empty_healable = _outcome(1, [])
+    with_runs = _outcome(2, [_run(run="old")])
+    empty_still_empty = _outcome(3, [])
+    not_rederived = _outcome(4, [])
+    stored = [empty_healable, with_runs, empty_still_empty, not_rederived]
+
+    later = datetime(2026, 9, 28, tzinfo=timezone.utc)
+    fresh = [
+        outcomes.derive_outcome(ticket(1), now=later, run_observations=[_run()]),
+        outcomes.derive_outcome(
+            ticket(2), now=later, run_observations=[_run(run="new")]),
+        outcomes.derive_outcome(ticket(3), now=later, run_observations=[]),
+    ]
+
+    combined, healed = outcomes._heal_empty_runs(stored, fresh)
+
+    assert combined == [fresh[0], with_runs, empty_still_empty, not_rederived]
+    assert healed == [fresh[0]]
+
+
+def test_derive_heal_empty_runs_writes_one_ledger_with_only_the_heal(
+        monkeypatch, capsys):
+    """End to end through `derive --heal-empty-runs` and a stubbed `gh`: the
+    empty record is replaced in place, the record with runs and the empty
+    record whose fresh derivation is also empty come back byte-for-byte, and
+    a new ticket is still appended."""
+    stored = [_outcome(1, []), _outcome(2, [_run(run="old")]), _outcome(3, [])]
+    stored_text = outcomes._encode_records(stored)
+    later = datetime(2026, 9, 28, tzinfo=timezone.utc)
+    fresh = [
+        outcomes.derive_outcome(ticket(1), now=later, run_observations=[
+            _run(), _run(agent="muse", run="run-2", usage=False)]),
+        outcomes.derive_outcome(
+            ticket(2), now=later, run_observations=[_run(run="new")]),
+        outcomes.derive_outcome(ticket(3), now=later, run_observations=[]),
+        outcomes.derive_outcome(ticket(5), now=later, run_observations=[]),
+    ]
+    monkeypatch.setattr(
+        outcomes, "derive_repository",
+        lambda repo, limit, ticket_numbers: fresh)
+    writes = []
+
+    def run(args, stdin=None):
+        if "PUT" in args:
+            writes.append(json.loads(stdin))
+            return SimpleNamespace(returncode=0, stdout="{}", stderr="")
+        return SimpleNamespace(returncode=0, stdout=json.dumps({
+            "content": base64.b64encode(stored_text.encode()).decode(),
+            "size": len(stored_text), "sha": "old",
+        }), stderr="")
+
+    monkeypatch.setattr(outcomes, "_run_gh", run)
+
+    assert outcomes.main(["derive", "--repo", REPO, "--heal-empty-runs"]) == 0
+
+    assert len(writes) == 1
+    written = base64.b64decode(writes[0]["content"]).decode().splitlines()
+    kept = stored_text.splitlines()
+    assert json.loads(written[0]) == fresh[0]
+    assert written[1:3] == kept[1:3]
+    assert json.loads(written[3]) == fresh[3]
+    assert len(written) == 4
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["appended"] == 1
+    assert summary["healed"] == 1
+    assert summary["healed_runs_by_agent"] == {"codex": 1, "muse": 1}
+    assert summary["healed_runs_with_token_usage"] == 1
+
+
+def test_derive_heal_empty_runs_writes_when_nothing_new_needs_appending(
+        monkeypatch, capsys):
+    """The one-time heal re-derives tickets that are all already stored, so
+    there is nothing to append. A write gated on new records alone would
+    return before the PUT, and `--heal-empty-runs` would report success
+    having healed nothing."""
+    stored = [_outcome(1, []), _outcome(2, [_run(run="old")])]
+    stored_text = outcomes._encode_records(stored)
+    later = datetime(2026, 9, 28, tzinfo=timezone.utc)
+    fresh = [
+        outcomes.derive_outcome(ticket(1), now=later, run_observations=[_run()]),
+        outcomes.derive_outcome(
+            ticket(2), now=later, run_observations=[_run(run="new")]),
+    ]
+    monkeypatch.setattr(
+        outcomes, "derive_repository",
+        lambda repo, limit, ticket_numbers: fresh)
+    writes = []
+
+    def run(args, stdin=None):
+        if "PUT" in args:
+            writes.append(json.loads(stdin))
+            return SimpleNamespace(returncode=0, stdout="{}", stderr="")
+        return SimpleNamespace(returncode=0, stdout=json.dumps({
+            "content": base64.b64encode(stored_text.encode()).decode(),
+            "size": len(stored_text), "sha": "old",
+        }), stderr="")
+
+    monkeypatch.setattr(outcomes, "_run_gh", run)
+
+    assert outcomes.main(["derive", "--repo", REPO, "--heal-empty-runs"]) == 0
+
+    assert len(writes) == 1
+    assert writes[0]["sha"] == "old"
+    written = base64.b64decode(writes[0]["content"]).decode().splitlines()
+    assert len(written) == 2
+    assert json.loads(written[0]) == fresh[0]
+    assert written[1] == stored_text.splitlines()[1]
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["appended"] == 0
+    assert summary["healed"] == 1
+
+
+def test_derive_without_the_heal_flag_never_replaces_a_stored_record(
+        monkeypatch):
+    stored_text = outcomes._encode_records([_outcome(1, [])])
+    fresh = [outcomes.derive_outcome(
+        ticket(1), now=NOW, run_observations=[_run()])]
+    monkeypatch.setattr(
+        outcomes, "derive_repository",
+        lambda repo, limit, ticket_numbers: fresh)
+    calls = []
+
+    def run(args, stdin=None):
+        calls.append(list(args))
+        return SimpleNamespace(returncode=0, stdout=json.dumps({
+            "content": base64.b64encode(stored_text.encode()).decode(),
+            "size": len(stored_text), "sha": "old",
+        }), stderr="")
+
+    monkeypatch.setattr(outcomes, "_run_gh", run)
+
+    assert outcomes.main(["derive", "--repo", REPO]) == 0
+    assert not any("PUT" in call for call in calls)

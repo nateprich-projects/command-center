@@ -3,8 +3,9 @@
 
 The review runner shows the model this packet and nothing else: the ticket
 body and its comments, the parent project's comments, PR review and issue
-comments, plan.md, the diff, CI state, the newest verdict and its head, the
-changed-file overlap with every other open PR, protected-path touches, the
+comments, the PR description and its Departures as the implementer's own
+claims (#1720), plan.md, the diff, CI state, the newest verdict and its head,
+the changed-file overlap with every other open PR, protected-path touches, the
 stop-auto-merging counter, and the pull_request CI runs on the head. #798
 assembled the evidence; #799 adds
 the deterministic pre-check rows the runner evaluates before any model is
@@ -114,7 +115,8 @@ PLAN_PREMISE_ROW_RE = re.compile(
 # same forms GitHub renders elsewhere: owner/repo#n, #n, or an issue URL.
 EVIDENCE_ISSUE_REF_RE = re.compile(
     r"(?P<url>https?://github\.com/(?P<url_owner>[A-Za-z0-9_.-]+)/"
-    r"(?P<url_repo>[A-Za-z0-9_.-]+)/issues/(?P<url_number>[1-9][0-9]*)/?)"
+    r"(?P<url_repo>[A-Za-z0-9_.-]+)/issues/"
+    r"(?P<url_number>[1-9][0-9]*)/?)"
     r"|(?<![A-Za-z0-9_.-])(?P<full>(?P<owner>[A-Za-z0-9_.-]+)/"
     r"(?P<repo>[A-Za-z0-9_.-]+)#(?P<number>[1-9][0-9]*))"
     r"|(?<![A-Za-z0-9_/])#(?P<bare_number>[1-9][0-9]*)")
@@ -167,6 +169,50 @@ TICKET_COMMENT_BODY_LIMIT = 4000
 # PR comments are durable run evidence. Keep each body bounded while carrying
 # every comment, newest last, so a reviewer can see the complete conversation.
 PR_COMMENT_BODY_LIMIT = 4000
+
+# The PR description, and the Departures section engine/implement.py writes
+# into it (#1720). Tickets ask for records "in the PR description" (#1659,
+# #1660), and a packet without the description rejected PR #1667 at one head
+# over and over for records its description held. The body is bounded like
+# every other free text in the packet; the departures are parsed from the
+# whole body, so a section past the cut still arrives. Both are the
+# implementer's own claims: the note travels beside them in the packet so a
+# judge reading the JSON alone still sees what they are.
+PR_BODY_LIMIT = 20000
+PR_CLAIMS_NOTE = (
+    "pr_body and pr_departures are the implementer's own claims, not "
+    "verified facts: pr_body is the PR description as its author wrote it, "
+    "and pr_departures lists the entries of its Departures section. Cite "
+    "them as evidence of what the author recorded and why; weigh every "
+    "claim against the diff, and never count a departure as meeting its "
+    "requirement by itself.")
+
+# A Departures header is a label line (``Departures:``, bold or not, with or
+# without text after the colon) or a Markdown heading (``## Departures``).
+# Prose that merely starts with the word, such as "Departures were none",
+# has neither the colon nor a line of its own and is not a header.
+DEPARTURES_HEADER_RE = re.compile(
+    r"^[ \t]{0,3}(?:(?P<heading>#{1,6})[ \t]+)?(?:\*\*|__)?Departures"
+    r"(?:(?:\*\*|__)?[ \t]*:(?:\*\*|__)?|(?:\*\*|__)?[ \t]*$)"
+    r"[ \t]*(?P<rest>.*?)[ \t]*$",
+    re.IGNORECASE)
+DEPARTURE_BULLET_RE = re.compile(
+    r"^[ \t]{0,3}(?:[-*+]|[0-9]{1,3}[.)])[ \t]+(?P<text>.*)$")
+# The next section ends the list: any Markdown heading, and after a
+# ``Departures:`` label, the template's next unindented short label with a
+# colon (``Branch:``, ``Local: ...``).
+MARKDOWN_HEADING_RE = re.compile(r"^[ \t]{0,3}#{1,6}[ \t]")
+DEPARTURES_LABEL_END_RE = re.compile(
+    r"^(?:\*\*|__)?[A-Z][A-Za-z0-9 /()'-]{0,40}?(?:\*\*|__)?:"
+    r"(?:\*\*|__)?(?:[ \t]|$)")
+# "- None." is how implement.py renders no departures; people write the
+# same thing as "none", "n/a" or "no departures". "None of the tests ran"
+# is a departure, so the word must stand alone or end at punctuation.
+NO_DEPARTURE_RE = re.compile(
+    r"^(?:none|n/a|no departures?(?: from the ticket)?)"
+    r"[ \t]*(?:[.;:,!(—–-].*)?$",
+    re.IGNORECASE)
+CODE_FENCE_RE = re.compile(r"^[ \t]{0,3}(?:```|~~~)")
 
 # A canonical run-evidence comment is a marked, fenced JSON block. Parsing its
 # shape helps the reviewer find the reported facts; it does not judge whether
@@ -495,6 +541,11 @@ def ticket_comments(rows: Optional[Sequence[dict]]) -> List[Dict]:
     not re-read as prose. Only the newest TICKET_COMMENT_LIMIT rows are
     kept, and each body is capped at TICKET_COMMENT_BODY_LIMIT characters
     with the cut marked, so a long ticket cannot flood the prompt.
+
+    The login cannot establish a voice, but it can rule one out (#1788):
+    only the owner account's comments are read. Any other author's comment
+    is a one-line placeholder naming who posted it and when, with voice
+    ``unknown``, so a pasted ``nate-direct`` block never amends a ticket.
     """
     shaped = []
     for row in rows or []:
@@ -505,6 +556,14 @@ def ticket_comments(rows: Optional[Sequence[dict]]) -> List[Dict]:
             author = author.get("login")
         elif not isinstance(author, str):
             author = None
+        if not funnel.trusted_comment(row):
+            shaped.append({
+                "author": author,
+                "created_at": row.get("createdAt") or row.get("created_at"),
+                "voice": "unknown",
+                "body": funnel.untrusted_comment_placeholder(row),
+            })
+            continue
         body = row.get("body") or ""
         provenance = funnel.parse_provenance(body)
         voice = provenance.get("voice") if provenance else "unknown"
@@ -1015,6 +1074,16 @@ def precheck_verdict(packet: dict) -> List[str]:
         and isinstance(comments_section.get("comments"), list)
         else None
     )
+    if comments is not None:
+        # The packet keeps each comment's login as a plain string, a shape
+        # ``trusted_comment`` never trusts. Restore GitHub's ``author.login``
+        # shape so the shared predicate decides which comment is new evidence
+        # (#1788); a withheld row keeps its outside author and stays untrusted.
+        comments = [
+            {"author": {"login": entry.get("author")},
+             "createdAt": entry.get("created_at")}
+            for entry in comments if isinstance(entry, dict)
+        ]
     if not funnel.verdict_covers_head(
         packet.get("verdict"), packet.get("head_sha"), comments
     ):
@@ -1525,6 +1594,287 @@ def evidence_ticket_is_unrunnable(evidence_pointer: object,
     return False
 
 
+def annotate_unrunnable_premises(packet: Dict) -> Dict:
+    """Record live-verified deferrals and premise-label errors in a packet.
+
+    ``build_packet`` stays pure. ``collect`` calls this after assembling its
+    packet so only live GitHub state can add ``deferred_answer`` for inferred
+    premises or ``label_error`` for measured/documented premises. Unavailable
+    plan groups and unresolved issue reads keep the existing review path.
+    """
+    ticket = packet.get("ticket")
+    reviewed_ref = ticket.get("ref") if isinstance(ticket, dict) else None
+    if (not isinstance(reviewed_ref, str)
+            or _issue_ref_parts(reviewed_ref) is None):
+        return packet
+
+    groups = packet.get("plan_premises")
+    if not isinstance(groups, list):
+        return packet
+
+    checked: Dict[str, bool] = {}
+    for group in groups:
+        if not isinstance(group, dict) or group.get("available") is not True:
+            continue
+        premises = group.get("premises")
+        if not isinstance(premises, list):
+            continue
+        for premise in premises:
+            if not isinstance(premise, dict):
+                continue
+            label = premise.get("label")
+            if label not in {"inferred", "measured", "documented"}:
+                continue
+            evidence = premise.get("evidence")
+            if not isinstance(evidence, str) or not evidence.strip():
+                continue
+            if evidence not in checked:
+                try:
+                    checked[evidence] = evidence_ticket_is_unrunnable(
+                        evidence, reviewed_ref)
+                except funnel.GitHubError:
+                    # No verified forward pointer: preserve the probe path.
+                    checked[evidence] = False
+            if checked[evidence]:
+                if label == "inferred":
+                    premise["deferred_answer"] = {
+                        "status": "deferred",
+                        "evidence_pointer": evidence,
+                        "reviewed_ticket": reviewed_ref,
+                        "reason": (
+                            "live issue state shows the named evidence ticket "
+                            "is open and cannot run before the reviewed ticket "
+                            "is complete"
+                        ),
+                    }
+                else:
+                    premise["label_error"] = {
+                        "status": "verified",
+                        "label": label,
+                        "evidence_pointer": evidence,
+                        "reviewed_ticket": reviewed_ref,
+                        "reason": (
+                            "live issue state shows the named evidence ticket "
+                            "is open and cannot run before the reviewed ticket "
+                            "is complete"
+                        ),
+                    }
+    return packet
+
+
+def _verified_deferred_premises(packet: Dict) -> List[Dict[str, str]]:
+    """Return only deferrals whose packet fields match the live premise."""
+    ticket = packet.get("ticket")
+    reviewed_ref = ticket.get("ref") if isinstance(ticket, dict) else None
+    if not isinstance(reviewed_ref, str):
+        return []
+    groups = packet.get("plan_premises")
+    if not isinstance(groups, list):
+        return []
+    verified: List[Dict[str, str]] = []
+    for group in groups:
+        if not isinstance(group, dict) or group.get("available") is not True:
+            continue
+        parent_ref = group.get("parent_ref")
+        if not isinstance(parent_ref, str):
+            continue
+        premises = group.get("premises")
+        if not isinstance(premises, list):
+            continue
+        for premise in premises:
+            if (not isinstance(premise, dict)
+                    or premise.get("label") != "inferred"):
+                continue
+            claim = premise.get("claim")
+            evidence = premise.get("evidence")
+            deferred = premise.get("deferred_answer")
+            if (not isinstance(claim, str) or not claim
+                    or not isinstance(evidence, str) or not evidence
+                    or not isinstance(deferred, dict)
+                    or deferred.get("status") != "deferred"
+                    or deferred.get("evidence_pointer") != evidence
+                    or deferred.get("reviewed_ticket") != reviewed_ref):
+                continue
+            verified.append({
+                "claim": claim,
+                "evidence": evidence,
+                "label": "inferred",
+                "parent_ref": parent_ref,
+                "reviewed_ticket": reviewed_ref,
+            })
+    return verified
+
+
+def _deferred_premise_requirement(premise: Dict[str, str]) -> str:
+    parts = _issue_ref_parts(premise["reviewed_ticket"])
+    reviewed_ticket = ("#{}".format(parts[1]) if parts
+                       else premise["reviewed_ticket"])
+    return ("Defer the inferred premise '{}' to its evidence pointer '{}' "
+            "until ticket {} is complete.").format(
+        premise["claim"], premise["evidence"], reviewed_ticket)
+
+
+def _verified_label_error_premises(packet: Dict) -> List[Dict[str, str]]:
+    """Return only live-verified measured/documented forward-pointer errors."""
+    ticket = packet.get("ticket")
+    reviewed_ref = ticket.get("ref") if isinstance(ticket, dict) else None
+    if not isinstance(reviewed_ref, str):
+        return []
+    groups = packet.get("plan_premises")
+    if not isinstance(groups, list):
+        return []
+    verified: List[Dict[str, str]] = []
+    for group in groups:
+        if not isinstance(group, dict) or group.get("available") is not True:
+            continue
+        parent_ref = group.get("parent_ref")
+        if not isinstance(parent_ref, str):
+            continue
+        premises = group.get("premises")
+        if not isinstance(premises, list):
+            continue
+        for premise in premises:
+            if not isinstance(premise, dict):
+                continue
+            label = premise.get("label")
+            claim = premise.get("claim")
+            evidence = premise.get("evidence")
+            error = premise.get("label_error")
+            if (label not in {"measured", "documented"}
+                    or not isinstance(claim, str) or not claim
+                    or not isinstance(evidence, str) or not evidence
+                    or not isinstance(error, dict)
+                    or error.get("status") != "verified"
+                    or error.get("label") != label
+                    or error.get("evidence_pointer") != evidence
+                    or error.get("reviewed_ticket") != reviewed_ref):
+                continue
+            verified.append({
+                "claim": claim,
+                "evidence": evidence,
+                "label": label,
+                "parent_ref": parent_ref,
+                "reviewed_ticket": reviewed_ref,
+            })
+    return verified
+
+
+def _label_error_premise_requirement(premise: Dict[str, str]) -> str:
+    parts = _issue_ref_parts(premise["reviewed_ticket"])
+    reviewed_ticket = ("#{}".format(parts[1]) if parts
+                       else premise["reviewed_ticket"])
+    return ("Reject the {} premise '{}' as a labeling error because its "
+            "evidence pointer '{}' names an open ticket that cannot run "
+            "before ticket {} is complete.").format(
+                premise["label"], premise["claim"], premise["evidence"],
+                reviewed_ticket)
+
+
+def _is_verified_premise_probe(requirement: str,
+                               premise: Dict[str, str]) -> bool:
+    """Match only the canonical lister probe for this exact premise."""
+    parent_parts = _issue_ref_parts(premise.get("parent_ref"))
+    reviewed_parts = _issue_ref_parts(premise.get("reviewed_ticket"))
+    label = premise.get("label")
+    claim = premise.get("claim")
+    evidence = premise.get("evidence")
+    if (parent_parts is None or reviewed_parts is None
+            or not isinstance(label, str)
+            or not isinstance(claim, str)
+            or not isinstance(evidence, str)):
+        return False
+
+    parent_repo, parent_number = parent_parts
+    reviewed_repo, _ = reviewed_parts
+    parent_ref = ("#{}".format(parent_number) if parent_repo == reviewed_repo
+                  else "{}#{}".format(parent_repo, parent_number))
+    text = requirement.casefold()
+    prefix = (
+        "Probe the parent plan {} premise labelled {} against live evidence "
+        "using its evidence pointer: '{}'".format(
+            parent_ref, label, claim)
+    ).casefold()
+    if not text.startswith(prefix):
+        return False
+
+    # The lister may include a short parenthetical explanation before the
+    # pointer. Keep that part of the canonical shape, and require its exact
+    # evidence value so unrelated requirements sharing a claim survive.
+    suffix = text[len(prefix):]
+    if not suffix.startswith(" ("):
+        return False
+    parenthetical, separator, _ = suffix.partition(");")
+    if not separator:
+        return False
+    return "evidence pointer: {}".format(evidence.casefold()) in parenthetical
+
+
+def normalize_plan_premise_requirements(
+        packet: Dict, requirements: Sequence[str]) -> List[str]:
+    """Replace model probe requirements with verified canonical premise rows.
+
+    The runner verifies these fields itself, so a lister wording lapse cannot
+    turn a verified deferral into an unsure probe or hide a verified label
+    error behind one.
+    """
+    deferred = _verified_deferred_premises(packet)
+    label_errors = _verified_label_error_premises(packet)
+    verified = deferred + label_errors
+    if not verified:
+        return list(requirements)
+
+    kept: List[str] = []
+    for requirement in requirements:
+        if any(_is_verified_premise_probe(requirement, premise)
+               for premise in verified):
+            continue
+        kept.append(requirement)
+
+    for premise, canonical in (
+            [(row, _deferred_premise_requirement(row)) for row in deferred]
+            + [(row, _label_error_premise_requirement(row))
+               for row in label_errors]):
+        if canonical not in kept:
+            kept.append(canonical)
+    return kept
+
+
+def mark_verified_premise_requirements(
+        packet: Dict, results: Sequence[Dict]) -> List[Dict]:
+    """Resolve canonical premise checks from matching verified packet fields."""
+    verified = {
+        _deferred_premise_requirement(premise): (
+            "met",
+            "Verified packet deferral: the inferred premise's evidence pointer "
+            "and reviewed ticket match its live deferred_answer.")
+        for premise in _verified_deferred_premises(packet)
+    }
+    verified.update({
+        _label_error_premise_requirement(premise): (
+            "unmet",
+            "Verified labeling error: the measured/documented premise's "
+            "evidence pointer names an open ticket that cannot run before "
+            "the reviewed ticket is complete.")
+        for premise in _verified_label_error_premises(packet)
+    })
+    marked: List[Dict] = []
+    for result in results:
+        if not isinstance(result, dict):
+            marked.append(result)
+            continue
+        requirement = result.get("requirement")
+        resolution = verified.get(requirement)
+        if resolution is None:
+            marked.append(result)
+            continue
+        status, evidence = resolution
+        resolved = dict(result)
+        resolved["status"] = status
+        resolved["evidence"] = evidence
+        marked.append(resolved)
+    return marked
+
+
 def _comment_connection_page(connection: object, label: str
                              ) -> Tuple[List[dict], bool, Optional[str]]:
     """Read one GraphQL comment page, failing closed on an incomplete shape."""
@@ -1578,7 +1928,13 @@ def parse_run_evidence_comment(body: str) -> Optional[Dict[str, object]]:
 
 
 def _shape_pr_comment(row: dict, kind: str) -> Dict[str, Any]:
-    """Return one reviewer-visible PR comment with a capped body."""
+    """Return one reviewer-visible PR comment with a capped body.
+
+    Only a trusted author's text reaches the lister and the judges (#1788).
+    command-center is public, so anyone can comment on a PR; an untrusted
+    comment becomes a one-line placeholder naming its author and time, marked
+    ``withheld``, and is never read as ``**Run evidence:**``.
+    """
     body = row.get("body")
     created_at = row.get("createdAt")
     if not isinstance(body, str) or not isinstance(created_at, str) or not created_at:
@@ -1587,6 +1943,14 @@ def _shape_pr_comment(row: dict, kind: str) -> Dict[str, Any]:
     login = author.get("login") if isinstance(author, dict) else None
     if not isinstance(login, str) or not login:
         login = "unknown"
+    if not funnel.trusted_comment(row):
+        return {
+            "kind": kind,
+            "author": login,
+            "created_at": created_at,
+            "body": funnel.untrusted_comment_placeholder(row, created_at),
+            "withheld": True,
+        }
     body = body.strip()
     if len(body) > PR_COMMENT_BODY_LIMIT:
         body = body[:PR_COMMENT_BODY_LIMIT] + (
@@ -1604,6 +1968,106 @@ def _shape_pr_comment(row: dict, kind: str) -> Dict[str, Any]:
             if payload is not None else {"format": "prose"}
         )
     return shaped
+
+
+def parse_departures(body: object) -> List[str]:
+    """Return the entries of a PR body's Departures section (#1720).
+
+    The section is the first ``Departures:`` label or ``## Departures``
+    heading outside a code fence. Each bullet is one entry, and so is a
+    paragraph of prose; indented and wrapped lines continue the entry above
+    them. A label section ends at a blank line followed by a new paragraph,
+    at the template's next label (``Branch:``), or at a heading; a heading
+    section ends only at the next heading. A code fence ends either.
+
+    "None" entries are the template's way of saying there were none, so
+    they are dropped: a body without the section and a section reading
+    ``- None.`` both give an empty list. Anything else is kept as written,
+    because what a departure claims is for the judge to weigh.
+    """
+    if not isinstance(body, str):
+        return []
+    lines = body.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    header = None
+    in_fence = False
+    start = 0
+    for index, line in enumerate(lines):
+        if CODE_FENCE_RE.match(line):
+            in_fence = not in_fence
+            continue
+        if not in_fence:
+            header = DEPARTURES_HEADER_RE.match(line)
+            if header is not None:
+                start = index + 1
+                break
+    if header is None:
+        return []
+    heading_form = header.group("heading") is not None
+
+    entries: List[str] = []
+    current: Optional[List[str]] = None
+    if header.group("rest"):
+        current = [header.group("rest")]
+
+    def close() -> None:
+        nonlocal current
+        if current:
+            entries.append(" ".join(current))
+        current = None
+
+    for line in lines[start:]:
+        stripped = line.strip()
+        if not stripped:
+            close()
+            continue
+        if CODE_FENCE_RE.match(line) or MARKDOWN_HEADING_RE.match(line):
+            break
+        if not heading_form and DEPARTURES_LABEL_END_RE.match(line):
+            break
+        bullet = DEPARTURE_BULLET_RE.match(line)
+        if bullet is not None:
+            close()
+            current = [bullet.group("text").strip()]
+            continue
+        if current is not None:
+            current.append(stripped)
+        elif heading_form or not entries:
+            current = [stripped]
+        elif line[:1] in (" ", "\t"):
+            # An indented paragraph after a blank line belongs to the
+            # bullet above it, as it does in Markdown.
+            entries[-1] = entries[-1] + " " + stripped
+        else:
+            break
+    close()
+    return [entry for entry in entries
+            if not NO_DEPARTURE_RE.match(entry.strip("*_` \t"))]
+
+
+def pr_body_section(pr_view: dict) -> Dict[str, object]:
+    """The packet's PR-description fields, labelled as claims (#1720).
+
+    ``pr_body`` is the stripped description cut at ``PR_BODY_LIMIT`` with
+    the packet's usual ``…[truncated N chars]`` mark, and
+    ``pr_body_truncated`` says so without parsing the text. A view that
+    carried no body reads as None, not as an empty description.
+    ``pr_departures`` comes from the whole body, not the cut one.
+    """
+    body = pr_view.get("body")
+    text: Optional[str] = None
+    truncated = False
+    if isinstance(body, str):
+        text = body.strip()
+        if len(text) > PR_BODY_LIMIT:
+            truncated = True
+            text = text[:PR_BODY_LIMIT] + (
+                "\n…[truncated {} chars]".format(len(text) - PR_BODY_LIMIT))
+    return {
+        "pr_body": text,
+        "pr_body_truncated": truncated,
+        "pr_departures": parse_departures(body),
+        "pr_claims_note": PR_CLAIMS_NOTE,
+    }
 
 
 def _pr_comments_section(comments: List[Dict[str, Any]]) -> Dict:
@@ -1714,9 +2178,15 @@ def build_packet(*, repo: str, pr_number: int, pr_view: dict, diff: str,
     gets an empty list. ``tickets`` is every ticket the PR closes —
     the branch ticket plus the closing references (#1088) — each shaped
     like ``ticket``; None reads as the branch ticket alone, so a
-    single-ticket PR's packet keeps its shape. The PR description stays
-    out on purpose: it is the author's own claims, and a reviewer that
-    trusts it can be argued into approving.
+    single-ticket PR's packet keeps its shape.
+    ``pr_body`` and ``pr_departures`` carry the PR description and its
+    Departures entries (#1720), shaped by ``pr_body_section``. They were
+    kept out once because they are the author's own claims and a reviewer
+    that trusts them can be argued into approving; that left every ticket
+    asking for a record in the description unmergeable. They now enter
+    beside ``pr_claims_note``, which labels both as the implementer's
+    claims, and the verdict rules are unchanged: a claim is weighed against
+    the diff, and a departure never meets its requirement by itself.
     ``plan_premises`` groups the fixed, structured premises section from
     each ticket's parent plan. An available empty list means that plan
     recorded none; ``available: false`` means its body could not be read
@@ -1766,6 +2236,7 @@ def build_packet(*, repo: str, pr_number: int, pr_view: dict, diff: str,
         "repo": repo,
         "pr": pr_number,
         "pr_title": pr_view.get("title"),
+        **pr_body_section(pr_view),
         "branch": pr_view.get("headRefName"),
         "base": pr_view.get("baseRefName"),
         "state": pr_view.get("state"),
@@ -1794,11 +2265,21 @@ def build_packet(*, repo: str, pr_number: int, pr_view: dict, diff: str,
                "latest_run_id": latest_completed_run_id(runs)},
         "verdict": verdict,
         "verdict_head_sha": (verdict or {}).get("head_sha"),
-        "overlap": file_overlap(changed_files, open_prs, pr_number),
+        # Only the funnel's own PRs are named to the reviewer or paired with
+        # the ticket (#1794): a fork's open PR never merges through the funnel,
+        # and its branch name is text a stranger chose. Every merge counts for
+        # staleness, whoever opened it, because it changed main.
+        "overlap": file_overlap(changed_files, [
+            row for row in open_prs or []
+            if funnel.is_funnel_pr(repo, row)
+        ], pr_number),
         "merged_overlap": merged_overlap(changed_files, merged_prs, head,
                                          pr_number),
         "ticket_prior_prs": ticket_prior_prs(
-            pr_view.get("headRefName"), merged_prs, pr_number),
+            pr_view.get("headRefName"), [
+                row for row in merged_prs or []
+                if funnel.is_funnel_pr(repo, row)
+            ], pr_number),
         "protected": protected_touches(changed_files, diff),
         "stop_auto_merging": stop_counter,
         "collected_at": collected_at,
@@ -1823,14 +2304,17 @@ def fetch_pr(repo: str, pr_number: int) -> dict:
     ``closingIssuesReferences`` rides the same read so the packet can
     carry every ticket the PR closes (#1088); it costs no extra call.
     ``baseRefOid`` is the PR's recorded base, the ``pr_base_sha`` the
-    packet compares the live merge base against (#1043).
+    packet compares the live merge base against (#1043). ``body`` is the
+    description the packet carries as the implementer's claims (#1720).
+    The trust fields say whether the PR is the funnel's own (#1794).
     """
     data = funnel._gh_json(
         "gh", "pr", "view", str(pr_number), "--repo", repo, "--json",
-        "number,title,headRefName,headRefOid,baseRefName,baseRefOid,state,"
-        "mergeable,"
+        "number,title,body,headRefName,headRefOid,baseRefName,baseRefOid,"
+        "state,mergeable,"
         "mergedAt,mergedBy,closedAt,"
-        "statusCheckRollup,commits,files,closingIssuesReferences")
+        "statusCheckRollup,commits,files,closingIssuesReferences,"
+        + funnel.PR_TRUST_JSON_FIELDS)
     if not data:
         raise funnel.GitHubError(
             "could not read PR #{} in {}".format(pr_number, repo))
@@ -2227,7 +2711,8 @@ def fetch_open_prs(repo: str) -> List[dict]:
     """Every open PR's number, branch, and changed files, in one read."""
     rows = funnel._gh_json(
         "gh", "pr", "list", "--repo", repo, "--state", "open",
-        "--json", "number,headRefName,files", "--limit", "100")
+        "--json", "number,headRefName,files," + funnel.PR_TRUST_JSON_FIELDS,
+        "--limit", "100")
     if rows is None or not isinstance(rows, list):
         raise funnel.GitHubError(
             "could not list open PRs in {}".format(repo))
@@ -2244,7 +2729,8 @@ def fetch_merged_prs(repo: str,
     """
     rows = funnel._gh_json(
         "gh", "pr", "list", "--repo", repo, "--state", "merged",
-        "--json", "number,title,mergedAt,files,headRefName",
+        "--json", "number,title,mergedAt,files,headRefName,"
+        + funnel.PR_TRUST_JSON_FIELDS,
         "--limit", str(limit))
     if rows is None or not isinstance(rows, list):
         raise funnel.GitHubError(
@@ -2336,6 +2822,15 @@ def collect(repo: Optional[str], pr_number: int, *,
     """
     resolved = funnel.resolve_repo(repo)
     pr_view = fetch_pr(resolved, pr_number)
+    # No packet for a PR that is not the funnel's own (#1794). The packet is
+    # what a model reads — the diff, the description, the comments — so a
+    # fork's PR named ticket/<n> would be a prompt-injection surface that
+    # also spends the lane's budget. Refuse before reading any of it.
+    foreign = funnel.foreign_pr_reason(resolved, pr_view)
+    if foreign is not None:
+        raise funnel.GitHubError(
+            "PR #{} in {} is not the funnel's own PR, because {}; no review "
+            "packet is assembled".format(pr_number, resolved, foreign))
     ref = funnel.ticket_ref_from_branch(
         resolved, pr_view.get("headRefName") or "")
     if ref is not None:
@@ -2401,7 +2896,7 @@ def collect(repo: Optional[str], pr_number: int, *,
             scope_source = "compare"
     if scope_diff is None:
         scope_diff = fetch_diff(resolved, pr_number)
-    return build_packet(
+    packet = build_packet(
         repo=resolved,
         pr_number=pr_number,
         pr_view=pr_view,
@@ -2421,6 +2916,9 @@ def collect(repo: Optional[str], pr_number: int, *,
         stop_counter=fetch_stop_counter(lambda: loaded_items, now),
         collected_at=(now or datetime.now(timezone.utc)).isoformat(),
     )
+    # Keep build_packet pure; unrunnability depends on fresh GitHub state.
+    packet = annotate_unrunnable_premises(packet)
+    return packet
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:

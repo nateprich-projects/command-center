@@ -17,10 +17,15 @@ from engine import review  # noqa: E402
 REPO = "nateprich-projects/command-center"
 REVIEWED = REPO + "#1598"
 FIXTURE = ROOT / "tests" / "fixtures" / "review_unrunnable_1581.json"
+REJECTED_1612 = ROOT / "tests" / "fixtures" / "review_rejected_1612.json"
 
 
 def live_fixture():
     return json.loads(FIXTURE.read_text())
+
+
+def rejected_1612_fixture():
+    return json.loads(REJECTED_1612.read_text())
 
 
 def _parts(ref):
@@ -84,6 +89,220 @@ def test_1581_cycle_evidence_ticket_is_unrunnable(monkeypatch):
 
     assert review.evidence_ticket_is_unrunnable(
         "Ticket 4 (#1600)", REVIEWED)
+
+
+def test_rejected_1612_packet_carries_a_verified_deferred_answer(monkeypatch):
+    install_github_fixture(monkeypatch, live_fixture())
+    fixture = rejected_1612_fixture()
+    packet = fixture["packet"]
+
+    result = review.annotate_unrunnable_premises(packet)
+
+    assert result is packet
+    premise = packet["plan_premises"][0]["premises"][0]
+    assert premise["deferred_answer"] == fixture["expected_deferred_answer"]
+    assert "Probe the parent plan" in fixture["rejected_requirement"]
+
+
+def test_lister_requirement_is_normalized_to_the_verified_deferral():
+    fixture = rejected_1612_fixture()
+    packet = fixture["packet"]
+    packet["plan_premises"][0]["premises"][0]["deferred_answer"] = (
+        fixture["expected_deferred_answer"])
+    probe = fixture["rejected_requirement"]
+
+    result = review.normalize_plan_premise_requirements(packet, [probe])
+
+    assert result == [
+        "Defer the inferred premise 'The split framer may itself still go "
+        "silent' to its evidence pointer 'ticket 4, #1600, checks' until "
+        "ticket #1598 is complete."
+    ]
+    assert all("Probe the parent plan" not in row for row in result)
+
+
+def test_only_matching_canonical_probe_is_replaced():
+    fixture = rejected_1612_fixture()
+    packet = fixture["packet"]
+    premise = packet["plan_premises"][0]["premises"][0]
+    premise["claim"] = "CI"
+    premise["deferred_answer"] = fixture["expected_deferred_answer"]
+    probe = (
+        "Probe the parent plan #1581 premise labelled inferred against live "
+        "evidence using its evidence pointer: 'CI' (evidence pointer: {}); "
+        "cite support or contradiction, and record unsure if unresolved."
+    ).format(premise["evidence"])
+    wrong_pointer_probe = probe.replace(
+        premise["evidence"], "ticket #1700, checks")
+    acceptance = 'CI check "Run the suite" passes on head'
+
+    result = review.normalize_plan_premise_requirements(
+        packet, [acceptance, wrong_pointer_probe, probe])
+
+    assert acceptance in result
+    assert wrong_pointer_probe in result
+    assert probe not in result
+    assert "Defer the inferred premise 'CI'" in result[-1]
+
+
+def test_verified_deferral_does_not_remain_unsure_at_judgement():
+    fixture = rejected_1612_fixture()
+    packet = fixture["packet"]
+    packet["plan_premises"][0]["premises"][0]["deferred_answer"] = (
+        fixture["expected_deferred_answer"])
+    requirement = review.normalize_plan_premise_requirements(
+        packet, [fixture["rejected_requirement"]])[0]
+
+    result = review.mark_verified_premise_requirements(packet, [{
+        "requirement": requirement,
+        "status": "unsure",
+        "evidence": "the model could not resolve this",
+    }])
+
+    assert result == [{
+        "requirement": requirement,
+        "status": "met",
+        "evidence": (
+            "Verified packet deferral: the inferred premise's evidence "
+            "pointer and reviewed ticket match its live deferred_answer."),
+    }]
+
+
+def test_unverified_deferred_fields_keep_the_probe_requirement():
+    fixture = rejected_1612_fixture()
+    packet = fixture["packet"]
+    packet["plan_premises"][0]["premises"][0]["deferred_answer"] = {
+        **fixture["expected_deferred_answer"],
+        "reviewed_ticket": REPO + "#1597",
+    }
+
+    assert review.normalize_plan_premise_requirements(
+        packet, [fixture["rejected_requirement"]]) == [
+            fixture["rejected_requirement"]]
+
+
+@pytest.mark.parametrize("label", ["measured", "documented"])
+def test_unrunnable_measured_and_documented_premises_are_label_errors(
+        monkeypatch, label):
+    install_github_fixture(monkeypatch, live_fixture())
+    packet = rejected_1612_fixture()["packet"]
+    premise = packet["plan_premises"][0]["premises"][0]
+    premise["label"] = label
+
+    review.annotate_unrunnable_premises(packet)
+
+    assert "deferred_answer" not in premise
+    assert premise["label_error"] == {
+        "status": "verified",
+        "label": label,
+        "evidence_pointer": "ticket 4, #1600, checks",
+        "reviewed_ticket": REVIEWED,
+        "reason": (
+            "live issue state shows the named evidence ticket is open and "
+            "cannot run before the reviewed ticket is complete"),
+    }
+
+
+@pytest.mark.parametrize("label", ["measured", "documented"])
+def test_verified_forward_label_error_becomes_a_canonical_rejection(
+        monkeypatch, label):
+    install_github_fixture(monkeypatch, live_fixture())
+    fixture = rejected_1612_fixture()
+    packet = fixture["packet"]
+    premise = packet["plan_premises"][0]["premises"][0]
+    premise["label"] = label
+    review.annotate_unrunnable_premises(packet)
+
+    probe = fixture["rejected_requirement"].replace(
+        "labelled inferred", "labelled {}".format(label))
+    result = review.normalize_plan_premise_requirements(
+        packet, [probe])
+
+    assert result == [
+        "Reject the {} premise 'The split framer may itself still go silent' "
+        "as a labeling error because its evidence pointer 'ticket 4, #1600, "
+        "checks' names an open ticket that cannot run before ticket #1598 is "
+        "complete.".format(label)
+    ]
+    marked = review.mark_verified_premise_requirements(packet, [{
+        "requirement": result[0],
+        "status": "unsure",
+        "evidence": "the evidence is not available yet",
+    }])
+    assert marked == [{
+        "requirement": result[0],
+        "status": "unmet",
+        "evidence": (
+            "Verified labeling error: the measured/documented premise's "
+            "evidence pointer names an open ticket that cannot run before "
+            "the reviewed ticket is complete."),
+    }]
+
+
+def test_unverified_label_error_fields_keep_the_model_probe():
+    fixture = rejected_1612_fixture()
+    packet = fixture["packet"]
+    premise = packet["plan_premises"][0]["premises"][0]
+    premise.update({
+        "label": "measured",
+        "label_error": {
+            "status": "verified",
+            "label": "measured",
+            "evidence_pointer": "ticket 4, #1600, checks",
+            "reviewed_ticket": REPO + "#1597",
+        },
+    })
+
+    assert review.normalize_plan_premise_requirements(
+        packet, [fixture["rejected_requirement"]]) == [
+            fixture["rejected_requirement"]]
+
+
+def test_a_checkable_inferred_pointer_keeps_the_probe_path(monkeypatch):
+    install_github_fixture(monkeypatch, live_fixture())
+    packet = rejected_1612_fixture()["packet"]
+    premise = packet["plan_premises"][0]["premises"][0]
+    premise["evidence"] = "#1700"
+
+    review.annotate_unrunnable_premises(packet)
+
+    assert "deferred_answer" not in premise
+
+
+def test_merged_pr_evidence_pointer_keeps_the_probe_path(monkeypatch):
+    source = json.loads((ROOT / "tests" / "fixtures" /
+                         "review_1626_1613_live_evidence.json").read_text())
+    records = source["records"]
+    assert records["pr_1613"]["approval"]["blocking"] == []
+    assert records["pr_1613"]["approval"]["verdict"] == "approved"
+    assert records["pr_1612_rejection"]["verdict"] == "rejected"
+    assert (records["pr_1612_rejection"]["reviewed_at"]
+            < records["pr_1613"]["approval"]["reviewed_at"]
+            < records["pr_1613"]["merged_at"]
+            < records["plan_1581_edit"]["provenance_at"])
+
+    data = live_fixture()
+    data["issues"].update(source["issue_states"])
+    install_github_fixture(monkeypatch, data)
+
+    packet = rejected_1612_fixture()["packet"]
+    packet["ticket"] = {"ref": source["reviewed_ticket"], "number": 1652}
+    packet["plan_premises"][0].update({
+        "parent_ref": REPO + "#1626",
+        "ticket_refs": [source["reviewed_ticket"]],
+    })
+    premise = packet["plan_premises"][0]["premises"][0]
+    premise.update(source["plan_premise"])
+    probe = (
+        "Probe the parent plan #1626 premise labelled inferred against live "
+        "evidence using its evidence pointer: '{}' (evidence pointer: {}); "
+        "cite support or contradiction, and record unsure if unresolved."
+    ).format(premise["claim"], premise["evidence"])
+
+    review.annotate_unrunnable_premises(packet)
+
+    assert "deferred_answer" not in premise
+    assert review.normalize_plan_premise_requirements(packet, [probe]) == [probe]
 
 
 def test_later_same_plan_ticket_is_unrunnable_without_dependency_edges(

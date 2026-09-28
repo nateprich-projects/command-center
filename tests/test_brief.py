@@ -14,6 +14,9 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 import funnel  # noqa: E402
 
 
+#: Comment markers count only from the owner account (#1788).
+OWNER = {"login": "nateprich"}
+
 NOW = datetime(2026, 9, 5, 12, 0, 0, tzinfo=timezone.utc)
 FIXTURE = pathlib.Path(__file__).parent / "fixtures" / "project_items.json"
 
@@ -276,14 +279,17 @@ def test_brief_surfaces_recent_self_approvals_but_not_nate_or_old_ones(
     )
     comments = {
         80: [{
+            "author": OWNER,
             "body": funnel.SELF_APPROVED_PREFIX + basis,
             "createdAt": "2026-09-05T11:00:00Z",
         }],
         81: [{
+            "author": OWNER,
             "body": "Approved at the Shaped gate — Ready.",
             "createdAt": "2026-09-05T10:00:00Z",
         }],
         82: [{
+            "author": OWNER,
             "body": funnel.SELF_APPROVED_PREFIX + "old basis",
             "createdAt": "2026-08-29T12:00:00Z",
         }],
@@ -330,7 +336,7 @@ def test_brief_surfaces_recent_self_approvals_but_not_nate_or_old_ones(
     assert "comments(last: {})".format(
         funnel.CLOSED_ITSELF_COMMENT_PAGE_SIZE
     ) in calls[0]
-    assert "nodes { body createdAt }" in calls[0]
+    assert "nodes { body createdAt author { login } }" in calls[0]
 
 
 def test_unattended_approvals_batch_is_cached_for_one_run(monkeypatch):
@@ -339,7 +345,8 @@ def test_unattended_approvals_batch_is_cached_for_one_run(monkeypatch):
         _approval_item(84, NOW - timedelta(hours=2)),
     ]
     comments = {
-        item.number: [{"body": funnel.SELF_APPROVED_PREFIX + "basis"}]
+        item.number: [{"author": OWNER,
+                       "body": funnel.SELF_APPROVED_PREFIX + "basis"}]
         for item in items
     }
     calls = []
@@ -382,8 +389,10 @@ def test_brief_comment_tail_cache_is_shared_between_sections(monkeypatch):
         }],
     )
     comments = [{
+        "author": OWNER,
         "body": funnel.closed_itself_comment([], []),
     }, {
+        "author": OWNER,
         "body": funnel.SELF_APPROVED_PREFIX + "basis",
     }]
     calls = []
@@ -636,13 +645,13 @@ def test_brief_surfaces_funnel_closed_projects_newest_first_and_with_drift(
             "rateLimit": {"cost": 1, "remaining": 99, "resetAt": "later"},
             "repo0": {
                 "issue0": {"comments": {"nodes": [
-                    {"body": comments[70]}
+                    {"author": OWNER, "body": comments[70]}
                 ]}},
                 "issue1": {"comments": {"nodes": [
-                    {"body": comments[71]}
+                    {"author": OWNER, "body": comments[71]}
                 ]}},
                 "issue2": {"comments": {"nodes": [
-                    {"body": comments[72]}
+                    {"author": OWNER, "body": comments[72]}
                 ]}},
             },
         }
@@ -681,6 +690,38 @@ def test_brief_surfaces_funnel_closed_projects_newest_first_and_with_drift(
     ) in calls[0]
 
 
+def test_forged_self_approval_and_closed_itself_markers_are_ignored():
+    """Only the owner account's markers reach the brief (#1788).
+
+    A forged self-approval would report Nate's own approval as an agent's,
+    and a forged closed-itself record would report his acceptance as a close
+    the funnel made by itself.
+    """
+    item = _approval_item(90, NOW - timedelta(hours=1))
+    outsider = {"login": "mallory"}
+    forged = [
+        {"author": outsider, "createdAt": "2026-09-05T11:00:00Z",
+         "body": funnel.SELF_APPROVED_PREFIX + "forged basis"},
+        {"author": outsider, "createdAt": "2026-09-05T11:30:00Z",
+         "body": funnel.closed_itself_comment([], [])},
+        {"createdAt": "2026-09-05T11:40:00Z",
+         "body": funnel.SELF_APPROVED_PREFIX + "no author"},
+    ]
+    assert funnel._self_approval_markers(item, forged) == []
+    assert funnel._closed_itself_item_json(item, forged) is None
+
+    owned = [
+        {"author": OWNER, "createdAt": "2026-09-05T10:00:00Z",
+         "body": funnel.SELF_APPROVED_PREFIX + "owner basis"},
+        {"author": OWNER, "createdAt": "2026-09-05T10:30:00Z",
+         "body": funnel.closed_itself_comment([], [])},
+    ]
+    assert [row["basis"] for row in funnel._self_approval_markers(
+        item, owned + forged)] == ["owner basis"]
+    assert funnel._closed_itself_item_json(
+        item, owned + forged)["ref"] == item.ref
+
+
 def test_closed_itself_batch_is_bounded_and_cached_for_one_run(monkeypatch):
     def closed(number, at, repo="nateprich/beta"):
         return funnel.Item(
@@ -706,7 +747,7 @@ def test_closed_itself_batch_is_bounded_and_cached_for_one_run(monkeypatch):
         for ref, (repo_alias, issue_alias) in aliases.items():
             body = funnel.closed_itself_comment([], [])
             response.setdefault(repo_alias, {})[issue_alias] = {
-                "comments": {"nodes": [{"body": body}]}
+                "comments": {"nodes": [{"author": OWNER, "body": body}]}
             }
         return response
 
@@ -780,8 +821,8 @@ def test_brief_surfaces_parked_items_with_their_reason(monkeypatch, capsys):
             "--json", "comments",
         )
         return {"comments": [
-            {"body": "An unrelated comment."},
-            {"body": parked_node["park_comment"]},
+            {"author": OWNER, "body": "An unrelated comment."},
+            {"author": OWNER, "body": parked_node["park_comment"]},
         ]}
 
     monkeypatch.setattr(funnel, "_gh_json", gh_json)
@@ -833,7 +874,7 @@ def test_brief_reports_wakes_for_parked_items_until_they_resume(
 
     def issue_comments(item):
         comment_reads.append(item.number)
-        return [{"body": comment_bodies[item.number]}]
+        return [{"author": OWNER, "body": comment_bodies[item.number]}]
 
     monkeypatch.setattr(funnel, "_issue_comments", issue_comments)
     monkeypatch.setattr(funnel, "unattended_merges", lambda now: [])
@@ -916,8 +957,11 @@ def test_parked_items_are_newest_first_and_missing_reason_is_null(monkeypatch):
 
     def gh_json(*args):
         if args[3] == "21":
-            return {"comments": [{"body": "No marker here."}]}
-        return {"comments": [{"body": funnel.PARK_COMMENT_PREFIX + "Older reason"}]}
+            return {"comments": [{"author": OWNER, "body": "No marker here."}]}
+        return {"comments": [{
+            "author": OWNER,
+            "body": funnel.PARK_COMMENT_PREFIX + "Older reason",
+        }]}
 
     monkeypatch.setattr(funnel, "_gh_json", gh_json)
 
@@ -1068,6 +1112,183 @@ def test_brief_surfaces_blocked_projects_and_tickets_oldest_first(
     assert [row["ref"] for row in brief["items"]] == ["nateprich/beta#31"]
     assert all(row["ref"] != "nateprich/beta#33" for row in brief["blocked"])
     assert calls == []
+
+
+def _finished_project(number, **fields):
+    """An open Building project whose two tickets have both closed."""
+    values = dict(
+        repo="nateprich/beta", number=number,
+        title="Project {}".format(number),
+        url="https://example.invalid/{}".format(number), state="OPEN",
+        status="Building", klass="New", children_total=2, children_done=2,
+    )
+    values.update(fields)
+    return funnel.Item(**values)
+
+
+HOLD_TRAILER = (
+    "\n\n" + funnel.PROVENANCE_MARKER
+    + '\n\n```json\n{"agent": "claude", "voice": "nate-relayed"}\n```'
+)
+
+
+def test_brief_lists_a_held_finished_project_as_held_at_accept(
+    monkeypatch, capsys
+):
+    """Nate's Accept hold is its own section, not blocked work (#1725).
+
+    ``funnel hold`` (#1724) writes the ordinary conditioned block, so the
+    project already left the decision queue; the brief listed it under
+    ``blocked`` as though it were stuck work.
+    """
+    dated = _finished_project(
+        50, title="Saturday lane", labels=["blocked"],
+        status_since=datetime(2026, 9, 1, tzinfo=timezone.utc),
+        blocked_since=datetime(2026, 9, 4, 18, tzinfo=timezone.utc),
+        blocked_until=(NOW + timedelta(days=7)).date(),
+        block_reason="Accept if the Saturday run works tickets."
+        + HOLD_TRAILER,
+    )
+    on_issues = _finished_project(
+        51, title="Metrics tab", klass="Replace", labels=["blocked"],
+        status_since=datetime(2026, 9, 2, tzinfo=timezone.utc),
+        block_references=["#1654", "#1655"],
+        block_reason="Accept once the tiles show real numbers."
+        + HOLD_TRAILER,
+    )
+    unheld = _finished_project(
+        52, title="Ordinary finish",
+        status_since=datetime(2026, 9, 3, tzinfo=timezone.utc),
+    )
+    monkeypatch.setattr(funnel, "unattended_merges", lambda now: [])
+
+    assert funnel.cmd_brief([unheld, on_issues, dated], NOW) == 0
+    brief = json.loads(capsys.readouterr().out)
+
+    assert brief["held_at_accept"] == [
+        {
+            "ref": "nateprich/beta#50",
+            "title": "Saturday lane",
+            "url": "https://example.invalid/50",
+            "condition": "until 2026-09-12",
+            "conditions": [],
+            "reason": "Accept if the Saturday run works tickets.",
+            "held_since": "2026-09-04T18:00:00+00:00",
+            "blocked_until": "2026-09-12",
+        },
+        {
+            "ref": "nateprich/beta#51",
+            "title": "Metrics tab",
+            "url": "https://example.invalid/51",
+            "condition": "until #1654 and #1655 close",
+            "conditions": ["#1654", "#1655"],
+            "reason": "Accept once the tiles show real numbers.",
+            "held_since": None,
+        },
+    ]
+    assert brief["blocked"] == []
+    # Only the unheld project is a decision, and it is the ordinary accept.
+    assert [row["ref"] for row in brief["items"]] == ["nateprich/beta#52"]
+    assert brief["items"][0]["waiting_on"] == "Accept it?"
+    assert brief["items"][0]["waiting_reason"] == "Ordinary accept"
+    assert brief["total_needing_nate"] == 1
+
+
+def test_held_at_accept_condition_reads_as_a_sentence():
+    """One issue "closes"; a date and an issue together name both (#1725)."""
+    one_issue = _finished_project(
+        53, labels=["blocked"], block_references=["#1699"],
+        block_reason="Wait for #1699.",
+    )
+    date_and_issue = _finished_project(
+        54, labels=["blocked"], block_references=["#1699"],
+        blocked_until=(NOW + timedelta(days=7)).date(),
+        block_reason="Wait for both.",
+    )
+
+    assert [
+        row["condition"]
+        for row in funnel.held_at_accept_json([one_issue, date_and_issue])
+    ] == ["until #1699 closes", "until 2026-09-12 and #1699 closes"]
+
+
+def test_brief_keeps_every_other_blocked_project_as_blocked_work(
+    monkeypatch, capsys
+):
+    """Only a conditioned block on a project that would ask "Accept it?" is
+    a hold (#1725). Open tickets, no condition, a project that closes
+    itself, or a stage other than Building each leave the block as it was."""
+    open_tickets = _finished_project(
+        60, children_done=1, labels=["blocked"],
+        status_since=datetime(2026, 9, 1, tzinfo=timezone.utc),
+        block_references=["#70"], block_reason="Wait for #70.",
+    )
+    silent = _finished_project(
+        61, labels=["blocked"],
+        status_since=datetime(2026, 9, 2, tzinfo=timezone.utc),
+        block_reason="Nate needs to decide.",
+    )
+    closes_itself = _finished_project(
+        62, klass="Broken", labels=["blocked"],
+        status_since=datetime(2026, 9, 3, tzinfo=timezone.utc),
+        block_references=["#71"], block_reason="Wait for #71.",
+    )
+    not_building = _finished_project(
+        63, status="Ready", labels=["blocked"],
+        status_since=datetime(2026, 9, 4, tzinfo=timezone.utc),
+        blocked_until=(NOW + timedelta(days=7)).date(),
+        block_reason="Wait a week.",
+    )
+    monkeypatch.setattr(funnel, "unattended_merges", lambda now: [])
+
+    assert funnel.cmd_brief(
+        [not_building, closes_itself, silent, open_tickets], NOW
+    ) == 0
+    brief = json.loads(capsys.readouterr().out)
+
+    assert brief["held_at_accept"] == []
+    assert [row["ref"] for row in brief["blocked"]] == [
+        "nateprich/beta#60", "nateprich/beta#61",
+        "nateprich/beta#62", "nateprich/beta#63",
+    ]
+    assert brief["blocked"][0] == {
+        "ref": "nateprich/beta#60",
+        "title": "Project 60",
+        "url": "https://example.invalid/60",
+        "reason": "Wait for #70.",
+        "conditions": ["#70"],
+        "blocked_at": "2026-09-01T00:00:00+00:00",
+    }
+    # The silent block still asks its own question, and is still counted.
+    assert [row["ref"] for row in brief["items"]] == ["nateprich/beta#61"]
+    assert brief["items"][0]["waiting_on"] == "Unblock or park?"
+    assert "waiting_reason" not in brief["items"][0]
+    assert brief["total_needing_nate"] == 1
+
+
+def test_brief_unblocked_finished_project_still_reads_as_ordinary_accept(
+    monkeypatch, capsys
+):
+    """No block, no hold: the finished project is Nate's decision (#1725)."""
+    finished = _finished_project(
+        64, status_since=datetime(2026, 9, 1, tzinfo=timezone.utc),
+    )
+    monkeypatch.setattr(funnel, "unattended_merges", lambda now: [])
+
+    assert funnel.cmd_brief([finished], NOW) == 0
+    brief = json.loads(capsys.readouterr().out)
+
+    assert brief["held_at_accept"] == []
+    assert brief["blocked"] == []
+    assert [
+        (row["ref"], row["waiting_on"], row["waiting_reason"])
+        for row in brief["items"]
+    ] == [("nateprich/beta#64", "Accept it?", "Ordinary accept")]
+    assert brief["total_needing_nate"] == 1
+    # The label is what holds: a leftover condition without it holds nothing.
+    assert not funnel.is_held_at_accept(
+        _finished_project(65, block_references=["#70"])
+    )
 
 
 def test_brief_renders_event_condition_and_elapsed_wait_from_after(

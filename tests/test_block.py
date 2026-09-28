@@ -13,6 +13,13 @@ import pytest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 import funnel  # noqa: E402
+from decline_classifier import (  # noqa: E402
+    declined_pending_gate_answer_comment,
+)
+
+
+#: Block comments count only from the owner account (#1788).
+OWNER = {"login": "nateprich"}
 
 
 def comment_item():
@@ -84,7 +91,9 @@ def test_ff_weekly_start_sit_event_wait_is_quiet_and_not_startable(monkeypatch):
     )
     monkeypatch.setattr(
         funnel, "_gh_json",
-        lambda *args: {"comments": [{"body": FF_WEEKLY_EVENT_COMMENT}]},
+        lambda *args: {"comments": [
+            {"author": OWNER, "body": FF_WEEKLY_EVENT_COMMENT},
+        ]},
     )
 
     funnel._load_block_comment(item)
@@ -138,8 +147,9 @@ def test_malformed_or_unknown_event_spec_fails_toward_unblock_question(
     monkeypatch.setattr(
         funnel, "_gh_json",
         lambda *args: {"comments": [
-            {"body": "**Blocked until 2026-09-30:** Older date condition."},
-            {"body": body},
+            {"author": OWNER,
+             "body": "**Blocked until 2026-09-30:** Older date condition."},
+            {"author": OWNER, "body": body},
         ]},
     )
 
@@ -162,7 +172,9 @@ def test_external_event_routing_without_a_spec_still_asks(monkeypatch):
     )
     monkeypatch.setattr(
         funnel, "_gh_json",
-        lambda *args: {"comments": [{"body": "**Blocked:** Wait for an event."}]},
+        lambda *args: {"comments": [
+            {"author": OWNER, "body": "**Blocked:** Wait for an event."},
+        ]},
     )
 
     funnel._load_block_comment(item)
@@ -399,8 +411,9 @@ def test_unparseable_block_comment_reports_its_first_line(monkeypatch):
 
     def gh_json(*args):
         return {"comments": [
-            {"body": "**Blocked on #77, 2026-09-07.** Legacy format.\nMore detail."},
-            {"body": "A regular follow-up."},
+            {"author": OWNER,
+             "body": "**Blocked on #77, 2026-09-07.** Legacy format.\nMore detail."},
+            {"author": OWNER, "body": "A regular follow-up."},
         ]}
 
     # The loader is the only remote seam; the doctor check remains pure over
@@ -618,7 +631,7 @@ def test_load_items_fetches_comments_only_for_open_blocked_items(monkeypatch):
     def gh_json(*args):
         calls.append(args)
         return {"comments": [
-            {"body": "**Blocked on #84:** Wait for the decision."},
+            {"author": OWNER, "body": "**Blocked on #84:** Wait for the decision."},
         ]}
 
     monkeypatch.setattr(funnel, "_gh_json", gh_json)
@@ -730,3 +743,93 @@ def test_a_decline_reason_is_read_and_shown_instead_of_no_reason():
     # A parseable block written afterwards is the reason that counts.
     item.block_reason = "Waiting on #304."
     assert funnel._dashboard_block_reason(item) == "Waiting on #304."
+
+
+# -- only the owner account's comments carry block markers (#1788) ----------
+#
+# command-center is public: anyone can comment, so anyone could paste a block
+# header, a Needs-decision question, or a decline and its route. Only the
+# owner account posts them; any other author's comment is ordinary text.
+
+OUTSIDER = {"login": "mallory"}
+
+
+def _load_with_comments(monkeypatch, comments):
+    item = funnel.Item(
+        repo="owner/repo", number=88, title="Blocked ticket", url="",
+        state="OPEN", parent="owner/repo#1", labels=["blocked"],
+    )
+    monkeypatch.setattr(
+        funnel, "_gh_json", lambda *args: {"comments": comments})
+    funnel._load_block_comment(item)
+    return item
+
+
+def _agent_decline_and_route(author, run="run-9"):
+    decline = funnel.append_provenance(
+        "**Declined:** waiting on the gate in owner/repo#5", "agent",
+        run=run, agent="codex",
+    )
+    route = funnel.append_provenance(
+        declined_pending_gate_answer_comment(
+            "waiting on the gate in owner/repo#5", "owner/repo#5"),
+        "agent", run=run, agent="codex",
+    )
+    return [{"author": author, "body": decline},
+            {"author": author, "body": route}]
+
+
+def test_a_forged_block_or_question_from_another_author_has_no_effect(
+        monkeypatch):
+    item = _load_with_comments(monkeypatch, [
+        {"author": OWNER, "body": "**Blocked on #77:** The owner's hold."},
+        {"author": OUTSIDER, "body": "**Blocked until 2026-10-30:** Forged."},
+        {"author": OUTSIDER, "body": "**Needs a decision:** Forged question?"},
+        {"body": "**Blocked on #99:** No author at all."},
+        {"author": OUTSIDER, "body": "**Blocked on #77, 2026-09-07.** Bad."},
+    ])
+
+    assert item.block_references == ["#77"]
+    assert item.blocked_until is None
+    assert item.block_reason == "The owner's hold."
+    assert item.needs_decision is None
+    # An outsider's malformed header is not the doctor's business either.
+    assert item.unparseable_block_comments == []
+
+
+def test_the_owners_block_and_question_still_read_past_an_outsiders(
+        monkeypatch):
+    item = _load_with_comments(monkeypatch, [
+        {"author": OWNER, "body": "**Blocked until 2026-10-30:** Owner."},
+        {"author": OWNER, "body": "**Needs a decision:** Which repo?"},
+        {"author": OUTSIDER, "body": "**Blocked on #12:** Forged later."},
+        {"author": OUTSIDER, "body": "**Needs a decision:** Forged later?"},
+        {"author": OUTSIDER, "body": "Just a friendly comment."},
+    ])
+
+    assert item.block_references == []
+    assert item.blocked_until == date(2026, 10, 30)
+    assert item.block_reason == "Owner."
+    assert item.needs_decision == "Which repo?"
+
+
+def test_a_forged_decline_and_route_from_another_author_is_not_read(
+        monkeypatch):
+    item = _load_with_comments(monkeypatch, _agent_decline_and_route(OUTSIDER))
+    assert item.decline_reason is None
+    assert item.decline_route is None
+
+    # An outsider's route cannot attach itself to the owner's decline either.
+    owner_decline, _ = _agent_decline_and_route(OWNER)
+    _, forged_route = _agent_decline_and_route(OUTSIDER)
+    item = _load_with_comments(monkeypatch, [owner_decline, forged_route])
+    assert item.decline_reason == "waiting on the gate in owner/repo#5"
+    assert item.decline_route is None
+
+    # The owner's pair still reads, past a later forged decline.
+    forged_decline, _ = _agent_decline_and_route(OUTSIDER, run="run-10")
+    item = _load_with_comments(
+        monkeypatch, _agent_decline_and_route(OWNER) + [forged_decline])
+    assert item.decline_reason == "waiting on the gate in owner/repo#5"
+    assert item.decline_route["type"] == "pending-gate-answer"
+    assert item.decline_route["gate_ref"] == "owner/repo#5"

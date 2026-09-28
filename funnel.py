@@ -22,6 +22,7 @@ from collections import namedtuple
 from concurrent.futures import ThreadPoolExecutor
 import errno
 import glob
+import hashlib
 import hmac
 import inspect
 import io
@@ -654,6 +655,7 @@ BRIEF_SECTION_BUDGETS = {
     # 1091-item board at 20.93 s, 25.17 s, 22.94 s.
     "cleared_blocks": 30.0,
     "blocked": 0.25,
+    "held_at_accept": 0.25,
     "human_steps": 0.25,
     "machine_local_steps": 0.25,
     "blocked_human_steps": 0.25,
@@ -708,6 +710,7 @@ BRIEF_PURE_SECTIONS = frozenset({
     "counts_by_gate",
     "in_motion",
     "blocked",
+    "held_at_accept",
     "human_steps",
     "machine_local_steps",
     "blocked_human_steps",
@@ -781,6 +784,7 @@ class Item:
     blocked_until: Optional[date] = None
     needs_decision: Optional[str] = None
     decline_reason: Optional[str] = None
+    decline_route: Optional[Dict[str, object]] = None
     unparseable_block_comments: List[str] = field(default_factory=list)
     block_comments_error: Optional[str] = None
     satisfied_block_record: Optional[Dict[str, object]] = None
@@ -1052,6 +1056,36 @@ def _acceptance_waiting_reason(
     return "Ordinary accept"
 
 
+def is_held_at_accept(item: Item) -> bool:
+    """Whether a finished project is held at Accept by Nate (#1725).
+
+    Nate's hold is recorded in the ordinary blocked form (``funnel hold``,
+    #1724): the ``blocked`` label with a ``**Blocked until ...:**`` or
+    ``**Blocked on #N:**`` comment. That named condition already keeps the
+    project out of ``total_needing_nate`` and out of the "Ordinary accept"
+    list, because ``gate_question`` asks nothing of a conditioned block; what
+    it did not do is say so. The brief listed the hold as blocked work.
+
+    Only a project that would otherwise ask "Accept it?" is held there: open,
+    at Building, every ticket closed, and not one that closes itself (the
+    unattended close ignores ``blocked``, so such a block holds nothing). A
+    block with no date or issue condition still asks "Unblock or park?", and
+    an event condition is an agent's wait, so both stay blocked work.
+    """
+    return (
+        item.state == "OPEN"
+        and item.parent is None
+        and item.status == "Building"
+        and item.is_blocked
+        and item.children_all_closed
+        and not _can_close_itself(item)
+        and (
+            bool(item.block_references)
+            or _item_blocked_until(item) is not None
+        )
+    )
+
+
 def question_since(item: Item) -> Optional[datetime]:
     """When the item's current question became live.
 
@@ -1292,14 +1326,22 @@ RISK_LINE = re.compile(r"^\s*Risk:\s*(standard|escalated)\b(.*)$",
 #: Category names and `lock`, `park`, `close` or `delete` alone stay ordinary
 #: subject matter: this repository discusses them even when no risky action is
 #: proposed, and matching them would keep the standard engine from ever running.
+# Keep the credentials matcher vocabulary in one place. The direct-action
+# table below reuses these exact noun fragments so it cannot add synonyms.
+_CREDENTIALS_MATCHER_NAMED_TERMS = (
+    r"api[- ]key|access token|client secret|credential store|password|private key"
+)
+_CREDENTIALS_MATCHER_ACTION_NOUN = r"credentials?"
+
 ESCALATION_PATTERNS = {
-    "credentials": r"(?<!no )\b(api[- ]key|access token|client secret|"
-                   r"credential store|password|private key)\b|"
-                   r"(?<!not )(?<!never )\b(?:access|chang|creat|enter|expos|"
-                   r"handl|load|read|replac|revok|rotat|stor|suppl|touch|"
-                   r"use|uses|used|using|writ)\w*"
-                   r"(?:\s+(?!(?:no|not|nothing)\b)[\w'’-]+){0,4}"
-                   r"\s+credentials?\b",
+    "credentials": (
+        r"(?<!no )\b(" + _CREDENTIALS_MATCHER_NAMED_TERMS + r")\b|"
+        r"(?<!not )(?<!never )\b(?:access|chang|creat|enter|expos|"
+        r"handl|load|read|replac|revok|rotat|stor|suppl|touch|"
+        r"use|uses|used|using|writ)\w*"
+        r"(?:\s+(?!(?:no|not|nothing)\b)[\w'’-]+){0,4}"
+        r"\s+" + _CREDENTIALS_MATCHER_ACTION_NOUN + r"\b"
+    ),
     "authorisation": r"(?<!no )(?<!not )(?<!never )\b("
                      r"authoris(?:e|es|ed|ing)|authoriz(?:e|es|ed|ing)|"
                      r"permission model|access control|oauth|scope grant)\b|"
@@ -1522,6 +1564,19 @@ _PLAN_REJECTED_INLINE_RE = re.compile(
 )
 
 _PLAN_QUOTE_PAIRS = {"\"": "\"", "“": "”", "‘": "’", "«": "»"}
+# These literal forms are already used by the credentials proposal matcher.
+# The direct-action table below shares this list, like the existing direct
+# action entries use their category's established verbs.
+_CREDENTIALS_PLAN_ACTION_FORMS = (
+    r"access|accesses|accessed|accessing|change|changes|changed|changing|"
+    r"create|creates|created|creating|expose|exposes|exposed|exposing|"
+    r"grant|grants|granted|granting|handle|handles|handled|handling|"
+    r"load|loads|loaded|loading|read|reads|reading|replace|replaces|"
+    r"replaced|replacing|revoke|revokes|revoked|revoking|rotate|rotates|"
+    r"rotated|rotating|store|stores|stored|storing|supply|supplies|"
+    r"supplied|supplying|touch|touches|touched|touching|update|updates|"
+    r"updated|updating|use|uses|used|using|write|writes|wrote|written|writing"
+)
 _PLAN_PROPOSAL_ACTIONS = {
     # Every inflection is spelled out: an optional suffix on a stem that
     # ends in "e" matches "changeing", never "changing" (#1681 review).
@@ -1537,22 +1592,21 @@ _PLAN_PROPOSAL_ACTIONS = {
         r"update|updates|updated|updating|use|uses|used|using)\b",
         re.IGNORECASE,
     ),
+    # Spelled out for the same reason: "use(?:s|d|ing)?" missed "using" and
+    # "rotating" and matched "useing" (#1722).
     "credentials": re.compile(
-        r"\b(?:access(?:es|ed|ing)?|change(?:s|d|ing)?|create(?:s|d|ing)?|"
-        r"expose(?:s|d|ing)?|grant(?:s|ed|ing)?|handle(?:s|d|ing)?|"
-        r"load(?:s|ed|ing)?|read(?:s|ing)?|replace(?:s|d|ing)?|"
-        r"revoke(?:s|d|ing)?|rotate(?:s|d|ing)?|store(?:s|d|ing)?|"
-        r"supply|supplies|supplied|supplying|touch(?:es|ed|ing)?|"
-        r"use(?:s|d|ing)?|write|writes|written|writing|"
-        r"update(?:s|d|ing)?)\b",
+        r"\b(?:" + _CREDENTIALS_PLAN_ACTION_FORMS + r")\b",
         re.IGNORECASE,
     ),
     "data-migration": re.compile(
-        r"\b(?:apply|applies|applied|applying|convert(?:s|ed|ing)?|"
-        r"copy|copies|copied|copying|execute(?:s|d|ing)?|import(?:s|ed|ing)?|"
-        r"load(?:s|ed|ing)?|perform(?:s|ed|ing)?|populate(?:s|d|ing)?|"
-        r"rebuild(?:s|ing)?|rebuilt|replay(?:s|ed|ing)?|run|runs|ran|"
-        r"seed(?:s|ed|ing)?|transform(?:s|ed|ing)?|update(?:s|d|ing)?)\b",
+        r"\b(?:apply|applies|applied|applying|convert|converts|converted|"
+        r"converting|copy|copies|copied|copying|execute|executes|executed|"
+        r"executing|import|imports|imported|importing|load|loads|loaded|"
+        r"loading|perform|performs|performed|performing|populate|populates|"
+        r"populated|populating|rebuild|rebuilds|rebuilt|rebuilding|replay|"
+        r"replays|replayed|replaying|run|runs|ran|running|seed|seeds|seeded|"
+        r"seeding|transform|transforms|transformed|transforming|update|"
+        r"updates|updated|updating)\b",
         re.IGNORECASE,
     ),
     "destructive": re.compile(
@@ -1595,7 +1649,23 @@ _PLAN_DIRECT_ACTIONS = {
         r"(?:\s+[\w'’-]+){0,4}\s+permissions?)\b",
         re.IGNORECASE,
     ),
-    "data-migration": re.compile(r"\b(?:backfill|migrat\w*)\b", re.IGNORECASE),
+    # "migrat\w*" also took "migrateing" (#1722). "migration" stays: it
+    # carries the proposal in a clause-led "Schema migration ..." item.
+    "data-migration": re.compile(
+        r"\b(?:backfill|backfills|backfilled|backfilling|migrate|migrates|"
+        r"migrated|migrating|migration)\b",
+        re.IGNORECASE,
+    ),
+    # Like data-migration and authorisation, this category gets a direct
+    # action entry for its own verb-inside-phrase proposal shape. Reuse the
+    # credentials proposal forms and matcher terms verbatim (#1770).
+    "credentials": re.compile(
+        r"\b(?:" + _CREDENTIALS_PLAN_ACTION_FORMS + r")"
+        r"(?:\s+[\w'’-]+){0,4}\s+"
+        r"(?:" + _CREDENTIALS_MATCHER_NAMED_TERMS + r"|"
+        + _CREDENTIALS_MATCHER_ACTION_NOUN + r")\b",
+        re.IGNORECASE,
+    ),
     "destructive": re.compile(
         r"\b(?:force[- ]push|hard[- ]delete|permanently\s+delete|"
         r"drop\s+(?:the\s+)?(?:table|branch)|rewrite\s+history)\b",
@@ -1949,6 +2019,62 @@ def required_tier(title: str, body: str, failed_before: bool = False) -> str:
     return "escalated" if escalation_reasons(title, body, failed_before) else "standard"
 
 
+def _decline_route_withholds_startability(
+    item: Item, by_ref: Dict[str, Item],
+) -> bool:
+    """Keep routed declines out of implementation until their route clears."""
+    route = item.decline_route
+    if not isinstance(route, dict):
+        return False
+    if (
+        item.needs == "agent"
+        and route.get("type") == "unsatisfiable-acceptance"
+    ):
+        if not isinstance(item.body, str):
+            return True
+        current_digest = hashlib.sha256(
+            item.body.encode("utf-8")
+        ).hexdigest()
+        return current_digest == route.get("acceptance_digest")
+    if (
+        item.needs == "external-event"
+        and route.get("type") == "pending-gate-answer"
+    ):
+        gate_ref = route.get("gate_ref")
+        gate = by_ref.get(gate_ref) if isinstance(gate_ref, str) else None
+        return (
+            gate is None
+            or not isinstance(gate.body, str)
+            or parse_gates_answer(gate.body) is None
+        )
+    return False
+
+
+def clear_answered_decline_routes(
+    items: Sequence[Item],
+) -> List[Dict[str, str]]:
+    """Clear Needs after a pending gate answer has been recorded."""
+    by_ref = {item.ref: item for item in items}
+    cleared = []
+    for item in items:
+        route = item.decline_route
+        if (
+            item.state != "OPEN"
+            or item.needs != "external-event"
+            or not isinstance(route, dict)
+            or route.get("type") != "pending-gate-answer"
+            or _decline_route_withholds_startability(item, by_ref)
+        ):
+            continue
+        if not item.item_id:
+            raise GitHubError("{} is not in the Project".format(item.ref))
+        gate_ref = str(route["gate_ref"])
+        write_project_select(item.item_id, "Needs", "none", item.ref)
+        item.needs = "none"
+        cleared.append({"ref": item.ref, "gate_ref": gate_ref})
+    return cleared
+
+
 def _startable_without_repo_readiness(
     item: Item,
     by_ref: Dict[str, Item],
@@ -1965,6 +2091,11 @@ def _startable_without_repo_readiness(
         or item.open_blockers
         or item.children_total
         or needs not in NEEDS_OPTIONS
+        or (
+            needs in ("agent", "external-event")
+            and item.block_comments_error is not None
+        )
+        or (needs == "external-event" and item.decline_route is None)
         # The Needs field is the only capability signal (#826). A
         # claude-code-environment ticket is the middle outcome: Claude Code
         # may work it, while every other requester must leave it in the
@@ -1972,6 +2103,8 @@ def _startable_without_repo_readiness(
         # established for the marker this field replaced.
         or (human or (machine_local and agent != "claude"))
     ):
+        return False
+    if _decline_route_withholds_startability(item, by_ref):
         return False
     if item.ref in awaiting_review:
         return False
@@ -2658,6 +2791,7 @@ def startable(
 def projected_pull_order(
     items: Sequence[Item], now: Optional[datetime] = None,
     paused: Collection[str] = (),
+    finished: Collection[str] = (),
 ) -> List[str]:
     """Every ticket's projected turn, found by running ``startable()`` forward.
 
@@ -2679,6 +2813,11 @@ def projected_pull_order(
     failed runs. The engineers will not take them before the hold lifts, so
     they wait until everything available now has had its turn (Nate,
     2026-09-25: a row must never claim a next step the engineers won't take).
+
+    ``finished`` names tickets ``finished_by_comments`` withholds. No begin
+    takes one until Nate closes it, so it gets no turn at all, and neither
+    does work that waits on it (#1701: the board gave #165 a turn for two
+    weeks while every begin withheld it).
     """
     sim = [copy.copy(item) for item in items]
     by_ref = {item.ref: item for item in sim}
@@ -2719,9 +2858,11 @@ def projected_pull_order(
 
     order: List[str] = []
     held = {ref: {} for ref in paused}
+    waiting_on_nate = set(finished)
     lift_blocks()
     for _ in range(len(sim) + 2):
-        queue = startable(sim, backed_off=held)
+        queue = startable(sim, awaiting_review=waiting_on_nate,
+                          backed_off=held)
         if not queue and held:
             held = {}
             continue
@@ -2822,6 +2963,13 @@ def stale_locks(
 #: the state, so it goes where the PR is rather than into a file only one machine
 #: can read.
 REVIEW_MARKER = "<!-- command-center-review -->"
+
+#: The GitHub accounts whose comments may carry a review verdict (#1787).
+#: command-center is public, so any GitHub user can post a comment holding the
+#: marker above; what makes a verdict authoritative is who posted it, which
+#: GitHub authenticates, never its text. Nate and every agent post as the owner
+#: account, so that is the only author trusted.
+TRUSTED_COMMENT_AUTHORS = frozenset({"nateprich"})
 
 #: The merge gate is software, not one of the model providers. Its verdicts
 #: still use the agent voice because they are neither Nate's words nor his
@@ -3175,8 +3323,110 @@ def parse_verdict(body: str) -> Optional[Dict]:
     return _marked_json(body, REVIEW_MARKER)
 
 
+def comment_author(row: object) -> Optional[str]:
+    """The login that posted one comment row, or None when it is unreadable.
+
+    ``gh ... --json comments`` and the batched GraphQL read carry
+    ``author.login``; REST ``issues/<n>/comments`` carries ``user.login``
+    (#1787). A row naming two different logins has no single author, so it
+    reads as unreadable rather than as whichever key happened to be checked
+    first.
+    """
+    if not isinstance(row, Mapping):
+        return None
+    logins = set()
+    for key in ("author", "user"):
+        value = row.get(key)
+        if not isinstance(value, Mapping):
+            continue
+        login = value.get("login")
+        if isinstance(login, str) and login:
+            logins.add(login)
+    return logins.pop() if len(logins) == 1 else None
+
+
+def trusted_comment(row: object) -> bool:
+    """Whether a comment's author may carry a verdict (#1787).
+
+    Fail closed: a comment with no readable author is untrusted. GitHub logins
+    are unique regardless of case, so the comparison ignores it.
+
+    The same test gates every other runner marker and voice read out of a
+    comment (#1788): block conditions, Needs-decision questions, declines and
+    their routes, park and wake headers, self-approval and closed-itself
+    records, satisfied blocks, the provenance voice, and the comments a model
+    reads in a packet. ``tests/test_comment_trust.py`` enumerates those readers
+    so a new one cannot skip it.
+    """
+    author = comment_author(row)
+    return author is not None and author.lower() in TRUSTED_COMMENT_AUTHORS
+
+
+def trusted_comments(rows: object) -> List[Mapping[str, object]]:
+    """The rows of a comment list that may carry a marker or a voice (#1788).
+
+    An untrusted row is not dropped from what a person is shown; it is only
+    kept away from every parser, so an outsider's text never becomes a
+    block, a route, a wake date or Nate's voice.
+    """
+    if not isinstance(rows, (list, tuple)):
+        return []
+    return [
+        row for row in rows
+        if isinstance(row, Mapping) and trusted_comment(row)
+    ]
+
+
+def untrusted_comment_author(row: object) -> str:
+    """How an untrusted comment's author is named where it is shown (#1788)."""
+    author = comment_author(row)
+    if author is None and isinstance(row, Mapping):
+        # A packet row already reduced to its login (engine/review.py) still
+        # names who posted it, although that shape is never trusted.
+        raw = row.get("author")
+        author = raw if isinstance(raw, str) and raw else None
+    return "@{}".format(author) if author else "an unknown author"
+
+
+def untrusted_comment_placeholder(row: object,
+                                  created_at: Optional[str] = None) -> str:
+    """The one line a model reads in place of an untrusted comment (#1788).
+
+    command-center is public, so a comment from anyone but the owner account
+    is a prompt-injection route into every packet a lister, judge, shaper or
+    breakdown reads. The line names who posted it and when, so a reader knows
+    something was said, and carries none of its text.
+    """
+    if created_at is None and isinstance(row, Mapping):
+        stamp = row.get("createdAt") or row.get("created_at")
+        created_at = stamp if isinstance(stamp, str) else None
+    return ("[Comment by {} at {} withheld: it was not posted by the owner "
+            "account, so its text is not read.]").format(
+                untrusted_comment_author(row), created_at or "an unknown time")
+
+
+def render_comment_voice(row: object) -> str:
+    """Render one comment's voice, reading the provenance only when trusted.
+
+    An outsider can paste a ``nate-direct`` provenance block into a comment on
+    a public repository; reading it would show outsider text as Nate's own
+    words (#1788). An untrusted comment is labelled by its author instead.
+    """
+    if not trusted_comment(row):
+        return "{} (not the owner account)".format(untrusted_comment_author(row))
+    body = row.get("body") if isinstance(row, Mapping) else None
+    return render_voice(body if isinstance(body, str) else "")
+
+
 def _verdict_from_comment(row: Mapping[str, object]) -> Optional[Dict]:
-    """Read a verdict and retain the timestamp of its GitHub comment."""
+    """Read a verdict and retain the timestamp of its GitHub comment.
+
+    Only a trusted author's comment carries one (#1787): anyone can comment on
+    a public repository, and a forged approval here would reach the merge gate.
+    An untrusted comment reads as no verdict, so the newest trusted one stands.
+    """
+    if not trusted_comment(row):
+        return None
     found = parse_verdict(str(row.get("body") or ""))
     if found is None:
         return None
@@ -3613,6 +3863,62 @@ def parse_decline_comment(bodies: Iterable[str]) -> Optional[str]:
     return None
 
 
+def parse_decline_route_comment(
+    bodies: Iterable[str],
+) -> Optional[Dict[str, object]]:
+    """Read the durable route belonging to the newest agent decline."""
+    rows = list(bodies)
+    latest_run = None
+    for body in reversed(rows):
+        if not isinstance(body, str) or not body.startswith(DECLINED_PREFIX):
+            continue
+        provenance = parse_provenance(body)
+        if (
+            provenance is not None
+            and provenance.get("voice") == "agent"
+            and isinstance(provenance.get("run"), str)
+            and provenance.get("run")
+        ):
+            latest_run = provenance["run"]
+            break
+    if latest_run is None:
+        return None
+
+    for body in reversed(rows):
+        if (
+            not isinstance(body, str)
+            or DECLINE_ROUTING_REVIEW_MARKER not in body
+        ):
+            continue
+        record = _marked_json(body, DECLINE_ROUTING_REVIEW_MARKER)
+        provenance = parse_provenance(body)
+        if (
+            not isinstance(record, dict)
+            or not isinstance(record.get("decline_excerpt"), str)
+            or provenance is None
+            or provenance.get("voice") != "agent"
+            or provenance.get("run") != latest_run
+        ):
+            continue
+        route_type = record.get("type")
+        if route_type == "unsatisfiable-acceptance":
+            digest = record.get("acceptance_digest")
+            if isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest):
+                return record
+        elif route_type == "pending-gate-answer":
+            gate_ref = record.get("gate_ref")
+            if (
+                isinstance(gate_ref, str)
+                and re.fullmatch(
+                    r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#[1-9][0-9]*",
+                    gate_ref,
+                )
+            ):
+                return record
+        return None
+    return None
+
+
 def parse_needs_decision_comment(bodies: Iterable[str]) -> Optional[str]:
     """Return the newest parseable breakdown question, if one exists."""
     for body in reversed(list(bodies)):
@@ -3901,7 +4207,9 @@ def latest_verdict(repo: str, pr) -> Optional[Dict]:
     """The newest verdict on a PR.
 
     Newest wins: a re-review after a fix is a fresh read against the plan, and an
-    older verdict must never authorise a diff it did not see.
+    older verdict must never authorise a diff it did not see. Newest means the
+    newest from a trusted author (#1787); ``--json comments`` rows carry
+    ``author.login`` for that check.
     """
     rows = (_gh_json("gh", "pr", "view", str(pr), "--repo", repo,
                      "--json", "comments") or {}).get("comments", [])
@@ -3918,6 +4226,27 @@ def latest_verdict(repo: str, pr) -> Optional[Dict]:
 #: until Nate closes it or a later run finishes it another way (#498).
 COMMENTS_DELIVERABLE_PREFIX = "finished by comments:"
 
+#: A GitHub issue or comment URL in a comments finish note, read as
+#: ``owner/repo#N`` (#1701). ``pull`` is read too, because GitHub serves an
+#: issue comment on a PR under that path; issues and PRs share one number
+#: space per repo, so it can never name the wrong ticket.
+_COMMENTS_NOTE_URL_RE = re.compile(
+    r"https?://github\.com/"
+    r"(?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+)/"
+    r"(?:issues|pull)/(?P<number>[0-9]+)",
+    flags=re.IGNORECASE,
+)
+
+
+def _comments_note_refs(note: str) -> Set[str]:
+    """Every issue a comments finish note links, as lowercased ``owner/repo#N``."""
+    return {
+        "{}/{}#{}".format(
+            found.group("owner"), found.group("repo"), found.group("number")
+        ).lower()
+        for found in _COMMENTS_NOTE_URL_RE.finditer(note)
+    }
+
 
 def finished_by_comments(items: Sequence[Item]) -> Set[str]:
     """Open tickets whose latest run finished them by comments, waiting on Nate.
@@ -3930,16 +4259,36 @@ def finished_by_comments(items: Sequence[Item]) -> Set[str]:
     never withheld. Observed 2026-09-09: eleven consecutive runs re-claimed
     #277 and re-verified the same nine comments in 85 minutes, because nothing
     recorded that the deliverable had already been delivered.
+
+    The bind alone is not trusted (#1701). A finish counts as the comments
+    deliverable only when one of the note's GitHub URLs, read as
+    ``owner/repo#N``, is the bound ticket or its parent -- a parent in another
+    repo included -- compared case-insensitively, because the note is
+    lowercased and refs such as ``The-League`` keep their case. Any other
+    finish counts as a non-marker finish under the latest-finish rule. Codex
+    run e1b3abbcf90a bound #165 on 2026-09-13 but commented on #780, and
+    #165 was withheld from every begin for two weeks.
     """
-    open_refs = {i.ref for i in items if i.state == "OPEN" and i.parent}
-    if not open_refs:
-        return set()
+    return set(finished_by_comments_runs(items))
+
+
+def finished_by_comments_runs(items: Sequence[Item]) -> Dict[str, str]:
+    """``finished_by_comments`` with the run that finished each: ref -> run id.
+
+    ``funnel queue`` names the run, so a hold can be traced to its record
+    (#1701).
+    """
+    open_items = {
+        i.ref: i for i in items if i.state == "OPEN" and i.parent
+    }
+    if not open_items:
+        return {}
     try:
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         import heartbeat
     except Exception:
-        return set()
-    latest: Dict[str, Tuple[float, bool]] = {}
+        return {}
+    latest: Dict[str, Tuple[float, Optional[str]]] = {}
     for agent in sorted(heartbeat.PROVIDERS):
         if agent in heartbeat.RETIRED_AGENTS:
             continue
@@ -3955,15 +4304,18 @@ def finished_by_comments(items: Sequence[Item]) -> Set[str]:
             if not binding or binding.get("do") != "ticket":
                 continue
             ref = str(binding.get("work"))
-            if ref not in open_refs:
+            item = open_items.get(ref)
+            if item is None:
                 continue
             ts = float(row.get("ts") or 0)
             note = str(row.get("note") or "").lower()
             marker = (row.get("outcome") == "skipped-human-step"
-                      and COMMENTS_DELIVERABLE_PREFIX in note)
+                      and COMMENTS_DELIVERABLE_PREFIX in note
+                      and bool(_comments_note_refs(note)
+                               & {ref.lower(), str(item.parent).lower()}))
             if ref not in latest or ts >= latest[ref][0]:
-                latest[ref] = (ts, marker)
-    return {ref for ref, (_, marker) in latest.items() if marker}
+                latest[ref] = (ts, str(row["run"]) if marker else None)
+    return {ref: run for ref, (_, run) in latest.items() if run}
 
 
 def verdict_covers_head(
@@ -3977,6 +4329,8 @@ def verdict_covers_head(
     the new evidence needs a fresh judgement. All other verdicts keep their
     existing same-head coverage. Missing timestamps or comment reads do not
     establish that evidence arrived later, so they preserve current coverage.
+    Only a trusted author's comment is new evidence (#1788): otherwise anyone
+    could comment on a public PR and send it back to review on every tick.
     """
     if not verdict or not head_oid or verdict.get("head_sha") != head_oid:
         return False
@@ -3994,7 +4348,7 @@ def verdict_covers_head(
     if verdict_at is None:
         return True
     for comment in pr_comments or ():
-        if not isinstance(comment, Mapping):
+        if not isinstance(comment, Mapping) or not trusted_comment(comment):
             continue
         created_at = comment.get("createdAt") or comment.get("created_at")
         comment_at = parse_time(
@@ -4070,6 +4424,11 @@ def awaiting_review(
     for item in items:
         for row in _pr_rows_for_ref(pr_facts, item.ref):
             if str(row.get("state") or "OPEN").upper() != "OPEN":
+                continue
+            # Anyone can open a PR named ticket/<n> from a fork; letting it
+            # hold the ticket out of the queue would let a stranger stall
+            # the funnel's work (#1794).
+            if not is_funnel_pr(item.repo, row):
                 continue
             # A PR whose review asked for changes is *not* blocked: its ticket
             # goes back to the engineer to fix. Without this a rejected PR has no
@@ -4475,7 +4834,9 @@ def _self_approval_markers(
 
     found: List[Dict[str, object]] = []
     for comment in comments:
-        if not isinstance(comment, dict):
+        # A forged marker would report Nate's own approval as an agent's
+        # self-approval in the brief (#1788).
+        if not isinstance(comment, dict) or not trusted_comment(comment):
             continue
         basis = parse_self_approval(comment.get("body") or "")
         if basis is None:
@@ -5068,7 +5429,8 @@ def _recent_merged_pr_rows(
 ) -> List[Dict[str, object]]:
     """Read merged PRs updated within the window using a light paged query.
 
-    The portfolio metric only needs the branch and merge timestamps. Reusing
+    The portfolio metric only needs the branch, the merge timestamps, and
+    the fields that say whether a PR is the funnel's own (#1794). Reusing
     ``ticket_pr_index`` would also request CI rollups and scan every PR state;
     the brief's 100-row bound can also hide valid merges. Merged PRs sort by
     ``updatedAt``, so the first row older than the cutoff proves that later
@@ -5086,7 +5448,10 @@ def _recent_merged_pr_rows(
       first: {page_size}, after: $cursor, states: [MERGED],
       orderBy: {{field: UPDATED_AT, direction: DESC}}
     ) {{
-      nodes {{ state headRefName mergedAt updatedAt }}
+      nodes {{
+        state headRefName mergedAt updatedAt
+        isCrossRepository headRepository {{ nameWithOwner }} author {{ login }}
+      }}
       pageInfo {{ hasNextPage endCursor }}
     }}
   }}
@@ -5136,6 +5501,9 @@ def _recent_merged_pr_rows(
                 "state": node.get("state"),
                 "headRefName": node.get("headRefName"),
                 "mergedAt": node.get("mergedAt"),
+                "isCrossRepository": node.get("isCrossRepository"),
+                "headRepository": node.get("headRepository"),
+                "author": node.get("author"),
             })
 
         if not page_info.get("hasNextPage"):
@@ -5196,7 +5564,8 @@ def command_center_ticket_pr_share(
         if merged_at < cutoff:
             continue
         merged += 1
-        if ticket_ref_from_branch(REPO, row.get("headRefName") or ""):
+        # A merged fork PR named ticket/<n> is not ticket work (#1794).
+        if ticket_ref_from_pr(REPO, row):
             ticket_merged += 1
 
     definition = (
@@ -5254,7 +5623,7 @@ query($search: String!, $cursor: String) {
         }
         comments(last: 100) {
           pageInfo { hasPreviousPage }
-          nodes { body createdAt }
+          nodes { body createdAt author { login } }
         }
       }
     }
@@ -5356,7 +5725,12 @@ def _decline_routing_issue_pages(
 def _decline_routing_comment_rows(
     issue: Mapping, start: datetime
 ) -> List[Dict[str, object]]:
-    """Validate the comment tail and return its rows without reading old bodies."""
+    """Validate the comment tail and return its rows without reading old bodies.
+
+    Every row's time bounds the page, but only a trusted author's rows are
+    returned (#1788): the decline and its routing record are runner markers,
+    and an outsider's copy of either must not move the metric.
+    """
     comments = issue.get("comments")
     if not isinstance(comments, dict):
         raise GitHubError("decline-search issue has no comments connection")
@@ -5374,7 +5748,8 @@ def _decline_routing_comment_rows(
         if created_at is None or not isinstance(body, str):
             raise GitHubError("decline-search issue has an unreadable comment")
         times.append(created_at)
-        rows.append({"body": body, "created_at": created_at})
+        if trusted_comment(node):
+            rows.append({"body": body, "created_at": created_at})
 
     # The last 100 comments are enough unless more comments on this issue
     # also fall inside the reporting window. In that case fail closed instead
@@ -10355,7 +10730,10 @@ def _load_begin_items(
             # Membership is the topic, exactly as in the full load.
             if item.repo not in members:
                 continue
-            if item.state == "OPEN" and item.is_blocked:
+            if item.state == "OPEN" and (
+                item.is_blocked
+                or item.needs in ("agent", "external-event")
+            ):
                 comment_started = time.perf_counter()
                 try:
                     _load_block_comment(item)
@@ -10498,7 +10876,10 @@ def _load_project_items_by_refs(refs: Sequence[str]) -> Dict[str, Item]:
                         "without the issue itself".format(ref)
                     )
                 continue
-            if match.state == "OPEN" and match.is_blocked:
+            if match.state == "OPEN" and (
+                match.is_blocked
+                or match.needs in ("agent", "external-event")
+            ):
                 _load_block_comment(match)
             found[ref] = match
     return found
@@ -10738,7 +11119,10 @@ def load_items(
                     # them from `blockedBy` in the Project query. They used to
                     # be fetched here instead, one REST call per open ticket —
                     # do not restore a per-item dependency read in this loop.
-                    if item.state == "OPEN" and item.is_blocked:
+                    if item.state == "OPEN" and (
+                        item.is_blocked
+                        or item.needs in ("agent", "external-event")
+                    ):
                         comment_started = time.perf_counter()
                         try:
                             _load_block_comment(item)
@@ -11480,10 +11864,12 @@ def dashboard_board(
         ))
     try:
         # The board's order for work in motion: each ticket's projected turn.
+        # Work finished by comments gets none, as no begin will take it (#1701).
         turn = {
             ref: index
             for index, ref in enumerate(
-                projected_pull_order(rows, now, paused=paused_rows)
+                projected_pull_order(rows, now, paused=paused_rows,
+                                     finished=finished)
             )
         }
     except Exception:
@@ -11997,7 +12383,8 @@ def _parked_item_json(item: Item) -> Dict[str, object]:
     """
     comments = _issue_comments(item)
     parsed = None
-    for comment in reversed(comments):
+    # Only the owner's park header is the reason and wake date (#1788).
+    for comment in reversed(trusted_comments(comments)):
         body = comment.get("body") or ""
         parsed = parse_park_comment(body)
         if parsed is not None:
@@ -12111,9 +12498,13 @@ def _could_carry_closed_itself_marker(
 def _closed_itself_item_json(
     item: Item, comments: Sequence[dict]
 ) -> Optional[Dict[str, object]]:
-    """Render one funnel-close marker, or omit an ordinary accepted close."""
+    """Render one funnel-close marker, or omit an ordinary accepted close.
+
+    Only a trusted author's marker counts (#1788): a forged one would report
+    Nate's own acceptance as a close the funnel made by itself.
+    """
     for comment in reversed(comments):
-        if not isinstance(comment, dict):
+        if not isinstance(comment, dict) or not trusted_comment(comment):
             continue
         payload = _marked_json(
             comment.get("body") or "", CLOSED_ITSELF_PREFIX
@@ -12173,7 +12564,9 @@ def _cleared_block_item_json(item: Item) -> Optional[Dict[str, object]]:
     """Render the newest valid satisfied-block record on one unblocked item."""
     comments = _issue_comments(item)
     for comment in reversed(comments):
-        if not isinstance(comment, dict):
+        # The record's agent voice is only an agent's when the owner account
+        # posted it (#1788).
+        if not isinstance(comment, dict) or not trusted_comment(comment):
             continue
         record = parse_satisfied_block_comment(comment.get("body") or "")
         if record is None:
@@ -12257,8 +12650,65 @@ def _blocked_item_json(item: Item, now: datetime) -> Dict[str, object]:
 def blocked_json(
     items: Iterable[Item], now: datetime,
 ) -> List[Dict[str, object]]:
-    """The brief's blocked section, reusing one load-time comment fetch."""
-    return [_blocked_item_json(item, now) for item in blocked_items(items)]
+    """The brief's blocked section, reusing one load-time comment fetch.
+
+    A finished project Nate holds at Accept is not blocked work: it is listed
+    in ``held_at_accept`` instead (#1725).
+    """
+    return [
+        _blocked_item_json(item, now) for item in blocked_items(items)
+        if not is_held_at_accept(item)
+    ]
+
+
+def _held_at_accept_condition(item: Item) -> str:
+    """Say in words what lifts an Accept hold: a date, issues closing, or both."""
+    parts = []
+    blocked_until = _item_blocked_until(item)
+    if blocked_until is not None:
+        parts.append(blocked_until.isoformat())
+    if item.block_references:
+        parts.append("{} {}".format(
+            " and ".join(item.block_references),
+            "closes" if len(item.block_references) == 1 else "close",
+        ))
+    return "until " + " and ".join(parts)
+
+
+def _held_at_accept_item_json(item: Item) -> Dict[str, object]:
+    """Render one Accept hold with its condition and Nate's reason (#1725).
+
+    The block parser keeps everything after the header as the reason, the
+    provenance trailer included, so the reason is cut at that marker.
+    """
+    reason = _visible_comment(item.block_reason or "").strip()
+    rendered = {
+        "ref": item.ref,
+        "title": item.title,
+        "url": item.url,
+        "condition": _held_at_accept_condition(item),
+        "conditions": list(item.block_references),
+        "reason": reason or None,
+        "held_since": (
+            item.blocked_since.isoformat() if item.blocked_since else None
+        ),
+    }
+    blocked_until = _item_blocked_until(item)
+    if blocked_until is not None:
+        rendered["blocked_until"] = blocked_until.isoformat()
+    return rendered
+
+
+def held_at_accept_json(items: Iterable[Item]) -> List[Dict[str, object]]:
+    """The brief's held-at-Accept section, in the blocked section's order.
+
+    Neither a decision nor blocked work: the hold lifts itself when its
+    condition is met, and the project then asks "Accept it?" again.
+    """
+    return [
+        _held_at_accept_item_json(item) for item in blocked_items(items)
+        if is_held_at_accept(item)
+    ]
 
 
 def _event_block_mismatch(item: Item) -> Optional[str]:
@@ -13331,9 +13781,15 @@ def cmd_queue(
                 subprocess.SubprocessError) as exc:
             pr_facts_unavailable = str(exc)
 
+    # What `cmd_next` and `begin` withhold as finished by comments is withheld
+    # here too, and listed below with its run (#1701). The queue used to list
+    # #165 as startable for two weeks while every begin refused it, and that
+    # mismatch is what hid the wedge.
+    finished = finished_by_comments_runs(items)
     decisions = awaiting_decision(items)
     tickets = startable(
-        items, awaiting_review=in_review, repo_readiness=repo_readiness
+        items, awaiting_review=set(in_review) | set(finished),
+        repo_readiness=repo_readiness,
     )
 
     print("Waiting on Nate ({}), bottom-up:".format(len(decisions)))
@@ -13367,6 +13823,14 @@ def cmd_queue(
             item.title,
         ),
     )
+
+    if finished:
+        print("\nWithheld — finished by comments, waiting on Nate to close "
+              "({}):".format(len(finished)))
+        for item in items:
+            if item.ref in finished:
+                print("  {:<34} run {:<14} {}".format(
+                    item.ref, finished[item.ref], item.title))
 
     withheld = readiness_blockers(items, repo_readiness=repo_readiness)
     if withheld:
@@ -13856,6 +14320,7 @@ def cmd_brief(
             "cleared_blocks", lambda: cleared_blocks_json(items, now)
         )
         blocked = section("blocked", lambda: blocked_json(items, now))
+        held = section("held_at_accept", lambda: held_at_accept_json(items))
         human = section("human_steps", lambda: human_step_json(items, now))
         machine_local = section(
             "machine_local_steps",
@@ -13944,6 +14409,7 @@ def cmd_brief(
         counts = pure_values["counts_by_gate"]
         running = pure_values["in_motion"]
         blocked = pure_values["blocked"]
+        held = pure_values["held_at_accept"]
         human = pure_values["human_steps"]
         machine_local = pure_values["machine_local_steps"]
         blocked_human = pure_values["blocked_human_steps"]
@@ -14000,6 +14466,7 @@ def cmd_brief(
             "closed_itself": closed_itself,
             "cleared_blocks": cleared_blocks,
             "blocked": blocked,
+            "held_at_accept": held,
             "human_steps": human,
             "machine_local_steps": machine_local,
             "blocked_human_steps": blocked_human,
@@ -14143,6 +14610,81 @@ def claim_ticket(
     # implementation so `funnel begin` (#349) and `funnel claim` promote alike.
     _begin_parent(items, target)
     return None
+
+
+def _ticket_branch_ref_sha(repo: str, ref: str) -> Optional[str]:
+    """Read one Git ref, returning None only when GitHub says it is absent."""
+    endpoint = "repos/{}/git/ref/{}".format(repo, ref[len("refs/"):])
+    result = _run_gh(
+        _gh_api_command(endpoint), capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        response = "{}\n{}".format(
+            getattr(result, "stderr", ""), getattr(result, "stdout", "")
+        )
+        if re.search(r"\bHTTP\s+404\b", response, re.IGNORECASE):
+            return None
+        raise GitHubError("could not read Git ref in {}".format(repo))
+    try:
+        payload = json.loads(result.stdout)
+    except (TypeError, ValueError):
+        raise GitHubError("GitHub returned an unreadable Git ref in {}".format(repo))
+    if not isinstance(payload, dict) or payload.get("ref") != ref:
+        raise GitHubError("GitHub returned an unexpected Git ref in {}".format(repo))
+    object_data = payload.get("object")
+    sha = object_data.get("sha") if isinstance(object_data, dict) else None
+    if not isinstance(sha, str) or not sha.strip():
+        raise GitHubError("GitHub returned a Git ref without a commit in {}".format(repo))
+    return sha
+
+
+def ensure_ticket_branch(repo: str, number: int) -> str:
+    """Plant ``ticket/<number>`` at main, preserving any existing remote ref.
+
+    This runs after a ticket claim and before its heartbeat binding. Once the
+    run is bound, abandoned-claim recovery can use this branch as its liveness
+    marker. The main SHA is captured before creating the ref; a raced creation
+    is read back and left untouched rather than replaced.
+    """
+    if (not isinstance(repo, str)
+            or not isinstance(number, int) or isinstance(number, bool) or number < 1
+            or not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo)):
+        raise GitHubError("cannot establish a ticket branch for this repository")
+
+    branch_ref = "refs/heads/ticket/{}".format(number)
+    existing = _ticket_branch_ref_sha(repo, branch_ref)
+    if existing is not None:
+        return existing
+
+    base_sha = _ticket_branch_ref_sha(repo, "refs/heads/main")
+    if base_sha is None:
+        raise GitHubError("main is missing in {}".format(repo))
+
+    result = _run_gh(
+        ["gh", "api", "-X", "POST", "repos/{}/git/refs".format(repo),
+         "-f", "ref=" + branch_ref, "-f", "sha=" + base_sha],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode == 0:
+        try:
+            payload = json.loads(result.stdout)
+        except (TypeError, ValueError):
+            payload = None
+        object_data = payload.get("object") if isinstance(payload, dict) else None
+        created_sha = object_data.get("sha") if isinstance(object_data, dict) else None
+        if (isinstance(payload, dict) and payload.get("ref") == branch_ref
+                and created_sha == base_sha):
+            return base_sha
+
+    # A competing creator may have won between the first read and the POST.
+    # Accept that ref without changing its tip; otherwise fail closed.
+    existing = _ticket_branch_ref_sha(repo, branch_ref)
+    if existing is not None:
+        return existing
+    raise GitHubError("could not push {} at the run base in {}".format(
+        branch_ref, repo
+    ))
 
 
 def cmd_claim(
@@ -14558,9 +15100,13 @@ def reconcile_parked_wakes(
 def _latest_park_comment(
     comments: Sequence[object],
 ) -> Optional[Dict[str, object]]:
-    """Parse the newest park header in oldest-first comments, if any."""
+    """Parse the newest park header in oldest-first comments, if any.
+
+    Only a trusted author's header counts (#1788): the wake date reopens the
+    issue and restores its Status, and anyone can comment on a public repo.
+    """
     for comment in reversed(comments):
-        if not isinstance(comment, dict):
+        if not isinstance(comment, dict) or not trusted_comment(comment):
             continue
         parsed = parse_park_comment(comment.get("body") or "")
         if parsed is not None:
@@ -14620,6 +15166,110 @@ def cmd_park(items: List[Item], now: datetime, ref: str, reason: str,
         raise GitHubError(comment.stderr.strip())
 
     print("{} → Parked\n{}".format(item.ref, park_comment))
+    return 0
+
+
+def _hold_refusal(item: Item) -> Optional[str]:
+    """Why ``item`` cannot be held at Accept, or ``None`` when it can (#1724).
+
+    A hold means something only where ``gate_question`` would otherwise ask
+    "Accept it?": an open Building project with every ticket closed that does
+    not close itself. The unattended close (``_auto_closeable_project``)
+    never reads ``blocked``, so a hold on a project that closes itself would
+    be recorded and then ignored.
+    """
+    if item.parent is not None:
+        return "{} is a ticket; only a finished project waits at Accept".format(
+            item.ref)
+    if item.state != "OPEN":
+        return "{} is {}; only an open project waits at Accept".format(
+            item.ref, item.state)
+    if item.status != "Building":
+        return (
+            "{} is at {}, not Building; only a finished Building project "
+            "waits at Accept".format(item.ref, item.status or "no status")
+        )
+    if item.children_total == 0:
+        return (
+            "{} has no tickets; it is waiting to be broken down, not "
+            "waiting at Accept".format(item.ref)
+        )
+    if not item.children_all_closed:
+        return (
+            "{} still has open tickets ({}/{} closed); it is not waiting at "
+            "Accept yet".format(
+                item.ref, item.children_done, item.children_total)
+        )
+    if _can_close_itself(item):
+        return (
+            "{} closes itself when its tickets close (Class {}), and the "
+            "unattended close ignores `blocked`, so a hold would do "
+            "nothing".format(item.ref, item.klass or "unset")
+        )
+    return None
+
+
+def cmd_hold(items: List[Item], now: datetime, ref: str, reason: str,
+             until: Optional[date] = None, on: Sequence[str] = (),
+             confirmed: bool = False, run: Optional[str] = None,
+             agent: Optional[str] = None,
+             instruction: Optional[str] = None) -> int:
+    """Record Nate's hold on a finished project at Accept (#1724).
+
+    A hold written as prose ("Accept held by Nate ...") is read by nothing, so
+    the project kept asking "Accept it?". The ``blocked`` label with a
+    parseable ``**Blocked until/on ...:**`` comment already takes an item out
+    of his queue, shows its condition, and is lifted by
+    ``clear_satisfied_blocks`` once that condition is met; this verb writes
+    exactly that form, in Nate's relayed voice.
+
+    **Dry run unless ``confirmed``**, like the gate answers: holding is
+    Nate's call at his own gate.
+    """
+    item = find(items, ref)
+    refusal = _hold_refusal(item)
+    if refusal is not None:
+        raise GitHubError(refusal)
+    if (until is None) == (not on):
+        raise GitHubError("a hold needs exactly one of --until or --on")
+    if until is not None and until <= _block_condition_date(now):
+        raise GitHubError("hold date must be after today's UTC date")
+    body = _hold_comment_body(reason, until=until, on=on)
+
+    if not confirmed:
+        print("would hold {} at Accept ({}) with the blocked label and:".format(
+            item.ref, item.title))
+        print(body)
+        print("\nNothing was changed. Re-run with --yes to record the hold.")
+        return 1
+
+    # Comment first, as ``comment --needs-decision`` does: a label without
+    # its condition would read as a silent block asking "Unblock or park?",
+    # while a comment without its label changes nothing and is superseded by
+    # the retry's newer copy.
+    comment = _run_gh(
+        ["gh", "issue", "comment", str(item.number), "--repo", item.repo,
+         "--body", append_provenance(
+             body, "nate-relayed", at=now,
+             run=run, agent=agent, instruction=instruction)],
+        capture_output=True, text=True,
+    )
+    if comment.returncode != 0:
+        raise GitHubError(comment.stderr.strip())
+    edit = _run_gh(
+        ["gh", "issue", "edit", str(item.number), "--repo", item.repo,
+         "--add-label", "blocked"],
+        capture_output=True, text=True,
+    )
+    if edit.returncode != 0:
+        raise GitHubError(
+            "recorded the hold comment on {}, but could not add its blocked "
+            "label: {}".format(item.ref, edit.stderr.strip())
+        )
+    if not item.is_blocked:
+        item.labels.append("blocked")
+
+    print("{} held at Accept\n{}".format(item.ref, body))
     return 0
 
 
@@ -14810,15 +15460,15 @@ def cmd_reject(items: List[Item], now: datetime, pr: str, note: Optional[str]) -
 
     data = json.loads(run(
         "gh", "pr", "view", number, "--repo", repo,
-        "--json", "title,url,headRefName,merged",
+        "--json", "title,url,headRefName,merged," + PR_TRUST_JSON_FIELDS,
     ))
     if not data.get("merged"):
         raise GitHubError(
             "PR #{} is not merged — a rejected merge is one that landed".format(number)
         )
 
-    branch = data.get("headRefName") or ""
-    ref = ticket_ref_from_branch(repo, branch)
+    # Only the funnel's own PR reopens the ticket its branch names (#1794).
+    ref = ticket_ref_from_pr(repo, data)
     ticket = next((i for i in items if i.ref == ref), None) if ref else None
 
     # 1. Reopen the ticket, so the work is visibly unfinished again.
@@ -15147,7 +15797,7 @@ def _brief_comment_query(
             issue_alias = "issue{}".format(issue_index)
             lines.append(
                 "    {}: issue(number: {}) {{ comments(last: {}) {{ "
-                "nodes {{ body createdAt }} }} }}".format(
+                "nodes {{ body createdAt author {{ login }} }} }} }}".format(
                     issue_alias, item.number, CLOSED_ITSELF_COMMENT_PAGE_SIZE
                 )
             )
@@ -15260,16 +15910,21 @@ def _subissue_rows(item: Item) -> List[dict]:
 
 
 def _ticket_prs(repo: str, number: int) -> List[Tuple[str, int]]:
-    """Return every PR ever made from a ticket's convention-named branch."""
+    """Return every funnel PR ever made from a ticket's convention-named branch.
+
+    ``--head`` matches the branch name in any fork, so only the funnel's own
+    PRs are the ticket's (#1794).
+    """
     rows = _gh_json(
         "gh", "pr", "list", "--repo", repo, "--state", "all",
-        "--head", "ticket/{}".format(number), "--json", "number",
+        "--head", "ticket/{}".format(number),
+        "--json", "number," + PR_TRUST_JSON_FIELDS,
     )
     if rows is None or not isinstance(rows, list):
         raise GitHubError("could not read PRs for {}#{}".format(repo, number))
     found: List[Tuple[str, int]] = []
     for row in rows:
-        if not isinstance(row, dict):
+        if not isinstance(row, dict) or not is_funnel_pr(repo, row):
             continue
         pr_number = row.get("number")
         if isinstance(pr_number, int) and not isinstance(pr_number, bool):
@@ -15289,7 +15944,9 @@ def _review_verdicts(prs: Iterable[Tuple[str, int]]) -> Tuple[Dict[str, object],
             raise GitHubError("could not read review history for {} PR #{}".format(
                 repo, number))
         for comment in payload.get("comments") or []:
-            if not isinstance(comment, dict):
+            # Only a trusted author's verdict counts (#1787): a forged
+            # rejection would otherwise raise a drift signal on the project.
+            if not isinstance(comment, dict) or not trusted_comment(comment):
                 continue
             verdict = parse_verdict(comment.get("body") or "")
             if verdict is not None:
@@ -15404,10 +16061,14 @@ def _load_block_comment(item: Item) -> None:
     if not isinstance(payload, dict) or not isinstance(payload.get("comments"), list):
         item.block_comments_error = "could not read comments"
         return
+    # Every parser below reads runner markers: a block condition, a
+    # Needs-decision question, a decline and its route, a satisfied block.
+    # Only the owner account's comments carry them (#1788); anyone can
+    # comment on a public repository, and an outsider's copy of any of these
+    # would block, unblock or re-route real work.
     bodies = [
         comment.get("body") or ""
-        for comment in payload["comments"]
-        if isinstance(comment, dict)
+        for comment in trusted_comments(payload["comments"])
     ]
     item.unparseable_block_comments = unparseable_block_comment_lines(bodies)
     item.block_event = None
@@ -15421,6 +16082,7 @@ def _load_block_comment(item: Item) -> None:
         ) = parsed
     item.needs_decision = parse_needs_decision_comment(bodies)
     item.decline_reason = parse_decline_comment(bodies)
+    item.decline_route = parse_decline_route_comment(bodies)
     for body in reversed(bodies):
         record = parse_satisfied_block_comment(body)
         if record is not None:
@@ -15559,6 +16221,10 @@ def _batched_pr_query(
         if include_body:
             lines.append("        body")
         lines.append("        author { login }")
+        # Who opened the PR and where its head lives decide whether it is
+        # the funnel's own PR at all (#1794); a branch name alone does not.
+        lines.append("        isCrossRepository")
+        lines.append("        headRepository { nameWithOwner }")
         lines.append("        mergedBy { login }")
         if include_reviews:
             lines.append(
@@ -15623,12 +16289,12 @@ def _normalise_pr_node(node: object) -> Optional[Dict[str, object]]:
         for name in (
             "number", "title", "state", "url", "headRefName",
             "headRefOid", "mergeable", "mergeStateStatus", "mergedAt",
-            "createdAt", "closedAt",
+            "createdAt", "closedAt", "isCrossRepository",
         )
     }
     if "body" in node:
         row["body"] = node.get("body")
-    for name in ("author", "mergedBy"):
+    for name in ("author", "mergedBy", "headRepository"):
         value = node.get(name)
         row[name] = value if isinstance(value, dict) else None
 
@@ -15816,7 +16482,11 @@ def _read_batched_pr_snapshots(
 
 
 def _latest_verdict_from_comments(comments: object) -> Optional[Dict]:
-    """Return the newest structured verdict from an already-read comment tail."""
+    """Return the newest structured verdict from an already-read comment tail.
+
+    The batch asks for each comment's ``author { login }`` so that
+    ``_verdict_from_comment`` can skip untrusted authors (#1787).
+    """
     if not isinstance(comments, list):
         return None
     for row in reversed(comments):
@@ -15832,13 +16502,23 @@ def _pr_rows_for_ref(
     pr_facts: Optional[Mapping[str, Optional[Dict[str, object]]]],
     ref: str,
 ) -> Tuple[Dict[str, object], ...]:
-    """Return every row for a ticket branch, with legacy-map compatibility."""
+    """Return every funnel PR row for a ticket branch, legacy maps included.
+
+    The one accessor the review queue, ``awaiting_review`` and the approved
+    merge reconciliation read rows through, so it keeps only the funnel's own
+    PRs (#1794) whatever map a caller supplies: a fork or another author's PR
+    on ``ticket/<n>`` is never offered, never blocks the ticket, and never
+    reaches the merge gate from here. ``ticket_pr_facts`` already drops them;
+    this holds for injected maps too.
+    """
     if pr_facts is None:
         return ()
+    repo = ref.rsplit("#", 1)[0]
     rows_by_ref = getattr(pr_facts, "rows_by_ref", None)
     if isinstance(rows_by_ref, Mapping) and ref in rows_by_ref:
         return tuple(
-            row for row in rows_by_ref[ref] if isinstance(row, dict)
+            row for row in rows_by_ref[ref]
+            if isinstance(row, dict) and is_funnel_pr(repo, row)
         )
     fact = pr_facts.get(ref)
     # A fact with neither a PR number nor a state is a branch-only record: a
@@ -15847,7 +16527,7 @@ def _pr_rows_for_ref(
     # (#968). Older fixture maps carry ``state`` without ``number``.
     if isinstance(fact, dict) and (
         fact.get("number") is not None or fact.get("state")
-    ):
+    ) and is_funnel_pr(repo, fact):
         return (fact,)
     return ()
 
@@ -15914,13 +16594,20 @@ def ticket_pr_index(
         include_closing_refs=include_comments,
         include_refs=False,
     )
-    bounded_rows = list(snapshot.rows_by_repo.get(repo, ()))
+    # Only the funnel's own PRs are indexed or counted (#1794): the outcome
+    # walker pairs ``all_rows`` with tickets by branch and by closing
+    # reference, and a fork PR named ``ticket/<n>`` is neither the ticket's
+    # attempt nor its merge. Truncation is still judged on the whole scan.
+    bounded_rows = [
+        row for row in snapshot.rows_by_repo.get(repo, ())
+        if is_funnel_pr(repo, row)
+    ]
     truncated = bool(snapshot.pr_truncated_by_repo.get(repo))
     index = TicketPRIndex(all_rows=bounded_rows)
     for row in bounded_rows:
         if not isinstance(row, dict):
             continue
-        ref = ticket_ref_from_branch(repo, row.get("headRefName") or "")
+        ref = ticket_ref_from_pr(repo, row)
         # `gh pr list` returns newest first, so the first row for a branch is
         # the one the old per-ticket lookup's `rows[0]` used to return.
         if ref and ref not in index:
@@ -16000,7 +16687,10 @@ def ticket_pr_facts(
     rows_by_ref: Dict[str, List[Dict[str, object]]] = {}
     for repo in repos:
         for row in snapshot.rows_by_repo.get(repo, ()):
-            ref = ticket_ref_from_branch(repo, row.get("headRefName") or "")
+            # A fork's or another author's PR on a ticket branch is not the
+            # ticket's PR (#1794), so it never becomes a fact: not a review
+            # candidate, not an awaiting-review block, not a merge candidate.
+            ref = ticket_ref_from_pr(repo, row)
             if ref:
                 rows_by_ref.setdefault(ref, []).append(row)
 
@@ -16090,6 +16780,10 @@ def review_queue(
             head = row.get("headRefName") or ""
             if not head.startswith("ticket/"):
                 continue
+            if not is_funnel_pr(repo, row):
+                # A fork or another author's PR is never offered, and never
+                # rejected below either: no verdict is written on it (#1794).
+                continue
             conflict = _conflicting_branch_blocker(row)
             if conflict is not None:
                 # Conflict is a complete, deterministic rejection. Record it
@@ -16176,9 +16870,149 @@ def shapeable_idea(items: Sequence[Item], tier: Optional[str],
     return None
 
 
+#: The heading ``render_plan`` writes, and the variants a plan writer uses:
+#: a trailing colon, closing hashes, a parenthetical naming the reasons.
+_PLAN_RISK_RATIONALE_RE = re.compile(
+    r"^ {0,3}#{1,6}[ \t]+Risk rationale\b[^\n]*$", re.IGNORECASE | re.MULTILINE
+)
+_PLAN_SECTION_END_RE = re.compile(
+    r"^ {0,3}#{1,6}[ \t]+|^[ \t]*<!-- command-center-[\w-]+ -->", re.MULTILINE
+)
+_PLAN_RISK_RATIONALE_ENTRY_RE = re.compile(
+    r"^[ \t]*[-*+][ \t]+(?P<reason>[\w-]+)[ \t]*:"
+)
+#: A rationale section in exactly the words render_plan uses for an empty
+#: list is not a declaration; any other prose, even prose opening "No", is.
+_PLAN_RISK_RATIONALE_NONE_RE = re.compile(r"(?i)\ANone recorded\.?\Z")
+#: ``Risk: escalated`` as a plan writer states it: a bare line, a bulleted or
+#: numbered list item, a heading, or bold (``- Risk: escalated``,
+#: ``1. Risk: escalated``, ``## Risk: escalated``, ``**Risk:** escalated``).
+#: ``RISK_LINE`` reads only the bare form; the #1034 union caught the others
+#: by accident.
+_PLAN_RISK_MARKER_RE = re.compile(
+    r"^[ \t]*(?:#{1,6}[ \t]+|(?:[-*+]|\d+[.)])[ \t]+)?[*_]{0,2}Risk[*_]{0,2}"
+    r"[ \t]*:[ \t]*[*_]{0,2}[ \t]*escalated\b[*_]{0,2}(?P<what>.*)$",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def plan_declared_risks(plan_body: str) -> List[str]:
+    """Risks a plan body declares, as distinct from wording-scan hits (#1721).
+
+    The one definition of a declared risk: ``engine/shape.py`` reads it from
+    the rendered scan body beside the typed ``escalated_risk`` list, and the
+    Shaped sweep reads it from the stored body, where the runner has rendered
+    that list as a ``Risk rationale`` section. A declaration is a
+    ``Risk rationale`` section, however it got into the body, or a
+    ``Risk: escalated`` line; either holds a plan at Shaped, while a hit from
+    ``plan_escalation_matches`` alone only raises the review tier. The text is
+    the one that scan reads, so quoted, code and Rejected text declares
+    nothing. A rationale section with prose but no readable entry counts as
+    ``declared``, so a malformed record holds rather than releases; one that
+    is empty or says ``None`` declares nothing.
+    """
+    text = _strip_plan_prose_quotes(
+        asserted_text(_plan_escalation_scan_text(plan_body or ""))
+    )
+    declared: List[str] = []
+
+    def add(reason: str) -> None:
+        if reason not in declared:
+            declared.append(reason)
+
+    for heading in _PLAN_RISK_RATIONALE_RE.finditer(text):
+        section = text[heading.end():]
+        boundary = _PLAN_SECTION_END_RE.search(section)
+        if boundary is not None:
+            section = section[:boundary.start()]
+        content = section.strip()
+        if not content or _PLAN_RISK_RATIONALE_NONE_RE.match(content):
+            continue
+        readable = False
+        for line in section.splitlines():
+            entry = _PLAN_RISK_RATIONALE_ENTRY_RE.match(line)
+            if (entry is not None
+                    and entry.group("reason") in ESCALATION_PATTERNS):
+                readable = True
+                add(entry.group("reason"))
+        if not readable:
+            add("declared")
+    for marker in _PLAN_RISK_MARKER_RE.finditer(text):
+        stated = marker.group("what").strip(" \t*_—-:#").strip()
+        add("declared: " + stated if stated else "declared")
+    return declared
+
+
+def scan_only_escalation_note(reasons: Sequence[str]) -> str:
+    """Self-approval wording for a scan hit that no longer holds (#1721)."""
+    named = " ({})".format(", ".join(reasons)) if reasons else ""
+    return "scan-only escalation{} raises the review tier".format(named)
+
+
+#: The shape runner's record of the risk decision it made (#1721): the
+#: declared risks the decision held on, possibly none, and the scan's reasons.
+#: Prose cannot stand in for it: the readers that find a declaration in prose
+#: strip code and quotes across the whole body, so a malformed fence or quote
+#: in the narrative can blank the rendered Risk rationale below it.
+SHAPE_RISK_MARKER = "<!-- command-center-shape-risk -->"
+
+
+def shape_risk_block(declared: Sequence[str], scan: Sequence[str]) -> str:
+    """Build the runner-owned risk record written into a shaped plan body."""
+    record = {"declared": list(declared), "scan": list(scan)}
+    return "{}\n\n```json\n{}\n```".format(
+        SHAPE_RISK_MARKER, json.dumps(record, indent=2, sort_keys=True)
+    )
+
+
+def parse_shape_risk_record(body: str) -> Optional[Dict[str, List[str]]]:
+    """The runner's risk record, or ``None`` when absent or unreadable.
+
+    The newest block wins, as for every runner record, so a marker the
+    shaper quoted in the narrative above cannot outrank the runner's own.
+    """
+    found = _marked_json(body, SHAPE_RISK_MARKER)
+    if found is None:
+        return None
+    declared = found.get("declared")
+    scan = found.get("scan")
+    if not (isinstance(declared, list)
+            and all(isinstance(reason, str) for reason in declared)
+            and isinstance(scan, list)
+            and all(isinstance(reason, str) for reason in scan)):
+        return None
+    return {"declared": declared, "scan": scan}
+
+
+def _shaped_risk_holds(item: Item, body: str) -> bool:
+    """Whether a Shaped plan's Risk still holds it (#1721).
+
+    Until #1721 an escalated Risk held a plan whoever set it. Now it is
+    released only on the runner's own record that the decision declared no
+    risk, and only when no declaration shows in the prose either. A plan
+    with no record, shaped before #1721 or by hand, or an unreadable one,
+    holds; so do unset or unknown Risk and a body the load did not carry.
+    ``Needs: human`` keeps its own hold whatever the Risk: after #1721 the
+    shape runner never writes it for a scan hit, so it records some other
+    reason to wait.
+    """
+    if item.risk == "standard":
+        return False
+    if item.risk != "escalated" or not body.strip():
+        return True
+    record = parse_shape_risk_record(body)
+    if record is None or record["declared"]:
+        return True
+    return bool(plan_declared_risks(body))
+
+
 def shaped_self_approvable(item: Item,
                            by_ref: Dict[str, Item]) -> bool:
-    """Re-evaluate one Shaped plan with the existing self-approval rule."""
+    """Re-evaluate one Shaped plan with the existing self-approval rule.
+
+    Only a declared risk holds (#1721): an escalated Risk the wording scan
+    set alone no longer does.
+    """
     body = _loaded_item_body(item)
     override = parse_origin_override(body)
     override_target = override["target"] if override is not None else None
@@ -16187,7 +17021,7 @@ def shaped_self_approvable(item: Item,
         item.origin,
         override_target,
         needs_nate=item.needs == "human",
-        escalated=item.risk != "standard",
+        escalated=_shaped_risk_holds(item, body),
         state=item.state,
     )
 
@@ -16224,6 +17058,11 @@ def sweep_shaped_self_approvals(
         reason = "needs_nate all null; class {} self-approvable; {}".format(
             klass, owner_basis
         )
+        # Eligible with an escalated Risk means the scan set it and nothing
+        # declared it (#1721): it stays escalated for the review tier.
+        scan_only = item.risk == "escalated"
+        if scan_only:
+            reason += "; " + scan_only_escalation_note(plan_is_escalated(body))
 
         try:
             status_error = _write_status(item, "Ready", now)
@@ -16233,7 +17072,9 @@ def sweep_shaped_self_approvals(
             errors.append({"ref": item.ref, "error": status_error})
             continue
 
-        basis = "{}; no escalated risk".format(reason)
+        basis = "{}; {}".format(
+            reason, "no declared risk" if scan_only else "no escalated risk"
+        )
         authority_signals = needs_nate_signals(body)
         if authority_signals:
             basis += "; authority signals: {}".format(
@@ -16291,8 +17132,9 @@ def approved_merge_candidates(
             repo = ticket.repo
             if str(row.get("state") or "OPEN").upper() != "OPEN":
                 continue
-            branch = row.get("headRefName") or ""
-            row_ref = ticket_ref_from_branch(repo, branch)
+            # Checked again here, not only in the row accessor: this list is
+            # what the lanes merge unattended (#1794).
+            row_ref = ticket_ref_from_pr(repo, row)
             if row_ref != ref or row.get("number") is None:
                 continue
             verdict = _row_verdict(row, repo)
@@ -17171,6 +18013,11 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
         )
         if cleared:
             out["cleared_blocks"] = cleared
+        cleared_decline_routes = attempt_reconcile(
+            "answered_decline_routes", clear_answered_decline_routes, items
+        )
+        if cleared_decline_routes:
+            out["cleared_decline_routes"] = cleared_decline_routes
         abandoned = attempt_reconcile(
             "abandoned_claims", reconcile_abandoned_claims,
             items, now, pr_facts,
@@ -17315,33 +18162,55 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
                     work=item_json(ticket, now, {i.ref: i for i in items}),
                 )
                 if agent in IMPLEMENT_VENDORS:
-                    # Bind immediately after the claim, before the packet's
-                    # slower ticket/plan/verdict reads. A process abandoned
-                    # during that load is then attributable and recoverable by
-                    # the next begin's reconciliation.
-                    _bind_run(agent, out)
                     try:
-                        out["packet"] = implementation_packet(
-                            ticket.repo, ticket.number, agent
-                        )
-                    except (GitHubError, OSError, subprocess.SubprocessError) as exc:
-                        # A packet-less implementation run is not actionable.
-                        # Undo the claim before returning a stop envelope so the
-                        # next poll can recover without waiting for the TTL.
+                        ensure_ticket_branch(ticket.repo, ticket.number)
+                    except (GitHubError, OSError,
+                            subprocess.SubprocessError) as exc:
+                        # A branchless claim still means begin was abandoned.
+                        # Release a claim whose liveness marker could not be
+                        # planted, then stop before issuing implementation work.
                         try:
                             write_lock(ticket, None)
-                        except GitHubError as release_exc:
-                            out["release_error"] = str(release_exc)
+                        except GitHubError:
+                            out["release_error"] = "could not release the ticket claim"
                         out.pop("work", None)
                         out.update(
                             do="stop",
                             gate="error",
-                            why="could not assemble implementation packet: {}".format(
-                                exc
+                            why="could not establish ticket branch for {}#{} ({})".format(
+                                ticket.repo, ticket.number, type(exc).__name__
                             ),
                         )
                     else:
-                        out["vendor"] = IMPLEMENT_VENDORS[agent]
+                        # Bind after the branch is durable and before the
+                        # packet's slower ticket/plan/verdict reads. A process
+                        # abandoned during that load is then attributable and
+                        # recoverable by the next begin's reconciliation.
+                        _bind_run(agent, out)
+                        try:
+                            out["packet"] = implementation_packet(
+                                ticket.repo, ticket.number, agent
+                            )
+                        except (GitHubError, OSError,
+                                subprocess.SubprocessError) as exc:
+                            # A packet-less implementation run is not
+                            # actionable. Undo the claim before returning a
+                            # stop envelope so the next poll can recover
+                            # without waiting for the TTL.
+                            try:
+                                write_lock(ticket, None)
+                            except GitHubError as release_exc:
+                                out["release_error"] = str(release_exc)
+                            out.pop("work", None)
+                            out.update(
+                                do="stop",
+                                gate="error",
+                                why="could not assemble implementation packet: {}".format(
+                                    exc
+                                ),
+                            )
+                        else:
+                            out["vendor"] = IMPLEMENT_VENDORS[agent]
         if "bound" not in out:
             _bind_run(agent, out)
         print(json.dumps(out, indent=2))
@@ -17701,9 +18570,17 @@ def cmd_review(repo: Optional[str], pr: int, verdict: str, ci: str,
     """
     repo = resolve_repo(repo)
     head = (_gh_json("gh", "pr", "view", str(pr), "--repo", repo,
-                     "--json", "headRefOid,state") or {})
+                     "--json", "headRefOid,state," + PR_TRUST_JSON_FIELDS)
+            or {})
     if head.get("state") != "OPEN":
         raise GitHubError("PR #{} is {}, not open".format(pr, head.get("state")))
+    # A verdict on a fork's or another author's PR would put the funnel's
+    # judgement on work that is not its own (#1794).
+    foreign = foreign_pr_reason(repo, head)
+    if foreign is not None:
+        raise GitHubError(
+            "refusing to review PR #{}: it is not the funnel's own PR, "
+            "because {}".format(pr, foreign))
     sha = head.get("headRefOid")
     if not sha:
         raise GitHubError("could not read the head commit of PR #{}".format(pr))
@@ -17808,6 +18685,11 @@ def _record_unmergeable_rejection(
         data = _pr_fact_for_number(repo, pr, include_comments=True) or {}
     if data.get("state") != "OPEN":
         return
+    if not is_funnel_pr(repo, data):
+        # Writing a verdict is acting on the PR, and releasing a claim acts
+        # on the ticket its branch names; neither follows from a PR that is
+        # not the funnel's own (#1794).
+        return
     sha = data.get("headRefOid")
     reason = _conflicting_branch_blocker(data)
     if not sha or reason is None:
@@ -17885,6 +18767,106 @@ def ticket_ref_from_branch(repo: str, branch: str) -> Optional[str]:
         return None
     tail = branch.split("/", 1)[1]
     return "{}#{}".format(repo, tail) if tail.isdigit() else None
+
+
+#: The ``gh pr view`` / ``gh pr list`` JSON fields ``foreign_pr_reason`` reads
+#: (#1794). Every such read that pairs a PR with a ticket or acts on one asks
+#: for them; the batched GraphQL read asks for the equivalent fields itself.
+PR_TRUST_JSON_FIELDS = (
+    "isCrossRepository,headRepository,headRepositoryOwner,author"
+)
+
+
+def pr_head_repository(row: object) -> Optional[str]:
+    """The ``owner/name`` a PR's head branch lives in, or None if unreadable.
+
+    Three wire shapes carry it (#1794): the batched GraphQL read asks for
+    ``headRepository { nameWithOwner }``; ``gh pr ... --json`` gives
+    ``headRepository.name`` beside ``headRepositoryOwner.login``; REST gives
+    ``head.repo.full_name``. GitHub reports no head repository once a fork is
+    deleted. Shapes that name two different repositories have no single
+    answer, so they read as unreadable, as ``comment_author`` treats a row
+    naming two logins.
+    """
+    if not isinstance(row, Mapping):
+        return None
+    found: Dict[str, str] = {}
+    head_repo = row.get("headRepository")
+    if isinstance(head_repo, Mapping):
+        full = head_repo.get("nameWithOwner")
+        if not (isinstance(full, str) and full):
+            owner = row.get("headRepositoryOwner")
+            login = owner.get("login") if isinstance(owner, Mapping) else None
+            name = head_repo.get("name")
+            full = (
+                "{}/{}".format(login, name)
+                if isinstance(login, str) and login
+                and isinstance(name, str) and name
+                else None
+            )
+        if full:
+            found[full.lower()] = full
+    head = row.get("head")
+    if isinstance(head, Mapping):
+        repo = head.get("repo")
+        full = repo.get("full_name") if isinstance(repo, Mapping) else None
+        if isinstance(full, str) and full:
+            found[full.lower()] = full
+    return next(iter(found.values())) if len(found) == 1 else None
+
+
+def foreign_pr_reason(repo: str, row: object) -> Optional[str]:
+    """Why a PR is not the funnel's own, or None when it is (#1794).
+
+    The funnel pairs a PR with its ticket by the ``ticket/<n>`` branch name,
+    and command-center is public: anyone can fork it and open a PR from a
+    branch of that name, which would otherwise be offered to the review lane
+    (a prompt-injection surface that also spends its budget), block the
+    ticket as awaiting review, and reach the merge gate. A branch name proves
+    nothing. The funnel's PRs are the ones whose head is in the base
+    repository and whose author is a trusted account: Nate and every agent
+    open PRs as the owner account, the one ``TRUSTED_COMMENT_AUTHORS`` names
+    for verdicts (#1787).
+
+    Same repository means GitHub's ``isCrossRepository`` is false, or, on a
+    read without that field (REST), the head repository is the base. Either
+    signal saying otherwise refuses. Fail closed: a PR whose head repository
+    or author cannot be read is not the funnel's.
+    """
+    if not isinstance(row, Mapping):
+        return "the PR could not be read"
+    cross = row.get("isCrossRepository")
+    head = pr_head_repository(row)
+    if cross is True:
+        return "it was opened from another repository ({})".format(
+            head or "unreadable")
+    if head is not None and head.lower() != str(repo or "").lower():
+        return "its head repository {} is not {}".format(head, repo)
+    if cross is not False and head is None:
+        return "its head repository could not be read"
+    author = comment_author(row)
+    if author is None:
+        return "its author could not be read"
+    if author.lower() not in TRUSTED_COMMENT_AUTHORS:
+        return "it was opened by {}, not a trusted account".format(author)
+    return None
+
+
+def is_funnel_pr(repo: str, row: object) -> bool:
+    """Whether a PR is the funnel's own: same repository, trusted author."""
+    return foreign_pr_reason(repo, row) is None
+
+
+def ticket_ref_from_pr(repo: str, row: object) -> Optional[str]:
+    """The ticket a PR finishes, or None; only the funnel's own PRs pair.
+
+    ``ticket_ref_from_branch`` with the trust check in front (#1794): every
+    place that pairs a fetched PR row with its ticket goes through here, so a
+    fork or another author's PR named ``ticket/<n>`` pairs with nothing.
+    """
+    if not is_funnel_pr(repo, row):
+        return None
+    return ticket_ref_from_branch(repo, str(row.get("headRefName") or ""))
 
 
 #: The marker's ticket list, read from the project's own sub-issues at close
@@ -18247,7 +19229,8 @@ def merged_pr_facts(items: Sequence[Item]) -> MergedPRFacts:
             snapshot.pr_truncated_by_repo.get(repo)
         )
         for row in snapshot.rows_by_repo.get(repo, ()):
-            ref = ticket_ref_from_branch(repo, row.get("headRefName") or "")
+            # Only the funnel's own merged PR finishes a ticket (#1794).
+            ref = ticket_ref_from_pr(repo, row)
             if ref in open_ticket_refs:
                 merged_ticket_refs.add(ref)
 
@@ -18294,6 +19277,13 @@ def merge_blockers(
 
     if data.get("state") != "OPEN":
         why.append("PR is {}, not open".format(data.get("state")))
+
+    # A PR named ticket/<n> can come from any fork of a public repository.
+    # Only the funnel's own PR merges, and an unreadable head repository or
+    # author refuses (#1794).
+    foreign = foreign_pr_reason(repo, data)
+    if foreign is not None:
+        why.append("PR #{} is not the funnel's own PR: {}".format(pr, foreign))
 
     mergeable = str(data.get("mergeable") or "").upper()
     conflict = _conflicting_branch_blocker(data)
@@ -18348,6 +19338,19 @@ def merge_blockers(
             why.append("CI not green: " + ", ".join(str(f) for f in failed))
         elif not checks:
             why.append("no CI checks reported — refusing to merge unverified work")
+        # A skipped check ran nothing, so it verified nothing (#1794). No
+        # member repository sets required checks in branch protection; every
+        # check the rollup reports is one this gate requires. command-center's
+        # own pytest job skips itself on a fork's PR, which would otherwise
+        # read as green here. No member repository's PR CI skips a job in
+        # normal runs (checked 2026-09-28), so this refuses nothing that
+        # merges today.
+        skipped = [c.get("name") or c.get("context") for c in checks
+                   if str(c.get("conclusion") or c.get("state") or "").upper()
+                   == "SKIPPED"]
+        if skipped:
+            why.append("CI not green: {} skipped — a skipped check verified "
+                       "nothing".format(", ".join(str(s) for s in skipped)))
 
     verdict = _row_verdict(data, repo)
     if verdict is None:
@@ -18537,8 +19540,10 @@ def cmd_show(items: List[Item], now: datetime, ref: str) -> int:
         for c in comments[-4:]:
             body = c.get("body") or ""
             text = " ".join(_visible_comment(body).split())
+            # An untrusted comment is shown under its author's login, never
+            # under a voice its own text claims (#1788).
             print("  {}: {}".format(
-                render_voice(body), text[:200]))
+                render_comment_voice(c), text[:200]))
         print("")
 
     if item.status == "Building":
@@ -18791,6 +19796,51 @@ def _blocked_comment_body(blocked_on: Sequence[str], because: str) -> str:
 def _needs_decision_comment_body(question: str) -> str:
     """Render the breakdown-question header owned by its parser."""
     return "{} {}".format(NEEDS_DECISION_PREFIX, question)
+
+
+def _hold_reference(value: str) -> str:
+    """Normalise one ``hold --on`` issue number exactly as ``--blocked-on``."""
+    try:
+        return _blocked_reference(value)
+    except argparse.ArgumentTypeError:
+        raise argparse.ArgumentTypeError(
+            "a positive issue number is required for --on"
+        )
+
+
+def _hold_until_date(value: str) -> date:
+    """Require a future calendar date for ``hold --until`` before loading.
+
+    ``satisfied_block_refs`` counts a date on or before today's UTC date as
+    met, so a hold dated today would be lifted by the next clear pass.
+    """
+    if not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", value):
+        raise argparse.ArgumentTypeError("hold date must use YYYY-MM-DD")
+    try:
+        until = date.fromisoformat(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            "hold date must be a valid YYYY-MM-DD calendar date"
+        )
+    if until <= _block_condition_date():
+        raise argparse.ArgumentTypeError(
+            "hold date must be after today's UTC date"
+        )
+    return until
+
+
+def _hold_comment_body(reason: str, until: Optional[date] = None,
+                       on: Sequence[str] = ()) -> str:
+    """Render an Accept hold as the block header ``BLOCK_COMMENT_RE`` owns.
+
+    Exactly one condition: a hold on both a date and an issue would parse,
+    but the verb offers one so the brief can say plainly what lifts it.
+    """
+    if (until is None) == (not on):
+        raise ValueError("a hold needs exactly one of a date or issues")
+    if until is not None:
+        return "**Blocked until {}:** {}".format(until.isoformat(), reason)
+    return _blocked_comment_body(on, reason)
 
 
 #: Whether each command's shared Project load must carry item history (#1622).
@@ -19060,6 +20110,41 @@ def main(argv: Optional[Sequence[str]] = None, *,
         help="heartbeat run id; otherwise infer a unique open local start",
     )
     comment.add_argument(
+        "--agent", default=None,
+        help="agent that wrote the comment; otherwise read the heartbeat spool",
+    )
+    hold = sub.add_parser(
+        "hold",
+        help="Nate's hold on a finished project at Accept, recorded as a "
+             "conditioned block — dry run without --yes",
+    )
+    hold.add_argument("ref", help="issue number, owner/repo#number, or URL")
+    hold_condition = hold.add_mutually_exclusive_group(required=True)
+    hold_condition.add_argument(
+        "--until", type=_hold_until_date, default=None, metavar="YYYY-MM-DD",
+        help="hold until this future date (UTC); the block lifts itself then",
+    )
+    hold_condition.add_argument(
+        "--on", nargs="+", type=_hold_reference, default=None, metavar="N",
+        help="hold until these issues in the project's repository close",
+    )
+    hold.add_argument(
+        "--reason", required=True, type=_comment_reason,
+        help="why Nate is holding it (required)",
+    )
+    hold.add_argument(
+        "--yes", action="store_true", dest="confirmed",
+        help="actually do it; without this the command is a dry run",
+    )
+    hold.add_argument(
+        "--instruction", type=_verbatim_instruction, default=None,
+        help="verbatim instruction received from Nate; recorded in provenance",
+    )
+    hold.add_argument(
+        "--run", default=None,
+        help="heartbeat run id; otherwise infer a unique open local start",
+    )
+    hold.add_argument(
         "--agent", default=None,
         help="agent that wrote the comment; otherwise read the heartbeat spool",
     )
@@ -19398,6 +20483,11 @@ def main(argv: Optional[Sequence[str]] = None, *,
         if args.command == "answer-gates":
             return cmd_answer_gates(items, now, args.ref, args.answer,
                                     args.decider, args.run, args.agent)
+        if args.command == "hold":
+            return cmd_hold(items, now, args.ref, args.reason,
+                            until=args.until, on=args.on or (),
+                            confirmed=args.confirmed, run=args.run,
+                            agent=args.agent, instruction=args.instruction)
         if args.command == "comment":
             if args.needs_decision is not None:
                 body = _needs_decision_comment_body(args.needs_decision)

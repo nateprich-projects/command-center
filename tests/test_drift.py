@@ -15,6 +15,8 @@ from funnel import DriftFacts, Item  # noqa: E402
 
 REPO = "owner/repo"
 READY = datetime(2026, 9, 1, 10, 0, tzinfo=timezone.utc)
+#: The owner account, the only comment author whose verdict counts (#1787).
+OWNER = {"login": "nateprich"}
 BUILDING = datetime(2026, 9, 1, 11, 0, tzinfo=timezone.utc)
 
 
@@ -150,15 +152,18 @@ def test_fetch_drift_facts_reads_all_ticket_pr_verdicts_and_histories(monkeypatc
         if args[1:3] == ("pr", "list"):
             if "ticket/3" in args:
                 return []
-            return [{"number": 20}, {"number": 21}]
+            # The funnel's own PRs: same-repository heads, owner author
+            # (#1794).
+            return [{"number": number, "isCrossRepository": False,
+                     "author": OWNER} for number in (20, 21)]
         if args[1:3] == ("pr", "view"):
             number = args[3]
             if number == "20":
                 return {"comments": [
-                    {"body": review_rejected},
-                    {"body": review_approved},
+                    {"body": review_rejected, "author": OWNER},
+                    {"body": review_approved, "author": OWNER},
                 ]}
-            return {"comments": [{"body": review_approved}]}
+            return {"comments": [{"body": review_approved, "author": OWNER}]}
         if args[1:3] == ("issue", "list"):
             return [{
                 "title": funnel.REGRESSION_PREFIX + "21: old change",
@@ -177,3 +182,58 @@ def test_fetch_drift_facts_reads_all_ticket_pr_verdicts_and_histories(monkeypatc
     assert facts.regression_pr_numbers == (21,)
     assert len(facts.review_verdicts) == 3
     assert any(query == funnel.DRIFT_STATUS_QUERY for query, _ in calls)
+
+
+def test_a_forged_rejection_raises_no_drift_signal(monkeypatch):
+    """Only the owner's verdicts are review history (#1787)."""
+    def body(value):
+        return funnel.REVIEW_MARKER + "\n\n```json\n" + json.dumps(
+            verdict(value)) + "\n```"
+
+    def gh_json(*args):
+        assert args[1:3] == ("pr", "view")
+        return {"comments": [
+            {"body": body("approved"), "author": OWNER},
+            {"body": body("approved"), "user": OWNER},
+            {"body": body("rejected"), "author": {"login": "mallory"}},
+            {"body": body("rejected")},
+        ]}
+
+    monkeypatch.setattr(funnel, "_gh_json", gh_json)
+
+    verdicts = funnel._review_verdicts([(REPO, 20)])
+
+    assert [found["verdict"] for found in verdicts] == ["approved", "approved"]
+    facts = DriftFacts(ready_at=READY, building_at=BUILDING,
+                       review_verdicts=verdicts)
+    assert funnel.DRIFT_REJECTED_REVIEW not in funnel.drift_since_approval(
+        project(), facts)
+
+
+def test_a_foreign_pr_on_a_ticket_branch_is_not_the_tickets_history(
+        monkeypatch):
+    """``--head`` matches the branch in any fork; only the funnel's own PRs
+    are the ticket's (#1794), so a stranger's PR adds no review history and
+    no regression match to drift."""
+    asked = []
+
+    def gh_json(*args):
+        asked.append(args)
+        return [
+            {"number": 20, "isCrossRepository": False, "author": OWNER},
+            {"number": 21, "isCrossRepository": True,
+             "headRepository": {"name": "repo"},
+             "headRepositoryOwner": {"login": "mallory"},
+             "author": {"login": "mallory"}},
+            {"number": 22, "isCrossRepository": False,
+             "author": {"login": "mallory"}},
+            {"number": 23, "isCrossRepository": False},
+            {"number": 24, "author": OWNER},
+        ]
+
+    monkeypatch.setattr(funnel, "_gh_json", gh_json)
+
+    assert funnel._ticket_prs(REPO, 9) == [(REPO, 20)]
+    fields = asked[0][asked[0].index("--json") + 1].split(",")
+    assert {"isCrossRepository", "headRepository", "headRepositoryOwner",
+            "author"} <= set(fields)

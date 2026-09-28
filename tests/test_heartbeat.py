@@ -11,6 +11,7 @@ So the tests are as much about refusing to guess as about resolving correctly.
 
 from __future__ import annotations
 
+import base64
 import importlib.util
 import json
 import pathlib
@@ -79,6 +80,42 @@ def test_read_github_excludes_records_only_in_the_local_spool(monkeypatch):
 
     assert heartbeat.read_github("codex") == [remote]
     assert heartbeat.read("codex") == [remote, spooled]
+
+
+def test_read_github_strict_reads_durable_jsonl_and_propagates_fetch_errors(
+        monkeypatch):
+    record = {"run": "durable", "agent": "codex", "phase": "bind"}
+    encoded = base64.b64encode(
+        (json.dumps(record) + "\n").encode("utf-8")
+    ).decode("ascii")
+    monkeypatch.setattr(
+        heartbeat, "gh",
+        lambda *args, **kwargs: json.dumps({
+            "encoding": "base64", "size": len(encoded), "content": encoded,
+        }),
+    )
+
+    assert heartbeat.read_github_strict("codex") == [record]
+
+    def unavailable(*args, **kwargs):
+        raise heartbeat.HeartbeatError("GitHub could not be read")
+
+    monkeypatch.setattr(heartbeat, "gh", unavailable)
+    with pytest.raises(heartbeat.HeartbeatError, match="could not be read"):
+        heartbeat.read_github_strict("codex")
+
+
+def test_read_github_strict_refuses_malformed_jsonl(monkeypatch):
+    encoded = base64.b64encode(b"{not-json}\n").decode("ascii")
+    monkeypatch.setattr(
+        heartbeat, "gh",
+        lambda *args, **kwargs: json.dumps({
+            "encoding": "base64", "size": len(encoded), "content": encoded,
+        }),
+    )
+
+    with pytest.raises(heartbeat.HeartbeatError, match="unreadable record"):
+        heartbeat.read_github_strict("codex")
 
 
 def test_one_open_start_resolves_without_a_run_id():
@@ -311,7 +348,7 @@ def test_usage_snapshot_reads_the_agent_own_provider(monkeypatch):
     now = 1_700_000_000.0
     readings = {
         "claude": {
-            "source": "anthropic", "captured_at": now,
+            "source": "claude", "captured_at": now, "estimated": False,
             "windows": {"five_hour": {
                 "used_percent": 11.0, "resets_at": now + 11,
             }},
@@ -330,11 +367,20 @@ def test_usage_snapshot_reads_the_agent_own_provider(monkeypatch):
         },
     }
     monkeypatch.setattr(heartbeat.time, "time", lambda: now)
-    monkeypatch.setattr(usage, "read_claude", lambda: readings["claude"])
+    monkeypatch.setattr(
+        usage, "read_claude_plan_history", lambda timestamp: readings["claude"]
+    )
     monkeypatch.setattr(usage, "read_codex", lambda: readings["codex"])
     monkeypatch.setattr(usage, "read_zai", lambda timestamp: readings["zcode"])
 
     assert heartbeat.usage_snapshot("claude") == {
+        "estimated": False,
+        "five_hour": {"used_percent": 11.0, "resets_at": now + 11}
+    }
+    readings["claude"]["estimated"] = True
+    readings["claude"]["source"] = "claude-local-estimate"
+    assert heartbeat.usage_snapshot("claude") == {
+        "estimated": True,
         "five_hour": {"used_percent": 11.0, "resets_at": now + 11}
     }
     assert heartbeat.usage_snapshot("codex") == {

@@ -23,6 +23,7 @@ import pytest
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+import heartbeat  # noqa: E402
 import funnel  # noqa: E402
 from engine import implement, shape  # noqa: E402
 
@@ -91,7 +92,7 @@ PAGES = [
 ]
 
 SHAPE_COMMENTS = [{
-    "author": {"login": "nate"},
+    "author": {"login": "nateprich"},
     "body": "The old premise is false.",
     "createdAt": "2026-09-25T01:00:00Z",
 }]
@@ -492,8 +493,18 @@ def test_shape_apply_falls_back_when_parent_by_ref_misses(
 
 def test_release_claim_releases_the_same_item_without_history(monkeypatch):
     ref = "{}#{}".format(REPO, TICKET)
+    bound = {
+        "run": "run-42", "phase": "bind",
+        "ts": int(datetime(2026, 9, 26, 11, 1,
+                            tzinfo=timezone.utc).timestamp()),
+        "do": "ticket", "work": ref,
+    }
+    monkeypatch.setattr(
+        heartbeat, "read_github_strict",
+        lambda agent: [bound] if agent == "codex" else [],
+    )
     old, _, new, _ = _run_both(
-        monkeypatch, lambda: implement.release_claim(ref))
+        monkeypatch, lambda: implement.release_claim(ref, run="run-42"))
     assert new.writes == old.writes
     assert new.writes == [("SET_LOCK", sorted({
         "project": funnel.PROJECT_ID, "item": "PVTI_{}".format(TICKET),
@@ -505,9 +516,19 @@ def test_release_claim_releases_the_same_item_without_history(monkeypatch):
 def test_release_claim_falls_back_to_compact_board_on_by_ref_miss(
         monkeypatch):
     ref = "{}#{}".format(REPO, TICKET)
+    bound = {
+        "run": "run-42", "phase": "bind",
+        "ts": int(datetime(2026, 9, 26, 11, 1,
+                            tzinfo=timezone.utc).timestamp()),
+        "do": "ticket", "work": ref,
+    }
+    monkeypatch.setattr(
+        heartbeat, "read_github_strict",
+        lambda agent: [bound] if agent == "codex" else [],
+    )
     with monkeypatch.context() as patch:
         board = _serve(patch, full=False, missing_refs=[ref])
-        implement.release_claim(ref)
+        implement.release_claim(ref, run="run-42")
     assert board.ref_queries == [[ref]]
     assert len(board.loaded) == 1
     empty = (None, [], None, None, None, None)

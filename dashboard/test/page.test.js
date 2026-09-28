@@ -835,6 +835,28 @@ test("the Budget panel renders D1-D6, marks Muse pace resets, and explains the D
 
     assert.match(html, /Muse’s ChatGPT-side usage and Claude’s claude\.ai usage are invisible/);
     assert.match(html, /id="budget-grid"/);
+
+    const estimateStatus = (value) => ({
+      kind: "category",
+      daily: Array(fixture.days.length).fill(null).map((item, index) => (
+        index === fixture.days.length - 1 ? value : item
+      )),
+      r7: Array(fixture.days.length).fill(null),
+      r28: Array(fixture.days.length).fill(null),
+      delta: Array(fixture.days.length).fill(null),
+    });
+    for (const [value, label] of [
+      [true, /Five-hour window \(estimated\)/],
+      [false, /Five-hour window \(authoritative app reading\)/],
+    ]) {
+      fixture.metrics.D.D3.estimated = estimateStatus(value);
+      renderBudgetMetrics(fixture, grid);
+      const claude = grid.querySelectorAll(".budget-tile")[2];
+      assert.match(claude.textContent, label);
+      assert.match(claude.textContent, value
+        ? /Seven-day window \(estimated\)/
+        : /Seven-day window \(authoritative app reading\)/);
+    }
   } finally {
     if (previousDocument === undefined) delete globalThis.document;
     else globalThis.document = previousDocument;
@@ -899,7 +921,7 @@ test("the Runs panel renders C1-C6 by agent and job and preserves their gaps", a
   }
 });
 
-test("the Quality panel renders B1, B2 and B4 while keeping B3 blind", async () => {
+test("the Quality panel renders B1, B2 and B4, and B3 shows its gap until an hour measures it", async () => {
   const [seriesText, snapshotText, html] = await Promise.all([
     readFile(new URL("../fixtures/execution_metrics.json", import.meta.url), "utf8"),
     readFile(new URL("../../tests/fixtures/metrics_snapshot.json", import.meta.url), "utf8"),
@@ -929,7 +951,8 @@ test("the Quality panel renders B1, B2 and B4 while keeping B3 blind", async () 
     assert.equal(b2Series.r28[last], expectedRework);
 
     const b3 = panels[2];
-    assert.match(b3.textContent, /Blind input: no capture has recorded a cause yet\./);
+    assert.match(b3.textContent, /mostly written by another Broken project's fix/);
+    assert.match(b3.textContent, /No reading yet: no hour has measured fix recurrence\./);
     assert.equal(b3.querySelectorAll(".metric-reading").length, 0);
     assert.equal(b3.querySelectorAll(".metric-chart").length, 0);
     assert.equal(series.metrics.B.B3, undefined);

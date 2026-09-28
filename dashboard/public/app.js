@@ -1431,10 +1431,10 @@ const QUALITY_METRICS = [
   {
     code: "B3",
     title: "Fix recurrence",
-    description: "Broken projects with a recorded cause ÷ Broken projects created.",
+    description: "Broken fixes whose changed lines were mostly written by another Broken project's fix in the prior 7 days ÷ Broken fixes that change existing code (fix_recurrence.py, #1682).",
     format: "percent",
-    sources: [],
-    gapMessage: "Blind input: no capture has recorded a cause yet.",
+    sources: [{ path: ["B", "B3"] }],
+    gapMessage: "No reading yet: no hour has measured fix recurrence.",
   },
   {
     code: "B4",
@@ -1832,9 +1832,14 @@ function renderBudgetMetrics(series, container) {
     && root.D.D2.funnel_vs_personal.gap);
 
   const claude = appendBudgetTile(container, "D3", "Claude window usage");
+  const estimateSeries = get(["D", "D3", "estimated"]);
+  const estimated = estimateSeries && Array.isArray(estimateSeries.daily)
+    ? estimateSeries.daily[index] : null;
+  const sourceLabel = estimated === true ? " (estimated)"
+    : estimated === false ? " (authoritative app reading)" : "";
   for (const [windowName, label] of [["five_hour", "Five-hour window"], ["seven_day", "Seven-day window"]]) {
     const used = get(["D", "D3", "windows", windowName, "used_percent"]);
-    appendBudgetMetric(claude, label, used, days, "percent-points");
+    appendBudgetMetric(claude, label + sourceLabel, used, days, "percent-points");
     const reset = latestSeriesValue(get(["D", "D3", "windows", windowName, "resets_at"]), index);
     if (reset) appendBudgetDetail(claude, label + " reset", resetLabel(reset));
   }

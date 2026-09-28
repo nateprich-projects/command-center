@@ -18,12 +18,14 @@ this module cannot create a dependency cycle.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import pathlib
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -37,7 +39,10 @@ import funnel  # noqa: E402
 from decline_classifier import (  # noqa: E402
     DECLINE_REVIEW_ROUTING_MARKER,
     classify_decline_reason,
+    declined_pending_gate_answer_comment as _declined_pending_gate_answer_comment,
     declined_review_routing_comment as _declined_review_routing_comment,
+    declined_unsatisfiable_acceptance_comment
+    as _declined_unsatisfiable_acceptance_comment,
 )
 from engine import shape  # noqa: E402
 
@@ -48,6 +53,34 @@ class ImplementError(RuntimeError):
 
 class StrayFileError(ImplementError):
     """The ticket branch contains run scratch that must not reach a PR."""
+
+    def __init__(self, paths: Sequence[str]):
+        # Kept apart from the message so a member-repo finish note can count
+        # them without naming them (#1796).
+        self.paths = list(paths)
+        super().__init__(
+            "pre-PR stray-file check refused; remove and re-stage run scratch: "
+            "{}".format(", ".join(self.paths)))
+
+
+class CommandTimeoutError(ImplementError):
+    """A finish subprocess exceeded its bound and was abandoned."""
+
+    def __init__(self, command: Sequence[str], timeout: float):
+        self.timeout_seconds = timeout
+        self.finish_recorded = False
+        super().__init__("{} timed out after {:g}s".format(
+            _command_label(command), timeout))
+
+
+class SupersededRunError(ImplementError):
+    """A finish cannot establish that this run still owns the ticket claim."""
+
+    def __init__(self, ref: str, reason: str):
+        self.ref = ref
+        self.reason = reason
+        super().__init__("superseded {}: {}".format(ref, reason))
+
 
 
 #: The blocked_on_human reason enum: the four specific human capabilities
@@ -109,16 +142,23 @@ def fetch_plan(repo: str, ticket: dict) -> Optional[dict]:
 
 
 def fetch_verdict_blocking(repo: str, number: int) -> dict:
-    """Read the newest verdict for the ticket's open PR, when one exists."""
+    """Read the newest verdict for the ticket's open PR, when one exists.
+
+    ``--head`` matches the branch name in any fork, so only the funnel's own
+    PR is the ticket's (#1794): a stranger's PR named ``ticket/<n>`` must not
+    hand the engineer its number, head or review.
+    """
     rows = funnel._gh_json(
         "gh", "pr", "list", "--repo", repo, "--state", "open",
         "--head", "ticket/{}".format(number), "--json",
-        "number,headRefOid,updatedAt", "--limit", "10",
+        "number,headRefOid,updatedAt," + funnel.PR_TRUST_JSON_FIELDS,
+        "--limit", "10",
     )
     if rows is None or not isinstance(rows, list):
         raise funnel.GitHubError(
             "could not list open PRs for {}#{}".format(repo, number)
         )
+    rows = [row for row in rows if funnel.is_funnel_pr(repo, row)]
     if not rows:
         return {"pr": None, "head_sha": None, "verdict": None,
                 "blocking": []}
@@ -197,12 +237,24 @@ def fetch_agents_md(repo: str) -> Tuple[str, bool, bool]:
     return cut, False, True
 
 
+def fetch_ticket_comments(repo: str, number: int) -> List[Dict[str, object]]:
+    """Read the ticket's whole comment thread, oldest first; fail closed.
+
+    A member-repo test failure's ids are posted to its ticket rather than to
+    the public heartbeat note (#1796), so this is how the next run learns
+    what failed. The shape and breakdown packets' paginated reader (#1549,
+    #1605): a short read raises rather than handing over part of a thread.
+    """
+    return funnel.read_issue_comments(repo, number)
+
+
 def build_packet(*, repo: str, ticket: dict, plan: Optional[dict],
                  verdict: dict, prior_run: Optional[dict],
                  agents_md: str = "", agents_md_missing: bool = False,
-                 agents_md_truncated: bool = False) -> dict:
+                 agents_md_truncated: bool = False,
+                 issue_comments: Optional[Sequence[Dict]] = None) -> dict:
     """Build one JSON-serialisable implementation packet from fetched facts."""
-    return {
+    packet = {
         "repo": repo,
         "ticket": ticket,
         "plan": plan,
@@ -216,12 +268,21 @@ def build_packet(*, repo: str, ticket: dict, plan: Optional[dict],
         "agents_md_truncated": agents_md_truncated,
         "collected_at": datetime.now(timezone.utc).isoformat(),
     }
+    # Rendered as the breakdown packet renders its parent's thread (#1605),
+    # and absent when the ticket has no comments, so that packet keeps its
+    # old shape.
+    issue_thread = shape.issue_thread_section(
+        issue_comments if issue_comments is not None else [])
+    if issue_thread is not None:
+        packet["issue_thread"] = issue_thread
+    return packet
 
 
 def collect(repo: Optional[str], number: int, *, agent: str = "codex") -> dict:
     """Fetch every read-only input needed to implement one ticket."""
     resolved = funnel.resolve_repo(repo)
     ticket = fetch_ticket(resolved, number)
+    issue_comments = fetch_ticket_comments(resolved, number)
     # The ticket's own repo, which for a member-repo ticket is not this one.
     agents_md, agents_md_missing, agents_md_truncated = fetch_agents_md(
         parent_repo(resolved, ticket)
@@ -235,6 +296,7 @@ def collect(repo: Optional[str], number: int, *, agent: str = "codex") -> dict:
         agents_md=agents_md,
         agents_md_missing=agents_md_missing,
         agents_md_truncated=agents_md_truncated,
+        issue_comments=issue_comments,
     )
 
 
@@ -313,7 +375,15 @@ def _read_done_answer(answer: dict) -> dict:
     ):
         raise ImplementError(
             "answer evidence must be a non-empty list of non-empty GitHub URLs")
-    extra = sorted(set(answer) - {"done", "summary", "departures", "evidence"})
+    # Where the implementer says review should look hardest (#1807). It is
+    # optional and may be empty, so an answer without it parses as before.
+    risks = answer.get("risks")
+    if "risks" in answer and (not isinstance(risks, list) or not all(
+        isinstance(value, str) and value.strip() for value in risks
+    )):
+        raise ImplementError("answer risks must be a list of non-empty strings")
+    extra = sorted(
+        set(answer) - {"done", "summary", "departures", "evidence", "risks"})
     if extra:
         raise ImplementError("answer has unknown field(s): {}".format(", ".join(extra)))
     found = {
@@ -323,6 +393,8 @@ def _read_done_answer(answer: dict) -> dict:
     }
     if "evidence" in answer:
         found["evidence"] = [value.strip() for value in evidence]
+    if "risks" in answer:
+        found["risks"] = [value.strip() for value in risks]
     return found
 
 
@@ -346,41 +418,138 @@ def _read_blocked_answer(value: object) -> dict:
     return {"reason": reason, "action": action.strip()}
 
 
+CLAIM_TTL_SECONDS = 2 * 60 * 60
+
+# Measured 2026-09-28 on this checkout: local Git inventory calls took at most
+# 0.0054s, disposable-repo add/commit/merge at most 0.0216s, and GitHub
+# ls-remote/fetch 0.9282s/1.0166s. The caps retain ample headroom for repo and
+# network variance while staying below the two-hour claim TTL.
+LOCAL_GIT_TIMEOUT_SECONDS = 2 * 60
+REMOTE_GIT_TIMEOUT_SECONDS = 10 * 60
+
+# The latest green CI run (#36331008053) spent 6m54s in pytest. Allow more
+# than six times that duration while staying well below the two-hour claim TTL.
+TEST_COMMAND_TIMEOUT_SECONDS = 45 * 60
+# This checkout's CI syntax-compile command took 0.0800s across seven runs;
+# compileall took 0.1176s. Keep compilation separate from the full test suite.
+COMPILE_COMMAND_TIMEOUT_SECONDS = 2 * 60
+# The Python version probe took at most 0.0160s across seven runs. Unknown
+# helper commands share this measured cap; the live finish path has no
+# unclassified command site.
+INTERPRETER_PROBE_TIMEOUT_SECONDS = 20
+OTHER_COMMAND_TIMEOUT_SECONDS = INTERPRETER_PROBE_TIMEOUT_SECONDS
+
+
+def _command_label(command: Sequence[str]) -> str:
+    """Name a timed-out command without echoing arbitrary command arguments."""
+    if not command:
+        return "subprocess"
+    program = os.path.basename(command[0])
+    if program == "git":
+        operation = command[1] if len(command) > 1 else "operation"
+        return "git {}".format(operation)
+    if program in ("make", "npm"):
+        operation = command[1] if len(command) > 1 else "command"
+        return "{} {}".format(program, operation)
+    if program in ("pytest", "py.test") or "pytest" in command:
+        return "pytest"
+    return "{} command".format(program or "subprocess")
+
+
+def _is_compile_command(command: Sequence[str]) -> bool:
+    """Whether the command only compiles source rather than running tests."""
+    return any(
+        "compileall" in str(part).lower()
+        or re.search(r"\bcompile\s*\(", str(part))
+        for part in command
+    )
+
+
+def _command_timeout_seconds(command: Sequence[str]) -> float:
+    """Choose a per-invocation bound from the observed finish workload."""
+    if command and os.path.basename(command[0]) == "git":
+        if len(command) > 1 and command[1] in ("fetch", "ls-remote", "push"):
+            return REMOTE_GIT_TIMEOUT_SECONDS
+        return LOCAL_GIT_TIMEOUT_SECONDS
+    rendered = " ".join(str(part) for part in command)
+    if re.search(r"(?<![\w.])(?:make|npm|pytest|py\.test)(?![\w.])",
+                 rendered):
+        return TEST_COMMAND_TIMEOUT_SECONDS
+    if any("sys.version_info" in str(part) for part in command):
+        return INTERPRETER_PROBE_TIMEOUT_SECONDS
+    if _is_compile_command(command):
+        return COMPILE_COMMAND_TIMEOUT_SECONDS
+    return OTHER_COMMAND_TIMEOUT_SECONDS
+
+
+def _abandon_child(proc: subprocess.Popen) -> None:
+    """Kill the command's process group and close our pipes without waiting."""
+    try:
+        if os.name == "posix":
+            os.killpg(proc.pid, signal.SIGKILL)
+        else:
+            proc.kill()
+    except OSError:
+        # It may have exited between communicate's timeout and the kill.
+        pass
+    for stream in (proc.stdin, proc.stdout, proc.stderr):
+        if stream is not None:
+            try:
+                stream.close()
+            except OSError:
+                pass
+
+
 def _run(command: Sequence[str], *, cwd: pathlib.Path,
          env: Optional[dict] = None, input_text: Optional[str] = None,
-         check: bool = True) -> subprocess.CompletedProcess:
-    """Run one local command and turn failures into a concise engine error."""
-    proc = subprocess.run(
-        list(command), cwd=str(cwd), env=env, input=input_text,
-        capture_output=True, text=True,
+         check: bool = True, timeout: Optional[float] = None
+         ) -> subprocess.CompletedProcess:
+    """Run one bounded local command and turn failures into concise errors."""
+    bound = (_command_timeout_seconds(command)
+             if timeout is None else timeout)
+    proc = subprocess.Popen(
+        list(command), cwd=str(cwd), env=env,
+        stdin=subprocess.PIPE if input_text is not None else None,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        start_new_session=(os.name == "posix"),
     )
-    if check and proc.returncode != 0:
+    try:
+        stdout, stderr = proc.communicate(input=input_text, timeout=bound)
+    except subprocess.TimeoutExpired:
+        _abandon_child(proc)
+        raise CommandTimeoutError(command, bound) from None
+    completed = subprocess.CompletedProcess(
+        list(command), proc.returncode, stdout, stderr)
+    if check and completed.returncode != 0:
         # Both streams: `compileall` reports on stdout while make prints only
         # its own "Error 1" on stderr, and that line alone hid the cause (#953).
         detail = "\n".join(
-            part.strip() for part in (proc.stdout, proc.stderr)
+            part.strip() for part in (completed.stdout, completed.stderr)
             if part and part.strip())
         raise ImplementError(
             "{} failed{}".format(
                 shlex.join(command), ": " + detail if detail else ""
             )
         )
-    return proc
+    return completed
 
 
 def checkout_context(cwd: Optional[os.PathLike] = None) -> dict:
     """Derive ticket identity from a real clone on ticket/<n>."""
     here = pathlib.Path(cwd or os.getcwd()).resolve()
     root = pathlib.Path(
-        _run(["git", "rev-parse", "--show-toplevel"], cwd=here).stdout.strip()
+        _run(["git", "rev-parse", "--show-toplevel"], cwd=here,
+             timeout=LOCAL_GIT_TIMEOUT_SECONDS).stdout.strip()
     ).resolve()
-    branch = _run(["git", "branch", "--show-current"], cwd=root).stdout.strip()
+    branch = _run(["git", "branch", "--show-current"], cwd=root,
+                  timeout=LOCAL_GIT_TIMEOUT_SECONDS).stdout.strip()
     match = re.fullmatch(r"ticket/([1-9][0-9]*)", branch)
     if match is None:
         raise ImplementError(
             "finish-ticket requires branch ticket/<number>, found {!r}".format(branch)
         )
-    _run(["git", "remote", "get-url", "origin"], cwd=root)
+    _run(["git", "remote", "get-url", "origin"], cwd=root,
+         timeout=LOCAL_GIT_TIMEOUT_SECONDS)
     return {"root": root, "branch": branch, "number": int(match.group(1))}
 
 
@@ -732,11 +901,15 @@ PINNED_PYTHON_DIRS = ("/opt/homebrew/bin", "/usr/local/bin")
 def _python_minor(executable: str) -> Optional[str]:
     """The ``M.m`` version an interpreter reports, or None if it won't run."""
     try:
-        result = subprocess.run(
+        result = _run(
             [executable, "-c",
              "import sys; print('%d.%d' % sys.version_info[:2])"],
-            capture_output=True, text=True, timeout=20)
-    except (OSError, subprocess.SubprocessError):
+            cwd=pathlib.Path.cwd(), check=False,
+            timeout=INTERPRETER_PROBE_TIMEOUT_SECONDS,
+        )
+    except CommandTimeoutError:
+        raise
+    except (ImplementError, OSError, subprocess.SubprocessError):
         return None
     return result.stdout.strip() if result.returncode == 0 else None
 
@@ -804,7 +977,12 @@ def run_tests(root: pathlib.Path,
         # Mac has no bare `python` on PATH (#890), so run the chosen one.
         if argv and argv[0] in ("python", "python3"):
             argv[0] = python
-        _run(argv, cwd=root, env=env)
+        _run(
+            argv, cwd=root, env=env,
+            timeout=(COMPILE_COMMAND_TIMEOUT_SECONDS
+                     if _is_compile_command(argv)
+                     else TEST_COMMAND_TIMEOUT_SECONDS),
+        )
         rendered.append(shlex.join(argv))
     return rendered, source
 
@@ -824,7 +1002,7 @@ def resolve_checkout_repo(root: pathlib.Path, explicit: Optional[str]) -> str:
     if explicit:
         return explicit
     remote = _run(["git", "remote", "get-url", "origin"], cwd=root,
-                  check=False).stdout.strip()
+                  check=False, timeout=LOCAL_GIT_TIMEOUT_SECONDS).stdout.strip()
     match = _GITHUB_REMOTE_RE.match(remote)
     if match:
         return match.group(1)
@@ -860,6 +1038,12 @@ def render_pr_body(ticket: dict, answer: dict, *, continued: bool,
         lines.extend("- " + value for value in answer["departures"])
     else:
         lines.append("- None.")
+    if answer.get("risks"):
+        # Only when there are some (#1807): a body without risks stays the
+        # template it always was. The label also ends the Departures section
+        # review.parse_departures reads, so a risk never reads as a departure.
+        lines.extend(["", "Risks:"])
+        lines.extend("- " + value for value in answer["risks"])
     lines.extend([
         "",
         "Branch:",
@@ -885,6 +1069,7 @@ def _remote_branch_exists(root: pathlib.Path, branch: str) -> bool:
          "refs/heads/{}".format(branch)],
         cwd=root,
         check=False,
+        timeout=REMOTE_GIT_TIMEOUT_SECONDS,
     )
     if proc.returncode not in (0, 2):
         detail = (proc.stderr or proc.stdout or "").strip()
@@ -909,7 +1094,8 @@ _RUN_SCRATCH_DIRECTORIES = frozenset({".scratch", "scratch", ".tmp", "tmp"})
 
 def _git_name_paths(root: pathlib.Path, command: Sequence[str]) -> List[str]:
     """Return NUL-delimited Git paths without losing unusual filenames."""
-    raw = _run(["git", *command], cwd=root).stdout
+    raw = _run(["git", *command], cwd=root,
+               timeout=LOCAL_GIT_TIMEOUT_SECONDS).stdout
     return [path for path in raw.split("\0") if path]
 
 
@@ -959,7 +1145,8 @@ def _stage_explicit_paths(root: pathlib.Path, paths: Sequence[str]) -> None:
     """Stage exactly the observed paths, never a blanket add or status sweep."""
     selected = _addable_paths(root, paths)
     if selected:
-        _run(["git", "add", "--", *selected], cwd=root)
+        _run(["git", "add", "--", *selected], cwd=root,
+             timeout=LOCAL_GIT_TIMEOUT_SECONDS)
 
 
 def _is_run_scratch(path: str) -> bool:
@@ -997,9 +1184,7 @@ def _check_no_run_scratch(root: pathlib.Path,
     stray = [path for path in _pre_pr_files(root, about_to_commit)
              if _is_run_scratch(path)]
     if stray:
-        raise StrayFileError(
-            "pre-PR stray-file check refused; remove and re-stage run scratch: "
-            "{}".format(", ".join(stray)))
+        raise StrayFileError(stray)
 
 
 def _commit_if_needed(root: pathlib.Path, number: int, summary: str, *,
@@ -1014,12 +1199,13 @@ def _commit_if_needed(root: pathlib.Path, number: int, summary: str, *,
             subject = subject[:57].rstrip() + "..."
         _run(
             ["git", "commit", "-m", "Finish #{}: {}".format(number, subject)],
-            cwd=root,
+            cwd=root, timeout=LOCAL_GIT_TIMEOUT_SECONDS,
         )
         return True
     _check_no_run_scratch(root)
     ahead = _run(
-        ["git", "rev-list", "--count", "origin/main..HEAD"], cwd=root
+        ["git", "rev-list", "--count", "origin/main..HEAD"], cwd=root,
+        timeout=LOCAL_GIT_TIMEOUT_SECONDS,
     ).stdout.strip()
     if not ahead.isdigit():
         raise ImplementError("could not read changes ahead of origin/main")
@@ -1164,6 +1350,12 @@ def _verify_evidence_url(url: str, started: datetime) -> None:
         raise ImplementError(
             "evidence URL {} did not resolve to its named artifact".format(url)
         )
+    if kind == "comment" and not funnel.trusted_comment(data):
+        # A comment is this run's evidence only when the owner account posted
+        # it (#1788); anyone can comment on a public repository mid-run.
+        raise ImplementError(
+            "evidence URL {} was not posted by the owner account".format(url)
+        )
     if kind == "closed" and str(data.get("state", "")).lower() != "closed":
         raise ImplementError("evidence URL {} is not closed".format(url))
     occurred = _parse_github_timestamp(data.get(stamp_field))
@@ -1206,16 +1398,24 @@ def close_no_diff_ticket(repo: str, number: int, *,
 
 def create_or_update_pr(repo: str, context: dict, ticket: dict,
                         body: str) -> dict:
-    """Create the ticket PR, or update the one already open for the branch."""
+    """Create the ticket PR, or update the one already open for the branch.
+
+    Only the funnel's own open PR is updated (#1794): ``--head`` also matches
+    a fork's PR on a branch of the same name, and editing that would act on
+    a stranger's PR.
+    """
     rows = funnel._gh_json(
         "gh", "pr", "list", "--repo", repo, "--state", "open",
-        "--head", context["branch"], "--json", "number,url", "--limit", "10",
+        "--head", context["branch"],
+        "--json", "number,url," + funnel.PR_TRUST_JSON_FIELDS,
+        "--limit", "10",
     )
     if rows is None or not isinstance(rows, list):
         raise funnel.GitHubError("could not list the branch's open PR")
+    rows = [row for row in rows if funnel.is_funnel_pr(repo, row)]
     title = "{} (#{})".format(ticket["title"], ticket["number"])
     if rows:
-        pr = rows[0]
+        pr = {"number": rows[0].get("number"), "url": rows[0].get("url")}
         proc = funnel._run_gh(
             ["gh", "pr", "edit", str(pr["number"]), "--repo", repo,
              "--title", title, "--body-file", "-"],
@@ -1332,6 +1532,14 @@ def write_declined_needs(url: str, ref: str) -> None:
     breakdown_engine.write_needs(item_id, "agent", ref)
 
 
+def write_declined_external_event_needs(url: str, ref: str) -> None:
+    """Wait for a pending gate answer without creating a human block."""
+    from engine import breakdown as breakdown_engine
+
+    item_id = breakdown_engine.add_to_project(url)
+    breakdown_engine.write_needs(item_id, "external-event", ref)
+
+
 def write_declined_human_needs(url: str, ref: str) -> None:
     """Route an unhandled decline to Nate so its block cannot be stranded."""
     from engine import breakdown as breakdown_engine
@@ -1354,6 +1562,243 @@ def mark_ticket_blocked(repo: str, number: int, *, blocked_by: Optional[int] = N
         raise funnel.GitHubError(
             "could not mark {}#{} blocked: {}".format(
                 repo, number, (proc.stderr or "").strip()))
+
+
+#: The parent's sub-issues, read before a human step is filed so a step Nate
+#: closed as not planned is never filed again for the same ticket (#1726).
+#: ``totalCount`` is requested so a short read is detectable.
+HUMAN_STEP_SIBLINGS_QUERY = """
+query($owner: String!, $name: String!, $number: Int!, $after: String) {
+  rateLimit { cost remaining resetAt }
+  repository(owner: $owner, name: $name) {
+    issue(number: $number) {
+      subIssues(first: 100, after: $after) {
+        totalCount
+        nodes { number state stateReason body repository { nameWithOwner } }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+}
+"""
+
+#: The stable line ``render_human_step_body`` writes first in every step. The
+#: ticket number is matched whole, so a step for #312 never matches #31.
+HUMAN_STEP_TICKET_RE = re.compile(
+    r"\bdiscovered while implementing #(?P<number>[1-9][0-9]*)(?![0-9])")
+
+#: The route record type a closed-step routing comment carries under the
+#: shared review-routing marker. The loop guard reads it back (#1726).
+CLOSED_HUMAN_STEP_ROUTE = "closed-human-step"
+
+
+def read_parent_sub_issues(repo: str, number: int) -> List[Dict[str, object]]:
+    """Read every sub-issue of one parent with its state, reason and body.
+
+    Fails closed: a malformed page, a missing cursor or a count that
+    disagrees with the rows raises ``GitHubError``, so a short read can never
+    look like "no closed step" and let the run file one again (#1726).
+    """
+    owner, _, name = repo.partition("/")
+    if not owner or not name:
+        raise funnel.GitHubError("invalid repository ref {}".format(repo))
+    parent = "{}#{}".format(repo, number)
+    rows: List[Dict[str, object]] = []
+    total: Optional[int] = None
+    cursor: Optional[str] = None
+    seen_cursors = set()
+    while True:
+        variables: Dict[str, object] = {
+            "owner": owner, "name": name, "number": number,
+        }
+        if cursor is not None:
+            variables["after"] = cursor
+        data = funnel.gh_graphql(HUMAN_STEP_SIBLINGS_QUERY, **variables)
+        repository = data.get("repository") if isinstance(data, dict) else None
+        issue = repository.get("issue") if isinstance(repository, dict) else None
+        connection = issue.get("subIssues") if isinstance(issue, dict) else None
+        if not isinstance(connection, dict):
+            raise funnel.GitHubError(
+                "could not read the sub-issues of {}".format(parent))
+        page_total = connection.get("totalCount")
+        nodes = connection.get("nodes")
+        page_info = connection.get("pageInfo")
+        if (
+            not isinstance(page_total, int) or isinstance(page_total, bool)
+            or page_total < 0 or not isinstance(nodes, list)
+            or not isinstance(page_info, dict)
+        ):
+            raise funnel.GitHubError(
+                "invalid sub-issue page for {}".format(parent))
+        if total is None:
+            total = page_total
+        elif page_total != total:
+            raise funnel.GitHubError(
+                "sub-issue count for {} changed while paging".format(parent))
+        for node in nodes:
+            owned = node.get("repository") if isinstance(node, dict) else None
+            child_repo = (
+                owned.get("nameWithOwner") if isinstance(owned, dict) else None
+            )
+            child = node.get("number") if isinstance(node, dict) else None
+            if (
+                not isinstance(child_repo, str) or "/" not in child_repo
+                or not isinstance(child, int) or isinstance(child, bool)
+            ):
+                raise funnel.GitHubError(
+                    "invalid sub-issue row under {}".format(parent))
+            rows.append({
+                "ref": "{}#{}".format(child_repo, child),
+                "repo": child_repo,
+                "number": child,
+                "state": str(node.get("state") or "").upper(),
+                "state_reason": str(node.get("stateReason") or "").upper(),
+                "body": node.get("body") if isinstance(
+                    node.get("body"), str) else "",
+            })
+        if not page_info.get("hasNextPage"):
+            break
+        next_cursor = page_info.get("endCursor")
+        if (not isinstance(next_cursor, str) or not next_cursor
+                or next_cursor in seen_cursors):
+            raise funnel.GitHubError(
+                "sub-issue page for {} has no usable next cursor".format(parent))
+        seen_cursors.add(next_cursor)
+        cursor = next_cursor
+    if len(rows) != total:
+        raise funnel.GitHubError(
+            "read {} of {} sub-issues of {}".format(len(rows), total, parent))
+    return rows
+
+
+def closed_human_steps_for(rows: Sequence[Dict[str, object]], repo: str,
+                           number: int) -> List[Dict[str, object]]:
+    """The human steps Nate closed as not planned for this ticket, oldest first.
+
+    A step names its ticket on the stable line ``render_human_step_body``
+    writes, as a short ref that means the step's own repository, so only a
+    step in the ticket's repository can name it. Open steps and steps closed
+    as completed are not an answer that the step will not happen.
+    """
+    found = []
+    for row in rows:
+        if (
+            row.get("repo") != repo
+            or row.get("state") != "CLOSED"
+            or row.get("state_reason") != "NOT_PLANNED"
+        ):
+            continue
+        match = HUMAN_STEP_TICKET_RE.search(str(row.get("body") or ""))
+        if match is not None and int(match.group("number")) == number:
+            found.append(row)
+    return sorted(found, key=lambda row: int(row["number"]))
+
+
+def read_ticket_comment_bodies(repo: str, number: int) -> List[str]:
+    """Read one ticket's trusted comment bodies, oldest first; fail closed.
+
+    The caller parses routing records out of these, so only the owner
+    account's comments are returned (#1788): an outsider's forged record would
+    read as a route this run already posted, and the guard would skip it.
+    """
+    payload = funnel._gh_json(
+        "gh", "issue", "view", str(number), "--repo", repo,
+        "--json", "comments",
+    )
+    comments = payload.get("comments") if isinstance(payload, dict) else None
+    if not isinstance(comments, list):
+        raise funnel.GitHubError(
+            "could not read comments for {}#{}".format(repo, number))
+    return [comment.get("body") or ""
+            for comment in funnel.trusted_comments(comments)]
+
+
+def remote_ticket_head(root: pathlib.Path, branch: str) -> Optional[str]:
+    """The ticket branch's pushed tip, or None when it was never pushed.
+
+    This is the head a review verdict judges. A blocked run neither commits
+    nor pushes, so the next run on an unchanged ticket reads the same value.
+    """
+    ref = "refs/heads/{}".format(branch)
+    proc = _run(["git", "ls-remote", "--exit-code", "--heads", "origin", ref],
+                cwd=root, check=False,
+                timeout=REMOTE_GIT_TIMEOUT_SECONDS)
+    if proc.returncode == 2:
+        return None
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip()
+        raise ImplementError(
+            "could not inspect remote ticket branch: {}".format(detail))
+    for line in (proc.stdout or "").splitlines():
+        sha, _, name = line.partition("\t")
+        if name.strip() == ref and re.fullmatch(r"[0-9a-f]{40,64}", sha):
+            return sha
+    raise ImplementError("could not read the head of {}".format(ref))
+
+
+def routed_for_closed_step(bodies: Sequence[str], step_ref: str,
+                           head: Optional[str]) -> bool:
+    """Whether an agent already routed this ticket for the step at this head."""
+    for body in bodies:
+        if (
+            not isinstance(body, str)
+            or DECLINE_REVIEW_ROUTING_MARKER not in body
+        ):
+            continue
+        record = funnel._marked_json(body, DECLINE_REVIEW_ROUTING_MARKER)
+        provenance = funnel.parse_provenance(body)
+        if (
+            isinstance(record, dict)
+            and record.get("type") == CLOSED_HUMAN_STEP_ROUTE
+            and record.get("human_step") == step_ref
+            and "head_sha" in record
+            and record.get("head_sha") == head
+            and provenance is not None
+            and provenance.get("voice") == "agent"
+        ):
+            return True
+    return False
+
+
+def render_closed_step_route(step_ref: str, head: Optional[str],
+                             blocked: dict) -> str:
+    """Render the review-routing comment citing Nate's closed human step."""
+    action = str(blocked.get("action") or "").strip()
+    if len(action) > 1200:
+        action = action[:1197].rstrip() + "..."
+    record = {
+        "type": CLOSED_HUMAN_STEP_ROUTE,
+        "human_step": step_ref,
+        "head_sha": head,
+        "requested_reason": blocked.get("reason"),
+        "requested_action": action,
+    }
+    return "\n".join((
+        "**Review routing: Closed human step**",
+        "",
+        "This run asked for a human step, but Nate closed {} as not planned "
+        "for this ticket, so no step was filed. Review and shaping: reconcile "
+        "the ticket, its plan or the review verdict with that answer rather "
+        "than asking for the step again.".format(step_ref),
+        "",
+        DECLINE_REVIEW_ROUTING_MARKER,
+        "```json",
+        json.dumps(record, ensure_ascii=False, indent=2),
+        "```",
+    ))
+
+
+def render_closed_step_hold(step_ref: str, head: Optional[str]) -> str:
+    """Render the citation that hands a re-asking ticket to Nate."""
+    at = "head {}".format(head[:12]) if head else "no pushed branch"
+    return (
+        "**Needs Nate: closed human step {ref}**\n\n"
+        "This ticket asked again for a human step after it was routed to "
+        "review and shaping for {ref}, which Nate closed as not planned, and "
+        "nothing has changed since ({at}). No step was filed. Reopen {ref} "
+        "to allow the step, or change the ticket, its plan or the review "
+        "verdict, before returning it to the agents."
+    ).format(ref=step_ref, at=at)
 
 
 
@@ -1432,7 +1877,7 @@ def prerequisite_project_landed(
 
 def _landed_prerequisite_evidence(
         ref: str, facts: Dict[str, object]) -> str:
-    """Explain the GitHub facts that disprove a closed-project decline."""
+    """Explain when closed child tickets disprove an unlanded claim."""
     match = shape.REF_RE.fullmatch(ref)
     if match is None:
         raise ImplementError("cannot render invalid prerequisite ref")
@@ -1441,16 +1886,16 @@ def _landed_prerequisite_evidence(
         match.group("owner"), match.group("repo"), match.group("number"),
     )
     return (
-        "**Prerequisite check:** GitHub reports [{}]({}) has all {} child "
-        "tickets completed ({}/{}). The project is landed by ticket "
-        "completion; its own PR link and drift or rejected-review records "
-        "do not change that result."
+        "**False unlanded-prerequisite check:** GitHub reports [{}]({}) has "
+        "all {} child tickets completed ({}/{}). The project is landed by "
+        "ticket completion; its own PR link and drift or rejected-review "
+        "records do not change that result."
     ).format(ref, url, total, total, total)
 
 
 def clear_declined_ticket_block(repo: str, number: int, *,
                                 cwd: pathlib.Path) -> None:
-    """Remove a stale human block after a named prerequisite is verified landed."""
+    """Remove a stale blocked label after routing a decline out of Nate's queue."""
     data = funnel._gh_json(
         "gh", "issue", "view", str(number), "--repo", repo,
         "--json", "labels",
@@ -1529,15 +1974,85 @@ def post_agent_comment(repo: str, number: int, body: str, *,
                 repo, number, (proc.stderr or "").strip()))
 
 
-def release_claim(ref: str) -> None:
-    """Release through funnel's one lock implementation.
+def _claim_state(ref: str, run: Optional[str], agent: str
+                 ) -> Tuple[str, List[funnel.Item]]:
+    """Resolve the holder from the timestamped Project claim and heartbeat binds.
 
-    Releasing finds one item and clears its lock field; fetch it by ref and
-    fall back to the compact board if the Project filter misses (#1623).
+    The Project field intentionally remains a timestamp. The run identity is
+    the latest heartbeat binding for this ticket at or after that timestamp.
+    A missing, conflicting, or unreadable binding is unknown and fails closed.
     """
-    items = funnel.load_project_items_by_refs([ref])
-    if items is None or len(items) != 1 or items[0].ref != ref:
-        items = funnel.load_items(include_details=False)
+    try:
+        items = funnel.load_project_items_by_refs([ref])
+        if items is None or len(items) != 1 or items[0].ref != ref:
+            items = funnel.load_items(include_details=False)
+        item = funnel.find(items, ref)
+    except Exception as exc:
+        raise SupersededRunError(ref, "claim could not be read") from exc
+    lock = item.in_motion_since
+    if lock is None:
+        # Empty and unparseable lock values have always meant unlocked.
+        return "empty", items
+    if not run:
+        return "unknown", items
+    try:
+        import heartbeat
+
+        records = []
+        for owner_agent in funnel.AGENTS_BY_ROLE.get("implement", {}):
+            records.extend(heartbeat.read_github_strict(owner_agent))
+        bindings = heartbeat.bindings(records)
+    except Exception as exc:
+        raise SupersededRunError(ref, "heartbeat bindings could not be read") from exc
+
+    try:
+        claim_ts = int(lock.timestamp())
+    except Exception as exc:
+        raise SupersededRunError(ref, "claim timestamp is unreadable") from exc
+    candidates = []
+    for bound_run, binding in bindings.items():
+        bound_ts = binding.get("ts")
+        if (
+            binding.get("do") == "ticket"
+            and str(binding.get("work")) == ref
+            and isinstance(bound_ts, int)
+            and not isinstance(bound_ts, bool)
+            and bound_ts >= claim_ts
+        ):
+            candidates.append((bound_ts, bound_run))
+    if not candidates:
+        return "unknown", items
+    latest_ts = max(ts for ts, _bound_run in candidates)
+    holders = {bound_run for ts, bound_run in candidates if ts == latest_ts}
+    if len(holders) != 1:
+        return "unknown", items
+    return ("owned" if next(iter(holders)) == run else "other"), items
+
+
+def _require_current_claim(ref: str, run: Optional[str], agent: str) -> str:
+    """Refuse writes when another run holds the claim or its owner is unknown."""
+    state, _items = _claim_state(ref, run, agent)
+    if state not in ("owned", "empty"):
+        reason = (
+            "another run holds the claim"
+            if state == "other" else "claim holder is unknown"
+        )
+        raise SupersededRunError(ref, reason)
+    return state
+
+
+def release_claim(ref: str, *, run: Optional[str] = None,
+                  agent: str = "codex") -> None:
+    """Release only this run's claim; an empty claim is already released."""
+    state, items = _claim_state(ref, run, agent)
+    if state == "empty":
+        return
+    if state != "owned":
+        reason = (
+            "another run holds the claim"
+            if state == "other" else "claim holder is unknown"
+        )
+        raise SupersededRunError(ref, reason)
     result = funnel.cmd_release(items, datetime.now(timezone.utc), ref)
     if result != 0:
         raise ImplementError("could not release {}".format(ref))
@@ -1559,34 +2074,236 @@ def finish_heartbeat(agent: str, run: str, outcome: str,
         raise ImplementError("heartbeat finish refused run {}".format(run))
 
 
-def _failure_note(exc: ImplementError, kept: str = "") -> str:
-    """Summarise a test failure so the next run knows what failed (#877).
+def _bound_work_ref_for_run(run: str, agent: str) -> str:
+    """Recover the issued ticket ref when checkout identity lookup timed out."""
+    import heartbeat
 
-    Names up to five FAILED or ERROR test ids and pytest's counts line, rather
-    than the first line of output, which is only the progress dots.
+    records = heartbeat.read_github(agent)
+    binding = heartbeat.bindings(records).get(run)
+    ref = binding.get("work") if isinstance(binding, dict) else None
+    if not isinstance(ref, str) or shape.REF_RE.fullmatch(ref) is None:
+        raise ImplementError(
+            "could not resolve the ticket bound to timed-out run {}".format(run)
+        )
+    return ref
+
+
+def _record_command_timeout(
+        exc: CommandTimeoutError, *, run: str, agent: str, ref: str,
+        release: Callable[[str], None],
+        heartbeat_finish: Callable[[str, str, str, str, str], None],
+        work_kept: bool = False) -> None:
+    """Finish a timed-out run without attempting another checkout command."""
+    if exc.finish_recorded:
+        return
+    # Do not repeat either effect if one of them fails part-way through.
+    exc.finish_recorded = True
+    release(ref)
+    kept_note = "work was checkpointed" if work_kept else "work NOT kept"
+    heartbeat_finish(
+        agent, run, "errored", "{}; {}".format(exc, kept_note), ref,
+    )
+
+
+def _is_public_repo(repo: str) -> bool:
+    """Whether a heartbeat finish note may quote ``repo``'s content (#1796).
+
+    Heartbeat ledgers are committed to command-center's ``heartbeat`` branch,
+    which is public, and command-center is the one public repository in the
+    funnel. Every member repository is private, so a note about one carries
+    counts and this module's own words only: never a test id, a file path,
+    command output or error text. What such a note withholds goes to the
+    ticket in its own repository, or is already there. GitHub compares
+    repository names without case.
     """
-    text = str(exc)
-    ids = []
-    for match in re.finditer(r"^(?:FAILED|ERROR) (\S+)", text, re.M):
+    return (repo or "").casefold() == funnel.REPO.casefold()
+
+
+def _with_markers(full: str, member: str) -> str:
+    """Keep the classifier phrases a member note would otherwise lose.
+
+    ``heartbeat.classify_error`` sorts errored finishes into weather, setup
+    and regressions by fixed phrases in the note (``connection timed out``,
+    ``could not derive a test command``, ``tests failed:``), and the brief
+    shows the regressions (#1289). The phrases are the classifier's words,
+    not the repository's, so a member note names any that the full note
+    held and the finish classifies exactly as it would have (#1796).
+    """
+    import heartbeat
+
+    full_text, member_text = full.casefold(), member.casefold()
+    found = [
+        marker for marker in (
+            heartbeat.BEGIN_TIMEOUT_ERROR_MARKERS
+            + heartbeat.FLOOR_ERROR_MARKERS
+            + heartbeat.UNCLASSIFIED_ERROR_MARKERS
+            + heartbeat.REGRESSION_ERROR_MARKERS
+        )
+        if marker in full_text and marker not in member_text
+    ]
+    if not found:
+        return member
+    return "{} | withheld text named: {}".format(member, ", ".join(found))
+
+
+def _member_kept(kept: str) -> str:
+    """``_keep_work``'s phrase without the git error a failure quotes."""
+    return "work NOT kept" if kept.startswith("work NOT kept") else kept
+
+
+_FAILED_TEST_RE = re.compile(r"^(?:FAILED|ERROR) (\S+)", re.M)
+_PYTEST_COUNTS_RE = re.compile(
+    r"^=* ?(\d+ (?:failed|passed|error)[^=\n]*?) ?=*$", re.M)
+
+#: One count on pytest's summary line. A member note is rebuilt from these
+#: alone, so nothing else on that line -- nor a line some test printed that
+#: merely looks like one -- reaches the public heartbeat (#1796).
+_PYTEST_COUNT_RE = re.compile(
+    r"\b(\d+) (failed|passed|skipped|deselected|xfailed|xpassed|warnings?|"
+    r"errors?|rerun)\b")
+
+#: How many failing test ids a member-repo ticket comment lists. The note
+#: stopped at five to stay one line; the comment is where the next run finds
+#: them now (#1796), so it keeps more and counts the rest.
+MAX_FAILED_TEST_IDS_IN_COMMENT = 50
+
+
+def _failed_test_ids(text: str) -> List[str]:
+    """The FAILED and ERROR test ids pytest printed, first mention first."""
+    ids: List[str] = []
+    for match in _FAILED_TEST_RE.finditer(text):
         if match.group(1) not in ids:
             ids.append(match.group(1))
-    counts = re.findall(r"^=* ?(\d+ (?:failed|passed|error)[^=\n]*?) ?=*$", text, re.M)
+    return ids
+
+
+def _pytest_counts(text: str) -> Optional[str]:
+    """pytest's last counts line as printed, or None when there is none."""
+    counts = _PYTEST_COUNTS_RE.findall(text)
+    return counts[-1].strip() if counts else None
+
+
+def _first_output_line(text: str) -> str:
+    """The failure's first line, cut to fit one note."""
+    first = text.splitlines()[0] if text else "unknown test failure"
+    return first[:197].rstrip() + "..." if len(first) > 200 else first
+
+
+def _failure_note(exc: ImplementError, kept: str = "", *, repo: str) -> str:
+    """Summarise a test failure for the heartbeat finish note.
+
+    command-center's note names up to five FAILED or ERROR test ids and
+    pytest's counts line, so the next run knows what failed (#877), rather
+    than the first line of output, which is only the progress dots.
+
+    Any other repository's note carries pytest's counts alone, rebuilt from
+    the numbers (#1796). The ids -- or, when pytest named no test, the first
+    line -- go to the ticket in its own repository through
+    ``_failure_comment``, where the next run's packet reads them.
+    """
+    text = str(exc)
+    ids = _failed_test_ids(text)
+    counts = _pytest_counts(text)
     parts = []
     if ids:
         more = " (+{} more)".format(len(ids) - 5) if len(ids) > 5 else ""
         parts.append("; ".join(ids[:5]) + more)
     if counts:
-        parts.append(counts[-1].strip())
+        parts.append(counts)
     if not parts:
-        first = text.splitlines()[0] if text else "unknown test failure"
-        parts.append(first[:197].rstrip() + "..." if len(first) > 200 else first)
+        parts.append(_first_output_line(text))
     note = "tests failed: " + " | ".join(parts)
     if kept:
         note += " | " + kept
-    return note
+    if _is_public_repo(repo):
+        return note
+    numbers = ", ".join(
+        "{} {}".format(number, word)
+        for number, word in _PYTEST_COUNT_RE.findall(counts or ""))
+    member = "tests failed: " + (numbers or "no pytest counts line")
+    if kept:
+        member += " | " + _member_kept(kept)
+    return _with_markers(note, member)
 
 
-def _push_ticket_branch(root: pathlib.Path, branch: str) -> None:
+def _failure_comment(exc: ImplementError, kept: str = "") -> str:
+    """What a member-repo failure note withholds, for its ticket (#1796).
+
+    The failing test ids, pytest's counts line and, when pytest named no
+    test, the first line of the output: what the note carried before. The
+    next run reads it in its packet's issue thread.
+    """
+    text = str(exc)
+    ids = _failed_test_ids(text)
+    counts = _pytest_counts(text)
+    # No issue number in the text: posted in a member repository, ``#1796``
+    # would link that repository's own issue of the same number.
+    lines = [
+        "**Tests failed** when this run finished the ticket. The heartbeat "
+        "note carries pytest's counts only, because the heartbeat is public "
+        "and this repository is not; what failed is recorded here for the "
+        "next run.",
+        "",
+    ]
+    if ids:
+        shown = ids[:MAX_FAILED_TEST_IDS_IN_COMMENT]
+        lines.extend(["Failing tests:", "", "```text", *shown, "```"])
+        if len(ids) > len(shown):
+            lines.append("(+{} more)".format(len(ids) - len(shown)))
+        lines.append("")
+    elif counts is None:
+        lines.extend(["First line of the output:", "", "```text",
+                      _first_output_line(text), "```", ""])
+    if counts is not None:
+        lines.append("Counts: `{}`".format(counts))
+    if kept:
+        lines.append("Work: {}".format(kept))
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _checkpoint_note(exc: ImplementError, kept: str, *, repo: str) -> str:
+    """The note for a checkpoint that failed before the tests ran.
+
+    Its first line is the failed git command, which for ``git add`` lists
+    the checkout's paths, then git's own output. A member note says only
+    that the checkpoint failed (#1796).
+    """
+    first = (str(exc).splitlines() or ["unknown error"])[0][:200]
+    note = "checkpoint failed: {}; {}".format(first, kept)
+    if _is_public_repo(repo):
+        return note
+    return _with_markers(
+        note, "checkpoint failed; {}".format(_member_kept(kept)))
+
+
+def _stray_note(exc: StrayFileError, *, repo: str) -> str:
+    """The stray-file refusal, naming a member repo's paths only by count.
+
+    A scratch directory (``tmp/``, ``scratch/``) matches at any depth, so
+    the refusal can list the repository's own paths (#1796).
+    """
+    if _is_public_repo(repo):
+        return str(exc)
+    count = len(exc.paths)
+    return _with_markers(str(exc), (
+        "pre-PR stray-file check refused {} run-scratch path{}; "
+        "names withheld".format(count, "" if count == 1 else "s")))
+
+
+def _note_test_source(source: str, *, repo: str) -> str:
+    """Name the test command's source; a member repo's CI step by kind only.
+
+    A CI source names the workflow file and the step's name, or its run line
+    when the step has none (``override_test_command``). The PR body keeps
+    it; a member repo's public note says only that it was a CI step (#1796).
+    """
+    if _is_public_repo(repo) or not source.startswith("CI "):
+        return source
+    return "CI workflow step"
+
+
+def _push_ticket_branch(root: pathlib.Path, branch: str, *, ref: str,
+                        run: Optional[str], agent: str) -> None:
     """Push the ticket branch as a fast-forward, even after a rebase (#890).
 
     A stale-PR verdict asks the engineer to rebase onto main, which rewrites
@@ -1595,53 +2312,139 @@ def _push_ticket_branch(root: pathlib.Path, branch: str) -> None:
     is not an ancestor of HEAD, record it with an ``ours`` merge: the tree is
     exactly this run's, the old commits stay in the history, and the push is a
     fast-forward. Never a force-push; main squash-merges, so the extra merge
-    commit never reaches it.
+    commit never reaches it. The ownership guard runs immediately before the
+    remote branch can be changed.
     """
+    _require_current_claim(ref, run, agent)
     fetched = _run(["git", "fetch", "origin",
                     "+refs/heads/{0}:refs/remotes/origin/{0}".format(branch)],
-                   cwd=root, check=False)
+                   cwd=root, check=False,
+                   timeout=REMOTE_GIT_TIMEOUT_SECONDS)
     if fetched.returncode == 0:
         remote_ref = "origin/{}".format(branch)
         ancestor = _run(["git", "merge-base", "--is-ancestor", remote_ref, "HEAD"],
-                        cwd=root, check=False)
+                        cwd=root, check=False,
+                        timeout=LOCAL_GIT_TIMEOUT_SECONDS)
         if ancestor.returncode != 0:
             _run(["git", "merge", "-s", "ours", "--no-edit", "-m",
                   "Record the previous {} tip before pushing the rebased branch".format(branch),
-                  remote_ref], cwd=root)
-    _run(["git", "push", "--set-upstream", "origin", branch], cwd=root)
+                  remote_ref], cwd=root,
+                 timeout=LOCAL_GIT_TIMEOUT_SECONDS)
+    _require_current_claim(ref, run, agent)
+    _run(["git", "push", "--set-upstream", "origin", branch], cwd=root,
+         timeout=REMOTE_GIT_TIMEOUT_SECONDS)
+
+def _remove_codex_run_checkout(root: pathlib.Path, number: int,
+                               agent: str) -> bool:
+    """Remove only this Codex ticket checkout under the runtime codex-runs/.
+
+    The per-run clone is named ``ticket-<number>-<UTC timestamp>`` and is
+    owner-only. Restrict removal to that exact direct child; finish-ticket also
+    runs from session workspaces and other agents' checkouts, which must remain
+    untouched.
+    """
+    if agent != "codex":
+        return False
+    checkout = pathlib.Path(root)
+    runs_root = pathlib.Path(funnel.CLAUDE_DIR) / "codex-runs"
+    if checkout.is_symlink() or runs_root.is_symlink():
+        return False
+    try:
+        runs_root = runs_root.resolve(strict=True)
+        checkout = checkout.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return False
+    match = re.fullmatch(
+        r"ticket-([1-9][0-9]*)-([0-9]{8}T[0-9]{12}Z)", checkout.name,
+    )
+    if (match is None or int(match.group(1)) != number
+            or checkout.parent != runs_root):
+        return False
+    try:
+        info = checkout.stat()
+        if (not checkout.is_dir() or info.st_uid != os.getuid()
+                or info.st_mode & 0o077):
+            return False
+        current = pathlib.Path.cwd().resolve()
+        try:
+            current.relative_to(checkout)
+        except ValueError:
+            pass
+        else:
+            # Keep later GitHub/heartbeat calls in a live working directory.
+            os.chdir(runs_root)
+        shutil.rmtree(checkout)
+        return True
+    except OSError:
+        # Cleanup is best-effort after the durable finish effect. Never turn a
+        # completed push or recorded non-kept result into a stranded claim.
+        return False
 
 
-def _keep_work(root: pathlib.Path, number: int, branch: str, *,
-               reason: str = "tests failing") -> str:
+def _keep_work(root: pathlib.Path, number: int, branch: str, *, ref: str,
+               run: Optional[str], agent: str,
+               reason: str = "tests failing") -> Tuple[str, bool]:
     """Commit and push explicit paths, so a failure loses time only.
 
     Never opens a PR. Returns a short phrase for the heartbeat note. The same
     pre-PR scratch check applies here so a WIP branch cannot carry run debris.
+    The second result is true if the push path failed; that checkout is kept
+    for diagnosis.
     """
+    push_attempted = False
     try:
+        _require_current_claim(ref, run, agent)
         paths = _working_tree_paths(root)
         if paths:
             _stage_explicit_paths(root, paths)
             _check_no_run_scratch(root, about_to_commit=paths)
             _run(["git", "commit", "-m",
-                  "WIP #{}: {}".format(number, reason)], cwd=root)
+                  "WIP #{}: {}".format(number, reason)], cwd=root,
+                 timeout=LOCAL_GIT_TIMEOUT_SECONDS)
         else:
             _check_no_run_scratch(root)
         ahead = _run(["git", "rev-list", "--count", "origin/main..HEAD"],
-                     cwd=root).stdout.strip()
+                     cwd=root,
+                     timeout=LOCAL_GIT_TIMEOUT_SECONDS).stdout.strip()
         if not ahead.isdigit() or int(ahead) < 1:
-            return "no work to keep"
-        _push_ticket_branch(root, branch)
-        return "work kept on {}".format(branch)
+            return "no work to keep", False
+        push_attempted = True
+        _push_ticket_branch(root, branch, ref=ref, run=run, agent=agent)
+        return "work kept on {}".format(branch), False
+    except SupersededRunError:
+        raise
     except ImplementError as exc:
         first = str(exc).splitlines()[0] if str(exc) else "unknown error"
-        return "work NOT kept: {}".format(first[:120])
+        return "work NOT kept: {}".format(first[:120]), push_attempted
+
+
+def _checkpoint_work(root: pathlib.Path, number: int, branch: str, *,
+                     ref: str, run: Optional[str], agent: str) -> bool:
+    """Push the current implementation before a long test run can lose it.
+
+    Ticket work is checkpointed on its deterministic remote branch at each
+    meaningful step. The final answer is validated before this helper runs;
+    tests and PR creation still happen afterward. A superseded run checks its
+    claim before committing and again immediately before pushing.
+    """
+    paths = _working_tree_paths(root)
+    if not paths:
+        _check_no_run_scratch(root)
+        return False
+    _stage_explicit_paths(root, paths)
+    _check_no_run_scratch(root, about_to_commit=paths)
+    _require_current_claim(ref, run, agent)
+    _run(["git", "commit", "-m",
+          "WIP #{}: checkpoint implementation".format(number)], cwd=root,
+         timeout=LOCAL_GIT_TIMEOUT_SECONDS)
+    _push_ticket_branch(root, branch, ref=ref, run=run, agent=agent)
+    return True
 
 
 def _recover_answer_error(
         exc: ImplementError, *, run: str, agent: str = "codex",
         repo: Optional[str] = None, cwd: Optional[os.PathLike] = None,
-        release: Callable[[str], None] = release_claim,
+        release: Optional[Callable[[str], None]] = None,
         heartbeat_finish: Callable[[str, str, str, str, str], None]
         = finish_heartbeat) -> bool:
     """Keep a dirty checkout and close its run after an unreadable answer.
@@ -1656,46 +2459,115 @@ def _recover_answer_error(
         return False
     resolved = resolve_checkout_repo(context["root"], repo)
     ref = "{}#{}".format(resolved, context["number"])
-    kept = _keep_work(
-        context["root"], context["number"], context["branch"],
-        reason="answer unreadable",
+    release_effect = release or (
+        lambda target: release_claim(target, run=run, agent=agent)
     )
-    release(ref)
+    kept, push_failed = _keep_work(
+        context["root"], context["number"], context["branch"],
+        ref=ref, run=run, agent=agent, reason="answer unreadable",
+    )
+    release_effect(ref)
     first = str(exc).splitlines()[0] if str(exc) else "unknown answer error"
     note = "answer error: {} | {}".format(first[:200], kept)
+    if not _is_public_repo(resolved):
+        # The answer error is this module's validation text; the kept phrase
+        # can quote a failed git command over the checkout's paths (#1796).
+        note = _with_markers(note, "answer error: {} | {}".format(
+            first[:200], _member_kept(kept)))
     heartbeat_finish(agent, run, "errored", note, ref)
+    if not push_failed:
+        _remove_codex_run_checkout(context["root"], context["number"], agent)
     return True
 
 
 def finish_done(answer: dict, *, run: str, agent: str = "codex",
                 repo: Optional[str] = None, cwd: Optional[os.PathLike] = None,
                 test_commands: Optional[Sequence[Sequence[str]]] = None,
-                release: Callable[[str], None] = release_claim,
+                release: Optional[Callable[[str], None]] = None,
                 heartbeat_finish: Callable[[str, str, str, str, str], None]
                 = finish_heartbeat,
                 pr_effect: Callable[[str, dict, dict, str], dict]
                 = create_or_update_pr,
                 close_effect: Callable[..., None]
                 = close_no_diff_ticket,
+                comment_effect: Callable[..., None] = post_agent_comment,
                 extra_note: Optional[str] = None) -> dict:
-    """Perform every happy-path effect and return the resulting PR identity."""
+    """Perform every happy-path effect and return the resulting PR identity.
+
+    A member repository's notes withhold its content (#1796): a failing
+    test's ids go to the ticket through ``comment_effect`` instead.
+    """
     context = checkout_context(cwd)
     resolved = resolve_checkout_repo(context["root"], repo)
     ticket = fetch_ticket(resolved, context["number"])
     ref = ticket["ref"]
+    release_effect = release or (
+        lambda target: release_claim(target, run=run, agent=agent)
+    )
+    phase = "checkpoint"
+    checkpointed = False
     try:
+        continued = _remote_branch_exists(context["root"], context["branch"])
+        checkpointed = _checkpoint_work(
+            context["root"], context["number"], context["branch"],
+            ref=ref, run=run, agent=agent,
+        )
+        phase = "tests"
         tests, test_source = run_tests(context["root"], test_commands)
-    except ImplementError as exc:
-        # A failing checkout must not strand the run or lose its work (#877):
-        # commit and push the ticket branch without opening a PR, release the
-        # claim, and finish errored naming what failed, so the next run
-        # continues the branch instead of starting again from main.
-        kept = _keep_work(context["root"], context["number"], context["branch"])
-        release(ref)
-        heartbeat_finish(agent, run, "errored", _failure_note(exc, kept), ref)
+    except SupersededRunError:
         raise
-    continued = _remote_branch_exists(context["root"], context["branch"])
+    except StrayFileError as exc:
+        release_effect(ref)
+        heartbeat_finish(
+            agent, run, "errored", _stray_note(exc, repo=resolved), ref)
+        _remove_codex_run_checkout(context["root"], context["number"], agent)
+        raise
+    except CommandTimeoutError as exc:
+        _record_command_timeout(
+            exc, run=run, agent=agent, ref=ref, release=release_effect,
+            heartbeat_finish=heartbeat_finish, work_kept=checkpointed,
+        )
+        if checkpointed:
+            _remove_codex_run_checkout(
+                context["root"], context["number"], agent)
+        raise
+    except ImplementError as exc:
+        # A failed checkpoint or test must not strand the run. Retry saving
+        # remaining work without opening a PR, then finish errored so the next
+        # run continues the branch instead of starting again from main.
+        kept, push_failed = _keep_work(
+            context["root"], context["number"], context["branch"],
+            ref=ref, run=run, agent=agent,
+            reason=("tests failed" if phase == "tests" else "checkpoint retry"),
+        )
+        posted = None
+        if phase == "tests" and not _is_public_repo(resolved):
+            # The ids leave the public note, so they go to the ticket, and
+            # before the release: the run that claims it next reads them in
+            # its packet (#1796). A failed post must not strand the run.
+            try:
+                comment_effect(
+                    resolved, context["number"], _failure_comment(exc, kept),
+                    run=run, agent=agent, cwd=context["root"],
+                )
+                posted = True
+            except (funnel.GitHubError, OSError, subprocess.SubprocessError):
+                posted = False
+        release_effect(ref)
+        note = (
+            _failure_note(exc, kept, repo=resolved) if phase == "tests" else
+            _checkpoint_note(exc, kept, repo=resolved)
+        )
+        if posted is False:
+            note += " | failing tests NOT posted to the ticket"
+        heartbeat_finish(agent, run, "errored", note, ref)
+        if not push_failed:
+            _remove_codex_run_checkout(
+                context["root"], context["number"], agent)
+        raise
     try:
+        if _working_tree_paths(context["root"]):
+            _require_current_claim(ref, run, agent)
         committed = _commit_if_needed(
             context["root"], context["number"], answer["summary"],
             allow_empty=True,
@@ -1704,66 +2576,121 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
             evidence = _verify_done_evidence(
                 answer.get("evidence") or [], run=run, agent=agent,
             )
+            _require_current_claim(ref, run, agent)
             close_effect(
                 resolved, context["number"], cwd=context["root"],
             )
-            release(ref)
+            release_effect(ref)
             note = "no-diff close as completed; verified evidence: {}".format(
                 ", ".join(evidence))
             if extra_note:
                 note += "; " + extra_note.strip()
             heartbeat_finish(agent, run, "done", note, ref)
+            _remove_codex_run_checkout(
+                context["root"], context["number"], agent)
             return {"number": context["number"], "url": ticket["url"],
                     "closed": True}
-        _push_ticket_branch(context["root"], context["branch"])
-        # Re-read immediately before the PR effect so the guard remains the
-        # last local file-list check, even when an existing branch was merged.
+        # Re-read immediately before pushing so a ticket branch never carries
+        # scratch files introduced after its commit.
         _check_no_run_scratch(context["root"])
+        _push_ticket_branch(
+            context["root"], context["branch"],
+            ref=ref, run=run, agent=agent,
+        )
+        # Recheck before the PR effect in case the merge or push surfaced
+        # another scratch file.
+        _check_no_run_scratch(context["root"])
+    except SupersededRunError:
+        raise
     except StrayFileError as exc:
-        release(ref)
-        heartbeat_finish(agent, run, "errored", str(exc), ref)
+        release_effect(ref)
+        heartbeat_finish(
+            agent, run, "errored", _stray_note(exc, repo=resolved), ref)
+        _remove_codex_run_checkout(context["root"], context["number"], agent)
+        raise
+    except CommandTimeoutError as exc:
+        _record_command_timeout(
+            exc, run=run, agent=agent, ref=ref, release=release_effect,
+            heartbeat_finish=heartbeat_finish, work_kept=checkpointed,
+        )
+        if checkpointed:
+            _remove_codex_run_checkout(
+                context["root"], context["number"], agent)
         raise
     body = render_pr_body(ticket, answer, continued=continued, tests=tests,
                          test_source=test_source)
     pr = pr_effect(resolved, context, ticket, body)
-    release(ref)
+    release_effect(ref)
     note = "PR #{}".format(pr["number"])
     if test_source is not None:
-        note += " (tests: {})".format(test_source)
+        note += " (tests: {})".format(
+            _note_test_source(test_source, repo=resolved))
     if extra_note:
         note += "; " + extra_note.strip()
     heartbeat_finish(agent, run, "done", note, ref)
+    _remove_codex_run_checkout(context["root"], context["number"], agent)
     return pr
-
 
 def finish_blocked_on_human(
         blocked: dict, *, run: str, agent: str = "codex",
         repo: Optional[str] = None, cwd: Optional[os.PathLike] = None,
-        release: Callable[[str], None] = release_claim,
+        release: Optional[Callable[[str], None]] = None,
         heartbeat_finish: Callable[[str, str, str, str, str], None]
         = finish_heartbeat,
         create_effect: Callable[..., dict] = create_human_step_issue,
         block_effect: Callable[..., None] = mark_ticket_blocked,
         comment_effect: Callable[..., None] = post_agent_comment,
         needs_effect: Callable[[str, str], None] = write_human_step_needs,
+        sub_issues_effect: Callable[[str, int], List[Dict[str, object]]]
+        = read_parent_sub_issues,
+        comments_effect: Callable[[str, int], List[str]]
+        = read_ticket_comment_bodies,
+        head_effect: Callable[[pathlib.Path, str], Optional[str]]
+        = remote_ticket_head,
+        route_needs_effect: Callable[[str, str], None] = write_declined_needs,
+        human_needs_effect: Callable[[str, str], None]
+        = write_declined_human_needs,
         extra_note: Optional[str] = None) -> dict:
     """File the human step, block the ticket, release, and finish. No PR.
 
-    No test run, commit, or push happens here: the checkout holds an
-    unfinished implementation and must stay exactly as the model left it.
+    No test run, commit, or push happens here: the finish records the
+    implementation as not kept, then removes this run's Codex checkout.
     A failure after the sub-issue exists names it, so the retry starts
     from GitHub's truth rather than filing a second one.
+
+    A human step Nate closed as not planned for this ticket is his answer
+    that no step will happen, so nothing is filed again (#1726): the ticket
+    is routed to review and shaping instead, or, when it was already routed
+    for that step at the current head, handed to Nate.
     """
     context = checkout_context(cwd)
     resolved = resolve_checkout_repo(context["root"], repo)
     ticket = fetch_ticket(resolved, context["number"])
     ref = ticket["ref"]
+    release_effect = release or (
+        lambda target: release_claim(target, run=run, agent=agent)
+    )
     parent = ticket.get("parent") or {}
     parent_number = parent.get("number")
     if not isinstance(parent_number, int):
         raise ImplementError(
             "blocked_on_human needs the ticket's parent to file the "
             "human step under")
+    # Read before filing: a lane filed a second step for one ticket after Nate
+    # closed the first as not planned, re-blocking the ticket he had unblocked.
+    # Matching is on the ticket number the step names, never on the action's
+    # wording, which no code can judge equivalent (#1658).
+    closed = closed_human_steps_for(
+        sub_issues_effect(parent_repo(resolved, ticket), parent_number),
+        resolved, context["number"])
+    if closed:
+        return _finish_closed_human_step(
+            blocked, str(closed[-1]["ref"]), ticket=ticket, resolved=resolved,
+            context=context, run=run, agent=agent, release=release_effect,
+            heartbeat_finish=heartbeat_finish, block_effect=block_effect,
+            comment_effect=comment_effect, comments_effect=comments_effect,
+            head_effect=head_effect, route_needs_effect=route_needs_effect,
+            human_needs_effect=human_needs_effect, extra_note=extra_note)
     title = render_human_step_title(blocked["action"])
     body = render_human_step_body(
         parent_number=parent_number, ticket_number=context["number"],
@@ -1782,22 +2709,78 @@ def finish_blocked_on_human(
     except funnel.GitHubError as exc:
         raise funnel.GitHubError(
             "{} (already created: {})".format(exc, created["ref"]))
-    release(ref)
+    release_effect(ref)
     note = "stopped: human step filed as #{}; ticket blocked; no PR opened".format(
         created["number"])
     if extra_note:
         note += "; " + extra_note.strip()
     heartbeat_finish(agent, run, "skipped-human-step", note, ref)
+    _remove_codex_run_checkout(context["root"], context["number"], agent)
     return {"ticket": ref,
             "human_step": {"number": created["number"],
                            "ref": created["ref"],
                            "url": created["url"]}}
 
 
+def _finish_closed_human_step(
+        blocked: dict, step_ref: str, *, ticket: dict, resolved: str,
+        context: dict, run: str, agent: str,
+        release: Callable[[str], None],
+        heartbeat_finish: Callable[[str, str, str, str, str], None],
+        block_effect: Callable[..., None],
+        comment_effect: Callable[..., None],
+        comments_effect: Callable[[str, int], List[str]],
+        head_effect: Callable[[pathlib.Path, str], Optional[str]],
+        route_needs_effect: Callable[[str, str], None],
+        human_needs_effect: Callable[[str, str], None],
+        extra_note: Optional[str]) -> dict:
+    """Route a ticket whose step Nate closed as not planned; file nothing.
+
+    Routed like an accept-body conflict: Needs stays with the agents and a
+    marked comment cites the closed step for review and shaping. Returning
+    the ticket unblocked would loop against the same verdict every ten
+    minutes, so a second request at an unchanged head goes to Nate instead
+    (#1658). The route comment is the guard's record; if it cannot be posted
+    the ticket falls back to Nate's visible queue, as that path does.
+    """
+    ref = ticket["ref"]
+    number = context["number"]
+    root = context["root"]
+    head = head_effect(root, context["branch"])
+    if routed_for_closed_step(comments_effect(resolved, number), step_ref,
+                              head):
+        human_needs_effect(ticket["url"], ref)
+        comment_effect(resolved, number,
+                       render_closed_step_hold(step_ref, head),
+                       run=run, agent=agent, cwd=root)
+        routed = "human"
+        outcome = "already routed at this head; Needs human"
+    else:
+        route_needs_effect(ticket["url"], ref)
+        try:
+            comment_effect(resolved, number,
+                           render_closed_step_route(step_ref, head, blocked),
+                           run=run, agent=agent, cwd=root)
+            routed = "review"
+            outcome = "routed to review and shaping"
+        except (funnel.GitHubError, OSError, subprocess.SubprocessError):
+            human_needs_effect(ticket["url"], ref)
+            block_effect(resolved, number, cwd=root)
+            routed = "blocked"
+            outcome = "review routing failed; ticket left blocked"
+    release(ref)
+    note = "human step not filed: {} was closed as not planned; {}".format(
+        step_ref, outcome)
+    if extra_note:
+        note += "; " + extra_note.strip()
+    heartbeat_finish(agent, run, "skipped-blocked", note, ref)
+    return {"ticket": ref, "closed_human_step": step_ref, "routed": routed}
+
+
 def finish_declined(
         reason: str, *, run: str, agent: str = "codex",
         repo: Optional[str] = None, cwd: Optional[os.PathLike] = None,
-        release: Callable[[str], None] = release_claim,
+        release: Optional[Callable[[str], None]] = None,
         heartbeat_finish: Callable[[str, str, str, str, str], None]
         = finish_heartbeat,
         block_effect: Callable[..., None] = mark_ticket_blocked,
@@ -1805,6 +2788,8 @@ def finish_declined(
         needs_effect: Callable[[str, str], None] = write_declined_needs,
         human_needs_effect: Callable[[str, str], None]
         = write_declined_human_needs,
+        external_event_needs_effect: Callable[[str, str], None]
+        = write_declined_external_event_needs,
         prerequisite_facts_effect: Callable[[str], Optional[Dict[str, object]]]
         = read_declined_prerequisite,
         clear_block_effect: Callable[..., None] = clear_declined_ticket_block,
@@ -1818,6 +2803,9 @@ def finish_declined(
     resolved = resolve_checkout_repo(context["root"], repo)
     ticket = fetch_ticket(resolved, context["number"])
     ref = ticket["ref"]
+    release_effect = release or (
+        lambda target: release_claim(target, run=run, agent=agent)
+    )
     decline_class, decline_target = classify_decline_reason(
         reason, resolved, ticket.get("body") or "")
     if decline_class == "defer-note-proof":
@@ -1825,18 +2813,23 @@ def finish_declined(
             resolved, context["number"], reason,
             run=run, agent=agent, cwd=context["root"],
         )
-        release(ref)
+        release_effect(ref)
         note = "closed as completed: allowed defer-note proof"
         if extra_note:
             note += "; " + extra_note.strip()
         heartbeat_finish(agent, run, "done", note, ref)
+        _remove_codex_run_checkout(context["root"], context["number"], agent)
         return {"ticket": ref, "declined": reason}
     accept_conflict_routed = (
         decline_class == "accept-body-conflict" and decline_target is not None
     )
     prerequisite_recorded = False
-    prerequisite_agent_routed = False
+    false_unlanded_prerequisite_routed = False
     prerequisite_evidence: Optional[str] = None
+    unsatisfiable_acceptance_routed = (
+        decline_class == "unsatisfiable-acceptance"
+    )
+    pending_gate_answer_routed = decline_class == "pending-gate-answer"
     if accept_conflict_routed:
         # Keep this in an agent lane so review and shaping can see the ticket.
         needs_effect(ticket["url"], ref)
@@ -1848,7 +2841,7 @@ def finish_declined(
                 prerequisite_evidence = _landed_prerequisite_evidence(
                     decline_target, prerequisite_facts or {},
                 )
-                prerequisite_agent_routed = True
+                false_unlanded_prerequisite_routed = True
             elif (
                 isinstance(prerequisite_facts, dict)
                 and prerequisite_facts.get("state") == "OPEN"
@@ -1863,7 +2856,9 @@ def finish_declined(
             # A failed lookup or edge write keeps today's visible block.
             prerequisite_recorded = False
     if (not prerequisite_recorded and not accept_conflict_routed
-            and not prerequisite_agent_routed):
+            and not false_unlanded_prerequisite_routed
+            and not unsatisfiable_acceptance_routed
+            and not pending_gate_answer_routed):
         # Unknown declines and failed prerequisite handoffs have no machine-
         # readable condition that can clear them. Ask Nate instead of leaving
         # a blocked ticket in the silent Needs=agent lane.
@@ -1874,12 +2869,22 @@ def finish_declined(
         declined_comment += "\n\n" + prerequisite_evidence
     comment_effect(resolved, context["number"], declined_comment,
                    run=run, agent=agent, cwd=context["root"])
-    if prerequisite_agent_routed:
+    if false_unlanded_prerequisite_routed:
         # Record proof before returning a false decline to the agent queue.
         clear_block_effect(
             resolved, context["number"], cwd=context["root"],
         )
         needs_effect(ticket["url"], ref)
+    elif unsatisfiable_acceptance_routed:
+        clear_block_effect(
+            resolved, context["number"], cwd=context["root"],
+        )
+        needs_effect(ticket["url"], ref)
+    elif pending_gate_answer_routed:
+        clear_block_effect(
+            resolved, context["number"], cwd=context["root"],
+        )
+        external_event_needs_effect(ticket["url"], ref)
     routing_failed = False
     if accept_conflict_routed:
         try:
@@ -1893,20 +2898,69 @@ def finish_declined(
             human_needs_effect(ticket["url"], ref)
             block_effect(resolved, context["number"], cwd=context["root"])
             routing_failed = True
-    release(ref)
+    elif unsatisfiable_acceptance_routed or pending_gate_answer_routed:
+        try:
+            if unsatisfiable_acceptance_routed:
+                digest = hashlib.sha256(
+                    (ticket.get("body") or "").encode("utf-8")
+                ).hexdigest()
+                routing_comment = (
+                    _declined_unsatisfiable_acceptance_comment(reason, digest)
+                )
+            elif isinstance(decline_target, str):
+                routing_comment = _declined_pending_gate_answer_comment(
+                    reason, decline_target,
+                )
+            else:
+                raise ImplementError(
+                    "pending gate decline has no named gate answer"
+                )
+            comment_effect(
+                resolved, context["number"], routing_comment,
+                run=run, agent=agent, cwd=context["root"],
+            )
+        except (funnel.GitHubError, ImplementError, OSError,
+                subprocess.SubprocessError):
+            # The route comment is the durable queue hold. If it cannot be
+            # recorded, put the ticket back in Nate's visible queue.
+            human_needs_effect(ticket["url"], ref)
+            block_effect(resolved, context["number"], cwd=context["root"])
+            routing_failed = True
+    release_effect(ref)
     first = reason.splitlines()[0] if reason else "no reason given"
     if len(first) > 200:
         first = first[:197].rstrip() + "..."
     note = "declined: {}".format(first)
+    if not _is_public_repo(resolved):
+        # The reason is the model's prose about a private ticket and can
+        # quote its files and tests. The declined comment above already put
+        # it on the ticket (#1796).
+        note = "declined; reason on the ticket"
     if accept_conflict_routed and not routing_failed:
         note += "; routed to review for Accept/body conflict"
-    elif prerequisite_agent_routed:
-        note += "; prerequisite already landed; returned to agent queue"
+    elif false_unlanded_prerequisite_routed:
+        note += (
+            "; false unlanded-prerequisite claim disproved by closed child "
+            "tickets; returned to agent queue"
+        )
+    elif unsatisfiable_acceptance_routed:
+        note += (
+            "; acceptance cannot be met; routed for reshaping"
+            if not routing_failed else
+            "; reshaping route failed; ticket left blocked"
+        )
+    elif pending_gate_answer_routed:
+        note += (
+            "; waiting for the named gate answer"
+            if not routing_failed else
+            "; gate-answer route failed; ticket left blocked"
+        )
     elif routing_failed:
         note += "; review routing failed; ticket left blocked"
     if extra_note:
         note += "; " + extra_note.strip()
     heartbeat_finish(agent, run, "skipped-blocked", note, ref)
+    _remove_codex_run_checkout(context["root"], context["number"], agent)
     return {"ticket": ref, "declined": reason}
 
 
@@ -1927,7 +2981,54 @@ def dry_run_main() -> int:
     return 0
 
 
+def _record_superseded_finish(args: argparse.Namespace, ref: str,
+                              reason: str) -> int:
+    """Finish a refused run without releasing, committing, or pushing work."""
+    if not args.run:
+        print("finish-ticket: cannot record superseded finish without --run",
+              file=sys.stderr)
+        return 1
+    note = "superseded: {}; work not kept".format(reason)
+    try:
+        finish_heartbeat(args.agent, args.run, "errored", note, ref)
+    except (funnel.GitHubError, ImplementError, OSError,
+            subprocess.SubprocessError) as exc:
+        print("finish-ticket: {}; heartbeat finish failed: {}".format(
+            note, exc), file=sys.stderr)
+        return 1
+    try:
+        context = checkout_context()
+    except ImplementError:
+        context = None
+    if context is not None:
+        _remove_codex_run_checkout(
+            context["root"], context["number"], args.agent,
+        )
+    print(json.dumps({
+        "ticket": ref, "superseded": True, "work_kept": False,
+    }, sort_keys=True))
+    return 0
+
+
 def _finish_ticket(args: argparse.Namespace) -> int:
+    try:
+        try:
+            context = checkout_context()
+        except ImplementError:
+            # The effect functions validate the checkout before writing. Keep
+            # their CLI routing seams usable by callers without a checkout.
+            context = None
+        if context is not None:
+            resolved = resolve_checkout_repo(context["root"], args.repo)
+            ref = "{}#{}".format(resolved, context["number"])
+            _require_current_claim(ref, args.run, args.agent)
+    except SupersededRunError as exc:
+        return _record_superseded_finish(args, exc.ref, exc.reason)
+    except (funnel.GitHubError, ImplementError, OSError,
+            subprocess.SubprocessError) as exc:
+        print("finish-ticket: {}".format(exc), file=sys.stderr)
+        return 1
+
     try:
         if args.answer_file is not None:
             answer = read_answer(args.answer_file)
@@ -1939,7 +3040,13 @@ def _finish_ticket(args: argparse.Namespace) -> int:
         try:
             _recover_answer_error(
                 exc, run=args.run, agent=args.agent, repo=args.repo,
-                release=release_claim, heartbeat_finish=finish_heartbeat,
+                release=lambda target: release_claim(
+                    target, run=args.run, agent=args.agent),
+                heartbeat_finish=finish_heartbeat,
+            )
+        except SupersededRunError as recovery_exc:
+            return _record_superseded_finish(
+                args, recovery_exc.ref, recovery_exc.reason,
             )
         except (funnel.GitHubError, ImplementError, OSError,
                 subprocess.SubprocessError) as recovery_exc:
@@ -1955,18 +3062,46 @@ def _finish_ticket(args: argparse.Namespace) -> int:
         if "done" in answer:
             result = finish_done(
                 answer, run=args.run, agent=args.agent, repo=args.repo,
+                release=lambda target: release_claim(
+                    target, run=args.run, agent=args.agent),
                 extra_note=args.note,
             )
         elif "blocked_on_human" in answer:
             result = finish_blocked_on_human(
                 answer["blocked_on_human"], run=args.run, agent=args.agent,
-                repo=args.repo, extra_note=args.note,
+                repo=args.repo, release=lambda target: release_claim(
+                    target, run=args.run, agent=args.agent),
+                extra_note=args.note,
             )
         else:
             result = finish_declined(
                 answer["declined"], run=args.run, agent=args.agent,
-                repo=args.repo, extra_note=args.note,
+                repo=args.repo, release=lambda target: release_claim(
+                    target, run=args.run, agent=args.agent),
+                extra_note=args.note,
             )
+    except CommandTimeoutError as exc:
+        if not exc.finish_recorded:
+            try:
+                ref = _bound_work_ref_for_run(args.run, args.agent)
+                _record_command_timeout(
+                    exc, run=args.run, agent=args.agent, ref=ref,
+                    release=lambda target: release_claim(
+                        target, run=args.run, agent=args.agent),
+                    heartbeat_finish=finish_heartbeat,
+                )
+            except (funnel.GitHubError, ImplementError, OSError,
+                    subprocess.SubprocessError) as recovery_exc:
+                print(
+                    "finish-ticket: {}; timeout outcome could not be recorded: {}"
+                    .format(exc, recovery_exc),
+                    file=sys.stderr,
+                )
+                return 1
+        print("finish-ticket: {}".format(exc), file=sys.stderr)
+        return 1
+    except SupersededRunError as exc:
+        return _record_superseded_finish(args, exc.ref, exc.reason)
     except (funnel.GitHubError, ImplementError, OSError,
             subprocess.SubprocessError) as exc:
         print("finish-ticket: {}".format(exc), file=sys.stderr)

@@ -1324,14 +1324,22 @@ RISK_LINE = re.compile(r"^\s*Risk:\s*(standard|escalated)\b(.*)$",
 #: Category names and `lock`, `park`, `close` or `delete` alone stay ordinary
 #: subject matter: this repository discusses them even when no risky action is
 #: proposed, and matching them would keep the standard engine from ever running.
+# Keep the credentials matcher vocabulary in one place. The direct-action
+# table below reuses these exact noun fragments so it cannot add synonyms.
+_CREDENTIALS_MATCHER_NAMED_TERMS = (
+    r"api[- ]key|access token|client secret|credential store|password|private key"
+)
+_CREDENTIALS_MATCHER_ACTION_NOUN = r"credentials?"
+
 ESCALATION_PATTERNS = {
-    "credentials": r"(?<!no )\b(api[- ]key|access token|client secret|"
-                   r"credential store|password|private key)\b|"
-                   r"(?<!not )(?<!never )\b(?:access|chang|creat|enter|expos|"
-                   r"handl|load|read|replac|revok|rotat|stor|suppl|touch|"
-                   r"use|uses|used|using|writ)\w*"
-                   r"(?:\s+(?!(?:no|not|nothing)\b)[\w'’-]+){0,4}"
-                   r"\s+credentials?\b",
+    "credentials": (
+        r"(?<!no )\b(" + _CREDENTIALS_MATCHER_NAMED_TERMS + r")\b|"
+        r"(?<!not )(?<!never )\b(?:access|chang|creat|enter|expos|"
+        r"handl|load|read|replac|revok|rotat|stor|suppl|touch|"
+        r"use|uses|used|using|writ)\w*"
+        r"(?:\s+(?!(?:no|not|nothing)\b)[\w'’-]+){0,4}"
+        r"\s+" + _CREDENTIALS_MATCHER_ACTION_NOUN + r"\b"
+    ),
     "authorisation": r"(?<!no )(?<!not )(?<!never )\b("
                      r"authoris(?:e|es|ed|ing)|authoriz(?:e|es|ed|ing)|"
                      r"permission model|access control|oauth|scope grant)\b|"
@@ -1554,6 +1562,19 @@ _PLAN_REJECTED_INLINE_RE = re.compile(
 )
 
 _PLAN_QUOTE_PAIRS = {"\"": "\"", "“": "”", "‘": "’", "«": "»"}
+# These literal forms are already used by the credentials proposal matcher.
+# The direct-action table below shares this list, like the existing direct
+# action entries use their category's established verbs.
+_CREDENTIALS_PLAN_ACTION_FORMS = (
+    r"access|accesses|accessed|accessing|change|changes|changed|changing|"
+    r"create|creates|created|creating|expose|exposes|exposed|exposing|"
+    r"grant|grants|granted|granting|handle|handles|handled|handling|"
+    r"load|loads|loaded|loading|read|reads|reading|replace|replaces|"
+    r"replaced|replacing|revoke|revokes|revoked|revoking|rotate|rotates|"
+    r"rotated|rotating|store|stores|stored|storing|supply|supplies|"
+    r"supplied|supplying|touch|touches|touched|touching|update|updates|"
+    r"updated|updating|use|uses|used|using|write|writes|wrote|written|writing"
+)
 _PLAN_PROPOSAL_ACTIONS = {
     # Every inflection is spelled out: an optional suffix on a stem that
     # ends in "e" matches "changeing", never "changing" (#1681 review).
@@ -1572,15 +1593,7 @@ _PLAN_PROPOSAL_ACTIONS = {
     # Spelled out for the same reason: "use(?:s|d|ing)?" missed "using" and
     # "rotating" and matched "useing" (#1722).
     "credentials": re.compile(
-        r"\b(?:access|accesses|accessed|accessing|change|changes|changed|"
-        r"changing|create|creates|created|creating|expose|exposes|exposed|"
-        r"exposing|grant|grants|granted|granting|handle|handles|handled|"
-        r"handling|load|loads|loaded|loading|read|reads|reading|replace|"
-        r"replaces|replaced|replacing|revoke|revokes|revoked|revoking|"
-        r"rotate|rotates|rotated|rotating|store|stores|stored|storing|"
-        r"supply|supplies|supplied|supplying|touch|touches|touched|"
-        r"touching|update|updates|updated|updating|use|uses|used|using|"
-        r"write|writes|wrote|written|writing)\b",
+        r"\b(?:" + _CREDENTIALS_PLAN_ACTION_FORMS + r")\b",
         re.IGNORECASE,
     ),
     "data-migration": re.compile(
@@ -1639,6 +1652,16 @@ _PLAN_DIRECT_ACTIONS = {
     "data-migration": re.compile(
         r"\b(?:backfill|backfills|backfilled|backfilling|migrate|migrates|"
         r"migrated|migrating|migration)\b",
+        re.IGNORECASE,
+    ),
+    # Like data-migration and authorisation, this category gets a direct
+    # action entry for its own verb-inside-phrase proposal shape. Reuse the
+    # credentials proposal forms and matcher terms verbatim (#1770).
+    "credentials": re.compile(
+        r"\b(?:" + _CREDENTIALS_PLAN_ACTION_FORMS + r")"
+        r"(?:\s+[\w'’-]+){0,4}\s+"
+        r"(?:" + _CREDENTIALS_MATCHER_NAMED_TERMS + r"|"
+        + _CREDENTIALS_MATCHER_ACTION_NOUN + r")\b",
         re.IGNORECASE,
     ),
     "destructive": re.compile(

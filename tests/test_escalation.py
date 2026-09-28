@@ -493,6 +493,24 @@ def test_ticket_1643_named_false_gate_fixtures_do_not_escalate():
         )
 
 
+def test_ticket_1770_sibling_citation_matches_generic_but_not_plan_scan():
+    fixtures = json.loads(
+        (FIXTURES / "escalation_plan_false_gates.json").read_text()
+    )
+    fixture = next(
+        item for item in fixtures
+        if item["source"].startswith("Ticket #1770:")
+    )
+
+    # A broad credentials regex sees the sibling's verb and noun together;
+    # the proposal scan must ignore that non-proposal section (#1643/#1679).
+    generic = re.compile(
+        funnel.ESCALATION_PATTERNS["credentials"], re.IGNORECASE
+    )
+    assert generic.search(fixture["body"])
+    assert funnel.plan_escalation_matches(fixture["body"]) == []
+
+
 def test_plan_scan_ignores_risky_actions_inside_code_blocks():
     fence = "```"
     code_blocks = [
@@ -628,3 +646,59 @@ def test_ticket_1722_direct_migration_verbs_are_spelled_out():
         assert direct.fullmatch(word), word
     for word in ("migrateing", "migrateed", "migrat"):
         assert direct.fullmatch(word) is None, word
+
+
+def test_ticket_1770_every_verb_carrying_category_has_a_direct_action_entry():
+    """Each category's own verb shape is represented in the direct table."""
+    examples = {
+        "data-migration": "migrate the schema",
+        "authorisation": "grant the service permissions",
+        "credentials": "rotate the deploy credentials",
+    }
+    assert set(examples) <= set(funnel._PLAN_DIRECT_ACTIONS)
+    for category, phrase in examples.items():
+        assert funnel._PLAN_DIRECT_ACTIONS[category].search(phrase), category
+
+
+def test_ticket_1770_credentials_direct_actions_use_literal_rotate_forms_and_terms():
+    direct = funnel._PLAN_DIRECT_ACTIONS["credentials"]
+    for verb in funnel._CREDENTIALS_PLAN_ACTION_FORMS.split("|"):
+        assert direct.search("{} the deploy credentials".format(verb)), verb
+
+    for noun in ("API key", "access token", "client secret",
+                 "credential store", "password", "private key", "credential",
+                 "credentials"):
+        assert direct.search("rotate the deploy {}".format(noun)), noun
+
+    for invalid in ("changeing", "rotateing", "useing", "writed"):
+        assert direct.search("{} the deploy credentials".format(invalid)) is None
+    assert direct.search("rotate the deploy secret key") is None
+
+
+def test_ticket_1770_credentials_direct_actions_reuse_existing_vocabulary():
+    direct = funnel._PLAN_DIRECT_ACTIONS["credentials"].pattern
+    proposal = funnel._PLAN_PROPOSAL_ACTIONS["credentials"].pattern
+
+    def action_terms(pattern):
+        assert pattern.startswith(r"\b(?:")
+        return pattern[len(r"\b(?:"):pattern.index(")", len(r"\b(?:"))]
+
+    assert action_terms(direct) == action_terms(proposal)
+
+    direct_tail = direct.split(
+        r"(?:\s+[\w'’-]+){0,4}\s+", 1
+    )[1]
+    assert direct_tail.startswith("(?:") and direct_tail.endswith(r")\b")
+    direct_credentials = direct_tail[3:-3]
+    matcher_terms = "{}|{}".format(
+        funnel._CREDENTIALS_MATCHER_NAMED_TERMS,
+        funnel._CREDENTIALS_MATCHER_ACTION_NOUN,
+    )
+    assert direct_credentials == matcher_terms
+    matcher = funnel.ESCALATION_PATTERNS["credentials"]
+    assert matcher.startswith(
+        r"(?<!no )\b(" + funnel._CREDENTIALS_MATCHER_NAMED_TERMS + r")\b|"
+    )
+    assert matcher.endswith(
+        r"\s+" + funnel._CREDENTIALS_MATCHER_ACTION_NOUN + r"\b"
+    )

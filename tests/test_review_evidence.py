@@ -760,6 +760,66 @@ def test_an_untouched_test_in_a_changed_file_is_not_listed(tmp_path, log):
     assert record["line"] == "reproduction: passes-on-base"
 
 
+@pytest.mark.parametrize("imports, base_class", [
+    ("import unittest\n", "unittest.TestCase"),
+    ("from unittest import TestCase\n", "TestCase"),
+], ids=["unittest.TestCase", "TestCase"])
+def test_a_red_test_in_a_testcase_class_of_any_name_is_listed(
+        tmp_path, log, imports, base_class):
+    # Pytest collects every unittest.TestCase subclass whatever its name
+    # (#1829 review). The head fixes double, adds a regression test to
+    # DoubleTests, and rewords a passing test in a Test* class.
+    unit = (imports + "\nfrom calc import double\n\n\n"
+            "class DoubleTests({}):\n    def test_one(self):\n"
+            "        self.assertEqual(double(2), 4)\n".format(base_class))
+    misc = ("from calc import double\n\n\nclass TestMisc:\n"
+            "    def test_two(self):\n        assert double(2) == 4\n")
+    repo, base_sha, _ = make_repo(
+        tmp_path,
+        ancestor={"calc.py": BUGGY_CALC, "tests/test_unit.py": unit,
+                  "tests/test_misc.py": misc},
+        base={},
+        head={"calc.py": CALC,
+              "tests/test_unit.py": unit + "\n    def test_three(self):\n"
+                                           "        self.assertEqual("
+                                           "double(3), 6)\n",
+              "tests/test_misc.py": misc.replace("== 4", "== 4, 'two'")},
+    )
+
+    record = repro(repo, base_sha, tmp_path)
+
+    assert outcomes(record) == {
+        "tests/test_misc.py::TestMisc::test_two": "passes-on-base",
+        "tests/test_unit.py::DoubleTests::test_three": "red"}
+    assert record["line"] == "reproduction: red"
+
+
+def test_a_repo_that_stops_at_the_first_failure_still_runs_every_test(
+        tmp_path, log):
+    # The repo's addopts say -x. The added tests run in file order: a pass,
+    # a no-signal failure, then a red test, which -x would never reach.
+    repo, base_sha, _ = make_repo(
+        tmp_path,
+        ancestor={"calc.py": BUGGY_CALC,
+                  "pytest.ini": "[pytest]\naddopts = -x\n"},
+        base={},
+        head={"calc.py": TRIPLE_CALC.replace("x + 2", "x * 2"),
+              "tests/test_calc.py":
+              "import calc\n\n\n"
+              "def test_a_pass():\n    assert calc.double(2) == 4\n\n\n"
+              "def test_b_new():\n    assert calc.triple(2) == 6\n\n\n"
+              "def test_c_red():\n    assert calc.double(3) == 6\n"},
+    )
+
+    record = repro(repo, base_sha, tmp_path)
+
+    assert outcomes(record) == {
+        "tests/test_calc.py::test_a_pass": "passes-on-base",
+        "tests/test_calc.py::test_b_new": "no signal",
+        "tests/test_calc.py::test_c_red": "red"}
+    assert record["line"] == "reproduction: red"
+
+
 def test_a_test_command_that_is_not_pytest_is_unsupported(tmp_path, log):
     # The Makefile runs pytest, but nothing can pick single tests out of it.
     repo, base_sha, _ = make_repo(

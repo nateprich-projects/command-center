@@ -487,13 +487,24 @@ def _blob(root: pathlib.Path, sha: str, path: str) -> Optional[str]:
     return proc.stdout if proc.returncode == 0 else None
 
 
+def _is_test_class(node: ast.ClassDef) -> bool:
+    """A ``Test*`` class, or a ``unittest.TestCase`` subclass of any name,
+    which pytest collects too (#1829 review). A class it turns out not to
+    collect is dropped as not found."""
+    return node.name.startswith("Test") or any(
+        (isinstance(base, ast.Name) and base.id.endswith("TestCase"))
+        or (isinstance(base, ast.Attribute)
+            and base.attr.endswith("TestCase"))
+        for base in node.bases)
+
+
 def _test_spans(source: str) -> List[Tuple[str, int, int]]:
     """(name, first line, last line) of each test pytest collects by default.
 
-    ``test*`` functions at module level and in ``Test*`` classes, nested
-    ones included, named as in a node id (``TestC::test_f``). A test's
-    lines start at its first decorator, so a changed parametrize list
-    changes the test. A file that does not parse has none.
+    ``test*`` functions at module level and in test classes, nested ones
+    included, named as in a node id (``TestC::test_f``). A test's lines
+    start at its first decorator, so a changed parametrize list changes
+    the test. A file that does not parse has none.
     """
     try:
         tree = ast.parse(source)
@@ -508,8 +519,7 @@ def _test_spans(source: str) -> List[Tuple[str, int, int]]:
                 first = min([node.lineno] + [
                     decorator.lineno for decorator in node.decorator_list])
                 spans.append((prefix + node.name, first, node.end_lineno))
-            elif isinstance(node, ast.ClassDef) \
-                    and node.name.startswith("Test"):
+            elif isinstance(node, ast.ClassDef) and _is_test_class(node):
                 walk(node.body, prefix + node.name + "::")
 
     walk(tree.body, "")
@@ -660,7 +670,10 @@ def _run_added(tree: pathlib.Path, prefix: Sequence[str],
         # A report left by the first run must not be read as the second's.
         with contextlib.suppress(FileNotFoundError):
             report.unlink()
-        argv = list(prefix) + ["-q", "--junitxml={}".format(report)] + pending
+        # --maxfail=0 overrides a repo's -x: a red test after the first
+        # failure must still run (#1829 review).
+        argv = list(prefix) + ["-q", "--maxfail=0",
+                               "--junitxml={}".format(report)] + pending
         passed, output = _run_one(tree, argv)
         cases = _junit_cases(report)
         keys = {key for key, _, _ in cases}

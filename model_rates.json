@@ -1,0 +1,593 @@
+{
+  "schema_version": 1,
+  "recorded_at": "2026-09-28T03:02:28Z",
+  "price_basis": "Notional public API list price in USD per million tokens; subscription charges are excluded.",
+  "assumptions": [
+        "OpenAI uses standard short-context rates because context length and service tier are absent from run observations; long-context and batch rates are not represented.",
+    "Provider pages often state an effective calendar date but not a time. Those dates are represented as 00:00:00 UTC and each affected row records that limitation.",
+    "Anthropic cache-write tokens use the default 5-minute cache creation rate because the run observation does not contain cache TTL.",
+    "Meta cache-write tokens use the published input rate because the rate card lists no separate cache-write rate.",
+    "A missing token count, run timestamp, or effective model rate keeps that run cost null; unknown usage is never treated as zero."
+  ],
+  "unpriced_models": [
+    {
+      "provider": "zai",
+      "model": "glm-5.3",
+      "reason": "Z.ai's public model API rate card says to contact sales for pricing; the Coding Plan is subscription/credits, not a per-token rate.",
+      "source_url": "https://z.ai/model-api"
+    },
+    {
+      "provider": "openai",
+      "model": "codex-auto-review",
+      "reason": "No public per-token model rate is available for this harness model identifier.",
+      "source_url": "https://developers.openai.com/api/docs/pricing"
+    },
+    {
+      "provider": "unknown",
+      "model": "<synthetic>",
+      "reason": "Synthetic model labels do not identify a public API model rate."
+    }
+  ],
+  "rates": [
+    {
+      "provider": "openai",
+      "model": "gpt-5.6-sol",
+      "token_kind": "fresh_input_tokens",
+      "usd_per_million_tokens": 5,
+      "effective_from": "2026-07-09T00:00:00Z",
+      "source_url": "https://openai.com/index/gpt-5-6/",
+      "recorded_at": "2026-09-28T03:02:28Z",
+      "source_note": "Initial public standard rate; cache writes are listed at 1.25 times input."
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-5.6-sol",
+      "token_kind": "cache_read_input_tokens",
+      "usd_per_million_tokens": 0.5,
+      "effective_from": "2026-07-09T00:00:00Z",
+      "source_url": "https://openai.com/index/gpt-5-6/",
+      "recorded_at": "2026-09-28T03:02:28Z",
+      "source_note": "Initial public standard rate; cache writes are listed at 1.25 times input."
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-5.6-sol",
+      "token_kind": "cache_write_input_tokens",
+      "usd_per_million_tokens": 6.25,
+      "effective_from": "2026-07-09T00:00:00Z",
+      "source_url": "https://openai.com/index/gpt-5-6/",
+      "recorded_at": "2026-09-28T03:02:28Z",
+      "source_note": "Initial public standard rate; cache writes are listed at 1.25 times input."
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-5.6-sol",
+      "token_kind": "output_tokens",
+      "usd_per_million_tokens": 30,
+      "effective_from": "2026-07-09T00:00:00Z",
+      "source_url": "https://openai.com/index/gpt-5-6/",
+      "recorded_at": "2026-09-28T03:02:28Z",
+      "source_note": "Initial public standard rate; cache writes are listed at 1.25 times input."
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-5.6-sol",
+      "token_kind": "fresh_input_tokens",
+      "usd_per_million_tokens": 4,
+      "effective_from": "2026-08-21T00:00:00Z",
+      "source_url": "https://openai.com/index/advancing-the-price-performance-frontier-with-gpt-5-6/",
+      "recorded_at": "2026-09-28T03:02:28Z",
+      "source_note": "Promotional standard rate announced for GPT-5.6 Sol; effective date is the announced calendar date."
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-5.6-sol",
+      "token_kind": "cache_read_input_tokens",
+      "usd_per_million_tokens": 0.4,
+      "effective_from": "2026-08-21T00:00:00Z",
+      "source_url": "https://openai.com/index/advancing-the-price-performance-frontier-with-gpt-5-6/",
+      "recorded_at": "2026-09-28T03:02:28Z",
+      "source_note": "Promotional standard rate announced for GPT-5.6 Sol; effective date is the announced calendar date."
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-5.6-sol",
+      "token_kind": "cache_write_input_tokens",
+      "usd_per_million_tokens": 5,
+      "effective_from": "2026-08-21T00:00:00Z",
+      "source_url": "https://openai.com/index/advancing-the-price-performance-frontier-with-gpt-5-6/",
+      "recorded_at": "2026-09-28T03:02:28Z",
+      "source_note": "Promotional standard rate announced for GPT-5.6 Sol; effective date is the announced calendar date."
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-5.6-sol",
+      "token_kind": "output_tokens",
+      "usd_per_million_tokens": 20,
+      "effective_from": "2026-08-21T00:00:00Z",
+      "source_url": "https://openai.com/index/advancing-the-price-performance-frontier-with-gpt-5-6/",
+      "recorded_at": "2026-09-28T03:02:28Z",
+      "source_note": "Promotional standard rate announced for GPT-5.6 Sol; effective date is the announced calendar date."
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-5.6-terra",
+      "token_kind": "fresh_input_tokens",
+      "usd_per_million_tokens": 2.5,
+      "effective_from": "2026-07-09T00:00:00Z",
+      "source_url": "https://openai.com/index/gpt-5-6/",
+      "recorded_at": "2026-09-28T03:02:28Z",
+      "source_note": "Initial public standard rate; cache writes are listed at 1.25 times input."
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-5.6-terra",
+      "token_kind": "cache_read_input_tokens",
+      "usd_per_million_tokens": 0.25,
+      "effective_from": "2026-07-09T00:00:00Z",
+      "source_url": "https://openai.com/index/gpt-5-6/",
+      "recorded_at": "2026-09-28T03:02:28Z",
+      "source_note": "Initial public standard rate; cache writes are listed at 1.25 times input."
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-5.6-terra",
+      "token_kind": "cache_write_input_tokens",
+      "usd_per_million_tokens": 3.125,
+      "effective_from": "2026-07-09T00:00:00Z",
+      "source_url": "https://openai.com/index/gpt-5-6/",
+      "recorded_at": "2026-09-28T03:02:28Z",
+      "source_note": "Initial public standard rate; cache writes are listed at 1.25 times input."
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-5.6-terra",
+      "token_kind": "output_tokens",
+      "usd_per_million_tokens": 15,
+      "effective_from": "2026-07-09T00:00:00Z",
+      "source_url": "https://openai.com/index/gpt-5-6/",
+      "recorded_at": "2026-09-28T03:02:28Z",
+      "source_note": "Initial public standard rate; cache writes are listed at 1.25 times input."
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-5.6-terra",
+      "token_kind": "fresh_input_tokens",
+      "usd_per_million_tokens": 2,
+      "effective_from": "2026-07-30T00:00:00Z",
+      "source_url": "https://openai.com/index/advancing-the-price-performance-frontier-with-gpt-5-6/",
+      "recorded_at": "2026-09-28T03:02:28Z",
+      "source_note": "Updated standard rate announced for GPT-5.6 Terra; effective date is the announced calendar date."
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-5.6-terra",
+      "token_kind": "cache_read_input_tokens",
+      "usd_per_million_tokens": 0.2,
+      "effective_from": "2026-07-30T00:00:00Z",
+      "source_url": "https://openai.com/index/advancing-the-price-performance-frontier-with-gpt-5-6/",
+      "recorded_at": "2026-09-28T03:02:28Z",
+      "source_note": "Updated standard rate announced for GPT-5.6 Terra; effective date is the announced calendar date."
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-5.6-terra",
+      "token_kind": "cache_write_input_tokens",
+      "usd_per_million_tokens": 2.5,
+      "effective_from": "2026-07-30T00:00:00Z",
+      "source_url": "https://openai.com/index/advancing-the-price-performance-frontier-with-gpt-5-6/",
+      "recorded_at": "2026-09-28T03:02:28Z",
+      "source_note": "Updated standard rate announced for GPT-5.6 Terra; effective date is the announced calendar date."
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-5.6-terra",
+      "token_kind": "output_tokens",
+      "usd_per_million_tokens": 12,
+      "effective_from": "2026-07-30T00:00:00Z",
+      "source_url": "https://openai.com/index/advancing-the-price-performance-frontier-with-gpt-5-6/",
+      "recorded_at": "2026-09-28T03:02:28Z",
+      "source_note": "Updated standard rate announced for GPT-5.6 Terra; effective date is the announced calendar date."
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-5.6-luna",
+      "token_kind": "fresh_input_tokens",
+      "usd_per_million_tokens": 1,
+      "effective_from": "2026-07-09T00:00:00Z",
+      "source_url": "https://openai.com/index/gpt-5-6/",
+      "recorded_at": "2026-09-28T03:02:28Z",
+      "source_note": "Initial public standard rate; cache writes are listed at 1.25 times input."
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-5.6-luna",
+      "token_kind": "cache_read_input_tokens",
+      "usd_per_million_tokens": 0.1,
+      "effective_from": "2026-07-09T00:00:00Z",
+      "source_url": "https://openai.com/index/gpt-5-6/",
+      "recorded_at": "2026-09-28T03:02:28Z",
+      "source_note": "Initial public standard rate; cache writes are listed at 1.25 times input."
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-5.6-luna",
+      "token_kind": "cache_write_input_tokens",
+      "usd_per_million_tokens": 1.25,
+      "effective_from": "2026-07-09T00:00:00Z",
+      "source_url": "https://openai.com/index/gpt-5-6/",
+      "recorded_at": "2026-09-28T03:02:28Z",
+      "source_note": "Initial public standard rate; cache writes are listed at 1.25 times input."
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-5.6-luna",
+      "token_kind": "output_tokens",
+      "usd_per_million_tokens": 6,
+      "effective_from": "2026-07-09T00:00:00Z",
+      "source_url": "https://openai.com/index/gpt-5-6/",
+      "recorded_at": "2026-09-28T03:02:28Z",
+      "source_note": "Initial public standard rate; cache writes are listed at 1.25 times input."
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-5.6-luna",
+      "token_kind": "fresh_input_tokens",
+      "usd_per_million_tokens": 0.2,
+      "effective_from": "2026-07-30T00:00:00Z",
+      "source_url": "https://openai.com/index/advancing-the-price-performance-frontier-with-gpt-5-6/",
+      "recorded_at": "2026-09-28T03:02:28Z",
+      "source_note": "Updated standard rate announced for GPT-5.6 Luna; effective date is the announced calendar date."
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-5.6-luna",
+      "token_kind": "cache_read_input_tokens",
+      "usd_per_million_tokens": 0.02,
+      "effective_from": "2026-07-30T00:00:00Z",
+      "source_url": "https://openai.com/index/advancing-the-price-performance-frontier-with-gpt-5-6/",
+      "recorded_at": "2026-09-28T03:02:28Z",
+      "source_note": "Updated standard rate announced for GPT-5.6 Luna; effective date is the announced calendar date."
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-5.6-luna",
+      "token_kind": "cache_write_input_tokens",
+      "usd_per_million_tokens": 0.25,
+      "effective_from": "2026-07-30T00:00:00Z",
+      "source_url": "https://openai.com/index/advancing-the-price-performance-frontier-with-gpt-5-6/",
+      "recorded_at": "2026-09-28T03:02:28Z",
+      "source_note": "Updated standard rate announced for GPT-5.6 Luna; effective date is the announced calendar date."
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-5.6-luna",
+      "token_kind": "output_tokens",
+      "usd_per_million_tokens": 1.2,
+      "effective_from": "2026-07-30T00:00:00Z",
+      "source_url": "https://openai.com/index/advancing-the-price-performance-frontier-with-gpt-5-6/",
+      "recorded_at": "2026-09-28T03:02:28Z",
+      "source_note": "Updated standard rate announced for GPT-5.6 Luna; effective date is the announced calendar date."
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-6-astra",
+      "token_kind": "fresh_input_tokens",
+      "usd_per_million_tokens": 10,
+      "effective_from": "2026-09-03T00:00:00Z",
+      "source_url": "https://developers.openai.com/api/docs/pricing",
+      "recorded_at": "2026-09-28T03:02:28Z",
+      "source_note": "Standard short-context API rate; the run observation has no long-context or service-tier field. Cache writes use the listed cache-write rate."
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-6-astra",
+      "token_kind": "cache_read_input_tokens",
+      "usd_per_million_tokens": 1,
+      "effective_from": "2026-09-03T00:00:00Z",
+      "source_url": "https://developers.openai.com/api/docs/pricing",
+      "recorded_at": "2026-09-28T03:02:28Z",
+      "source_note": "Standard short-context API rate; the run observation has no long-context or service-tier field. Cache writes use the listed cache-write rate."
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-6-astra",
+      "token_kind": "cache_write_input_tokens",
+      "usd_per_million_tokens": 12.5,
+      "effective_from": "2026-09-03T00:00:00Z",
+      "source_url": "https://developers.openai.com/api/docs/pricing",
+      "recorded_at": "2026-09-28T03:02:28Z",
+      "source_note": "Standard short-context API rate; the run observation has no long-context or service-tier field. Cache writes use the listed cache-write rate."
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-6-astra",
+      "token_kind": "output_tokens",
+      "usd_per_million_tokens": 50,
+      "effective_from": "2026-09-03T00:00:00Z",
+      "source_url": "https://developers.openai.com/api/docs/pricing",
+      "recorded_at": "2026-09-28T03:02:28Z",
+      "source_note": "Standard short-context API rate; the run observation has no long-context or service-tier field. Cache writes use the listed cache-write rate."
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-6-sol",
+      "token_kind": "fresh_input_tokens",
+      "usd_per_million_tokens": 2,
+      "effective_from": "2026-09-22T00:00:00Z",
+      "source_url": "https://developers.openai.com/api/docs/pricing",
+      "recorded_at": "2026-09-28T03:02:28Z",
+      "source_note": "Standard short-context API rate; the run observation has no long-context or service-tier field. Cache writes use the listed cache-write rate."
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-6-sol",
+      "token_kind": "cache_read_input_tokens",
+      "usd_per_million_tokens": 0.2,
+      "effective_from": "2026-09-22T00:00:00Z",
+      "source_url": "https://developers.openai.com/api/docs/pricing",
+      "recorded_at": "2026-09-28T03:02:28Z",
+      "source_note": "Standard short-context API rate; the run observation has no long-context or service-tier field. Cache writes use the listed cache-write rate."
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-6-sol",
+      "token_kind": "cache_write_input_tokens",
+      "usd_per_million_tokens": 2.5,
+      "effective_from": "2026-09-22T00:00:00Z",
+      "source_url": "https://developers.openai.com/api/docs/pricing",
+      "recorded_at": "2026-09-28T03:02:28Z",
+      "source_note": "Standard short-context API rate; the run observation has no long-context or service-tier field. Cache writes use the listed cache-write rate."
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-6-sol",
+      "token_kind": "output_tokens",
+      "usd_per_million_tokens": 10,
+      "effective_from": "2026-09-22T00:00:00Z",
+      "source_url": "https://developers.openai.com/api/docs/pricing",
+      "recorded_at": "2026-09-28T03:02:28Z",
+      "source_note": "Standard short-context API rate; the run observation has no long-context or service-tier field. Cache writes use the listed cache-write rate."
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-6-luna",
+      "token_kind": "fresh_input_tokens",
+      "usd_per_million_tokens": 0.1,
+      "effective_from": "2026-09-22T00:00:00Z",
+      "source_url": "https://developers.openai.com/api/docs/pricing",
+      "recorded_at": "2026-09-28T03:02:28Z",
+      "source_note": "Standard short-context API rate; the run observation has no long-context or service-tier field. Cache writes use the listed cache-write rate."
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-6-luna",
+      "token_kind": "cache_read_input_tokens",
+      "usd_per_million_tokens": 0.01,
+      "effective_from": "2026-09-22T00:00:00Z",
+      "source_url": "https://developers.openai.com/api/docs/pricing",
+      "recorded_at": "2026-09-28T03:02:28Z",
+      "source_note": "Standard short-context API rate; the run observation has no long-context or service-tier field. Cache writes use the listed cache-write rate."
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-6-luna",
+      "token_kind": "cache_write_input_tokens",
+      "usd_per_million_tokens": 0.125,
+      "effective_from": "2026-09-22T00:00:00Z",
+      "source_url": "https://developers.openai.com/api/docs/pricing",
+      "recorded_at": "2026-09-28T03:02:28Z",
+      "source_note": "Standard short-context API rate; the run observation has no long-context or service-tier field. Cache writes use the listed cache-write rate."
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-6-luna",
+      "token_kind": "output_tokens",
+      "usd_per_million_tokens": 0.5,
+      "effective_from": "2026-09-22T00:00:00Z",
+      "source_url": "https://developers.openai.com/api/docs/pricing",
+      "recorded_at": "2026-09-28T03:02:28Z",
+      "source_note": "Standard short-context API rate; the run observation has no long-context or service-tier field. Cache writes use the listed cache-write rate."
+    },
+    {
+      "provider": "anthropic",
+      "model": "claude-opus-5",
+      "token_kind": "fresh_input_tokens",
+      "usd_per_million_tokens": 5,
+      "effective_from": "2026-07-24T00:00:00Z",
+      "source_url": "https://platform.claude.com/docs/en/models/opus-5/overview",
+      "recorded_at": "2026-09-28T03:02:28Z",
+      "source_note": "Public API list rate. Cache-write pricing uses the default 5-minute cache creation tier because run usage does not include cache TTL."
+    },
+    {
+      "provider": "anthropic",
+      "model": "claude-opus-5",
+      "token_kind": "cache_read_input_tokens",
+      "usd_per_million_tokens": 0.5,
+      "effective_from": "2026-07-24T00:00:00Z",
+      "source_url": "https://platform.claude.com/docs/en/models/opus-5/overview",
+      "recorded_at": "2026-09-28T03:02:28Z",
+      "source_note": "Public API list rate. Cache-write pricing uses the default 5-minute cache creation tier because run usage does not include cache TTL."
+    },
+    {
+      "provider": "anthropic",
+      "model": "claude-opus-5",
+      "token_kind": "cache_write_input_tokens",
+      "usd_per_million_tokens": 6.25,
+      "effective_from": "2026-07-24T00:00:00Z",
+      "source_url": "https://platform.claude.com/docs/en/models/opus-5/overview",
+      "recorded_at": "2026-09-28T03:02:28Z",
+      "source_note": "Public API list rate. Cache-write pricing uses the default 5-minute cache creation tier because run usage does not include cache TTL."
+    },
+    {
+      "provider": "anthropic",
+      "model": "claude-opus-5",
+      "token_kind": "output_tokens",
+      "usd_per_million_tokens": 25,
+      "effective_from": "2026-07-24T00:00:00Z",
+      "source_url": "https://platform.claude.com/docs/en/models/opus-5/overview",
+      "recorded_at": "2026-09-28T03:02:28Z",
+      "source_note": "Public API list rate. Cache-write pricing uses the default 5-minute cache creation tier because run usage does not include cache TTL."
+    },
+    {
+      "provider": "anthropic",
+      "model": "claude-fable-5-1",
+      "token_kind": "fresh_input_tokens",
+      "usd_per_million_tokens": 10,
+      "effective_from": "2026-09-01T00:00:00Z",
+      "source_url": "https://platform.claude.com/docs/en/models/fable-5-1/overview",
+      "recorded_at": "2026-09-28T03:02:28Z",
+      "source_note": "Public API list rate. Cache-write pricing uses the default 5-minute cache creation tier because run usage does not include cache TTL."
+    },
+    {
+      "provider": "anthropic",
+      "model": "claude-fable-5-1",
+      "token_kind": "cache_read_input_tokens",
+      "usd_per_million_tokens": 0.25,
+      "effective_from": "2026-09-01T00:00:00Z",
+      "source_url": "https://platform.claude.com/docs/en/models/fable-5-1/overview",
+      "recorded_at": "2026-09-28T03:02:28Z",
+      "source_note": "Public API list rate. Cache-write pricing uses the default 5-minute cache creation tier because run usage does not include cache TTL."
+    },
+    {
+      "provider": "anthropic",
+      "model": "claude-fable-5-1",
+      "token_kind": "cache_write_input_tokens",
+      "usd_per_million_tokens": 12.5,
+      "effective_from": "2026-09-01T00:00:00Z",
+      "source_url": "https://platform.claude.com/docs/en/models/fable-5-1/overview",
+      "recorded_at": "2026-09-28T03:02:28Z",
+      "source_note": "Public API list rate. Cache-write pricing uses the default 5-minute cache creation tier because run usage does not include cache TTL."
+    },
+    {
+      "provider": "anthropic",
+      "model": "claude-fable-5-1",
+      "token_kind": "output_tokens",
+      "usd_per_million_tokens": 50,
+      "effective_from": "2026-09-01T00:00:00Z",
+      "source_url": "https://platform.claude.com/docs/en/models/fable-5-1/overview",
+      "recorded_at": "2026-09-28T03:02:28Z",
+      "source_note": "Public API list rate. Cache-write pricing uses the default 5-minute cache creation tier because run usage does not include cache TTL."
+    },
+    {
+      "provider": "anthropic",
+      "model": "claude-opus-5-5",
+      "token_kind": "fresh_input_tokens",
+      "usd_per_million_tokens": 4,
+      "effective_from": "2026-09-22T00:00:00Z",
+      "source_url": "https://platform.claude.com/docs/en/models/opus-5-5/overview",
+      "recorded_at": "2026-09-28T03:02:28Z",
+      "source_note": "Public API list rate. Cache-write pricing uses the default 5-minute cache creation tier because run usage does not include cache TTL."
+    },
+    {
+      "provider": "anthropic",
+      "model": "claude-opus-5-5",
+      "token_kind": "cache_read_input_tokens",
+      "usd_per_million_tokens": 0.2,
+      "effective_from": "2026-09-22T00:00:00Z",
+      "source_url": "https://platform.claude.com/docs/en/models/opus-5-5/overview",
+      "recorded_at": "2026-09-28T03:02:28Z",
+      "source_note": "Public API list rate. Cache-write pricing uses the default 5-minute cache creation tier because run usage does not include cache TTL."
+    },
+    {
+      "provider": "anthropic",
+      "model": "claude-opus-5-5",
+      "token_kind": "cache_write_input_tokens",
+      "usd_per_million_tokens": 5,
+      "effective_from": "2026-09-22T00:00:00Z",
+      "source_url": "https://platform.claude.com/docs/en/models/opus-5-5/overview",
+      "recorded_at": "2026-09-28T03:02:28Z",
+      "source_note": "Public API list rate. Cache-write pricing uses the default 5-minute cache creation tier because run usage does not include cache TTL."
+    },
+    {
+      "provider": "anthropic",
+      "model": "claude-opus-5-5",
+      "token_kind": "output_tokens",
+      "usd_per_million_tokens": 20,
+      "effective_from": "2026-09-22T00:00:00Z",
+      "source_url": "https://platform.claude.com/docs/en/models/opus-5-5/overview",
+      "recorded_at": "2026-09-28T03:02:28Z",
+      "source_note": "Public API list rate. Cache-write pricing uses the default 5-minute cache creation tier because run usage does not include cache TTL."
+    },
+    {
+      "provider": "meta",
+      "model": "muse-spark-1.3",
+      "token_kind": "fresh_input_tokens",
+      "usd_per_million_tokens": 1.25,
+      "effective_from": "2026-09-02T00:00:00Z",
+      "source_url": "https://dev.meta.ai/docs/pricing-rate-limits",
+      "recorded_at": "2026-09-28T03:02:28Z",
+      "source_note": "Public tier rate per million tokens. The rate card lists input, cached input, and output; cache-write tokens use the input rate because no separate cache-write rate is listed."
+    },
+    {
+      "provider": "meta",
+      "model": "muse-spark-1.3",
+      "token_kind": "cache_read_input_tokens",
+      "usd_per_million_tokens": 0.15,
+      "effective_from": "2026-09-02T00:00:00Z",
+      "source_url": "https://dev.meta.ai/docs/pricing-rate-limits",
+      "recorded_at": "2026-09-28T03:02:28Z",
+      "source_note": "Public tier rate per million tokens. The rate card lists input, cached input, and output; cache-write tokens use the input rate because no separate cache-write rate is listed."
+    },
+    {
+      "provider": "meta",
+      "model": "muse-spark-1.3",
+      "token_kind": "cache_write_input_tokens",
+      "usd_per_million_tokens": 1.25,
+      "effective_from": "2026-09-02T00:00:00Z",
+      "source_url": "https://dev.meta.ai/docs/pricing-rate-limits",
+      "recorded_at": "2026-09-28T03:02:28Z",
+      "source_note": "Public tier rate per million tokens. The rate card lists input, cached input, and output; cache-write tokens use the input rate because no separate cache-write rate is listed."
+    },
+    {
+      "provider": "meta",
+      "model": "muse-spark-1.3",
+      "token_kind": "output_tokens",
+      "usd_per_million_tokens": 4.25,
+      "effective_from": "2026-09-02T00:00:00Z",
+      "source_url": "https://dev.meta.ai/docs/pricing-rate-limits",
+      "recorded_at": "2026-09-28T03:02:28Z",
+      "source_note": "Public tier rate per million tokens. The rate card lists input, cached input, and output; cache-write tokens use the input rate because no separate cache-write rate is listed."
+    },
+    {
+      "provider": "meta",
+      "model": "muse-spark-1.3-contributor",
+      "token_kind": "fresh_input_tokens",
+      "usd_per_million_tokens": 0.1,
+      "effective_from": "2026-09-02T00:00:00Z",
+      "source_url": "https://dev.meta.ai/docs/pricing-rate-limits",
+      "recorded_at": "2026-09-28T03:02:28Z",
+      "source_note": "Public tier rate per million tokens. The rate card lists input, cached input, and output; cache-write tokens use the input rate because no separate cache-write rate is listed."
+    },
+    {
+      "provider": "meta",
+      "model": "muse-spark-1.3-contributor",
+      "token_kind": "cache_read_input_tokens",
+      "usd_per_million_tokens": 0.002,
+      "effective_from": "2026-09-02T00:00:00Z",
+      "source_url": "https://dev.meta.ai/docs/pricing-rate-limits",
+      "recorded_at": "2026-09-28T03:02:28Z",
+      "source_note": "Public tier rate per million tokens. The rate card lists input, cached input, and output; cache-write tokens use the input rate because no separate cache-write rate is listed."
+    },
+    {
+      "provider": "meta",
+      "model": "muse-spark-1.3-contributor",
+      "token_kind": "cache_write_input_tokens",
+      "usd_per_million_tokens": 0.1,
+      "effective_from": "2026-09-02T00:00:00Z",
+      "source_url": "https://dev.meta.ai/docs/pricing-rate-limits",
+      "recorded_at": "2026-09-28T03:02:28Z",
+      "source_note": "Public tier rate per million tokens. The rate card lists input, cached input, and output; cache-write tokens use the input rate because no separate cache-write rate is listed."
+    },
+    {
+      "provider": "meta",
+      "model": "muse-spark-1.3-contributor",
+      "token_kind": "output_tokens",
+      "usd_per_million_tokens": 0.2,
+      "effective_from": "2026-09-02T00:00:00Z",
+      "source_url": "https://dev.meta.ai/docs/pricing-rate-limits",
+      "recorded_at": "2026-09-28T03:02:28Z",
+      "source_note": "Public tier rate per million tokens. The rate card lists input, cached input, and output; cache-write tokens use the input rate because no separate cache-write rate is listed."
+    }
+  ]
+}

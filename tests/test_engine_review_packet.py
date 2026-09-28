@@ -959,6 +959,24 @@ def test_packet_marks_a_missing_plan():
     assert found["plan_md"] == "" and found["plan_md_missing"] is True
 
 
+def test_a_plan_md_over_64k_characters_is_cut_and_marked():
+    """Context is bounded, never rejected (#1801)."""
+    found = packet(plan_md="d" * 65546, verdict=None)
+    assert found["plan_md"] == "d" * 65536 + "\n…[truncated 10 chars]"
+    assert found["precheck"] == {"pass": True, "reasons": []}
+    assert packet(plan_md="d" * 65536)["plan_md"] == "d" * 65536
+
+
+def test_a_ticket_body_over_20000_characters_is_cut_and_marked():
+    long_body = ticket(body="b" * 20100)
+    found = packet(ticket=long_body, tickets=[long_body], verdict=None)
+    for shaped in (found["ticket"], found["tickets"][0]):
+        assert shaped["body"] == "b" * 20000 + "\n…[truncated 100 chars]"
+    assert found["precheck"] == {"pass": True, "reasons": []}
+    at_bound = packet(ticket=ticket(body="b" * 20000))
+    assert at_bound["ticket"]["body"] == "b" * 20000
+
+
 def test_packet_computes_overlap_and_protected_from_the_pr_view():
     view = pr_view(files=[{"path": "AGENTS.md"}, {"path": "funnel.py"}])
     open_prs = [dict(OWNER_PR, number=8, headRefName="ticket/10",
@@ -1140,6 +1158,25 @@ def test_a_long_body_is_capped_with_its_cut_marked():
 def test_a_body_at_the_cap_is_left_alone():
     (found,) = review.ticket_comments([comment("y" * 4000)])
     assert found["body"] == "y" * 4000
+
+
+def test_comment_bodies_stop_at_24000_characters_newest_first():
+    """Six comments at the per-comment cap fill the bound exactly (#1801).
+
+    The seventh newest is trimmed, and so is everything older, however
+    short: the cut is one line in time.
+    """
+    rows = [comment("tiny", created_at="2026-09-01T00:00:00Z")] + [
+        comment(str(day) * 4000,
+                created_at="2026-09-{:02d}T00:00:00Z".format(day))
+        for day in range(2, 9)]
+    found = review.ticket_comments(rows)
+    assert [entry["body"] for entry in found] == [
+        "…[truncated 4 chars]", "…[truncated 4000 chars]",
+        "3" * 4000, "4" * 4000, "5" * 4000, "6" * 4000, "7" * 4000,
+        "8" * 4000]
+    assert [entry["created_at"][:10] for entry in found] == [
+        "2026-09-0{}".format(day) for day in range(1, 9)]
 
 
 def test_another_authors_nate_direct_comment_never_amends_the_ticket():
@@ -2157,6 +2194,8 @@ def test_only_an_unreadable_patchless_file_is_counted(monkeypatch, route):
     assert "big.py" not in diff
     assert "Binary file not shown: added, 10 bytes\n" in diff
     assert isinstance(diff, review.AssembledDiff)
+    # Named for the precheck's rejection (#1801).
+    assert list(diff.omitted_paths) == ["big.py"]
 
 
 def test_the_files_rebuild_without_a_merge_base_counts_what_it_cannot_read(
@@ -2229,6 +2268,11 @@ def test_a_300_file_compare_falls_back_to_the_files_api(monkeypatch):
     assert found["diff"].endswith(
         "diff --git a/f300.py b/f300.py\n--- a/f300.py\n+++ b/f300.py\n"
         "@@ -1 +1 @@\n-old\n+new\n")
+    # The rebuild marks itself truncated with nothing left out, and the
+    # diff row reads the count, not the flag (#1801).
+    assert found["diff_truncated"] is True
+    assert review.precheck_diff(found) == []
+    assert found["precheck"] == {"pass": True, "reasons": []}
     assert [c[-1] for c in calls if "/pulls/" in c[-1]] == [
         "repos/owner/repo/pulls/7/files?per_page=100&page={}".format(page)
         for page in (1, 2, 3, 4)]
@@ -2256,6 +2300,41 @@ def test_a_compare_under_the_cap_is_the_scope(monkeypatch):
         "@@ -0,0 +1,2 @@\n+hello\n+world\n")
     assert _read_calls(calls) == [
         "repos/owner/repo/contents/new.txt?ref=" + HEAD_SHA]
+
+
+# -- a diff the review cannot judge is rejected before any model (#1801) -------
+
+def test_an_unread_file_rejects_the_packet_and_is_named(monkeypatch):
+    """The ``gh pr diff`` refusal path has no merge base to read at."""
+    pages = [_files_page(0, 100, missing={3}),
+             _files_page(100, 2, missing={101})]
+    _stub_gh(monkeypatch, lambda args: _proc(args, 1, stderr=TOO_LARGE),
+             pages)
+    found = _collect_with_diff(monkeypatch)
+    assert found["diff_omitted_paths"] == ["f3.py", "f101.py"]
+    assert found["precheck"] == {
+        "pass": False, "reasons": ["diff incomplete: f3.py, f101.py"]}
+    json.dumps(found)
+
+
+@pytest.mark.parametrize("route", ["compare", "files"])
+def test_named_binaries_and_lockfiles_never_make_a_diff_incomplete(
+        monkeypatch, route):
+    entries = [
+        {"filename": "logo.png", "status": "added"},
+        {"filename": "package-lock.json", "status": "modified",
+         "patch": "@@ -1 +1 @@\n-1\n+2"},
+        {"filename": "Cargo.lock", "status": "modified"},
+    ]
+    diff, omitted, _ = _assemble(monkeypatch, route, entries, {
+        ("logo.png", HEAD_SHA): b"GIF89a\x00\x01",
+        ("package-lock.json", HEAD_SHA): b"{}",
+        ("Cargo.lock", HEAD_SHA): b"lock",
+    })
+    assert omitted == 0
+    found = packet(diff=diff, verdict=None)
+    assert review.precheck_diff(found) == []
+    assert found["precheck"] == {"pass": True, "reasons": []}
 
 
 def test_the_packet_verdict_is_the_owners_not_a_forged_one(monkeypatch):

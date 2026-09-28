@@ -3277,6 +3277,8 @@ def test_the_lister_asks_for_requirements_before_the_judge_is_asked(tmp_path):
     assert "PACKET_JSON" not in lister
     assert "has `deferred_answer`" in lister
     assert "Do not emit a live-evidence" in lister
+    assert "ticket.deferred_acceptance" in lister
+    assert "Do not emit a missing Run evidence requirement" in lister
     assert "verified `label_error`" in lister
     assert "reject it explicitly as a" in lister
     assert "Do not defer that entry" in lister
@@ -3305,6 +3307,8 @@ def test_the_lister_asks_for_requirements_before_the_judge_is_asked(tmp_path):
     assert "Install nothing; leave the keeper unchanged" in judge
     assert "deferred-premise requirement" in judge
     assert "mark that deferral requirement met, not" in judge
+    assert "deferred-ticket-acceptance requirement" in judge
+    assert "Any acceptance line without a matching deferral" in judge
     assert "For a labeling-error requirement" in judge
     assert "mark the requirement `unmet`" in judge
     assert "never defer it" in judge

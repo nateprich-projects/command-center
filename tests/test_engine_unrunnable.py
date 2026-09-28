@@ -18,6 +18,9 @@ REPO = "nateprich-projects/command-center"
 REVIEWED = REPO + "#1598"
 FIXTURE = ROOT / "tests" / "fixtures" / "review_unrunnable_1581.json"
 REJECTED_1612 = ROOT / "tests" / "fixtures" / "review_rejected_1612.json"
+REJECTED_1614 = ROOT / "tests" / "fixtures" / "review_rejected_1614.json"
+MISSING_ACCEPTANCE = ROOT / "tests" / "fixtures" / \
+    "review_acceptance_missing_evidence.json"
 
 
 def live_fixture():
@@ -26,6 +29,10 @@ def live_fixture():
 
 def rejected_1612_fixture():
     return json.loads(REJECTED_1612.read_text())
+
+
+def rejected_1614_fixture():
+    return json.loads(REJECTED_1614.read_text())
 
 
 def _parts(ref):
@@ -333,3 +340,46 @@ def test_unrelated_open_ticket_is_not_unrunnable(monkeypatch):
     install_github_fixture(monkeypatch, live_fixture())
 
     assert not review.evidence_ticket_is_unrunnable("#1700", REVIEWED)
+
+
+def test_rejected_1614_post_deploy_acceptance_is_a_verified_deferral():
+    fixture = rejected_1614_fixture()
+    packet = fixture["packet"]
+
+    assert review.annotate_unrunnable_premises(packet) is packet
+    acceptance = packet["ticket"]["deferred_acceptance"][0]
+    assert acceptance["deferred_answer"] == fixture["expected_deferred_answer"]
+
+    requirements = review.normalize_plan_premise_requirements(
+        packet, [fixture["rejected_requirement"]])
+    assert requirements == [fixture["expected_deferred_requirement"]]
+    marked = review.mark_verified_premise_requirements(packet, [{
+        "requirement": requirements[0],
+        "status": "unsure",
+        "evidence": "the after-deploy run has not happened yet",
+    }])
+
+    assert marked[0]["status"] == "met"
+    assert review.derive_judge_answer(requirements, marked)["verdict"] == (
+        "approved")
+
+
+def test_checkable_acceptance_with_missing_run_evidence_still_rejects():
+    fixture = json.loads(MISSING_ACCEPTANCE.read_text())
+    packet = fixture["packet"]
+
+    review.annotate_unrunnable_premises(packet)
+
+    assert "deferred_acceptance" not in packet["ticket"]
+    requirements = review.normalize_plan_premise_requirements(
+        packet, [fixture["rejected_requirement"]])
+    assert requirements == [fixture["rejected_requirement"]]
+    marked = review.mark_verified_premise_requirements(packet, [{
+        "requirement": requirements[0],
+        "status": "unsure",
+        "evidence": "the packet has no Run evidence comment",
+    }])
+
+    answer = review.derive_judge_answer(requirements, marked)
+    assert answer["verdict"] == "rejected"
+    assert answer["blocking"]

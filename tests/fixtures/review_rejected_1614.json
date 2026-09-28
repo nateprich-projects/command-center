@@ -1,0 +1,20 @@
+{
+  "source_pr": 1614,
+  "source_head_sha": "99f72c81ecd9b02e267f30ed84c7f9a6a943f3d5",
+  "source_reviewed_at": "2026-09-26T19:08:00.139457+00:00",
+  "rejected_requirement": "Acceptance artifact: a **Run evidence:** comment with the phase before and after, from the lane logs' `begin_review_phase` markers (each marks its phase's start), must exist.",
+  "packet": {
+    "ticket": {
+      "ref": "nateprich-projects/command-center#1606",
+      "number": 1606,
+      "body": "Ticket 1: pass begin's shared PR snapshot to the orphaned-start reconcile.\n\nAcceptance: a **Run evidence:** comment on this ticket with the phase before and after timings, from the lane logs' `begin_review_phase` markers (each marks its phase's start); the after timing is posted once this deploys.\n\nParent plan: #1591."
+    }
+  },
+  "expected_deferred_answer": {
+    "status": "deferred",
+    "evidence_pointer": "a **Run evidence:** comment on this ticket with the phase before and after timings, from the lane logs' `begin_review_phase` markers (each marks its phase's start); the after timing is posted once this deploys.",
+    "reviewed_ticket": "nateprich-projects/command-center#1606",
+    "reason": "ticket acceptance requires Run evidence after the reviewed ticket deploys"
+  },
+  "expected_deferred_requirement": "Defer the ticket acceptance line 'a **Run evidence:** comment on this ticket with the phase before and after timings, from the lane logs' `begin_review_phase` markers (each marks its phase's start); the after timing is posted once this deploys.' until ticket #1606 is deployed."
+}

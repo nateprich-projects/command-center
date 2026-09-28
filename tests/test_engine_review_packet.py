@@ -1846,3 +1846,22 @@ def test_protected_row_ignores_main_only_files_outside_the_compare_scope():
                    merge_base=MERGE_BASE_SHA, scope_source="compare")
     assert found["protected"]["touched"] == []
     assert found["protected"]["rules"] == []
+
+
+def test_the_packet_verdict_is_the_owners_not_a_forged_one(monkeypatch):
+    """A forged approval must not read as covering the head (#1787)."""
+    def marked(verdict):
+        return funnel.REVIEW_MARKER + "\n\n```json\n" + json.dumps({
+            "verdict": verdict, "head_sha": SHA, "blocking": [],
+        }) + "\n```"
+
+    def fake_json(*args):
+        assert args[1:3] == ("pr", "view")
+        return {"comments": [
+            {"body": marked("rejected"), "author": {"login": "nateprich"}},
+            {"body": marked("approved"), "author": {"login": "mallory"}},
+        ]}
+
+    monkeypatch.setattr(funnel, "_gh_json", fake_json)
+
+    assert review.fetch_verdict(REPO, 7)["verdict"] == "rejected"

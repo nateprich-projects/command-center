@@ -7,6 +7,9 @@
 #   tier   -- escalated (default) or standard; substituted into begin
 #   effort -- max (default) or high; Muse only, zai-exec takes none
 #
+# review-replay runs the same review on a given packet and records nothing,
+# through the MUSE_REVIEW_ENGINE_REPLAY_* variables (#1730; below).
+#
 # Phase 1 of #794: begin offers the work, the packet command assembles the
 # evidence, and a failing review precheck is applied as rejected with no model
 # call at all, except a non-OPEN PR stop, which records no verdict. A passing
@@ -20,7 +23,8 @@
 # and an auditor in parallel, and merges their answers in code (#1599); shape
 # on z.ai answers one JSON question. Calls retry once on a parse error; a
 # shape part or a judge chunk whose call goes stream-idle is also asked once
-# more, and each writes one timing line to stderr (#1719).
+# more, and each writes one timing line to stderr (#1719). The review lister
+# gets the same stream-idle retry (#1730).
 # Breakdown rides the standard tier only; shape follows wherever begin offers
 # it.
 #
@@ -87,6 +91,60 @@ case "$EFFORT" in
   *) echo "muse-review-engine: reasoning effort must be max or high, got '$EFFORT'" >&2; exit 1 ;;
 esac
 
+# --- the replay entry (#1730) -------------------------------------------------
+#
+# review-replay (engine/replay.py) runs this runner on a private corpus
+# packet, so a replayed verdict comes from the same lister, judges and
+# derivation the lanes run rather than from a second copy of them: replay kept
+# one max call over the whole packet when #1233 split review, and that call
+# went stream-idle on the must-approve seed (#1698). Environment variables,
+# not flags, because the parse above refuses every flag. All three or none:
+#
+#   MUSE_REVIEW_ENGINE_REPLAY_PACKET   the review packet to judge
+#   MUSE_REVIEW_ENGINE_REPLAY_ROUTINE  the review routine to ask it with
+#   MUSE_REVIEW_ENGINE_REPLAY_ANSWER   where the derived answer goes; must
+#                                      not exist yet
+#
+# A replay records nothing. It starts no funnel session and runs no begin,
+# heartbeat, packet fetch, gh or review-apply, and it skips the precheck and
+# CI branches: a corpus packet is frozen evidence about a PR that has long
+# since moved on, and the question is what the judges make of it. It writes
+# the derived answer and exits 0. Every failure exits non-zero and writes no
+# answer. That includes a Muse quota refusal: the shared hold is still
+# written, because it is the same account's limit, but a replay has no lane
+# to skip, so it fails instead of the lane's clean `exit 0`.
+REPLAY_PACKET="${MUSE_REVIEW_ENGINE_REPLAY_PACKET:-}"
+REPLAY_ROUTINE="${MUSE_REVIEW_ENGINE_REPLAY_ROUTINE:-}"
+REPLAY_ANSWER="${MUSE_REVIEW_ENGINE_REPLAY_ANSWER:-}"
+REPLAY=0
+if [[ -n "$REPLAY_PACKET$REPLAY_ROUTINE$REPLAY_ANSWER" ]]; then
+  REPLAY=1
+  if [[ -z "$REPLAY_PACKET" || -z "$REPLAY_ROUTINE" || -z "$REPLAY_ANSWER" ]]; then
+    echo "muse-review-engine: a replay needs MUSE_REVIEW_ENGINE_REPLAY_PACKET, MUSE_REVIEW_ENGINE_REPLAY_ROUTINE and MUSE_REVIEW_ENGINE_REPLAY_ANSWER together" >&2
+    exit 1
+  fi
+  if [[ ! -f "$REPLAY_PACKET" || ! -r "$REPLAY_PACKET" ]]; then
+    echo "muse-review-engine: cannot read the replay packet $REPLAY_PACKET" >&2
+    exit 1
+  fi
+  # Refused rather than overwritten: a file already there could be read as
+  # this run's answer after this run failed.
+  if [[ -e "$REPLAY_ANSWER" || -L "$REPLAY_ANSWER" ]]; then
+    echo "muse-review-engine: the replay answer path $REPLAY_ANSWER already exists" >&2
+    exit 1
+  fi
+fi
+
+# A quota stop ends a lane's run as a clean skip: nothing was wrong with the
+# work, and the next fire reads the hold. A replay's caller is waiting for an
+# answer it will not get, so there the same stop is a failure (#1730).
+quota_stop() {
+  if (( REPLAY )); then
+    exit 1
+  fi
+  exit 0
+}
+
 # --- which backend answers this run (Nate, 2026-09-23) ------------------------
 #
 # Decided from the clock, not from a file or a flag in the plist: the plist
@@ -135,6 +193,11 @@ fi
 #: zai-exec's status for a spent z.ai window; see its docstring.
 ZAI_QUOTA_EXIT=75
 ROUTINE_REVIEW="$REPO/routines/muse-review.md"
+# A replay asks with the routine it was given, under the same template check
+# (#1730).
+if (( REPLAY )); then
+  ROUTINE_REVIEW="$REPLAY_ROUTINE"
+fi
 ROUTINE_BREAKDOWN="$REPO/routines/muse-breakdown.md"
 ROUTINE_SHAPE="$REPO/routines/muse-shape.md"
 # An empty directory on purpose, shared with the old reviewer. The model has
@@ -237,6 +300,11 @@ if [[ ! -r "$MUSE_QUOTA_HOLD_LIB" ]]; then
   exit 1
 fi
 . "$MUSE_QUOTA_HOLD_LIB"
+# A replay writes the hold alone. Its heartbeat record of the hit is a
+# heartbeat write and a GitHub call, and a replay makes neither (#1730).
+if (( REPLAY )); then
+  MUSE_QUOTA_HOLD_RECORD=0
+fi
 DIAG_FILE="$RUN_DIR/diag.txt"
 RESULT_FILE="$RUN_DIR/result.txt"
 
@@ -266,19 +334,22 @@ assemble_packet() {
 # The server prints its loopback endpoint through an inherited pipe; it does
 # not read GitHub until the first client command arrives, so `begin` still
 # sees the live Project when it claims work. No endpoint or Project data is
-# written to disk, and the session ends with this runner.
-exec 3< <(
-  FUNNEL_SESSION= FUNNEL_SESSION_SERVER=1 \
-    python3 "$REPO/funnel.py" session-server --parent-pid "$$"
-)
-FUNNEL_SESSION=""
-if ! IFS= read -r FUNNEL_SESSION <&3; then
-  echo "muse-review-engine: could not start the per-run funnel session" >&2
+# written to disk, and the session ends with this runner. A replay reads no
+# Project and starts none (#1730).
+if (( ! REPLAY )); then
+  exec 3< <(
+    FUNNEL_SESSION= FUNNEL_SESSION_SERVER=1 \
+      python3 "$REPO/funnel.py" session-server --parent-pid "$$"
+  )
+  FUNNEL_SESSION=""
+  if ! IFS= read -r FUNNEL_SESSION <&3; then
+    echo "muse-review-engine: could not start the per-run funnel session" >&2
+    exec 3<&-
+    exit 1
+  fi
   exec 3<&-
-  exit 1
+  export FUNNEL_SESSION
 fi
-exec 3<&-
-export FUNNEL_SESSION
 
 # Bind the heartbeat start to Muse's session when available. This is
 # telemetry only: a missing id leaves usage unresolved, but must not stop the
@@ -300,8 +371,13 @@ export FUNNEL_SESSION
 # starts. The later calls, the parallel judges and a parse retry, run
 # unbound under ids Muse assigns, so the run's recorded token usage covers
 # the first call only: an undercount, not the whole run (#1413).
+#
+# A replay binds nothing: it records no heartbeat for an id to join, and an
+# id inherited from the caller must not reach its calls either (#1730).
 MUSE_SESSION_BOUND=0
-if [[ "$BACKEND" == "muse" ]]; then
+if (( REPLAY )); then
+  unset MUSE_SESSION_ID ZCODE_SESSION_ID
+elif [[ "$BACKEND" == "muse" ]]; then
   if MUSE_SESSION_ID="$(python3 -c 'import uuid; print(uuid.uuid4())' 2>/dev/null)" \
     && [[ -n "$MUSE_SESSION_ID" ]]; then
     export MUSE_SESSION_ID
@@ -326,7 +402,16 @@ cleanup() {
   # not have to be remembered here to be cleaned up.
   rm -rf -- "$RUN_DIR"
 }
-trap cleanup EXIT
+# A replay's own trap: the run directory, and no session-stop for a session
+# it never started (#1730).
+replay_cleanup() {
+  rm -rf -- "$RUN_DIR"
+}
+if (( REPLAY )); then
+  trap replay_cleanup EXIT
+else
+  trap cleanup EXIT
+fi
 
 # Keep one error shape for runner failures: the heartbeat gets the concise
 # diagnostic, while the full stderr remains in the schedule's error log.
@@ -707,7 +792,7 @@ zai_quota_skip() {
       --outcome skipped-provider-quota \
       --note "z.ai quota exhausted: ${zai_reason:-zai-exec exit $status}" >&2 || true
   fi
-  exit 0
+  quota_stop
 }
 
 # End the whole run as a Muse quota skip once muse_quota_record has written
@@ -732,7 +817,7 @@ muse_quota_skip() {
     fi
     python3 "$REPO/heartbeat.py" "${quota_finish_args[@]}" >&2 || true
   fi
-  exit 0
+  quota_stop
 }
 
 # The optional second argument is the failed call's own diagnostic, for a
@@ -1420,7 +1505,7 @@ run_issue_job() {
 if [[ "$BACKEND" == "muse" ]] \
   && MUSE_QUOTA_RESET="$(muse_quota_hold_until)"; then
   echo "muse-review-engine: parked until $MUSE_QUOTA_RESET — Muse's provider quota is exhausted" >&2
-  exit 0
+  quota_stop
 fi
 
 # Own the opening poll. Empty polls must not launch a model: `begin` has
@@ -1470,8 +1555,44 @@ print(value)
 ' "$key"
 }
 
-BEGIN_JSON="$(python3 "$REPO/funnel.py" begin --agent "$AGENT" $BEGIN_FLAGS)"
-begin_status=$?
+# A replay answers begin's question from its packet instead of asking the
+# funnel (#1730): a review of the packet's own PR in the packet's own
+# repository, with no run id. So the job, the failure subject and the model
+# below come from the same code as a live review's, and every heartbeat
+# finish below it is already a no-op without a run id (`failure` says so and
+# returns). The packet must name both, as every review-packet does.
+replay_begin_json() {
+  python3 - "$REPLAY_PACKET" <<'PY'
+import json
+import sys
+
+try:
+    with open(sys.argv[1]) as handle:
+        packet = json.load(handle)
+except (OSError, ValueError) as exc:
+    raise SystemExit("the replay packet is not readable JSON: {}".format(exc))
+if not isinstance(packet, dict):
+    raise SystemExit("the replay packet is not a JSON object")
+repo, pr = packet.get("repo"), packet.get("pr")
+if not isinstance(repo, str) or "/" not in repo.strip():
+    raise SystemExit("the replay packet names no owner/repo repository")
+if isinstance(pr, bool) or not isinstance(pr, int) or pr < 1:
+    raise SystemExit("the replay packet names no PR number")
+print(json.dumps({"do": "review", "gate": "ok", "run": "",
+                  "work": {"pr": pr, "repo": repo.strip()}}))
+PY
+}
+
+if (( REPLAY )); then
+  if ! BEGIN_JSON="$(replay_begin_json)"; then
+    echo "muse-review-engine: cannot replay $REPLAY_PACKET" >&2
+    exit 1
+  fi
+  begin_status=0
+else
+  BEGIN_JSON="$(python3 "$REPO/funnel.py" begin --agent "$AGENT" $BEGIN_FLAGS)"
+  begin_status=$?
+fi
 if (( begin_status != 0 )); then
   echo "muse-review-engine: funnel begin failed (exit $begin_status)" >&2
   if BEGIN_RUN="$(begin_value run)" && [[ -n "$BEGIN_RUN" ]]; then
@@ -1607,8 +1728,14 @@ if [[ "$JOB" != "review" ]]; then
 fi
 
 # The packet is the only evidence the model ever sees. Reads only; nothing
-# here changes remote state.
+# here changes remote state. A replay's packet is the file it was given,
+# copied into the run directory so every call reads it from the same place
+# as a live review's (#1730).
 fetch_review_packet() {
+  if (( REPLAY )); then
+    cp -- "$REPLAY_PACKET" "$PACKET_FILE" 2>"$DIAG_FILE"
+    return
+  fi
   python3 "$REPO/review-packet" "$BEGIN_PR" --repo "$BEGIN_REPO" \
     >"$PACKET_FILE" 2>"$DIAG_FILE"
 }
@@ -1696,12 +1823,16 @@ fi
 # healthy and quiet until Actions recovers; recording rejection here would
 # count the same untestable head against the auto-merge bar and hand the
 # engineer a branch-shaped problem that no branch can fix.
-if [[ "$PACKET_CI" == "could-not-run" ]]; then
+#
+# A replay skips this branch and the precheck and CI re-run branches below:
+# they decide what to record about the PR as it stands, and a replay records
+# nothing and judges the packet as it was collected (#1730).
+if (( ! REPLAY )) && [[ "$PACKET_CI" == "could-not-run" ]]; then
   finish_done "review skipped PR #$BEGIN_PR in $BEGIN_REPO at $HEAD_SHORT: CI could not run: $PACKET_CI_REASON; no verdict recorded"
   exit 0
 fi
 
-if [[ "$PACKET_PASS" != "True" ]]; then
+if (( ! REPLAY )) && [[ "$PACKET_PASS" != "True" ]]; then
   if [[ "$PACKET_PR_NOT_OPEN" == "True" ]]; then
     if ! packet_field pr_not_open_reason >"$DECISION_FILE"; then
       echo "muse-review-engine: could not read the non-OPEN precheck reason" >&2
@@ -1747,7 +1878,7 @@ fi
 # (#1019). A failing precheck rejects first (above) and never reaches here.
 # The finish notes carry no verdict word, because a healthy wait is not a
 # verdict.
-if [[ -n "$CI_RERUN_ACTION" ]]; then
+if (( ! REPLAY )) && [[ -n "$CI_RERUN_ACTION" ]]; then
   if [[ "$CI_RERUN_ACTION" != "rerun" && "$CI_RERUN_ACTION" != "wait" ]]; then
     echo "muse-review-engine: unknown ci_rerun action '$CI_RERUN_ACTION'" >&2
     failure "unknown ci_rerun action '$CI_RERUN_ACTION' for PR #$BEGIN_PR in $BEGIN_REPO; recorded nothing" || true
@@ -1881,12 +2012,20 @@ with open(out_path, "w") as handle:
 PY
 }
 
-# The lister call and its one retry. Returns non-zero only after the run has
-# been finished as errored: no verdict is recorded, so the PR stays in the
-# review queue for the next run rather than being rejected for the model's
-# formatting.
+# The lister call, its one parse retry, and one stream-idle retry, neither
+# spending the other's. Returns non-zero only after the run has been finished
+# as errored: no verdict is recorded, so the PR stays in the review queue for
+# the next run rather than being rejected for the model's formatting.
+#
+# The stream-idle retry is #1719's, given to the judge chunks and shape parts
+# first. The lister is the one call that reads the whole packet, and on the
+# ~240 KB must-approve corpus seed the single call replay used to make went
+# silent past Muse's 180-second limit on two consecutive replays (#1698), so a
+# silent lister is asked once more, unbound like every call after the first,
+# before it fails the run. Any other failure still fails at once.
 list_requirements() {
   local attempt=1
+  local idle_retried=0
   local parse_err
   local muse_status
   local parse_status
@@ -1895,6 +2034,13 @@ list_requirements() {
     call_model
     muse_status=$?
     if (( muse_status != 0 )); then
+      # The same prompt again, whichever attempt went silent.
+      if (( ! idle_retried )) \
+        && model_stream_idle "$muse_status" "$DIAG_FILE"; then
+        idle_retried=1
+        echo "muse-review-engine: the lister went stream-idle; asking it once more: $(head -c 300 "$DIAG_FILE" 2>/dev/null)" >&2
+        continue
+      fi
       model_failed "$muse_status"
     fi
     # Read the status directly, for the same reason the judging loop does:
@@ -2246,10 +2392,17 @@ fi
 # spent z.ai window has already ended the run as a quota skip above, and the
 # next `begin` reads the window from z.ai, so there is no hold to write — and
 # a Muse-shaped refusal in a z.ai judge's diagnostic must never park Muse.
+#
+# A replay stops here instead, with the hold written and no answer: a judge
+# the provider refused judged nothing, and its `unsure` would score as a
+# rejection of a packet nobody read (#1730).
 if [[ "$BACKEND" == "muse" ]]; then
   for (( index = 0; index < JUDGE_COUNT; index++ )); do
     if MUSE_QUOTA_RESET="$(muse_quota_record "$RUN_DIR/judge.$index/diag.txt" "${BEGIN_RUN:-}")"; then
       echo "muse-review-engine: Muse's provider quota is exhausted; parking future lanes until $MUSE_QUOTA_RESET" >&2
+      if (( REPLAY )); then
+        quota_stop
+      fi
       break
     fi
   done
@@ -2294,6 +2447,18 @@ then
   echo "muse-review-engine: could not derive the review verdict: $derive_err" >&2
   failure "could not derive the review verdict for PR #$BEGIN_PR in $BEGIN_REPO" || true
   exit 1
+fi
+
+# A replay ends here: the derived answer goes to the path it was given,
+# owner-only because its evidence quotes the private packet, and nothing is
+# applied (#1730). A copy that fails leaves no answer behind.
+if (( REPLAY )); then
+  if ! ( umask 077 && cp -- "$ANSWER_FILE" "$REPLAY_ANSWER" ); then
+    rm -f -- "$REPLAY_ANSWER"
+    echo "muse-review-engine: could not write the replay answer to $REPLAY_ANSWER" >&2
+    exit 1
+  fi
+  exit 0
 fi
 
 # The recorded verdict word, read back from review-apply's own report — never

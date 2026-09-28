@@ -61,7 +61,7 @@ def validation_exit(attempt: Optional[int]) -> int:
 
 #: The answer keys shape-apply accepts — exactly these, no extras. From
 #: the Shape row of #794, plus the model-declared escalated-risk list
-#: (#1034) that the decision unions with the wording scan, plus the
+#: (#1034), the only risk that holds a plan since #1721, plus the
 #: sequencing-dependency list (#1053) that sequencing questions become
 #: instead of Needs Nate entries, plus the evidence-backed premises list
 #: recorded in the plan body (#1422).
@@ -373,9 +373,9 @@ def _validate_escalated_risk(entries: object) -> List[Dict[str, str]]:
     A list of ``{"reason", "why"}`` objects, possibly empty. Each reason
     names one of ``funnel.ESCALATION_PATTERNS`` exactly; each why is one
     non-empty line saying what in the plan carries that risk. The model
-    judges the plan itself here, not its wording: the decision holds on
-    this list or the wording scan, whichever fires, so the declaration
-    can only hold, never release.
+    judges the plan itself here, not its wording: this list holds the
+    plan at Shaped, while a wording-scan hit it omits only raises the
+    review tier (#1721). An empty list never lowers the Risk field.
     """
     if not isinstance(entries, list):
         raise ShapeError("escalated_risk must be a list")
@@ -659,7 +659,8 @@ def review_agent_shape_output(
     Scope and priority. Clear waits on named tickets move to ``depends_on``;
     concrete scope questions and questions whose category is unclear remain
     open. Hypothetical implementation bugs are not risks in the proposed
-    plan. The shared self-approval predicate remains the sole gate.
+    plan, unless the wording scan finds a risky action in it (#1721). The
+    shared self-approval predicate remains the sole gate.
     """
     reviewed = copy.deepcopy(answer)
     rejected = []
@@ -705,14 +706,92 @@ def review_agent_shape_output(
             "generic Scope permission to implement agent-origin work")
 
     risks = reviewed["escalated_risk"]
-    kept_risks = [entry for entry in risks
-                  if not _HYPOTHETICAL_IMPLEMENTATION_RISK.search(
-                      entry["why"])]
+    hypothetical = [entry for entry in risks
+                    if _HYPOTHETICAL_IMPLEMENTATION_RISK.search(
+                        entry["why"])]
+    # A hypothetical-bug why is dropped only when the plan's wording proposes
+    # no risky action at all. Until #1721 the scan's own hold caught such a
+    # plan whatever the reasons; now that the scan holds nothing, dropping
+    # the shaper's declaration there would release a plan it called risky.
+    # The scan body leaves the typed whys out, so a why cannot vouch for
+    # itself.
+    if hypothetical and _plan_escalation_matches(reviewed):
+        hypothetical = []
+    kept_risks = [entry for entry in risks if entry not in hypothetical]
     if len(kept_risks) != len(risks):
         reviewed["escalated_risk"] = kept_risks
         rejected.append(
             "escalated risk based only on a hypothetical implementation bug")
     return reviewed, rejected
+
+
+def declared_risks(answer: Dict) -> List[str]:
+    """The risks the shaper declared: the one predicate for a hold (#1721).
+
+    The typed ``escalated_risk`` reasons, then whatever
+    ``funnel.plan_declared_risks`` finds in the rendered scan body: a
+    ``Risk rationale`` section or a ``Risk: escalated`` line the shaper
+    wrote into the plan. The Shaped sweep calls the same reader on the
+    stored body, where the typed list is rendered as that section, so the
+    first write and the sweep cannot disagree about what holds.
+    """
+    declared = []
+    for entry in answer.get("escalated_risk", []):
+        reason = entry.get("reason") if isinstance(entry, dict) else None
+        if isinstance(reason, str) and reason not in declared:
+            declared.append(reason)
+    for reason in funnel.plan_declared_risks(
+            _plan_escalation_scan_body(answer)):
+        if reason not in declared:
+            declared.append(reason)
+    return declared
+
+
+def scan_only_matches(answer: Dict,
+                      matches: Sequence[Dict[str, Optional[str]]]
+                      ) -> List[Dict[str, Optional[str]]]:
+    """The wording-scan matches that raise the tier but do not hold (#1721).
+
+    Empty when the shaper declared a risk (``declared_risks``): the
+    declaration holds the plan and carries its own explanation.
+    """
+    if declared_risks(answer):
+        return []
+    return [entry for entry in matches
+            if isinstance(entry.get("reason"), str)]
+
+
+def scan_escalation_comment(matches: Sequence[Dict[str, Optional[str]]],
+                            status: str = "Ready",
+                            at: Optional[datetime] = None,
+                            run: Optional[str] = None,
+                            agent: Optional[str] = None) -> str:
+    """The one comment recording a scan-only escalation's evidence (#1721).
+
+    Each reason is listed with the plan line it matched, quoted, so the
+    breakdown and the reviewer can see what raised the tier and judge it.
+    The heading says the plan was not held only when it advanced: an open
+    question or the class can still hold it at Shaped.
+    """
+    if status == "Ready":
+        heading = "Escalation scan: review tier raised, plan not held."
+    else:
+        heading = ("Escalation scan: review tier raised; the plan waits at "
+                   "Shaped for another reason.")
+    lines = [
+        "**{}** The shaper declared no risk, and the wording scan matched "
+        "the lines below, so Risk is `escalated` and the escalated reviewer "
+        "judges the implementation. The scan alone never holds a plan at "
+        "Shaped (#1721).".format(heading),
+        "",
+    ]
+    for entry in matches:
+        lines.append("- `{}`".format(entry["reason"]))
+        line = entry.get("line")
+        if isinstance(line, str) and line.strip():
+            lines.append("  > {}".format(line.strip()))
+    return funnel.append_provenance(
+        "\n".join(lines), "agent", at=at, run=run, agent=agent)
 
 
 def decide(answer: Dict, *,
@@ -726,27 +805,32 @@ def decide(answer: Dict, *,
 
     Returns the status and its reason: ``Ready`` only when the four
     needs_nate fields are all null, the class is self-approvable, the
-    effective shaper is agents, and the plan carries no escalated risk.
+    effective shaper is agents, and the plan declares no escalated risk.
     The rule itself is the shared ``self_approval_eligible`` predicate,
     so the packet path cannot drift from the shaping path; only the
     needs_nate input comes from the fields instead of the parser.
 
-    Escalated risk is the union of the model's ``escalated_risk``
-    declaration and the wording scan passed as ``escalation_reasons``
-    (#1034): either one holding is enough, so a plan-worded risk the
-    scan misses still holds, and a scan hit the model omitted still
-    holds. Matching lines from ``escalation_matches`` are included in
-    the explanation for scan hits. There is no standard override: an
-    empty declaration never clears a scan hit.
+    Only a declared risk holds (#1721, reversing #1034's union), as
+    ``declared_risks`` reads it from the answer: the typed
+    ``escalated_risk``, or a ``Risk rationale`` section or
+    ``Risk: escalated`` line in the plan. A wording-scan hit alone, passed
+    as ``escalation_reasons``, no longer holds: the
+    plan advances as its other fields allow, and the Ready reason names the
+    scan's reasons, because the Risk write still records it as escalated so
+    the escalated reviewer judges the implementation. Five predicate patches
+    since #1034 each moved a false hold rather than ending it, and each one
+    spent a decision of Nate's where the scan's own comment prices a false
+    positive at one escalated review. Matching lines from
+    ``escalation_matches`` are included in the explanation of a hold.
 
     Sequencing dependencies never hold (#1053): a plan that waits on
     a named sibling but asks Nate nothing self-approves, and the
     dependency is recorded as a native edge, not a question.
     """
-    declared = [entry["reason"] for entry in answer.get("escalated_risk", [])
-                if isinstance(entry, dict)
-                and isinstance(entry.get("reason"), str)]
-    reasons = sorted(set(escalation_reasons or ()) | set(declared))
+    scanned = sorted({reason for reason in escalation_reasons or ()
+                      if isinstance(reason, str)})
+    reasons = sorted(declared_risks(answer))
+    scan_only = [] if reasons else scanned
     matched_lines = {
         entry.get("reason"): entry.get("line")
         for entry in escalation_matches or ()
@@ -765,9 +849,11 @@ def decide(answer: Dict, *,
             owner_basis = "origin agent"
         else:
             owner_basis = "origin override to agents"
-        return ("Ready",
-                "needs_nate all null; class {} self-approvable; "
-                "{}".format(klass, owner_basis))
+        reason = ("needs_nate all null; class {} self-approvable; "
+                  "{}".format(klass, owner_basis))
+        if scan_only:
+            reason += "; " + funnel.scan_only_escalation_note(scan_only)
+        return "Ready", reason
     failed = []
     if state is not None and str(state).upper() != "OPEN":
         failed.append("the issue is {} on GitHub".format(
@@ -1176,8 +1262,17 @@ def apply_shape(items: list, now: datetime, ref: str,
     # the writes below can observe.
     status, reason = preview_decision(items, item, answer)
     authority_signals = funnel.needs_nate_signals(rendered)
+    matches = _plan_escalation_matches(answer)
+    declared = declared_risks(answer)
+    # The runner's record of what the decision held on (#1721). The Shaped
+    # sweep releases an escalated Risk only on this record, never on prose
+    # alone, which a malformed fence or quote in the narrative can blank.
+    risk_record = funnel.shape_risk_block(
+        declared, [entry["reason"] for entry in matches
+                   if isinstance(entry.get("reason"), str)])
     body = funnel.append_provenance(
-        rendered, voice, at=now, run=run, agent=agent)
+        "{}\n\n{}\n".format(rendered.rstrip("\n"), risk_record),
+        voice, at=now, run=run, agent=agent)
     for block in carried_blocks:
         body = "{}\n\n{}".format(body, block)
 
@@ -1246,10 +1341,11 @@ def apply_shape(items: list, now: datetime, ref: str,
             item=item.item_id, field=funnel.CLASS_FIELD_ID,
             option=funnel._option_id(funnel.CLASS_FIELD_ID,
                                      answer["proposed_class"]))
-    risk = "escalated" if (
-        answer["escalated_risk"]
-        or _plan_escalation_matches(answer)
-    ) else "standard"
+    # A declaration the shaper wrote into the plan holds it just as the typed
+    # list does, so it must also write Risk escalated: the sweep reads a
+    # standard Risk as no hold at all.
+    risk = "escalated" if (declared or matches) else "standard"
+    scan_only = scan_only_matches(answer, matches)
     needs = "human" if status == "Shaped" else "none"
     funnel.write_project_select(item.item_id, "Risk", risk, item.ref)
     funnel.write_project_select(item.item_id, "Needs", needs, item.ref)
@@ -1282,7 +1378,8 @@ def apply_shape(items: list, now: datetime, ref: str,
             value for value in item.labels if value != "needs-shaping"
         ]
     if status == "Ready":
-        basis = "{}; no escalated risk".format(reason)
+        basis = "{}; {}".format(
+            reason, "no declared risk" if scan_only else "no escalated risk")
         if authority_signals:
             basis += "; authority signals: {}".format(
                 ", ".join(authority_signals)
@@ -1297,11 +1394,30 @@ def apply_shape(items: list, now: datetime, ref: str,
         )
         if comment.returncode != 0:
             raise funnel.GitHubError(comment.stderr.strip())
+    if scan_only:
+        # Whatever the status, the scan's evidence is recorded where the
+        # breakdown and review read it, since it no longer holds the plan.
+        scan_comment = funnel._run_gh(
+            ["gh", "issue", "comment", str(item.number),
+             "--repo", item.repo,
+             "--body", scan_escalation_comment(
+                 scan_only, status, at=now, run=run, agent=agent)],
+            capture_output=True, text=True,
+        )
+        if scan_comment.returncode != 0:
+            raise funnel.GitHubError(scan_comment.stderr.strip())
     print("{} → {}\n{}".format(item.ref, status, item.url))
     if status == "Ready":
         print("advanced to Ready: {}".format(reason))
     else:
         print("held at Shaped: {}".format(reason))
+    if scan_only:
+        described = "; ".join(
+            "{}: {}".format(entry["reason"], entry["line"])
+            if entry.get("line") else entry["reason"]
+            for entry in scan_only)
+        print("escalation scan raised the review tier (the scan alone "
+              "holds nothing): {}".format(described))
     if authority_signals:
         print("\n--- self-approval advisory ---")
         print("Authority signals are recorded in the Self-approved basis:")

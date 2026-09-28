@@ -71,7 +71,8 @@ def test_unattended_shaping_can_recover_an_unclassed_agent_idea():
     normalized = " ".join(body.split()).lower()
 
     assert "capture origin is `agent`" in normalized
-    assert "--class <broken|maintenance|improve|new|replace>" in normalized
+    # Bug joined the ladder in #1845; the class list offers it (#1848).
+    assert "--class <broken|maintenance|improve|new|replace|bug>" in normalized
     assert "proposed class:" in normalized
 
 

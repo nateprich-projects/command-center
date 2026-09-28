@@ -79,8 +79,8 @@ all are null.
 
 ### Scheduling is the project manager's decision
 
-For an **agent-origin** `Investigate`, `Broken`, `Maintenance`, or `Improve`
-plan, timing, priority, and sequencing are project-manager decisions. Never
+For an **agent-origin** `Investigate`, `Broken`, `Maintenance`, `Improve`, or
+`Bug` plan, timing, priority, and sequencing are project-manager decisions. Never
 emit a question solely about one of those decisions in `Needs Nate`; record the
 chosen ordering under **Decided by the agent**. A clear choice to wait for a
 named ticket belongs in `depends_on` as an `owner/repo#n` reference. If the
@@ -93,7 +93,7 @@ Keep Exposure, Gates, and Preference questions in `Needs Nate`. Under Scope,
 keep a concrete unresolved stakeholder tradeoff even if it mentions timing,
 and keep a question whose category is unclear. These are the countercases to
 the scheduling rule; classify by meaning, not keywords alone. Apply the rule
-only to agent-origin plans in the four classes above. Leave Nate-origin plans
+only to agent-origin plans in the five classes above. Leave Nate-origin plans
 and `New` and `Replace` classes untouched.
 
 The shared engine enforces this rule in `engine/shape.py`. Keep this mirror
@@ -123,7 +123,7 @@ inventing an answer is a defect.
 ## Class it when you file it
 
 Class a capture with the ladder names — `Investigate`, `Broken`,
-`Maintenance`, `Improve`, `New`, `Replace` — and say why; stated doubt beats
+`Maintenance`, `Improve`, `New`, `Replace`, `Bug` — and say why; stated doubt beats
 confident error. Choose the class for what the tickets will deliver: a study,
 measurement, documentation recording, or product research with no
 possible-defect question takes the class that fits its deliverable, never

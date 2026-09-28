@@ -99,7 +99,8 @@ agent has genuinely completed.
   `#2`, private). Not Project 1 — see `plan.md`, Verification status item 7.
 - `Status` single-select: `Ideas → Shaped → Ready → Building → Done → Parked`, in funnel
   order, each with its meaning as the option description.
-- `Class` single-select: `Broken → Maintenance → Improve → New → Replace`, in ladder order.
+- `Class` single-select: `Investigate → Broken → Maintenance → Improve → New → Replace →
+  Bug`, in ladder order (Bug since #1845; read from the live field 2026-09-28).
 - Labels `needs-shaping` and `blocked` on this repo, and GitHub's ten stock labels
   deleted. That is the complete label set.
 - Topic `command-center` on this repo — the funnel's membership gate.

@@ -2939,6 +2939,13 @@ def stale_locks(
 #: can read.
 REVIEW_MARKER = "<!-- command-center-review -->"
 
+#: The GitHub accounts whose comments may carry a review verdict (#1787).
+#: command-center is public, so any GitHub user can post a comment holding the
+#: marker above; what makes a verdict authoritative is who posted it, which
+#: GitHub authenticates, never its text. Nate and every agent post as the owner
+#: account, so that is the only author trusted.
+TRUSTED_COMMENT_AUTHORS = frozenset({"nateprich"})
+
 #: The merge gate is software, not one of the model providers. Its verdicts
 #: still use the agent voice because they are neither Nate's words nor his
 #: relayed decision, but the agent field must say which component authored it.
@@ -3291,8 +3298,47 @@ def parse_verdict(body: str) -> Optional[Dict]:
     return _marked_json(body, REVIEW_MARKER)
 
 
+def comment_author(row: object) -> Optional[str]:
+    """The login that posted one comment row, or None when it is unreadable.
+
+    ``gh ... --json comments`` and the batched GraphQL read carry
+    ``author.login``; REST ``issues/<n>/comments`` carries ``user.login``
+    (#1787). A row naming two different logins has no single author, so it
+    reads as unreadable rather than as whichever key happened to be checked
+    first.
+    """
+    if not isinstance(row, Mapping):
+        return None
+    logins = set()
+    for key in ("author", "user"):
+        value = row.get(key)
+        if not isinstance(value, Mapping):
+            continue
+        login = value.get("login")
+        if isinstance(login, str) and login:
+            logins.add(login)
+    return logins.pop() if len(logins) == 1 else None
+
+
+def trusted_comment(row: object) -> bool:
+    """Whether a comment's author may carry a verdict (#1787).
+
+    Fail closed: a comment with no readable author is untrusted. GitHub logins
+    are unique regardless of case, so the comparison ignores it.
+    """
+    author = comment_author(row)
+    return author is not None and author.lower() in TRUSTED_COMMENT_AUTHORS
+
+
 def _verdict_from_comment(row: Mapping[str, object]) -> Optional[Dict]:
-    """Read a verdict and retain the timestamp of its GitHub comment."""
+    """Read a verdict and retain the timestamp of its GitHub comment.
+
+    Only a trusted author's comment carries one (#1787): anyone can comment on
+    a public repository, and a forged approval here would reach the merge gate.
+    An untrusted comment reads as no verdict, so the newest trusted one stands.
+    """
+    if not trusted_comment(row):
+        return None
     found = parse_verdict(str(row.get("body") or ""))
     if found is None:
         return None
@@ -4073,7 +4119,9 @@ def latest_verdict(repo: str, pr) -> Optional[Dict]:
     """The newest verdict on a PR.
 
     Newest wins: a re-review after a fix is a fresh read against the plan, and an
-    older verdict must never authorise a diff it did not see.
+    older verdict must never authorise a diff it did not see. Newest means the
+    newest from a trusted author (#1787); ``--json comments`` rows carry
+    ``author.login`` for that check.
     """
     rows = (_gh_json("gh", "pr", "view", str(pr), "--repo", repo,
                      "--json", "comments") or {}).get("comments", [])
@@ -15651,7 +15699,9 @@ def _review_verdicts(prs: Iterable[Tuple[str, int]]) -> Tuple[Dict[str, object],
             raise GitHubError("could not read review history for {} PR #{}".format(
                 repo, number))
         for comment in payload.get("comments") or []:
-            if not isinstance(comment, dict):
+            # Only a trusted author's verdict counts (#1787): a forged
+            # rejection would otherwise raise a drift signal on the project.
+            if not isinstance(comment, dict) or not trusted_comment(comment):
                 continue
             verdict = parse_verdict(comment.get("body") or "")
             if verdict is not None:
@@ -16179,7 +16229,11 @@ def _read_batched_pr_snapshots(
 
 
 def _latest_verdict_from_comments(comments: object) -> Optional[Dict]:
-    """Return the newest structured verdict from an already-read comment tail."""
+    """Return the newest structured verdict from an already-read comment tail.
+
+    The batch asks for each comment's ``author { login }`` so that
+    ``_verdict_from_comment`` can skip untrusted authors (#1787).
+    """
     if not isinstance(comments, list):
         return None
     for row in reversed(comments):

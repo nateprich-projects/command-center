@@ -33,6 +33,22 @@ def verdict(**kw):
     return funnel.REVIEW_MARKER + "\n\n```json\n" + json.dumps(body) + "\n```"
 
 
+#: The owner account every agent and Nate post as: the only author whose
+#: comment carries a verdict (#1787).
+OWNER = "nateprich"
+
+
+def comment_row(body, author=OWNER):
+    """A comment row as ``gh ... --json comments`` and the batch return it.
+
+    A dict passes through unchanged, so a test can hand over a row with a
+    different author, no author, or the REST ``user`` shape.
+    """
+    if isinstance(body, dict):
+        return body
+    return {"body": body, "author": {"login": author}}
+
+
 def items(klass="Improve", children_total=1, children_done=0,
           other_ticket=False, origin="agent"):
     body = (
@@ -59,12 +75,12 @@ def items(klass="Improve", children_total=1, children_done=0,
 def wire(monkeypatch, pr_json, comments):
     def fake(*args):
         if "comments" in args:
-            return {"comments": [{"body": b} for b in comments]}
+            return {"comments": [comment_row(b) for b in comments]}
         return pr_json
 
     node = dict(pr_json)
     node.update({"number": 5, "title": "PR 5", "url": "https://example.invalid/5"})
-    node["comments"] = {"nodes": [{"body": b} for b in comments]}
+    node["comments"] = {"nodes": [comment_row(b) for b in comments]}
     node["commits"] = {
         "nodes": [{
             "commit": {
@@ -121,6 +137,113 @@ def test_the_newest_verdict_wins(monkeypatch):
     """A re-review after a fix is a fresh read; the older one must not linger."""
     wire(monkeypatch, pr(), [verdict(verdict="rejected"), verdict()])
     assert funnel.latest_verdict(REPO, 5)["verdict"] == "approved"
+
+
+# -- only the owner's comments carry verdicts (#1787) -------------------------
+#
+# command-center is public: any GitHub user can post a comment holding the
+# review marker. What makes a verdict authoritative is its author.
+
+def test_comment_author_reads_the_gh_and_the_rest_shapes():
+    gh_row = {"author": {"login": OWNER}, "body": ""}
+    rest_row = {"user": {"login": OWNER, "type": "User"}, "body": ""}
+    assert funnel.comment_author(gh_row) == OWNER
+    assert funnel.comment_author(rest_row) == OWNER
+    assert funnel.trusted_comment(gh_row)
+    assert funnel.trusted_comment(rest_row)
+
+
+@pytest.mark.parametrize("row", [
+    {"body": "no author key"},
+    {"author": None},
+    {"author": {}},
+    {"author": {"login": ""}},
+    {"author": {"login": None}},
+    {"author": "nateprich"},  # not the documented shape
+    {"user": None},
+    {"author": {"login": "mallory"}},
+    {"user": {"login": "mallory"}},
+    {"author": {"login": "nateprich-bot"}},
+    # Two different logins name no single author.
+    {"author": {"login": OWNER}, "user": {"login": "mallory"}},
+    None,
+    "nateprich",
+])
+def test_an_unreadable_or_other_author_is_untrusted(row):
+    assert not funnel.trusted_comment(row)
+
+
+def test_github_logins_match_regardless_of_case():
+    assert funnel.trusted_comment({"author": {"login": "NatePrich"}})
+
+
+def test_another_authors_approval_is_ignored_and_the_older_verdict_stands(
+        monkeypatch):
+    wire(monkeypatch, pr(), [
+        verdict(verdict="rejected"),
+        comment_row(verdict(), author="mallory"),
+    ])
+    assert funnel.latest_verdict(REPO, 5)["verdict"] == "rejected"
+
+
+def test_a_verdict_with_no_author_is_ignored(monkeypatch):
+    wire(monkeypatch, pr(), [
+        verdict(verdict="rejected"),
+        {"body": verdict()},
+    ])
+    assert funnel.latest_verdict(REPO, 5)["verdict"] == "rejected"
+
+    wire(monkeypatch, pr(), [{"body": verdict()}])
+    assert funnel.latest_verdict(REPO, 5) is None
+
+
+def test_a_rest_shaped_owner_verdict_is_read(monkeypatch):
+    wire(monkeypatch, pr(), [
+        {"user": {"login": OWNER}, "body": verdict(verdict="rejected"),
+         "created_at": "2026-09-06T01:00:00Z"},
+        {"user": {"login": "mallory"}, "body": verdict(),
+         "created_at": "2026-09-06T02:00:00Z"},
+    ])
+    found = funnel.latest_verdict(REPO, 5)
+    assert found["verdict"] == "rejected"
+    assert found["comment_created_at"] == "2026-09-06T01:00:00Z"
+
+
+def test_the_batch_verdict_skips_untrusted_authors():
+    """The batched tail feeds the lanes' reconcile and the review queue."""
+    comments = [
+        comment_row(verdict(verdict="rejected")),
+        comment_row(verdict(), author="mallory"),
+        {"body": verdict()},
+        "not a row",
+    ]
+    assert funnel._latest_verdict_from_comments(comments)["verdict"] == (
+        "rejected")
+    assert funnel._latest_verdict_from_comments(comments[1:]) is None
+
+
+def test_a_forged_approval_cannot_merge(monkeypatch):
+    wire(monkeypatch, pr(), [
+        verdict(verdict="rejected"),
+        comment_row(verdict(), author="mallory"),
+    ])
+    why = funnel.merge_blockers(REPO, 5, items(), NOW)
+    assert "latest review says 'rejected'" in why
+
+    wire(monkeypatch, pr(), [comment_row(verdict(), author="mallory")])
+    assert "no review verdict recorded" in funnel.merge_blockers(
+        REPO, 5, items(), NOW)
+    assert funnel.cmd_merge(items(), NOW, REPO, 5, False) == 1
+
+
+def test_the_owners_approval_still_merges_past_an_outsiders_rejection(
+        monkeypatch):
+    """Owner verdicts behave as today; an outsider cannot block by forging."""
+    wire(monkeypatch, pr(), [
+        verdict(),
+        comment_row(verdict(verdict="rejected"), author="mallory"),
+    ])
+    assert funnel.merge_blockers(REPO, 5, items(), NOW) == []
 
 
 def _wire_review_confirmation(monkeypatch):
@@ -289,7 +412,7 @@ def _gate_rejection_wired(monkeypatch, pr_json, comments):
         node = dict(pr_json)
         node.update({"number": 5, "title": "PR 5", "url": "https://example.invalid/5"})
         node["comments"] = {
-            "nodes": [{"body": body} for body in comments + posted]
+            "nodes": [comment_row(body) for body in comments + posted]
         }
         node["commits"] = {
             "nodes": [{
@@ -323,7 +446,7 @@ def _gate_rejection_wired(monkeypatch, pr_json, comments):
             return [{"headRefName": "ticket/9", "headRefOid": SHA, "number": 5}]
         if "comments" in args:
             return {"comments": [
-                {"body": body} for body in comments + posted
+                comment_row(body) for body in comments + posted
             ]}
         return pr_json
 
@@ -462,7 +585,7 @@ def _next_with_pr(monkeypatch, fact, comment):
 
     def fake_gh_json(*args):
         if "comments" in args:
-            return {"comments": [{"body": comment}]}
+            return {"comments": [comment_row(comment)]}
         return [{
             "headRefName": "ticket/9",
             "headRefOid": fact["headRefOid"],
@@ -536,7 +659,7 @@ def _merge_wired(monkeypatch, issue_state="OPEN", close_rc=0, close_err="",
         if "issue" in args and "view" in args:
             return {"state": issue_state}
         if "comments" in args:
-            return {"comments": [{"body": verdict()}]}
+            return {"comments": [comment_row(verdict())]}
         return pr(**(pr_fields or {}))
 
     def fake_run(argv, **kwargs):
@@ -563,7 +686,7 @@ def _merge_wired(monkeypatch, issue_state="OPEN", close_rc=0, close_err="",
         data = pr(**(pr_fields or {}))
         data.setdefault("number", 7)
         data.setdefault("url", "https://example.invalid/7")
-        data["comments"] = {"nodes": [{"body": verdict()}]}
+        data["comments"] = {"nodes": [comment_row(verdict())]}
         data["commits"] = {
             "nodes": [{
                 "commit": {

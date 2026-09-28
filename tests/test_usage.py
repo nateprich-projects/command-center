@@ -11,6 +11,8 @@ import json
 import pathlib
 import sys
 
+import pytest
+
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 import usage  # noqa: E402
@@ -275,15 +277,18 @@ def test_gate_exits_2_on_a_reading_from_the_future(tmp_path, monkeypatch):
 
 
 def transcript(path, entries, ts="2026-09-05T08:00:00.000Z"):
-    """entries: (model, output_tokens) or (model, output_tokens, timestamp)."""
+    """Entries may add a timestamp and message ID after model and token count."""
     lines = []
     for e in entries:
         model, out = e[0], e[1]
         stamp = e[2] if len(e) > 2 else ts
+        message = {"role": "assistant", "model": model,
+                   "usage": {"output_tokens": out}}
+        if len(e) > 3 and e[3] is not None:
+            message["id"] = e[3]
         lines.append(json.dumps({
             "type": "assistant", "timestamp": stamp,
-            "message": {"role": "assistant", "model": model,
-                        "usage": {"output_tokens": out}},
+            "message": message,
         }))
     path.write_text("\n".join(lines) + "\n")
     return path
@@ -353,6 +358,81 @@ def test_records_outside_the_window_are_not_counted(tmp_path, monkeypatch):
 def test_no_transcripts_reads_as_none_not_as_zero(tmp_path, monkeypatch):
     monkeypatch.setattr(usage, "CLAUDE_TRANSCRIPTS", str(tmp_path / "none/*.jsonl"))
     assert usage.read_claude_local(NOW) is None
+
+
+def test_repeated_message_ids_count_once_across_transcripts(tmp_path, monkeypatch):
+    import time as _time
+    now = _time.time()
+    monkeypatch.setattr(usage, "last_weekly_reset", lambda n: n - 7 * 86400)
+    transcript(tmp_path / "a.jsonl", [
+        ("claude-opus-5", 1000, _at(now, 1), "message-1"),
+        ("claude-opus-5", 300, _at(now, 1), "message-2"),
+    ])
+    transcript(tmp_path / "b.jsonl", [
+        ("claude-opus-5", 1000, _at(now, 1), "message-1"),
+    ])
+    monkeypatch.setattr(usage, "CLAUDE_TRANSCRIPTS", str(tmp_path / "*.jsonl"))
+
+    reading = usage.read_claude_local(now)
+
+    assert reading["opus_output_tokens"] == {
+        "five_hour": 1300, "seven_day": 1300,
+    }
+
+
+def test_repeated_message_id_is_counted_once_in_each_window(tmp_path, monkeypatch):
+    import time as _time
+    now = _time.time()
+    monkeypatch.setattr(usage, "last_weekly_reset", lambda n: n - 7 * 86400)
+    older = transcript(tmp_path / "older.jsonl", [
+        ("claude-opus-5", 1000, _at(now, 6), "message-1"),
+    ])
+    recent = transcript(tmp_path / "recent.jsonl", [
+        ("claude-opus-5", 1000, _at(now, 1), "message-1"),
+    ])
+    monkeypatch.setattr(usage.glob, "glob", lambda _: [str(older), str(recent)])
+
+    reading = usage.read_claude_local(now)
+
+    assert reading["opus_output_tokens"] == {
+        "five_hour": 1000, "seven_day": 1000,
+    }
+
+
+def test_deduplicated_capacities_track_the_paired_app_sample_conservatively(
+    tmp_path, monkeypatch
+):
+    import time as _time
+    sample_at = _time.time()
+    monkeypatch.setattr(usage, "last_weekly_reset", lambda n: sample_at - 8 * 3600)
+    monkeypatch.setattr(
+        usage, "CLAUDE_APP_CONFIG", str(tmp_path / "absent-claude.json")
+    )
+    plan_usage_history(tmp_path, monkeypatch, [
+        plan_sample(sample_at, 43, 14),
+    ])
+    transcript(tmp_path / "paired.jsonl", [
+        ("claude-opus-5", 530879, _at(sample_at, 1), "five-hour-message"),
+        ("claude-opus-5", 406755, _at(sample_at, 6), "weekly-only-message"),
+    ])
+    monkeypatch.setattr(usage, "CLAUDE_TRANSCRIPTS", str(tmp_path / "*.jsonl"))
+
+    reading = usage.read_claude_local(sample_at)
+    app_reading = usage.read_claude_plan_history(sample_at)
+
+    assert reading["opus_output_tokens"] == {
+        "five_hour": 530879, "seven_day": 937634,
+    }
+    assert app_reading["windows"]["five_hour"]["used_percent"] == 43.0
+    assert app_reading["windows"]["seven_day"]["used_percent"] == 14.0
+    paired_five_hour_capacity = 100.0 * 530879 / 43.0
+    paired_weekly_capacity = 100.0 * 937634 / 14.0
+    assert usage.FIVE_HOUR_CAPACITY == 1_200_000.0
+    assert usage.FIVE_HOUR_CAPACITY > 801_303
+    assert usage.FIVE_HOUR_CAPACITY < paired_five_hour_capacity
+    assert reading["windows"]["five_hour"]["used_percent"] > 43.0
+    assert usage.WEEKLY_CAPACITY == pytest.approx(paired_weekly_capacity)
+    assert reading["windows"]["seven_day"]["used_percent"] == pytest.approx(14.0)
 
 
 # -- promos are read at runtime, never written into the file ----------------
@@ -458,7 +538,7 @@ def test_app_sample_within_six_hours_passes_the_gate(tmp_path, monkeypatch):
     assert usage.main(["gate", "claude"]) == 0
 
 
-def test_stale_app_sample_falls_back_to_the_unchanged_estimate(tmp_path, monkeypatch):
+def test_stale_app_sample_falls_back_to_the_marked_estimate(tmp_path, monkeypatch):
     import time as _time
     now = _time.time()
     plan_usage_history(tmp_path, monkeypatch, [plan_sample(now - 7 * 3600, 80, 90)])
@@ -468,6 +548,7 @@ def test_stale_app_sample_falls_back_to_the_unchanged_estimate(tmp_path, monkeyp
     assert reading["source"] == "claude-local-estimate"
     assert reading["estimated"] is True
     assert reading["opus_output_tokens"]["five_hour"] == 1000
+    assert reading["windows"]["five_hour"]["used_percent"] > 0.0
 
 
 def test_missing_or_malformed_app_history_falls_back_to_the_estimate(tmp_path, monkeypatch):

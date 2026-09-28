@@ -2420,11 +2420,21 @@ def build_packet(*, repo: str, pr_number: int, pr_view: dict, diff: str,
                "latest_run_id": latest_completed_run_id(runs)},
         "verdict": verdict,
         "verdict_head_sha": (verdict or {}).get("head_sha"),
-        "overlap": file_overlap(changed_files, open_prs, pr_number),
+        # Only the funnel's own PRs are named to the reviewer or paired with
+        # the ticket (#1794): a fork's open PR never merges through the funnel,
+        # and its branch name is text a stranger chose. Every merge counts for
+        # staleness, whoever opened it, because it changed main.
+        "overlap": file_overlap(changed_files, [
+            row for row in open_prs or []
+            if funnel.is_funnel_pr(repo, row)
+        ], pr_number),
         "merged_overlap": merged_overlap(changed_files, merged_prs, head,
                                          pr_number),
         "ticket_prior_prs": ticket_prior_prs(
-            pr_view.get("headRefName"), merged_prs, pr_number),
+            pr_view.get("headRefName"), [
+                row for row in merged_prs or []
+                if funnel.is_funnel_pr(repo, row)
+            ], pr_number),
         "protected": protected_touches(changed_files, diff),
         "stop_auto_merging": stop_counter,
         "collected_at": collected_at,
@@ -2451,13 +2461,15 @@ def fetch_pr(repo: str, pr_number: int) -> dict:
     ``baseRefOid`` is the PR's recorded base, the ``pr_base_sha`` the
     packet compares the live merge base against (#1043). ``body`` is the
     description the packet carries as the implementer's claims (#1720).
+    The trust fields say whether the PR is the funnel's own (#1794).
     """
     data = funnel._gh_json(
         "gh", "pr", "view", str(pr_number), "--repo", repo, "--json",
         "number,title,body,headRefName,headRefOid,baseRefName,baseRefOid,"
         "state,mergeable,"
         "mergedAt,mergedBy,closedAt,"
-        "statusCheckRollup,commits,files,closingIssuesReferences")
+        "statusCheckRollup,commits,files,closingIssuesReferences,"
+        + funnel.PR_TRUST_JSON_FIELDS)
     if not data:
         raise funnel.GitHubError(
             "could not read PR #{} in {}".format(pr_number, repo))
@@ -2854,7 +2866,8 @@ def fetch_open_prs(repo: str) -> List[dict]:
     """Every open PR's number, branch, and changed files, in one read."""
     rows = funnel._gh_json(
         "gh", "pr", "list", "--repo", repo, "--state", "open",
-        "--json", "number,headRefName,files", "--limit", "100")
+        "--json", "number,headRefName,files," + funnel.PR_TRUST_JSON_FIELDS,
+        "--limit", "100")
     if rows is None or not isinstance(rows, list):
         raise funnel.GitHubError(
             "could not list open PRs in {}".format(repo))
@@ -2871,7 +2884,8 @@ def fetch_merged_prs(repo: str,
     """
     rows = funnel._gh_json(
         "gh", "pr", "list", "--repo", repo, "--state", "merged",
-        "--json", "number,title,mergedAt,files,headRefName",
+        "--json", "number,title,mergedAt,files,headRefName,"
+        + funnel.PR_TRUST_JSON_FIELDS,
         "--limit", str(limit))
     if rows is None or not isinstance(rows, list):
         raise funnel.GitHubError(
@@ -2963,6 +2977,15 @@ def collect(repo: Optional[str], pr_number: int, *,
     """
     resolved = funnel.resolve_repo(repo)
     pr_view = fetch_pr(resolved, pr_number)
+    # No packet for a PR that is not the funnel's own (#1794). The packet is
+    # what a model reads — the diff, the description, the comments — so a
+    # fork's PR named ticket/<n> would be a prompt-injection surface that
+    # also spends the lane's budget. Refuse before reading any of it.
+    foreign = funnel.foreign_pr_reason(resolved, pr_view)
+    if foreign is not None:
+        raise funnel.GitHubError(
+            "PR #{} in {} is not the funnel's own PR, because {}; no review "
+            "packet is assembled".format(pr_number, resolved, foreign))
     ref = funnel.ticket_ref_from_branch(
         resolved, pr_view.get("headRefName") or "")
     if ref is not None:

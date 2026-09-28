@@ -190,7 +190,9 @@ def _verdicts(comments: object) -> List[Dict[str, object]]:
         return []
     found: List[Dict[str, object]] = []
     for index, comment in enumerate(comments):
-        if not isinstance(comment, Mapping):
+        # Only a trusted author's verdict is an outcome (#1787); a forged one
+        # would otherwise count as the review a PR received.
+        if not isinstance(comment, Mapping) or not funnel.trusted_comment(comment):
             continue
         parsed = funnel.parse_verdict(_body(comment))
         if not isinstance(parsed, Mapping):
@@ -1163,8 +1165,13 @@ def _index_with_outcome_details(
             raise
         index, truncated = funnel.ticket_pr_index(repo, limit=limit)
     rows = getattr(index, "all_rows", tuple(index.values()))
+    # Only the funnel's own PRs are a ticket's attempts (#1794): the walk
+    # pairs rows by branch and by closing reference, and a fork's PR can
+    # carry either. ``ticket_pr_index`` already drops them; this also holds
+    # for an injected index.
     return index, truncated, tuple(
-        row for row in rows if isinstance(row, Mapping)
+        row for row in rows
+        if isinstance(row, Mapping) and funnel.is_funnel_pr(repo, row)
     )
 
 

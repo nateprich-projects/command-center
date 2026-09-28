@@ -108,6 +108,8 @@ def test_collect_reads_the_tickets_own_repo(monkeypatch):
         implement, "fetch_prior_run", lambda number, agent: None
     )
     monkeypatch.setattr(implement, "parent_repo", lambda repo, ticket: REPO)
+    monkeypatch.setattr(
+        implement, "fetch_ticket_comments", lambda repo, number: [])
 
     def record(repo):
         seen.append(repo)

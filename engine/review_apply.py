@@ -308,7 +308,9 @@ def _latest_review_comment(comments: object):
     if not isinstance(comments, list):
         return None
     for comment in reversed(comments):
-        if not isinstance(comment, dict):
+        # An untrusted author's verdict would make someone else's approval
+        # read as the one that raced this run (#1787).
+        if not isinstance(comment, dict) or not funnel.trusted_comment(comment):
             continue
         body = comment.get("body")
         if not isinstance(body, str):
@@ -410,8 +412,9 @@ def load_merge_items(repo: str, pr_fact: Optional[dict]) -> list:
     failed read raises, and ``apply_approved`` treats that as a refused merge.
     """
     items = funnel.load_items(include_details=False)
-    branch = pr_fact.get("headRefName") if isinstance(pr_fact, dict) else None
-    ref = funnel.ticket_ref_from_branch(repo, branch or "")
+    # Only the funnel's own PR names a ticket whose history is worth loading;
+    # the gate refuses any other PR before it reads that history (#1794).
+    ref = funnel.ticket_ref_from_pr(repo, pr_fact)
     if ref is None:
         return items
     ticket = next((item for item in items if item.ref == ref), None)

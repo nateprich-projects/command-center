@@ -78,5 +78,10 @@
     "source": "#1632: sibling citation",
     "body": "## Siblings checked\n- #1626 (Shaped) — review-lister deadlock fix on #1581's tickets; engine code, not AGENTS.md; keep both.\n",
     "pre_change_reasons": ["concurrency"]
+  },
+  {
+    "source": "Ticket #1770: sibling citation remains a non-proposal (#1643/#1679)",
+    "body": "## Siblings checked\n- #1643 and #1679 (independent): a sibling rotates the deploy credentials during cutover; this ticket only changes the matcher.\n",
+    "pre_change_reasons": []
   }
 ]

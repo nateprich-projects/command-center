@@ -33,6 +33,22 @@ def verdict(**kw):
     return funnel.REVIEW_MARKER + "\n\n```json\n" + json.dumps(body) + "\n```"
 
 
+#: The owner account every agent and Nate post as: the only author whose
+#: comment carries a verdict (#1787).
+OWNER = "nateprich"
+
+
+def comment_row(body, author=OWNER):
+    """A comment row as ``gh ... --json comments`` and the batch return it.
+
+    A dict passes through unchanged, so a test can hand over a row with a
+    different author, no author, or the REST ``user`` shape.
+    """
+    if isinstance(body, dict):
+        return body
+    return {"body": body, "author": {"login": author}}
+
+
 def items(klass="Improve", children_total=1, children_done=0,
           other_ticket=False, origin="agent"):
     body = (
@@ -59,12 +75,12 @@ def items(klass="Improve", children_total=1, children_done=0,
 def wire(monkeypatch, pr_json, comments):
     def fake(*args):
         if "comments" in args:
-            return {"comments": [{"body": b} for b in comments]}
+            return {"comments": [comment_row(b) for b in comments]}
         return pr_json
 
     node = dict(pr_json)
     node.update({"number": 5, "title": "PR 5", "url": "https://example.invalid/5"})
-    node["comments"] = {"nodes": [{"body": b} for b in comments]}
+    node["comments"] = {"nodes": [comment_row(b) for b in comments]}
     node["commits"] = {
         "nodes": [{
             "commit": {
@@ -97,7 +113,9 @@ def wire(monkeypatch, pr_json, comments):
 def pr(**kw):
     data = {"state": "OPEN", "headRefName": "ticket/9", "headRefOid": SHA,
             "mergeable": "MERGEABLE",
-            "statusCheckRollup": [{"name": "tests", "conclusion": "SUCCESS"}]}
+            "statusCheckRollup": [{"name": "tests", "conclusion": "SUCCESS"}],
+            # The funnel's own PR: same-repository head, owner author (#1794).
+            "isCrossRepository": False, "author": {"login": OWNER}}
     data.update(kw)
     return data
 
@@ -121,6 +139,113 @@ def test_the_newest_verdict_wins(monkeypatch):
     """A re-review after a fix is a fresh read; the older one must not linger."""
     wire(monkeypatch, pr(), [verdict(verdict="rejected"), verdict()])
     assert funnel.latest_verdict(REPO, 5)["verdict"] == "approved"
+
+
+# -- only the owner's comments carry verdicts (#1787) -------------------------
+#
+# command-center is public: any GitHub user can post a comment holding the
+# review marker. What makes a verdict authoritative is its author.
+
+def test_comment_author_reads_the_gh_and_the_rest_shapes():
+    gh_row = {"author": {"login": OWNER}, "body": ""}
+    rest_row = {"user": {"login": OWNER, "type": "User"}, "body": ""}
+    assert funnel.comment_author(gh_row) == OWNER
+    assert funnel.comment_author(rest_row) == OWNER
+    assert funnel.trusted_comment(gh_row)
+    assert funnel.trusted_comment(rest_row)
+
+
+@pytest.mark.parametrize("row", [
+    {"body": "no author key"},
+    {"author": None},
+    {"author": {}},
+    {"author": {"login": ""}},
+    {"author": {"login": None}},
+    {"author": "nateprich"},  # not the documented shape
+    {"user": None},
+    {"author": {"login": "mallory"}},
+    {"user": {"login": "mallory"}},
+    {"author": {"login": "nateprich-bot"}},
+    # Two different logins name no single author.
+    {"author": {"login": OWNER}, "user": {"login": "mallory"}},
+    None,
+    "nateprich",
+])
+def test_an_unreadable_or_other_author_is_untrusted(row):
+    assert not funnel.trusted_comment(row)
+
+
+def test_github_logins_match_regardless_of_case():
+    assert funnel.trusted_comment({"author": {"login": "NatePrich"}})
+
+
+def test_another_authors_approval_is_ignored_and_the_older_verdict_stands(
+        monkeypatch):
+    wire(monkeypatch, pr(), [
+        verdict(verdict="rejected"),
+        comment_row(verdict(), author="mallory"),
+    ])
+    assert funnel.latest_verdict(REPO, 5)["verdict"] == "rejected"
+
+
+def test_a_verdict_with_no_author_is_ignored(monkeypatch):
+    wire(monkeypatch, pr(), [
+        verdict(verdict="rejected"),
+        {"body": verdict()},
+    ])
+    assert funnel.latest_verdict(REPO, 5)["verdict"] == "rejected"
+
+    wire(monkeypatch, pr(), [{"body": verdict()}])
+    assert funnel.latest_verdict(REPO, 5) is None
+
+
+def test_a_rest_shaped_owner_verdict_is_read(monkeypatch):
+    wire(monkeypatch, pr(), [
+        {"user": {"login": OWNER}, "body": verdict(verdict="rejected"),
+         "created_at": "2026-09-06T01:00:00Z"},
+        {"user": {"login": "mallory"}, "body": verdict(),
+         "created_at": "2026-09-06T02:00:00Z"},
+    ])
+    found = funnel.latest_verdict(REPO, 5)
+    assert found["verdict"] == "rejected"
+    assert found["comment_created_at"] == "2026-09-06T01:00:00Z"
+
+
+def test_the_batch_verdict_skips_untrusted_authors():
+    """The batched tail feeds the lanes' reconcile and the review queue."""
+    comments = [
+        comment_row(verdict(verdict="rejected")),
+        comment_row(verdict(), author="mallory"),
+        {"body": verdict()},
+        "not a row",
+    ]
+    assert funnel._latest_verdict_from_comments(comments)["verdict"] == (
+        "rejected")
+    assert funnel._latest_verdict_from_comments(comments[1:]) is None
+
+
+def test_a_forged_approval_cannot_merge(monkeypatch):
+    wire(monkeypatch, pr(), [
+        verdict(verdict="rejected"),
+        comment_row(verdict(), author="mallory"),
+    ])
+    why = funnel.merge_blockers(REPO, 5, items(), NOW)
+    assert "latest review says 'rejected'" in why
+
+    wire(monkeypatch, pr(), [comment_row(verdict(), author="mallory")])
+    assert "no review verdict recorded" in funnel.merge_blockers(
+        REPO, 5, items(), NOW)
+    assert funnel.cmd_merge(items(), NOW, REPO, 5, False) == 1
+
+
+def test_the_owners_approval_still_merges_past_an_outsiders_rejection(
+        monkeypatch):
+    """Owner verdicts behave as today; an outsider cannot block by forging."""
+    wire(monkeypatch, pr(), [
+        verdict(),
+        comment_row(verdict(verdict="rejected"), author="mallory"),
+    ])
+    assert funnel.merge_blockers(REPO, 5, items(), NOW) == []
 
 
 def _wire_review_confirmation(monkeypatch):
@@ -280,6 +405,220 @@ def test_every_failure_is_reported_not_just_the_first(monkeypatch):
     assert len(funnel.merge_blockers(REPO, 5, items(), NOW)) >= 3
 
 
+# -- only the funnel's own PR merges (#1794) ----------------------------------
+#
+# command-center is public: anyone can fork it and open a PR from a branch
+# named ticket/<n>. The branch name proves nothing; where the head lives and
+# who opened the PR do.
+
+#: A fork's PR, as the batched read returns it.
+FORK = {"isCrossRepository": True,
+        "headRepository": {"nameWithOwner": "mallory/repo"},
+        "author": {"login": "mallory"}}
+
+NOT_THE_FUNNELS = [
+    pytest.param(FORK, id="fork"),
+    # A fork is refused even when the owner opened it.
+    pytest.param({"isCrossRepository": True,
+                  "headRepository": {"nameWithOwner": "nateprich/repo"}},
+                 id="owner-fork"),
+    pytest.param({"author": {"login": "mallory"}}, id="another-author"),
+    pytest.param({"author": {"login": "nateprich-bot"}}, id="lookalike-author"),
+    pytest.param({"author": None}, id="author-null"),
+    pytest.param({"author": {}}, id="author-no-login"),
+    pytest.param({"isCrossRepository": None}, id="head-unreadable"),
+    # A head repository that is not the base refuses even beside a false
+    # isCrossRepository: two signals that disagree establish nothing.
+    pytest.param({"headRepository": {"nameWithOwner": "mallory/repo"}},
+                 id="head-elsewhere"),
+]
+
+
+@pytest.mark.parametrize("trust", NOT_THE_FUNNELS)
+def test_a_pr_that_is_not_the_funnels_own_never_passes_the_gate(
+        monkeypatch, trust):
+    wire(monkeypatch, pr(**trust), [verdict()])
+    why = funnel.merge_blockers(REPO, 5, items(), NOW)
+    assert any("PR #5 is not the funnel's own PR" in w for w in why)
+
+
+@pytest.mark.parametrize("trust", NOT_THE_FUNNELS)
+def test_cmd_merge_never_merges_a_pr_that_is_not_the_funnels_own(
+        monkeypatch, capsys, trust):
+    wire(monkeypatch, pr(**trust), [verdict()])
+    runs = []
+    monkeypatch.setattr(
+        funnel, "_run_gh",
+        lambda argv, **kwargs: runs.append(list(argv)) or type(
+            "R", (), {"returncode": 0, "stdout": "", "stderr": ""})())
+
+    assert funnel.cmd_merge(items(), NOW, REPO, 5, True) == 1
+
+    assert not any(argv[:3] == ["gh", "pr", "merge"] for argv in runs)
+    assert "not the funnel's own PR" in capsys.readouterr().err
+
+
+def test_a_conflicting_fork_pr_gets_no_verdict_and_releases_no_claim(
+        monkeypatch):
+    """Writing the conflict rejection acts on the PR and on the ticket its
+    branch names; neither follows from a stranger's PR (#1794)."""
+    rows = items()
+    rows[1].item_id = "ticket-project-item"
+    rows[1].in_motion_since = NOW
+    posted = _gate_rejection_wired(
+        monkeypatch, pr(mergeable="CONFLICTING", **FORK), [verdict()])
+
+    assert funnel.cmd_merge(rows, NOW, REPO, 5, False) == 1
+
+    assert posted == []
+    assert rows[1].in_motion_since == NOW
+
+
+@pytest.mark.parametrize("trust", NOT_THE_FUNNELS)
+def test_cmd_review_records_no_verdict_on_a_pr_that_is_not_the_funnels_own(
+        monkeypatch, trust):
+    wire(monkeypatch, pr(**trust), [])
+    runs = []
+    monkeypatch.setattr(
+        funnel, "_run_gh",
+        lambda argv, **kwargs: runs.append(list(argv)) or type(
+            "R", (), {"returncode": 0, "stdout": "", "stderr": ""})())
+
+    with pytest.raises(funnel.GitHubError, match="not the funnel's own PR"):
+        funnel.cmd_review(REPO, 5, "approved", "green", [], None)
+
+    assert not any(argv[:3] == ["gh", "pr", "comment"] for argv in runs)
+
+
+def test_the_owners_same_repository_pr_still_merges(monkeypatch):
+    """Both trust fields readable and right: exactly today's behaviour."""
+    wire(monkeypatch, pr(headRepository={"nameWithOwner": REPO}),
+         [verdict()])
+    assert funnel.merge_blockers(REPO, 5, items(), NOW) == []
+
+
+@pytest.mark.parametrize("row", [
+    # The batched GraphQL read.
+    {"isCrossRepository": False, "headRepository": {"nameWithOwner": REPO},
+     "author": {"login": OWNER}},
+    # ``gh pr view --json isCrossRepository,headRepository,...``.
+    {"isCrossRepository": False, "headRepository": {"name": "repo"},
+     "headRepositoryOwner": {"login": "owner"}, "author": {"login": OWNER}},
+    # REST ``pulls/<n>``, which has no isCrossRepository.
+    {"head": {"repo": {"full_name": REPO}}, "user": {"login": OWNER}},
+    # GitHub names are case-insensitive.
+    {"head": {"repo": {"full_name": "Owner/Repo"}},
+     "user": {"login": "NatePrich"}},
+    # GitHub's own isCrossRepository answer stands when no name came back.
+    {"isCrossRepository": False, "author": {"login": OWNER}},
+])
+def test_every_wire_shape_of_the_owners_same_repository_pr_is_the_funnels(row):
+    assert funnel.foreign_pr_reason(REPO, row) is None
+    assert funnel.is_funnel_pr(REPO, dict(row, headRefName="ticket/9"))
+    assert funnel.ticket_ref_from_pr(
+        REPO, dict(row, headRefName="ticket/9")) == REPO + "#9"
+
+
+@pytest.mark.parametrize("row, reason", [
+    ({"isCrossRepository": True,
+      "headRepository": {"nameWithOwner": "mallory/repo"},
+      "author": {"login": OWNER}}, "another repository (mallory/repo)"),
+    ({"head": {"repo": {"full_name": "mallory/repo"}},
+      "user": {"login": OWNER}}, "head repository mallory/repo is not"),
+    # A deleted fork: REST reports ``head.repo`` null.
+    ({"head": {"repo": None}, "user": {"login": OWNER}},
+     "head repository could not be read"),
+    ({"author": {"login": OWNER}}, "head repository could not be read"),
+    # Two shapes naming different repositories name none.
+    ({"headRepository": {"nameWithOwner": REPO},
+      "head": {"repo": {"full_name": "mallory/repo"}},
+      "author": {"login": OWNER}}, "head repository could not be read"),
+    ({"isCrossRepository": False}, "author could not be read"),
+    ({"isCrossRepository": False, "author": {"login": OWNER},
+      "user": {"login": "mallory"}}, "author could not be read"),
+    ({"isCrossRepository": False, "user": {"login": "mallory"}},
+     "opened by mallory"),
+    (None, "could not be read"),
+    ("ticket/9", "could not be read"),
+])
+def test_foreign_pr_reason_names_why_and_fails_closed(row, reason):
+    found = funnel.foreign_pr_reason(REPO, row)
+    assert found is not None and reason in found
+    assert not funnel.is_funnel_pr(REPO, row)
+    assert funnel.ticket_ref_from_pr(REPO, row) is None
+
+
+@pytest.mark.parametrize("trust, reopened", [
+    ({"isCrossRepository": False, "author": {"login": OWNER}}, True),
+    (FORK, False),
+    ({"isCrossRepository": False, "author": {"login": "mallory"}}, False),
+    ({"author": {"login": OWNER}}, False),
+])
+def test_a_rejected_merge_reopens_only_the_funnels_own_ticket(
+        monkeypatch, capsys, trust, reopened):
+    view = dict(trust, title="PR 5", url="https://example.invalid/5",
+                headRefName="ticket/9", merged=True)
+    runs = []
+
+    def fake_run(argv, **kwargs):
+        argv = list(argv)
+        runs.append(argv)
+        out = json.dumps(view) if argv[:3] == ["gh", "pr", "view"] else (
+            "https://example.invalid/issue/77")
+        return type("R", (), {"returncode": 0, "stdout": out, "stderr": ""})()
+
+    moved = []
+    monkeypatch.setattr(funnel, "_run_gh", fake_run)
+    monkeypatch.setattr(funnel, "REPO", REPO)
+    monkeypatch.setattr(funnel, "_option_id", lambda field, name: name)
+    monkeypatch.setattr(
+        funnel, "gh_graphql",
+        lambda query, **variables: moved.append(variables["option"]) or {})
+
+    assert funnel.cmd_reject(items(), NOW, "5", None) == 0
+
+    fields = runs[0][runs[0].index("--json") + 1].split(",")
+    assert {"isCrossRepository", "headRepository", "headRepositoryOwner",
+            "author"} <= set(fields)
+    assert any(argv[:3] == ["gh", "issue", "reopen"]
+               for argv in runs) is reopened
+    # The project goes back to Building / Broken only for the funnel's PR.
+    assert moved == (["Building", "Broken"] if reopened else [])
+
+
+# -- a skipped check verified nothing (#1794) ---------------------------------
+#
+# command-center's pytest job skips itself on a fork's PR, and GitHub reports
+# that as SKIPPED. Read as a pass, the fork's CI would be green.
+
+def test_a_skipped_check_is_not_green(monkeypatch):
+    wire(monkeypatch, pr(statusCheckRollup=[
+        {"name": "pytest", "conclusion": "SKIPPED", "status": "COMPLETED"}]),
+        [verdict()])
+    why = funnel.merge_blockers(REPO, 5, items(), NOW)
+    assert ("CI not green: pytest skipped — a skipped check verified "
+            "nothing") in why
+
+
+def test_a_skipped_check_beside_a_passing_one_is_not_green(monkeypatch):
+    wire(monkeypatch, pr(statusCheckRollup=[
+        {"name": "tests", "conclusion": "SUCCESS", "status": "COMPLETED"},
+        {"name": "pytest", "conclusion": "SKIPPED", "status": "COMPLETED"}]),
+        [verdict()])
+    why = funnel.merge_blockers(REPO, 5, items(), NOW)
+    assert any("CI not green" in w and "pytest" in w for w in why)
+    assert not any("tests" in w for w in why if "CI not green" in w)
+
+
+def test_a_neutral_check_is_still_excused(monkeypatch):
+    """Only SKIPPED changed: the rest of the success set is as it was."""
+    wire(monkeypatch, pr(statusCheckRollup=[
+        {"name": "tests", "conclusion": "SUCCESS", "status": "COMPLETED"},
+        {"name": "lint", "conclusion": "NEUTRAL", "status": "COMPLETED"}]),
+        [verdict()])
+    assert funnel.merge_blockers(REPO, 5, items(), NOW) == []
+
+
 # -- a conflicting branch hands the ticket back -------------------------------
 
 def _gate_rejection_wired(monkeypatch, pr_json, comments):
@@ -289,7 +628,7 @@ def _gate_rejection_wired(monkeypatch, pr_json, comments):
         node = dict(pr_json)
         node.update({"number": 5, "title": "PR 5", "url": "https://example.invalid/5"})
         node["comments"] = {
-            "nodes": [{"body": body} for body in comments + posted]
+            "nodes": [comment_row(body) for body in comments + posted]
         }
         node["commits"] = {
             "nodes": [{
@@ -323,7 +662,7 @@ def _gate_rejection_wired(monkeypatch, pr_json, comments):
             return [{"headRefName": "ticket/9", "headRefOid": SHA, "number": 5}]
         if "comments" in args:
             return {"comments": [
-                {"body": body} for body in comments + posted
+                comment_row(body) for body in comments + posted
             ]}
         return pr_json
 
@@ -462,7 +801,7 @@ def _next_with_pr(monkeypatch, fact, comment):
 
     def fake_gh_json(*args):
         if "comments" in args:
-            return {"comments": [{"body": comment}]}
+            return {"comments": [comment_row(comment)]}
         return [{
             "headRefName": "ticket/9",
             "headRefOid": fact["headRefOid"],
@@ -536,7 +875,7 @@ def _merge_wired(monkeypatch, issue_state="OPEN", close_rc=0, close_err="",
         if "issue" in args and "view" in args:
             return {"state": issue_state}
         if "comments" in args:
-            return {"comments": [{"body": verdict()}]}
+            return {"comments": [comment_row(verdict())]}
         return pr(**(pr_fields or {}))
 
     def fake_run(argv, **kwargs):
@@ -563,7 +902,7 @@ def _merge_wired(monkeypatch, issue_state="OPEN", close_rc=0, close_err="",
         data = pr(**(pr_fields or {}))
         data.setdefault("number", 7)
         data.setdefault("url", "https://example.invalid/7")
-        data["comments"] = {"nodes": [{"body": verdict()}]}
+        data["comments"] = {"nodes": [comment_row(verdict())]}
         data["commits"] = {
             "nodes": [{
                 "commit": {

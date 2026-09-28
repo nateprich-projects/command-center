@@ -618,7 +618,17 @@ def _review_comment(verdict="approved", head=SHA,
         json.dumps({"verdict": verdict, "head_sha": head}),
         funnel.provenance_block("agent", run=run, agent=agent),
     )
-    return {"body": body}
+    return {"body": body, "author": {"login": "nateprich"}}
+
+
+def _authored(row, author):
+    """The same comment row posted by someone else, or by no readable author."""
+    found = dict(row)
+    if author is None:
+        found.pop("author", None)
+    else:
+        found["author"] = {"login": author}
+    return found
 
 
 def _merged_fact(comments, **kw):
@@ -681,6 +691,15 @@ def test_recorded_284_race_finishes_skipped_locked(
          "latest verdict is rejected"),
         (_merged_fact([_review_comment(run="current-run")]),
          "does not identify another run and agent"),
+        # Only the owner's comments carry verdicts (#1787): another author's
+        # approval, or one with no author, is not the approval that raced us.
+        (_merged_fact([_review_comment(verdict="rejected"),
+                       _authored(_review_comment(), "mallory")]),
+         "latest verdict is rejected"),
+        (_merged_fact([_authored(_review_comment(), "mallory")]),
+         "no readable covering approved verdict"),
+        (_merged_fact([_authored(_review_comment(), None)]),
+         "no readable covering approved verdict"),
         ({"number": 7, "state": "CLOSED", "headRefOid": SHA,
           "mergedAt": None, "comments": []}, "CLOSED unmerged"),
         ({"number": 7, "state": "OPEN", "headRefOid": SHA,
@@ -947,3 +966,34 @@ def test_validate_only_final_malformed_exits_1_without_recording(
     out = capsys.readouterr()
     assert "invalid JSON" in out.err
     assert review_apply.ERRORED_OUTCOME not in out.out
+
+
+# -- only the funnel's own PR names the merge subject (#1794) ------------------
+
+@pytest.mark.parametrize("fact, hydrated", [
+    ({"headRefName": "ticket/9", "isCrossRepository": False,
+      "author": {"login": "nateprich"}}, [REPO + "#9", REPO + "#1"]),
+    ({"headRefName": "ticket/9", "isCrossRepository": True,
+      "headRepository": {"nameWithOwner": "mallory/repo"},
+      "author": {"login": "mallory"}}, None),
+    ({"headRefName": "ticket/9", "isCrossRepository": False,
+      "author": {"login": "mallory"}}, None),
+    ({"headRefName": "ticket/9"}, None),
+    (None, None),
+])
+def test_merge_history_is_loaded_only_for_the_funnels_own_pr(
+        monkeypatch, fact, hydrated):
+    parent = funnel.Item(repo=REPO, number=1, title="p", url="",
+                         state="OPEN")
+    ticket = funnel.Item(repo=REPO, number=9, title="t", url="",
+                         state="OPEN", parent=REPO + "#1")
+    calls = []
+    monkeypatch.setattr(
+        funnel, "load_items", lambda include_details=True: [parent, ticket])
+    monkeypatch.setattr(
+        funnel, "hydrate_item_details",
+        lambda items, subjects: calls.append([s.ref for s in subjects]))
+
+    review_apply.load_merge_items(REPO, fact)
+
+    assert calls == ([hydrated] if hydrated else [])

@@ -10,12 +10,16 @@ import pathlib
 import sys
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 import funnel  # noqa: E402
 from funnel import Item  # noqa: E402
 
 NOW = datetime(2026, 9, 9, 12, 0, 0, tzinfo=timezone.utc)
+#: The owner account, the only comment author whose verdict counts (#1787).
+OWNER = {"login": "nateprich"}
 
 
 def ticket(number, parent=1, repo="nateprich/beta", **kw) -> Item:
@@ -36,6 +40,8 @@ def pr_row(number, branch, state="OPEN", **kw):
         "headRefName": branch, "headRefOid": "abc123",
         "mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN",
         "mergedAt": None, "reviews": [],
+        # The funnel's own PR: same-repository head, owner author (#1794).
+        "isCrossRepository": False, "author": OWNER,
     }
     row.update(kw)
     return row
@@ -281,7 +287,8 @@ def test_verdict_is_looked_up_only_for_an_open_conflicting_pr(monkeypatch):
     """A verdict lookup per ticket would undo the saving the scan exists for."""
     body = funnel.REVIEW_MARKER + "\n\n```json\n{\"verdict\": \"changes\"}\n```"
     rows = [
-        pr_row(10, "ticket/10", mergeable="CONFLICTING", comments=[{"body": body}]),
+        pr_row(10, "ticket/10", mergeable="CONFLICTING",
+               comments=[{"body": body, "author": OWNER}]),
         pr_row(11, "ticket/11", mergeable="MERGEABLE"),
         pr_row(12, "ticket/12", state="MERGED", mergeable="CONFLICTING"),
     ]
@@ -298,6 +305,215 @@ def test_verdict_is_looked_up_only_for_an_open_conflicting_pr(monkeypatch):
     assert facts["nateprich/beta#10"]["verdict"] == {"verdict": "changes"}
     assert facts["nateprich/beta#11"]["verdict"] is None
     assert "verdict" not in facts["nateprich/beta#12"]
+
+
+def _verdict_body(verdict):
+    return (funnel.REVIEW_MARKER + "\n\n```json\n"
+            "{{\"verdict\": \"{}\", \"head_sha\": \"abc123\"}}\n```"
+            .format(verdict))
+
+
+def test_a_forged_approval_in_the_batch_is_no_merge_candidate(monkeypatch):
+    """Reconcile merges on the batch verdict: only the owner's count (#1787)."""
+    rows = [
+        pr_row(10, "ticket/10", comments=[
+            {"body": _verdict_body("rejected"), "author": OWNER},
+            {"body": _verdict_body("approved"),
+             "author": {"login": "mallory"}},
+            {"body": _verdict_body("approved"), "author": None},
+        ]),
+        pr_row(11, "ticket/11", comments=[
+            {"body": _verdict_body("approved"), "author": OWNER},
+        ]),
+    ]
+    monkeypatch.setattr(funnel, "gh_graphql", repo_graphql_reads(rows))
+    items = [ticket(10), ticket(11)]
+
+    facts = funnel.ticket_pr_facts(items)
+
+    assert facts["nateprich/beta#10"]["verdict"]["verdict"] == "rejected"
+    assert facts["nateprich/beta#11"]["verdict"]["verdict"] == "approved"
+    assert funnel.approved_merge_candidates(items, pr_facts=facts) == [
+        {"repo": "nateprich/beta", "pr": 11, "ref": "nateprich/beta#11"},
+    ]
+
+
+# -- only the funnel's own PRs pair with tickets (#1794) -----------------------
+#
+# The scan matched PRs to tickets by branch name alone. command-center is
+# public, so a fork's PR named ticket/<n> became the ticket's PR: offered for
+# review, holding the ticket as awaiting review, and a merge candidate.
+
+#: A fork's PR as the batched read returns it.
+FORK = {"isCrossRepository": True,
+        "headRepository": {"nameWithOwner": "mallory/beta"},
+        "author": {"login": "mallory"}}
+
+NOT_THE_FUNNELS = [
+    pytest.param(FORK, id="fork"),
+    pytest.param({"author": {"login": "mallory"}}, id="another-author"),
+    pytest.param({"author": None}, id="author-unreadable"),
+    pytest.param({"isCrossRepository": None}, id="head-unreadable"),
+]
+
+
+def test_the_scan_asks_who_opened_each_pr_and_where_its_head_lives(
+        monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        funnel, "gh_graphql", repo_graphql_reads([], calls=calls))
+
+    funnel.ticket_pr_facts([ticket(10)])
+
+    query = " ".join(calls[0][0].split())
+    assert "isCrossRepository" in query
+    assert "headRepository { nameWithOwner }" in query
+    assert "author { login }" in query
+
+
+def test_the_scan_carries_the_trust_fields_into_each_row(monkeypatch):
+    monkeypatch.setattr(funnel, "gh_graphql", repo_graphql_reads([
+        pr_row(10, "ticket/10",
+               headRepository={"nameWithOwner": "nateprich/beta"}),
+    ]))
+
+    facts = funnel.ticket_pr_facts([ticket(10)])
+
+    fact = facts["nateprich/beta#10"]
+    assert fact["isCrossRepository"] is False
+    assert fact["headRepository"] == {"nameWithOwner": "nateprich/beta"}
+    assert fact["author"] == OWNER
+
+
+@pytest.mark.parametrize("trust", NOT_THE_FUNNELS)
+def test_a_foreign_pr_on_a_ticket_branch_is_not_the_tickets_pr(
+        monkeypatch, trust):
+    rows = [
+        pr_row(30, "ticket/10", comments=[
+            {"body": _verdict_body("approved"), "author": OWNER},
+        ], **trust),
+        pr_row(11, "ticket/11"),
+    ]
+    monkeypatch.setattr(funnel, "gh_graphql", repo_graphql_reads(rows))
+    items = [ticket(10), ticket(11)]
+
+    facts = funnel.ticket_pr_facts(items)
+
+    # A complete scan with no funnel PR and no branch: no PR at all.
+    assert facts["nateprich/beta#10"] is None
+    assert "nateprich/beta#10" not in facts.rows_by_ref
+    assert facts["nateprich/beta#11"]["number"] == 11
+    assert funnel.awaiting_review(items, pr_facts=facts) == {
+        "nateprich/beta#11"}
+    assert [entry["ref"] for entry in funnel.review_queue(
+        items, pr_facts=facts)] == ["nateprich/beta#11"]
+    assert funnel.approved_merge_candidates(items, pr_facts=facts) == []
+
+
+@pytest.mark.parametrize("trust", NOT_THE_FUNNELS)
+def test_a_foreign_pr_beside_the_owners_leaves_the_owners_as_the_fact(
+        monkeypatch, trust):
+    # Newest first, as GitHub returns them: the stranger's PR is newer.
+    rows = [pr_row(30, "ticket/10", **trust), pr_row(10, "ticket/10")]
+    monkeypatch.setattr(funnel, "gh_graphql", repo_graphql_reads(rows))
+
+    facts = funnel.ticket_pr_facts([ticket(10)])
+
+    assert facts["nateprich/beta#10"]["number"] == 10
+    assert [row["number"] for row in
+            facts.rows_by_ref["nateprich/beta#10"]] == [10]
+
+
+@pytest.mark.parametrize("trust", NOT_THE_FUNNELS)
+def test_an_approved_foreign_pr_in_an_injected_map_is_never_merged(
+        monkeypatch, trust):
+    """The row accessor holds even when a caller supplies its own map."""
+    row = pr_row(30, "ticket/10", **trust)
+    row["verdict"] = {"verdict": "approved", "head_sha": "abc123"}
+    facts = funnel.TicketPRFacts(
+        {"nateprich/beta#10": row},
+        rows_by_ref={"nateprich/beta#10": [row]},
+    )
+    merged = []
+    monkeypatch.setattr(
+        funnel, "cmd_merge",
+        lambda *args, **kwargs: merged.append(args) or 0)
+    items = [ticket(10)]
+
+    assert funnel.approved_merge_candidates(items, pr_facts=facts) == []
+    assert funnel.reconcile_approved_merges(items, NOW, pr_facts=facts) == []
+    assert merged == []
+    assert funnel.awaiting_review(items, pr_facts=facts) == set()
+    assert funnel.review_queue(items, pr_facts=facts) == []
+
+    # A legacy map without rows_by_ref goes through the same accessor.
+    legacy = {"nateprich/beta#10": row}
+    assert funnel.approved_merge_candidates(items, pr_facts=legacy) == []
+    assert funnel.awaiting_review(items, pr_facts=legacy) == set()
+
+
+def test_the_owners_approved_pr_is_still_merged_by_reconciliation(
+        monkeypatch):
+    row = pr_row(10, "ticket/10")
+    row["verdict"] = {"verdict": "approved", "head_sha": "abc123"}
+    facts = funnel.TicketPRFacts(
+        {"nateprich/beta#10": row},
+        rows_by_ref={"nateprich/beta#10": [row]},
+    )
+    merged = []
+    monkeypatch.setattr(
+        funnel, "cmd_merge",
+        lambda items, now, repo, pr, confirmed, **kwargs:
+        merged.append((repo, pr)) or 0)
+
+    results = funnel.reconcile_approved_merges(
+        [ticket(10)], NOW, pr_facts=facts)
+
+    assert merged == [("nateprich/beta", 10)]
+    assert [entry["result"] for entry in results] == ["merged"]
+
+
+@pytest.mark.parametrize("trust", NOT_THE_FUNNELS)
+def test_the_index_and_its_history_rows_hold_only_funnel_prs(
+        monkeypatch, trust):
+    rows = [pr_row(30, "ticket/10", **trust), pr_row(10, "ticket/10"),
+            pr_row(31, "ticket/12", **trust)]
+    monkeypatch.setattr(funnel, "gh_graphql", repo_graphql_reads(rows))
+
+    index, truncated = funnel.ticket_pr_index("nateprich/beta", limit=10)
+
+    assert truncated is False
+    assert index["nateprich/beta#10"]["number"] == 10
+    assert "nateprich/beta#12" not in index
+    assert [row["number"] for row in index.all_rows] == [10]
+
+
+def test_the_index_still_reports_truncation_from_the_whole_scan(monkeypatch):
+    """Dropping foreign rows must not hide that the window was full."""
+    limit = funnel.MERGED_PR_SCAN_LIMIT
+    monkeypatch.setattr(
+        funnel, "gh_graphql", repo_graphql_reads([
+            pr_row(n, "ticket/{}".format(n), **FORK)
+            for n in range(1, limit + 2)
+        ])
+    )
+
+    index, truncated = funnel.ticket_pr_index("nateprich/beta")
+
+    assert truncated is True
+    assert len(index) == 0
+
+
+@pytest.mark.parametrize("trust", NOT_THE_FUNNELS)
+def test_a_merged_foreign_pr_does_not_finish_an_open_ticket(
+        monkeypatch, trust):
+    rows = [pr_row(30, "ticket/10", state="MERGED", **trust),
+            pr_row(11, "ticket/11", state="MERGED")]
+    monkeypatch.setattr(funnel, "gh_graphql", repo_graphql_reads(rows))
+
+    facts = funnel.merged_pr_facts([ticket(10), ticket(11)])
+
+    assert facts.ticket_refs == frozenset({"nateprich/beta#11"})
 
 
 def test_an_unreadable_response_fails_closed(monkeypatch):

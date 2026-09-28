@@ -59,7 +59,9 @@ def pr(**kw):
     data = {"state": "OPEN", "headRefName": "ticket/9", "headRefOid": SHA,
             "mergeable": "MERGEABLE",
             "statusCheckRollup": [{"name": "tests",
-                                   "conclusion": "SUCCESS"}]}
+                                   "conclusion": "SUCCESS"}],
+            # The funnel's own PR: same-repository head, owner author (#1794).
+            "isCrossRepository": False, "author": {"login": "nateprich"}}
     data.update(kw)
     return data
 
@@ -67,7 +69,8 @@ def pr(**kw):
 def wire(monkeypatch, pr_json, comments):
     fact = dict(pr_json)
     fact["number"] = 5
-    fact["comments"] = [{"body": body} for body in comments]
+    fact["comments"] = [{"body": body, "author": {"login": "nateprich"}}
+                        for body in comments]
     fact["verdict"] = funnel._latest_verdict_from_comments(fact["comments"])
     monkeypatch.setattr(
         funnel, "_pr_fact_for_number", lambda repo, number, **kwargs: dict(fact)

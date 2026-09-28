@@ -115,7 +115,8 @@ PLAN_PREMISE_ROW_RE = re.compile(
 # same forms GitHub renders elsewhere: owner/repo#n, #n, or an issue URL.
 EVIDENCE_ISSUE_REF_RE = re.compile(
     r"(?P<url>https?://github\.com/(?P<url_owner>[A-Za-z0-9_.-]+)/"
-    r"(?P<url_repo>[A-Za-z0-9_.-]+)/issues/(?P<url_number>[1-9][0-9]*)/?)"
+    r"(?P<url_repo>[A-Za-z0-9_.-]+)/issues/"
+    r"(?P<url_number>[1-9][0-9]*)/?)"
     r"|(?<![A-Za-z0-9_.-])(?P<full>(?P<owner>[A-Za-z0-9_.-]+)/"
     r"(?P<repo>[A-Za-z0-9_.-]+)#(?P<number>[1-9][0-9]*))"
     r"|(?<![A-Za-z0-9_/])#(?P<bare_number>[1-9][0-9]*)")
@@ -1570,6 +1571,287 @@ def evidence_ticket_is_unrunnable(evidence_pointer: object,
     return False
 
 
+def annotate_unrunnable_premises(packet: Dict) -> Dict:
+    """Record live-verified deferrals and premise-label errors in a packet.
+
+    ``build_packet`` stays pure. ``collect`` calls this after assembling its
+    packet so only live GitHub state can add ``deferred_answer`` for inferred
+    premises or ``label_error`` for measured/documented premises. Unavailable
+    plan groups and unresolved issue reads keep the existing review path.
+    """
+    ticket = packet.get("ticket")
+    reviewed_ref = ticket.get("ref") if isinstance(ticket, dict) else None
+    if (not isinstance(reviewed_ref, str)
+            or _issue_ref_parts(reviewed_ref) is None):
+        return packet
+
+    groups = packet.get("plan_premises")
+    if not isinstance(groups, list):
+        return packet
+
+    checked: Dict[str, bool] = {}
+    for group in groups:
+        if not isinstance(group, dict) or group.get("available") is not True:
+            continue
+        premises = group.get("premises")
+        if not isinstance(premises, list):
+            continue
+        for premise in premises:
+            if not isinstance(premise, dict):
+                continue
+            label = premise.get("label")
+            if label not in {"inferred", "measured", "documented"}:
+                continue
+            evidence = premise.get("evidence")
+            if not isinstance(evidence, str) or not evidence.strip():
+                continue
+            if evidence not in checked:
+                try:
+                    checked[evidence] = evidence_ticket_is_unrunnable(
+                        evidence, reviewed_ref)
+                except funnel.GitHubError:
+                    # No verified forward pointer: preserve the probe path.
+                    checked[evidence] = False
+            if checked[evidence]:
+                if label == "inferred":
+                    premise["deferred_answer"] = {
+                        "status": "deferred",
+                        "evidence_pointer": evidence,
+                        "reviewed_ticket": reviewed_ref,
+                        "reason": (
+                            "live issue state shows the named evidence ticket "
+                            "is open and cannot run before the reviewed ticket "
+                            "is complete"
+                        ),
+                    }
+                else:
+                    premise["label_error"] = {
+                        "status": "verified",
+                        "label": label,
+                        "evidence_pointer": evidence,
+                        "reviewed_ticket": reviewed_ref,
+                        "reason": (
+                            "live issue state shows the named evidence ticket "
+                            "is open and cannot run before the reviewed ticket "
+                            "is complete"
+                        ),
+                    }
+    return packet
+
+
+def _verified_deferred_premises(packet: Dict) -> List[Dict[str, str]]:
+    """Return only deferrals whose packet fields match the live premise."""
+    ticket = packet.get("ticket")
+    reviewed_ref = ticket.get("ref") if isinstance(ticket, dict) else None
+    if not isinstance(reviewed_ref, str):
+        return []
+    groups = packet.get("plan_premises")
+    if not isinstance(groups, list):
+        return []
+    verified: List[Dict[str, str]] = []
+    for group in groups:
+        if not isinstance(group, dict) or group.get("available") is not True:
+            continue
+        parent_ref = group.get("parent_ref")
+        if not isinstance(parent_ref, str):
+            continue
+        premises = group.get("premises")
+        if not isinstance(premises, list):
+            continue
+        for premise in premises:
+            if (not isinstance(premise, dict)
+                    or premise.get("label") != "inferred"):
+                continue
+            claim = premise.get("claim")
+            evidence = premise.get("evidence")
+            deferred = premise.get("deferred_answer")
+            if (not isinstance(claim, str) or not claim
+                    or not isinstance(evidence, str) or not evidence
+                    or not isinstance(deferred, dict)
+                    or deferred.get("status") != "deferred"
+                    or deferred.get("evidence_pointer") != evidence
+                    or deferred.get("reviewed_ticket") != reviewed_ref):
+                continue
+            verified.append({
+                "claim": claim,
+                "evidence": evidence,
+                "label": "inferred",
+                "parent_ref": parent_ref,
+                "reviewed_ticket": reviewed_ref,
+            })
+    return verified
+
+
+def _deferred_premise_requirement(premise: Dict[str, str]) -> str:
+    parts = _issue_ref_parts(premise["reviewed_ticket"])
+    reviewed_ticket = ("#{}".format(parts[1]) if parts
+                       else premise["reviewed_ticket"])
+    return ("Defer the inferred premise '{}' to its evidence pointer '{}' "
+            "until ticket {} is complete.").format(
+        premise["claim"], premise["evidence"], reviewed_ticket)
+
+
+def _verified_label_error_premises(packet: Dict) -> List[Dict[str, str]]:
+    """Return only live-verified measured/documented forward-pointer errors."""
+    ticket = packet.get("ticket")
+    reviewed_ref = ticket.get("ref") if isinstance(ticket, dict) else None
+    if not isinstance(reviewed_ref, str):
+        return []
+    groups = packet.get("plan_premises")
+    if not isinstance(groups, list):
+        return []
+    verified: List[Dict[str, str]] = []
+    for group in groups:
+        if not isinstance(group, dict) or group.get("available") is not True:
+            continue
+        parent_ref = group.get("parent_ref")
+        if not isinstance(parent_ref, str):
+            continue
+        premises = group.get("premises")
+        if not isinstance(premises, list):
+            continue
+        for premise in premises:
+            if not isinstance(premise, dict):
+                continue
+            label = premise.get("label")
+            claim = premise.get("claim")
+            evidence = premise.get("evidence")
+            error = premise.get("label_error")
+            if (label not in {"measured", "documented"}
+                    or not isinstance(claim, str) or not claim
+                    or not isinstance(evidence, str) or not evidence
+                    or not isinstance(error, dict)
+                    or error.get("status") != "verified"
+                    or error.get("label") != label
+                    or error.get("evidence_pointer") != evidence
+                    or error.get("reviewed_ticket") != reviewed_ref):
+                continue
+            verified.append({
+                "claim": claim,
+                "evidence": evidence,
+                "label": label,
+                "parent_ref": parent_ref,
+                "reviewed_ticket": reviewed_ref,
+            })
+    return verified
+
+
+def _label_error_premise_requirement(premise: Dict[str, str]) -> str:
+    parts = _issue_ref_parts(premise["reviewed_ticket"])
+    reviewed_ticket = ("#{}".format(parts[1]) if parts
+                       else premise["reviewed_ticket"])
+    return ("Reject the {} premise '{}' as a labeling error because its "
+            "evidence pointer '{}' names an open ticket that cannot run "
+            "before ticket {} is complete.").format(
+                premise["label"], premise["claim"], premise["evidence"],
+                reviewed_ticket)
+
+
+def _is_verified_premise_probe(requirement: str,
+                               premise: Dict[str, str]) -> bool:
+    """Match only the canonical lister probe for this exact premise."""
+    parent_parts = _issue_ref_parts(premise.get("parent_ref"))
+    reviewed_parts = _issue_ref_parts(premise.get("reviewed_ticket"))
+    label = premise.get("label")
+    claim = premise.get("claim")
+    evidence = premise.get("evidence")
+    if (parent_parts is None or reviewed_parts is None
+            or not isinstance(label, str)
+            or not isinstance(claim, str)
+            or not isinstance(evidence, str)):
+        return False
+
+    parent_repo, parent_number = parent_parts
+    reviewed_repo, _ = reviewed_parts
+    parent_ref = ("#{}".format(parent_number) if parent_repo == reviewed_repo
+                  else "{}#{}".format(parent_repo, parent_number))
+    text = requirement.casefold()
+    prefix = (
+        "Probe the parent plan {} premise labelled {} against live evidence "
+        "using its evidence pointer: '{}'".format(
+            parent_ref, label, claim)
+    ).casefold()
+    if not text.startswith(prefix):
+        return False
+
+    # The lister may include a short parenthetical explanation before the
+    # pointer. Keep that part of the canonical shape, and require its exact
+    # evidence value so unrelated requirements sharing a claim survive.
+    suffix = text[len(prefix):]
+    if not suffix.startswith(" ("):
+        return False
+    parenthetical, separator, _ = suffix.partition(");")
+    if not separator:
+        return False
+    return "evidence pointer: {}".format(evidence.casefold()) in parenthetical
+
+
+def normalize_plan_premise_requirements(
+        packet: Dict, requirements: Sequence[str]) -> List[str]:
+    """Replace model probe requirements with verified canonical premise rows.
+
+    The runner verifies these fields itself, so a lister wording lapse cannot
+    turn a verified deferral into an unsure probe or hide a verified label
+    error behind one.
+    """
+    deferred = _verified_deferred_premises(packet)
+    label_errors = _verified_label_error_premises(packet)
+    verified = deferred + label_errors
+    if not verified:
+        return list(requirements)
+
+    kept: List[str] = []
+    for requirement in requirements:
+        if any(_is_verified_premise_probe(requirement, premise)
+               for premise in verified):
+            continue
+        kept.append(requirement)
+
+    for premise, canonical in (
+            [(row, _deferred_premise_requirement(row)) for row in deferred]
+            + [(row, _label_error_premise_requirement(row))
+               for row in label_errors]):
+        if canonical not in kept:
+            kept.append(canonical)
+    return kept
+
+
+def mark_verified_premise_requirements(
+        packet: Dict, results: Sequence[Dict]) -> List[Dict]:
+    """Resolve canonical premise checks from matching verified packet fields."""
+    verified = {
+        _deferred_premise_requirement(premise): (
+            "met",
+            "Verified packet deferral: the inferred premise's evidence pointer "
+            "and reviewed ticket match its live deferred_answer.")
+        for premise in _verified_deferred_premises(packet)
+    }
+    verified.update({
+        _label_error_premise_requirement(premise): (
+            "unmet",
+            "Verified labeling error: the measured/documented premise's "
+            "evidence pointer names an open ticket that cannot run before "
+            "the reviewed ticket is complete.")
+        for premise in _verified_label_error_premises(packet)
+    })
+    marked: List[Dict] = []
+    for result in results:
+        if not isinstance(result, dict):
+            marked.append(result)
+            continue
+        requirement = result.get("requirement")
+        resolution = verified.get(requirement)
+        if resolution is None:
+            marked.append(result)
+            continue
+        status, evidence = resolution
+        resolved = dict(result)
+        resolved["status"] = status
+        resolved["evidence"] = evidence
+        marked.append(resolved)
+    return marked
+
+
 def _comment_connection_page(connection: object, label: str
                              ) -> Tuple[List[dict], bool, Optional[str]]:
     """Read one GraphQL comment page, failing closed on an incomplete shape."""
@@ -2554,7 +2836,7 @@ def collect(repo: Optional[str], pr_number: int, *,
             scope_source = "compare"
     if scope_diff is None:
         scope_diff = fetch_diff(resolved, pr_number)
-    return build_packet(
+    packet = build_packet(
         repo=resolved,
         pr_number=pr_number,
         pr_view=pr_view,
@@ -2574,6 +2856,9 @@ def collect(repo: Optional[str], pr_number: int, *,
         stop_counter=fetch_stop_counter(lambda: loaded_items, now),
         collected_at=(now or datetime.now(timezone.utc)).isoformat(),
     )
+    # Keep build_packet pure; unrunnability depends on fresh GitHub state.
+    packet = annotate_unrunnable_premises(packet)
+    return packet
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:

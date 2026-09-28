@@ -231,7 +231,7 @@ def test_capture_records_caused_by_refs(monkeypatch):
 def test_capture_cli_passes_repeated_caused_by_refs(monkeypatch):
     received = {}
 
-    def capture(*args):
+    def capture(*args, **kwargs):
         received["args"] = args
         return 0
 
@@ -333,6 +333,7 @@ def test_agent_capture_sets_class_after_project_add(monkeypatch):
     assert funnel.cmd_capture(
         [], NOW, "An observed defect", "A note", "owner/repo",
         run="capture-run", agent="codex", origin="agent", klass="Broken",
+        observed="heartbeat run capture-run finished errored",
     ) == 0
 
     add_index = next(
@@ -463,3 +464,131 @@ def test_capture_agent_class_is_required_before_github_is_loaded(monkeypatch, ca
 
     assert exc.value.code == 2
     assert "--class is required with --origin agent" in capsys.readouterr().err
+
+
+def _filing_doubles(monkeypatch):
+    """Fake the issue create, Project add and field writes; return the log."""
+    calls = []
+
+    def run(args, capture_output, text=True):
+        calls.append(("run", tuple(args)))
+        if args[1:3] == ["issue", "create"]:
+            return SimpleNamespace(
+                returncode=0,
+                stdout="https://github.com/owner/repo/issues/123\n",
+                stderr="",
+            )
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps({"id": "project-item-123"}),
+            stderr="",
+        )
+
+    def graphql(query, **variables):
+        calls.append(("graphql", variables))
+        return {}
+
+    monkeypatch.setattr(funnel.subprocess, "run", run)
+    monkeypatch.setattr(funnel, "gh_graphql", graphql)
+    monkeypatch.setattr(
+        funnel, "_option_id", lambda field_id, name: "{}-option".format(name)
+    )
+    return calls
+
+
+def _created_body(calls):
+    create = next(
+        call[1] for call in calls
+        if call[0] == "run" and call[1][1:3] == ("issue", "create")
+    )
+    return create[create.index("--body") + 1]
+
+
+@pytest.mark.parametrize("observed", [None, "", "   \n "])
+def test_agent_broken_capture_without_observed_refuses_and_names_bug(
+        monkeypatch, observed):
+    """Broken is observed-only (#1847): an agent's Broken capture with no
+    evidence refuses before anything is filed, and names Bug as the class
+    for a find that has not happened."""
+    monkeypatch.setattr(
+        funnel, "resolve_repo", lambda repo: pytest.fail("repo was resolved")
+    )
+    monkeypatch.setattr(
+        funnel.subprocess, "run",
+        lambda *args, **kwargs: pytest.fail("GitHub was called"),
+    )
+
+    with pytest.raises(funnel.GitHubError) as exc:
+        funnel.cmd_capture(
+            [], NOW, "A latent defect", "Read in review.", "owner/repo",
+            run="capture-run", agent="claude", origin="agent",
+            klass="Broken", observed=observed,
+        )
+
+    message = str(exc.value)
+    assert "--class Broken requires --observed" in message
+    assert "--class Bug" in message
+
+
+def test_broken_capture_without_observed_refuses_before_github_is_loaded(
+        monkeypatch, capsys):
+    monkeypatch.setattr(
+        funnel, "load_items", lambda: pytest.fail("GitHub should not be loaded")
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        funnel.main([
+            "capture", "A latent defect", "--repo", "owner/repo",
+            "--origin", "agent", "--class", "Broken",
+        ])
+
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert "--class Broken requires --observed" in err
+    assert "--class Bug" in err
+
+
+def test_broken_capture_with_observed_files_and_carries_the_evidence(
+        monkeypatch):
+    """With `--observed`, the capture files as Broken and its body carries
+    the evidence on its own `**Observed:**` line, above the provenance."""
+    calls = _filing_doubles(monkeypatch)
+
+    assert funnel.main([
+        "capture", "begin wedges on a closed ticket", "--repo", "owner/repo",
+        "--run", "capture-run", "--agent", "claude",
+        "--origin", "agent", "--class", "Broken",
+        "--note", "Every standard fire since 09:10 stopped the same way.",
+        "--observed", "heartbeat run 5d1c errored: no funnel item matches #12",
+    ], _items=[]) == 0
+
+    body = _created_body(calls)
+    lines = body.splitlines()
+    assert ("**Observed:** heartbeat run 5d1c errored: no funnel item "
+            "matches #12") in lines
+    assert lines.index(
+        "**Observed:** heartbeat run 5d1c errored: no funnel item matches #12"
+    ) < lines.index(funnel.PROVENANCE_MARKER)
+    assert body.startswith(
+        "Every standard fire since 09:10 stopped the same way.")
+    assert [
+        call[1]["option"] for call in calls
+        if call[0] == "graphql"
+        and call[1].get("field") == funnel.CLASS_FIELD_ID
+    ] == ["Broken-option"]
+
+
+def test_nate_relayed_broken_capture_needs_no_flag_and_records_his_report(
+        monkeypatch):
+    """Nate's report is the observation: his Broken capture files without
+    `--observed` and says his report is the evidence (#1847)."""
+    calls = _filing_doubles(monkeypatch)
+
+    assert funnel.main([
+        "capture", "The dashboard shows yesterday's queue", "--repo",
+        "owner/repo", "--run", "capture-run", "--agent", "claude",
+        "--origin", "nate-relayed", "--voice", "nate-relayed",
+        "--class", "Broken", "--note", "Nate saw it this morning.",
+    ], _items=[]) == 0
+
+    assert "**Observed:** Nate's report." in _created_body(calls).splitlines()

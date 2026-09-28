@@ -152,6 +152,8 @@ WRITERS = frozenset({
     "funnel.py:_needs_decision_comment_body",
     "funnel.py:_write_verdict",
     "funnel.py:cmd_park",
+    "funnel.py:cmd_capture",
+    "funnel.py:cmd_promote",
     "decline_classifier.py:declined_review_routing_comment",
     "decline_classifier.py:declined_unsatisfiable_acceptance_comment",
     "decline_classifier.py:declined_pending_gate_answer_comment",

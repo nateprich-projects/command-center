@@ -139,3 +139,14 @@ are exercised by `tests/test_engine_shape.py`. An `Investigate` plan delivers
 evidence, never the fix: follow-ups are new ideas, classed for the work and
 linked back. **Still his:** the class on anything *he* raises, and any
 reclassification. Propose, do not set.
+
+`Broken` is observed (#1832): an agent's `capture --class Broken` refuses
+without `--observed <evidence>` (a run or heartbeat id, a CI run, a log line, a
+wedge, or Nate's report) and writes it into the issue; a capture Nate raised
+records his report as the evidence. A defect found by reading, review or tests
+that has not happened is `Bug`; when one does happen,
+`funnel promote <n> --observed <evidence>` moves it to `Broken`. A latent
+security or privacy exposure stays `Broken`, with `--observed` naming the
+exposure: one that enables unauthorised read, write or execution, or sends
+private data outside its audience, such as a public-repo leak or an injection
+path.

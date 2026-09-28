@@ -552,6 +552,19 @@ NEEDS_DECISION_RE = re.compile(
 #: and ``stranded_items`` flags the block until a parseable one replaces it.
 DECLINED_PREFIX = "**Declined:**"
 
+#: Broken is observed, not latent (#1832). A Broken capture carries its
+#: evidence on this line in the issue body, and `promote` posts it as a comment
+#: when a Bug happens (#1847): a run or heartbeat id, a CI run, a log line, a
+#: wedge, or Nate's report. The issue is where Nate reads the proof, so it
+#: lives there rather than in a new store. Nothing parses it yet; anyone can
+#: comment on a public repo, so a reader of these comments must filter them
+#: with `trusted_comment` (#1788).
+OBSERVED_PREFIX = "**Observed:** "
+
+#: What a Broken capture Nate raised records when it is given no `--observed`.
+#: His report is the observation, so his captures do not need the flag (#1847).
+OBSERVED_NATE_REPORT = "Nate's report."
+
 #: A satisfied block is recorded before its label is removed. The structured
 #: payload makes a partial failure idempotent: the next run can retry the label
 #: write without posting a second provenance comment for the same block.
@@ -15591,13 +15604,42 @@ def _capture_item_add_is_transient(error: str) -> bool:
     return bool(re.search(r"\b(?:500|502|503|504)\b", lowered))
 
 
+def _capture_observed(origin: Optional[str], klass: Optional[str],
+                      observed: Optional[str]) -> Tuple[Optional[str],
+                                                        Optional[str]]:
+    """The evidence line a capture writes, or why it must refuse (#1847).
+
+    Returns ``(evidence, refusal)``. Broken preempts because it is finite, and
+    it stays finite only while it holds failures that happened (#1832), so an
+    agent's Broken capture must name what it saw. A capture Nate raised is his
+    report, which is itself the observation: it needs no flag, and records
+    that his report is the evidence. `main` and `cmd_capture` both ask this,
+    so the parser refuses before any GitHub read and the seam refuses too.
+    """
+    evidence = observed.strip() if isinstance(observed, str) else ""
+    if evidence:
+        return evidence, None
+    if klass != "Broken":
+        return None, None
+    if origin == "nate-relayed":
+        return OBSERVED_NATE_REPORT, None
+    return None, (
+        "capture --class Broken requires --observed <evidence>: a run or "
+        "heartbeat id, a CI run, a log line, a wedge, or Nate's report. A "
+        "defect found by reading, review or tests that has not happened is "
+        "--class Bug; a latent security or privacy exposure stays Broken, "
+        "with --observed naming the exposure."
+    )
+
+
 def cmd_capture(items: List[Item], now: datetime, title: str, note: Optional[str],
                 repo: Optional[str], run: Optional[str] = None,
                 agent: Optional[str] = None,
                 origin: Optional[str] = None,
                 klass: Optional[str] = None,
                 caused_by: Optional[Sequence[str]] = None,
-                voice: str = "agent") -> int:
+                voice: str = "agent",
+                observed: Optional[str] = None) -> int:
     """Capture an idea. Unbounded and guilt-free, by design."""
     if origin not in ORIGIN_VOICES:
         raise GitHubError(
@@ -15615,6 +15657,9 @@ def cmd_capture(items: List[Item], now: datetime, title: str, note: Optional[str
                 klass, ", ".join(LADDER)
             )
         )
+    evidence, refusal = _capture_observed(origin, klass, observed)
+    if refusal is not None:
+        raise GitHubError(refusal)
     caused_by_refs = []
     if caused_by is not None:
         caused_by_refs = [
@@ -15624,10 +15669,10 @@ def cmd_capture(items: List[Item], now: datetime, title: str, note: Optional[str
         if not caused_by_refs:
             raise GitHubError("--caused-by requires a non-empty PR or ticket reference")
     repo = capture_repo(repo, run, agent)
-    body = append_provenance(
-        note or "Captured from chat. Not yet thought through.", voice,
-        at=now, run=run, agent=agent,
-    )
+    text = note or "Captured from chat. Not yet thought through."
+    if evidence is not None:
+        text = "{}\n\n{}{}".format(text, OBSERVED_PREFIX, evidence)
+    body = append_provenance(text, voice, at=now, run=run, agent=agent)
     if caused_by_refs:
         body = append_caused_by(body, caused_by_refs, at=now)
     args = [
@@ -15674,6 +15719,59 @@ def cmd_capture(items: List[Item], now: datetime, title: str, note: Optional[str
         print("{}  → Ideas (needs-shaping) in {}".format(url, repo))
     else:
         raise GitHubError(_capture_item_add_error(add))
+    return 0
+
+
+def cmd_promote(items: List[Item], now: datetime, ref: str, observed: str,
+                run: Optional[str] = None,
+                agent: Optional[str] = None) -> int:
+    """Move a Bug that has now happened to Broken, with its evidence (#1847).
+
+    A Bug is latent and never preempts; once it is seen to happen it is an
+    observed failure, which is what Broken holds (#1832). The move takes the
+    same evidence a Broken capture does. The `**Observed:**` comment is
+    posted before the Class write, so a failed write leaves a Bug with its
+    evidence to retry from, never a Broken item without its proof.
+    """
+    evidence = observed.strip() if isinstance(observed, str) else ""
+    if not evidence:
+        raise GitHubError(
+            "promote requires --observed <evidence>: a run or heartbeat id, "
+            "a CI run, a log line, a wedge, or Nate's report"
+        )
+    item = find(items, ref)
+    if item.klass != "Bug":
+        raise GitHubError(
+            "promote moves a Bug to Broken; {} is Class {}".format(
+                item.ref, item.klass or "unset"
+            )
+        )
+    # Class on a closed issue orders nothing, so the failure would be recorded
+    # and never worked. A closed Bug that happens is a new Broken capture.
+    if item.state != "OPEN":
+        raise GitHubError(
+            "{} is closed; capture the failure as a new --class Broken item "
+            "with --caused-by {}".format(item.ref, item.ref)
+        )
+    comment = _run_gh(
+        ["gh", "issue", "comment", str(item.number), "--repo", item.repo,
+         "--body", append_provenance(
+             "{}{}\n\nPromoted from Bug to Broken: this latent defect has now "
+             "happened.".format(OBSERVED_PREFIX, evidence),
+             "agent", at=now, run=run, agent=agent)],
+        capture_output=True, text=True,
+    )
+    if comment.returncode != 0:
+        raise GitHubError(comment.stderr.strip())
+    gh_graphql(
+        SET_FIELD,
+        project=PROJECT_ID,
+        item=item.item_id,
+        field=CLASS_FIELD_ID,
+        option=_option_id(CLASS_FIELD_ID, "Broken"),
+    )
+    item.klass = "Broken"
+    print("{} → Broken (was Bug)".format(item.ref))
     return 0
 
 
@@ -20026,6 +20124,28 @@ def main(argv: Optional[Sequence[str]] = None, *,
         metavar="REF",
         help="earlier PR or ticket that caused this idea; repeat for more",
     )
+    capture.add_argument(
+        "--observed", default=None, metavar="EVIDENCE",
+        help="what shows it happened: a run or heartbeat id, CI run, log "
+             "line, wedge, or Nate's report; required for --class Broken "
+             "with --origin agent",
+    )
+    promote = sub.add_parser(
+        "promote", help="move a Bug that has happened to Broken, with evidence")
+    promote.add_argument("ref", help="issue number, owner/repo#number, or URL")
+    promote.add_argument(
+        "--observed", required=True, metavar="EVIDENCE",
+        help="what shows it happened: a run or heartbeat id, CI run, log "
+             "line, wedge, or Nate's report",
+    )
+    promote.add_argument(
+        "--run", default=None,
+        help="heartbeat run id; otherwise infer a unique open local start",
+    )
+    promote.add_argument(
+        "--agent", default=None,
+        help="agent that wrote the comment; otherwise read the heartbeat spool",
+    )
     claim = sub.add_parser("claim", help="take the single-in-motion lock on a ticket")
     claim.add_argument("ref", help="issue number, owner/repo#number, or URL")
     release = sub.add_parser("release", help="give up the lock on a ticket")
@@ -20224,6 +20344,10 @@ def main(argv: Optional[Sequence[str]] = None, *,
     if (args.command == "capture" and args.origin == "agent"
             and args.klass is None):
         parser.error("--class is required with --origin agent")
+    if args.command == "capture":
+        refusal = _capture_observed(args.origin, args.klass, args.observed)[1]
+        if refusal is not None:
+            parser.error(refusal)
 
     global _ACTIVE_HEARTBEAT_RUN, _ACTIVE_HEARTBEAT_AGENT
     _ACTIVE_HEARTBEAT_RUN = getattr(args, "run", None)
@@ -20529,7 +20653,11 @@ def main(argv: Optional[Sequence[str]] = None, *,
         if args.command == "capture":
             return cmd_capture(items, now, args.title, args.note, args.repo,
                                args.run, args.agent, args.origin, args.klass,
-                               args.caused_by, args.voice)
+                               args.caused_by, args.voice,
+                               observed=args.observed)
+        if args.command == "promote":
+            return cmd_promote(items, now, args.ref, args.observed,
+                               args.run, args.agent)
         if args.command == "begin":
             begin_kwargs = {
                 "repo_readiness": repo_readiness,

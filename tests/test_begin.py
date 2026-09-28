@@ -2103,6 +2103,61 @@ def test_codex_begin_skips_the_other_tier_before_claiming(monkeypatch, capsys):
     assert [ref for ref, value in writes if value] == [standard.ref]
 
 
+def test_begin_uses_one_shared_startable_order_for_the_165_regression(
+    monkeypatch, capsys,
+):
+    import heartbeat
+
+    repo = "nateprich-projects/command-center"
+    project = funnel.Item(
+        repo=repo, number=162, title="Project 162",
+        url="https://github.com/{}/issues/162".format(repo),
+        state="OPEN", status="Building", klass="Investigate",
+        origin="agent", risk="standard", needs="none", children_total=1,
+    )
+    ticket = funnel.Item(
+        repo=repo, number=165, title="Ticket 165",
+        url="https://github.com/{}/issues/165".format(repo),
+        state="OPEN", body="Risk: standard", origin="agent",
+        risk="standard", needs="none", parent=project.ref,
+        item_id="item-165",
+    )
+    records = [
+        {"run": "e1b3abbcf90a", "phase": "bind", "do": "ticket",
+         "work": ticket.ref, "ts": 100},
+        {"run": "e1b3abbcf90a", "phase": "finish", "ts": 150,
+         "outcome": "skipped-human-step",
+         "note": ("finished by comments: https://github.com/"
+                  "nateprich-projects/command-center/issues/780; "
+                  "waiting on Nate to close #781")},
+    ]
+    monkeypatch.setattr(heartbeat, "PROVIDERS", {"codex": "openai"})
+    monkeypatch.setattr(heartbeat, "RETIRED_AGENTS", frozenset())
+    monkeypatch.setattr(heartbeat, "read", lambda _agent: records)
+    monkeypatch.setattr(
+        funnel, "finished_by_comments",
+        lambda rows: set(funnel.finished_by_comments_runs(rows)),
+    )
+
+    calls = []
+    original_listing = funnel.startable_listing
+
+    def counted_listing(*args, **kwargs):
+        result = original_listing(*args, **kwargs)
+        calls.append([item.ref for item in result])
+        return result
+
+    monkeypatch.setattr(funnel, "startable_listing", counted_listing)
+    result, writes = _implementing_begin(
+        monkeypatch, capsys, [project, ticket], tier="standard",
+    )
+
+    assert result["do"] == "ticket"
+    assert result["work"]["ref"] == ticket.ref
+    assert [ref for ref, value in writes if value] == [ticket.ref]
+    assert calls == [[ticket.ref]]
+
+
 def test_muse_escalated_begin_no_longer_claims_a_ticket(monkeypatch, capsys):
     """Muse judges and Codex implements (Nate, 2026-09-22, #1315, #1322):
     an escalated Muse begin with no role takes the review path."""

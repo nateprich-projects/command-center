@@ -2665,8 +2665,90 @@ def startable(
     spends a whole run to fail a fourth: FF-Weekly-Start-Sit#208 was offered
     eleven times in 23 hours and errored on every one but the last.
     """
+    candidates = _filter_startable_items(
+        items,
+        awaiting_review=awaiting_review,
+        agent=agent,
+        repo_readiness=repo_readiness,
+        backed_off=backed_off,
+    )
+    return _order_startable_items(items, candidates)
+
+
+def _filter_startable_items(
+    items: Sequence[Item],
+    awaiting_review: Optional[Set[str]] = None,
+    agent: str = "codex",
+    repo_readiness: Optional[Mapping[str, MemberRepoReadiness]] = None,
+    backed_off: Optional[Mapping[str, object]] = None,
+    candidates: Optional[Sequence[Item]] = None,
+) -> List[Item]:
+    """Filter candidate rows using only the loaded Project fields."""
     awaiting_review = awaiting_review or frozenset()
     backed_off = backed_off or {}
+    by_ref = {i.ref: i for i in items}
+    source = list(items) if candidates is None else [
+        by_ref[item.ref] for item in candidates if item.ref in by_ref
+    ]
+
+    def eligible(item: Item) -> bool:
+        if not _startable_without_repo_readiness(
+            item, by_ref, awaiting_review, agent
+        ):
+            return False
+        if _repo_blocking_reasons(item, repo_readiness):
+            return False
+        if item.ref in backed_off:
+            return False
+        return freeze_withhold_reason(item, by_ref) is None
+
+    return [item for item in source if eligible(item)]
+
+
+def _startable_candidate_items(
+    items: Sequence[Item], agent: str = "codex",
+) -> List[Item]:
+    """Filter the Project rows needed by the shared startable listing.
+
+    This uses only fields returned with each Project item. It runs before
+    optional timeline hydration, so callers can avoid reading history for
+    rows that cannot enter the work queue.
+    """
+    by_ref = {item.ref: item for item in items}
+    candidates = []
+    for item in items:
+        if (
+            _startable_without_repo_readiness(
+                item, by_ref, frozenset(), agent
+            )
+            and freeze_withhold_reason(item, by_ref) is None
+        ):
+            candidates.append(item)
+    return candidates
+
+
+def _filter_prequalified_startable_items(
+    candidates: Sequence[Item],
+    awaiting_review: Optional[Set[str]] = None,
+    repo_readiness: Optional[Mapping[str, MemberRepoReadiness]] = None,
+    backed_off: Optional[Mapping[str, object]] = None,
+) -> List[Item]:
+    """Apply the runtime exclusions to rows already checked for startability."""
+    awaiting_review = awaiting_review or frozenset()
+    backed_off = backed_off or {}
+    return [
+        item for item in candidates
+        if item.state == "OPEN"
+        and item.ref not in awaiting_review
+        and not _repo_blocking_reasons(item, repo_readiness)
+        and item.ref not in backed_off
+    ]
+
+
+def _order_startable_items(
+    items: Sequence[Item], candidates: Sequence[Item],
+) -> List[Item]:
+    """Order already-filtered candidates against the complete loaded view."""
     by_ref = {i.ref: i for i in items}
     descendants = dependency_descendants(items)
     effective_rank = {
@@ -2693,20 +2775,6 @@ def startable(
         )
         for ref in by_ref
     }
-
-    def eligible(item: Item) -> bool:
-        if not _startable_without_repo_readiness(
-            item, by_ref, awaiting_review, agent
-        ):
-            return False
-        if _repo_blocking_reasons(item, repo_readiness):
-            return False
-        # Repeated failure is passed in rather than read here, like
-        # `awaiting_review`: the count lives in the heartbeat and this
-        # function stays pure over Items and testable from fixtures.
-        if item.ref in backed_off:
-            return False
-        return freeze_withhold_reason(item, by_ref) is None
 
     def in_flight(item: Item) -> bool:
         """Once a project is Building, its remaining tickets finish first.
@@ -2760,7 +2828,40 @@ def startable(
             item.number,
         )
 
-    return sorted((i for i in items if eligible(i)), key=key)
+    return sorted(candidates, key=key)
+
+
+def startable_listing(
+    items: Sequence[Item],
+    awaiting_review: Optional[Set[str]] = None,
+    agent: str = "codex",
+    repo_readiness: Optional[Mapping[str, MemberRepoReadiness]] = None,
+    backed_off: Optional[Mapping[str, object]] = None,
+    candidate_items: Optional[Sequence[Item]] = None,
+) -> List[Item]:
+    """Build the one filtered, best-first listing consumed by queue and begin.
+
+    Callers pass this result through to selection helpers instead of deriving
+    the ordering again. Queue display and ticket selection therefore use the
+    same filtering and ranking rules; WIP, claims, and tier checks remain
+    filters on the already-ranked candidates.
+    """
+    if candidate_items is None:
+        candidates = _filter_startable_items(
+            items,
+            awaiting_review=awaiting_review,
+            agent=agent,
+            repo_readiness=repo_readiness,
+            backed_off=backed_off,
+        )
+    else:
+        candidates = _filter_prequalified_startable_items(
+            candidate_items,
+            awaiting_review=awaiting_review,
+            repo_readiness=repo_readiness,
+            backed_off=backed_off,
+        )
+    return _order_startable_items(items, candidates)
 
 
 def projected_pull_order(
@@ -4309,6 +4410,7 @@ def next_ticket(items: Sequence[Item], now: datetime,
                     Dict[str, Optional[Dict[str, object]]]
                 ] = None,
                 backed_off: Optional[Mapping[str, object]] = None,
+                startable_order: Optional[Sequence[Item]] = None,
                 ) -> Optional[Item]:
     """The single ticket the requesting agent should work, or None.
 
@@ -4319,12 +4421,16 @@ def next_ticket(items: Sequence[Item], now: datetime,
     """
     excluded = excluded or frozenset()
     queue = [
-        item for item in startable(
-            items,
-            awaiting_review=blocked,
-            agent=agent,
-            repo_readiness=repo_readiness,
-            backed_off=backed_off,
+        item for item in (
+            startable_order
+            if startable_order is not None
+            else startable_listing(
+                items,
+                awaiting_review=blocked,
+                agent=agent,
+                repo_readiness=repo_readiness,
+                backed_off=backed_off,
+            )
         )
         if item.ref not in excluded
     ]
@@ -4364,6 +4470,9 @@ def next_ticket_for_tier(items: Sequence[Item], now: datetime,
                          ] = None,
                          backed_off: Optional[
                              Mapping[str, object]
+                         ] = None,
+                         startable_order: Optional[
+                             Sequence[Item]
                          ] = None) -> Optional[Item]:
     """Return the first shared-order ticket belonging to ``tier``.
 
@@ -4381,6 +4490,7 @@ def next_ticket_for_tier(items: Sequence[Item], now: datetime,
             repo_readiness=repo_readiness,
             pr_facts=pr_facts,
             backed_off=backed_off,
+            startable_order=startable_order,
         )
         if ticket is None or tier is None:
             return ticket
@@ -4401,6 +4511,7 @@ def held_claims_before(
     agent: str = "codex",
     repo_readiness: Optional[Mapping[str, MemberRepoReadiness]] = None,
     pr_facts: Optional[Dict[str, Optional[Dict[str, object]]]] = None,
+    startable_order: Optional[Sequence[Item]] = None,
 ) -> List[str]:
     """Claimed queue entries a selector passed before its chosen ticket.
 
@@ -4411,12 +4522,17 @@ def held_claims_before(
     """
     claimed = {item.ref for item in in_motion(items, now, pr_facts=pr_facts)}
     passed: List[str] = []
-    for candidate in startable(
-        items,
-        awaiting_review=blocked,
-        agent=agent,
-        repo_readiness=repo_readiness,
-    ):
+    ordered = (
+        startable_order
+        if startable_order is not None
+        else startable_listing(
+            items,
+            awaiting_review=blocked,
+            agent=agent,
+            repo_readiness=repo_readiness,
+        )
+    )
+    for candidate in ordered:
         if ticket is not None and candidate.ref == ticket.ref:
             break
         if candidate.ref in claimed:
@@ -10719,14 +10835,53 @@ class ScopedItems(list):
     the full board.
     """
 
-    def __init__(self, items: Iterable[Item] = (), scope: str = "full"):
+    def __init__(
+        self,
+        items: Iterable[Item] = (),
+        scope: str = "full",
+        startable_candidates: Optional[Sequence[Item]] = None,
+        startable_agent: Optional[str] = None,
+    ):
         super().__init__(items)
         self.scope = scope
+        self.startable_candidates = (
+            list(startable_candidates)
+            if startable_candidates is not None else None
+        )
+        self.startable_agent = startable_agent
 
 
 def items_scope(items: Optional[Sequence[Item]]) -> str:
     """The view a loaded item list holds: ``"begin"`` or ``"full"``."""
     return getattr(items, "scope", None) or "full"
+
+
+def _ensure_startable_view(
+    items: Sequence[Item], agent: str = "codex",
+) -> ScopedItems:
+    """Attach the cheap shared candidate view to a cached item list."""
+    if (
+        isinstance(items, ScopedItems)
+        and items.startable_candidates is not None
+        and items.startable_agent == agent
+    ):
+        return items
+    return ScopedItems(
+        items,
+        scope=items_scope(items),
+        startable_candidates=_startable_candidate_items(items, agent=agent),
+        startable_agent=agent,
+    )
+
+
+def _startable_detail_items(
+    items: Sequence[Item], startable_candidates: Sequence[Item],
+) -> List[Item]:
+    """Rows whose queue rendering still benefits from timeline history."""
+    refs = {item.ref for item in startable_candidates}
+    refs.update(item.ref for item in awaiting_decision(items))
+    refs.update(item.ref for item in awaiting_breakdown(items))
+    return [item for item in items if item.ref in refs]
 
 
 #: Session commands the filtered begin view serves as the full board would
@@ -10778,6 +10933,8 @@ def load_items(
     timings: Optional[Dict[str, object]] = None,
     shape_issue: Optional[Tuple[str, int]] = None,
     scope: Optional[str] = None,
+    include_startable: bool = False,
+    startable_agent: str = "codex",
 ) -> List[Item]:
     """Load the funnel's Project items.
 
@@ -10803,12 +10960,21 @@ def load_items(
         begin_items.extend(
             _load_begin_anchor_items(begin_items, members, timings)
         )
+        candidates = (
+            _startable_candidate_items(begin_items, agent=startable_agent)
+            if include_startable else None
+        )
         if include_details:
             _begin_load_timed(
                 timings, "item_details",
                 lambda: hydrate_item_details(begin_items),
             )
-        return ScopedItems(begin_items, scope="begin")
+        return ScopedItems(
+            begin_items,
+            scope="begin",
+            startable_candidates=candidates,
+            startable_agent=startable_agent if include_startable else None,
+        )
     items: List[Item] = []
     cursor = None
     shape_comments: Optional[List[Dict[str, object]]] = None
@@ -10876,9 +11042,25 @@ def load_items(
             )
     if shape_issue is not None:
         _attach_shape_comments(items, shape_issue, shape_comments)
+    candidates = (
+        _startable_candidate_items(items, agent=startable_agent)
+        if include_startable else None
+    )
     if include_details:
+        details = (
+            _startable_detail_items(items, candidates)
+            if candidates is not None else items
+        )
         _begin_load_timed(
-            timings, "item_details", lambda: hydrate_item_details(items)
+            timings, "item_details",
+            lambda: hydrate_item_details(items, details),
+        )
+    if include_startable:
+        return ScopedItems(
+            items,
+            scope="full",
+            startable_candidates=candidates,
+            startable_agent=startable_agent,
         )
     return items
 
@@ -13508,9 +13690,15 @@ def cmd_queue(
     # mismatch is what hid the wedge.
     finished = finished_by_comments_runs(items)
     decisions = awaiting_decision(items)
-    tickets = startable(
+    candidate_items = (
+        getattr(items, "startable_candidates", None)
+        if getattr(items, "startable_agent", None) == "codex"
+        else None
+    )
+    tickets = startable_listing(
         items, awaiting_review=set(in_review) | set(finished),
         repo_readiness=repo_readiness,
+        candidate_items=candidate_items,
     )
 
     print("Waiting on Nate ({}), bottom-up:".format(len(decisions)))
@@ -17710,12 +17898,29 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
             if entry.get("result") == "error" and entry.get("ref")
         )
         begin_backed_off = _backed_off_work(items, now)
+        # Compute the shared best-first startable listing once, before any
+        # selected ticket is hydrated. The queue uses the same listing helper;
+        # begin's WIP, claim, and tier checks consume this exact ordering.
+        candidate_items = (
+            getattr(items, "startable_candidates", None)
+            if getattr(items, "startable_agent", None) == agent
+            else None
+        )
+        startable_order = startable_listing(
+            items,
+            awaiting_review=blocked,
+            agent=agent,
+            repo_readiness=repo_readiness,
+            backed_off=begin_backed_off,
+            candidate_items=candidate_items,
+        )
         ticket = next_ticket_for_tier(
             items, now, tier=tier, blocked=blocked,
             agent=agent,
             repo_readiness=repo_readiness,
             pr_facts=pr_facts,
             backed_off=begin_backed_off,
+            startable_order=startable_order,
         )
         recently_claimed: Set[str] = set()
         while ticket is not None:
@@ -17748,6 +17953,7 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
                 repo_readiness=repo_readiness,
                 pr_facts=pr_facts,
                 backed_off=begin_backed_off,
+                startable_order=startable_order,
             )
         held = held_claims_before(
             items,
@@ -17757,6 +17963,7 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
             agent=agent,
             repo_readiness=repo_readiness,
             pr_facts=pr_facts,
+            startable_order=startable_order,
         )
         if held:
             out["held"] = held
@@ -19885,7 +20092,13 @@ def main(argv: Optional[Sequence[str]] = None, *,
         _items = None
     try:
         if _items is not None:
-            items = _items
+            if args.command in ("begin", "queue"):
+                listing_agent = (
+                    args.agent if args.command == "begin" else "codex"
+                )
+                items = _ensure_startable_view(_items, agent=listing_agent)
+            else:
+                items = _items
         elif _items_loader is not None:
             if args.command == "begin":
                 items = _call_with_optional_keywords(
@@ -19894,6 +20107,15 @@ def main(argv: Optional[Sequence[str]] = None, *,
                     member_repo_names=begin_member_repo_names,
                     timings=begin_timings,
                     scope="begin",
+                    include_startable=True,
+                    startable_agent=args.agent,
+                )
+            elif args.command == "queue":
+                items = _call_with_optional_keywords(
+                    _items_loader,
+                    include_details=project_load_reads_history(args.command),
+                    include_startable=True,
+                    startable_agent="codex",
                 )
             else:
                 items = _call_with_optional_keywords(
@@ -19911,6 +20133,8 @@ def main(argv: Optional[Sequence[str]] = None, *,
                 member_repo_names=begin_member_repo_names,
                 timings=begin_timings,
                 scope="begin",
+                include_startable=True,
+                startable_agent=args.agent,
             )
 
             def hydrate_begin_candidates(candidates):
@@ -19926,6 +20150,8 @@ def main(argv: Optional[Sequence[str]] = None, *,
             items = _call_with_optional_keywords(
                 load_items,
                 include_details=project_load_reads_history(args.command),
+                include_startable=args.command == "queue",
+                startable_agent="codex",
             )
         if args.command == "begin" and begin_detail_loader is None:
             def hydrate_begin_candidates(candidates):
@@ -20600,6 +20826,8 @@ class FunnelSession:
         member_repo_names: Optional[Sequence[str]] = None,
         timings: Optional[Dict[str, object]] = None,
         scope: Optional[str] = None,
+        include_startable: bool = False,
+        startable_agent: str = "codex",
     ) -> List[Item]:
         """Load once per session, or again when the cached read is a
         narrower view than this command asked for.
@@ -20615,8 +20843,18 @@ class FunnelSession:
         if self.items is not None and (
             scope == "begin" or items_scope(self.items) == "full"
         ):
+            if include_startable:
+                self.items = _ensure_startable_view(
+                    self.items, agent=startable_agent
+                )
             if include_details and self._history_pending:
-                hydrate_item_details(self.items)
+                detail_items = (
+                    _startable_detail_items(
+                        self.items, self.items.startable_candidates or []
+                    )
+                    if include_startable else self.items
+                )
+                hydrate_item_details(self.items, detail_items)
                 self._history_pending = False
             return self.items
         self.items = _call_with_optional_keywords(
@@ -20625,6 +20863,8 @@ class FunnelSession:
             member_repo_names=member_repo_names,
             timings=timings,
             scope=scope,
+            include_startable=include_startable,
+            startable_agent=startable_agent,
         )
         self._history_pending = (
             not include_details and self._command != "begin"

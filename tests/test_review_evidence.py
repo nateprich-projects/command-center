@@ -1,4 +1,5 @@
-"""The fresh-merge suite: scripts/review_evidence.py (#1802, plan #1783 ticket 2).
+"""The fresh-merge suite and the reproduction run: scripts/review_evidence.py
+(#1802 and #1803, plan #1783 tickets 2 and 3).
 
 Each test builds a real fixture repository: an ancestor commit, a base commit
 on ``main`` and a head commit on a branch, with the checkout on the head. The
@@ -385,10 +386,12 @@ def test_a_make_test_failure_on_the_merge_counts_without_a_base_rerun(
     assert record["base_rerun"] is None
 
 
-def test_the_worktree_is_removed_when_the_run_raises(tmp_path, monkeypatch):
+@pytest.mark.parametrize("run", ["merged_suite", "reproduction"])
+def test_the_worktree_is_removed_when_the_run_raises(tmp_path, monkeypatch,
+                                                     run):
     repo, base_sha, _ = make_repo(
         tmp_path, ancestor={"tests/test_calc.py": CALC_TESTS},
-        base={}, head={})
+        base={}, head={"tests/test_new.py": "def test_new():\n    pass\n"})
     work = tmp_path / "work"
     seen = []
 
@@ -398,7 +401,7 @@ def test_the_worktree_is_removed_when_the_run_raises(tmp_path, monkeypatch):
 
     monkeypatch.setattr(implement, "run_tests", explode)
     with pytest.raises(RuntimeError, match="fell over"):
-        review_evidence.merged_suite(repo, base_sha, work_dir=work)
+        getattr(review_evidence, run)(repo, base_sha, work_dir=work)
 
     # It did get as far as a worktree, outside the checkout.
     assert seen and repo.resolve() not in seen[0].resolve().parents
@@ -465,3 +468,314 @@ def test_the_output_is_capped_at_64_kb_and_says_what_it_cut():
         "kept": 4096, "total": 10000}
     assert out["commands"][0]["command"] == "c" * 4096
     assert "conflicts" not in out["truncated"]
+
+
+# -- the reproduction run (#1803) -------------------------------------------
+
+#: Right only at 2: what a head that fixes double is fixing.
+BUGGY_CALC = "def double(x):\n    return x + 2\n"
+TWO_TEST = ("from calc import double\n\n\n"
+            "def test_two():\n    assert double(2) == 4\n")
+
+
+def repro(repo, base_sha, tmp_path):
+    """Run it with a work directory the test can inspect afterwards."""
+    work = tmp_path / "work"
+    record = review_evidence.reproduction(repo, base_sha, work_dir=work)
+    assert worktrees(repo) == ["worktree {}".format(repo.resolve())]
+    assert list(work.iterdir()) == []
+    return record
+
+
+def outcomes(record):
+    return {test["id"]: test["outcome"] for test in record["tests"]}
+
+
+def test_a_test_the_fix_makes_pass_is_red_on_the_base(tmp_path, log):
+    # The head fixes double and adds a test of it that takes a fixture from
+    # a conftest the head also adds. The conftest is the tests' own and
+    # comes from the head; calc.py is the code under test and is the base's.
+    repo, base_sha, head_sha = make_repo(
+        tmp_path,
+        ancestor={"calc.py": BUGGY_CALC, "tests/test_calc.py": TWO_TEST},
+        base={},
+        head={"calc.py": CALC,
+              "tests/conftest.py": "import pytest\n\n\n@pytest.fixture\n"
+                                   "def three():\n    return 3\n",
+              "tests/test_calc.py": TWO_TEST +
+              "\n\ndef test_three(three):\n    assert double(three) == 6\n"},
+    )
+
+    record = repro(repo, base_sha, tmp_path)
+
+    assert (record["schema_version"], record["head"], record["base"]) == (
+        1, head_sha, base_sha)
+    [test] = record["tests"]
+    assert (test["id"], test["outcome"]) == (
+        "tests/test_calc.py::test_three", "red")
+    assert test["detail"].startswith("assert 5 == 6")
+    assert record["line"] == "reproduction: red"
+    assert json.loads(review_evidence.render(record))["line"] == (
+        "reproduction: red")
+    # Only the added test ran, and in a tree without the head's code.
+    assert ran(log) == [("base", "tests/test_calc.py::test_three")]
+
+
+def test_a_test_that_passes_without_the_change_passes_on_base(tmp_path, log):
+    # A prefactor's test passes on the base as it will after. The other
+    # added test fails only for want of the function the head adds, which
+    # is no signal, so the one pass decides the line. The head also deletes
+    # a conftest whose fixture would break every test: the tests' paths are
+    # the head's, deletions included.
+    repo, base_sha, _ = make_repo(
+        tmp_path,
+        ancestor={"calc.py": BUGGY_CALC, "tests/conftest.py":
+                  "import pytest\n\n\n@pytest.fixture(autouse=True)\n"
+                  "def broken():\n    raise RuntimeError('deleted')\n"},
+        base={},
+        head={"calc.py": BUGGY_CALC + "\n\ndef triple(x):\n    return x * 3\n",
+              "tests/test_calc.py":
+              "import calc\n\n\n"
+              "def test_two():\n    assert calc.double(2) == 4\n\n\n"
+              "def test_triple():\n    assert calc.triple(2) == 6\n"},
+    )
+    git(repo, "rm", "-q", "tests/conftest.py")
+    git(repo, "commit", "-q", "-m", "drop the conftest")
+
+    record = repro(repo, base_sha, tmp_path)
+
+    assert outcomes(record) == {
+        "tests/test_calc.py::test_two": "passes-on-base",
+        "tests/test_calc.py::test_triple": "no signal"}
+    assert record["line"] == "reproduction: passes-on-base"
+
+
+TRIPLE_CALC = BUGGY_CALC + "\n\ndef triple(x):\n    return x * 3\n"
+
+
+@pytest.mark.parametrize("head, detail", [
+    # An ImportError, AttributeError or NameError on a symbol the head adds
+    # says only that the base lacks it.
+    ({"calc.py": TRIPLE_CALC, "tests/test_new.py":
+      "import calc\n\n\ndef test_new():\n    assert calc.triple(2) == 6\n"},
+     "AttributeError"),
+    ({"calc.py": TRIPLE_CALC, "tests/test_new.py":
+      "def test_new():\n    from calc import triple\n"
+      "    assert triple(2) == 6\n"},
+     "ImportError"),
+    ({"calc.py": TRIPLE_CALC, "tests/test_new.py":
+      "from calc import *\n\n\ndef test_new():\n    assert triple(2) == 6\n"},
+     "NameError"),
+    # A module the head adds to a package the base has: the error names
+    # the dotted path, whose last part is the new module.
+    ({"shapes/trig.py": "def half(x):\n    return x / 2\n",
+      "tests/test_new.py": "def test_new():\n    import shapes.trig\n"
+                           "    assert shapes.trig.half(4) == 2\n"},
+     "ModuleNotFoundError: No module named 'shapes.trig'"),
+    # The same at module level stops the file being collected at all.
+    ({"calc.py": TRIPLE_CALC, "tests/test_new.py":
+      "from calc import triple\n\n\ndef test_new():\n"
+      "    assert triple(2) == 6\n"},
+     "collection error"),
+    # A failure in setup is no signal, even an assertion about the code.
+    ({"calc.py": CALC, "tests/test_new.py":
+      "import pytest\n\nfrom calc import double\n\n\n@pytest.fixture\n"
+      "def six():\n    assert double(3) == 6\n    return 6\n\n\n"
+      "def test_new(six):\n    assert six == 6\n"},
+     "failed on setup"),
+    # A skip on the base is not a pass.
+    ({"calc.py": TRIPLE_CALC, "tests/test_new.py":
+      "import pytest\n\nimport calc\n\n\ndef test_new():\n"
+      "    if not hasattr(calc, 'triple'):\n"
+      "        pytest.skip('no triple here')\n"
+      "    assert calc.triple(2) == 6\n"},
+     "no triple here"),
+    # No test added at all.
+    ({"calc.py": CALC}, None),
+], ids=["attribute", "import", "name", "module", "collection", "setup",
+        "skip", "no-tests"])
+def test_no_signal(tmp_path, log, head, detail):
+    repo, base_sha, _ = make_repo(
+        tmp_path, ancestor={"calc.py": BUGGY_CALC, "shapes/__init__.py": "",
+                            "tests/test_calc.py": TWO_TEST},
+        base={}, head=head)
+
+    record = repro(repo, base_sha, tmp_path)
+
+    if detail is None:
+        assert record["tests"] == []
+    else:
+        [test] = record["tests"]
+        assert (test["id"], test["outcome"]) == (
+            "tests/test_new.py::test_new", "no signal")
+        assert test["detail"].startswith(detail)
+    assert record["line"] == "reproduction: no signal"
+
+
+PARSE = "\n\ndef parse(s):\n    return s.strip()\n"
+RATIO = "\n\ndef ratio(a, b):\n    return a / b\n"
+
+
+@pytest.mark.parametrize("ancestor, head, detail", [
+    # The base crashes. The AttributeError names strip, which the fix's own
+    # added line calls but does not define: it is not a missing symbol.
+    (CALC + PARSE,
+     {"calc.py": CALC + PARSE.replace("s.strip()", '(s or "").strip()'),
+      "tests/test_new.py":
+      "import calc\n\n\ndef test_new():\n    assert calc.parse(None) == ''\n"},
+     "AttributeError: 'NoneType' object has no attribute 'strip'"),
+    (CALC + RATIO,
+     {"calc.py": CALC + RATIO.replace("a / b", "a / b if b else 0.0"),
+      "tests/test_new.py":
+      "import calc\n\n\n"
+      "def test_new():\n    assert calc.ratio(1, 0) == 0.0\n"},
+     "ZeroDivisionError"),
+    (CALC,
+     {"calc.py": "def double(x):\n    if x < 0:\n"
+                 "        raise ValueError(x)\n    return x * 2\n",
+      "tests/test_new.py":
+      "import pytest\n\nimport calc\n\n\ndef test_new():\n"
+      "    with pytest.raises(ValueError):\n        calc.double(-1)\n"},
+     "Failed: DID NOT RAISE"),
+], ids=["attribute-crash", "crash", "did-not-raise"])
+def test_a_crash_reproduction_is_red(tmp_path, log, ancestor, head, detail):
+    repo, base_sha, _ = make_repo(
+        tmp_path, ancestor={"calc.py": ancestor}, base={}, head=head)
+
+    record = repro(repo, base_sha, tmp_path)
+
+    [test] = record["tests"]
+    assert (test["id"], test["outcome"]) == (
+        "tests/test_new.py::test_new", "red")
+    assert test["detail"].startswith(detail)
+    assert record["line"] == "reproduction: red"
+
+
+def test_mixed_results_give_red(tmp_path, log):
+    # One file holds a red test, a pass, a parametrized test red for one
+    # case, a no-signal test, and a class pytest does not collect (it has
+    # an __init__). Another file cannot be collected on the base. Pytest
+    # runs nothing at all while either of those ids is asked for.
+    repo, base_sha, _ = make_repo(
+        tmp_path,
+        ancestor={"calc.py": BUGGY_CALC},
+        base={},
+        head={"calc.py": TRIPLE_CALC.replace("x + 2", "x * 2"),
+              "tests/test_calc.py":
+              "import pytest\n\nimport calc\n\n\n"
+              "def test_red():\n    assert calc.double(3) == 6\n\n\n"
+              "def test_pass():\n    assert calc.double(2) == 4\n\n\n"
+              "@pytest.mark.parametrize('x', [2, 3])\n"
+              "def test_param(x):\n    assert calc.double(x) == 2 * x\n\n\n"
+              "def test_triple():\n    assert calc.triple(2) == 6\n\n\n"
+              "class TestInit:\n    def __init__(self):\n        pass\n\n"
+              "    def test_x(self):\n        assert calc.double(3) == 6\n",
+              "tests/test_triple.py":
+              "from calc import triple\n\n\ndef test_import():\n"
+              "    assert triple(1) == 3\n"},
+    )
+
+    record = repro(repo, base_sha, tmp_path)
+
+    assert outcomes(record) == {
+        "tests/test_calc.py::test_red": "red",
+        "tests/test_calc.py::test_pass": "passes-on-base",
+        "tests/test_calc.py::test_param": "red",
+        "tests/test_calc.py::test_triple": "no signal",
+        "tests/test_calc.py::TestInit::test_x": "no signal",
+        "tests/test_triple.py::test_import": "no signal"}
+    assert {test["id"]: test["detail"] for test in record["tests"]
+            if test["detail"] in ("not collected", "collection error")} == {
+        "tests/test_calc.py::TestInit::test_x": "not collected",
+        "tests/test_triple.py::test_import": "collection error"}
+    assert record["line"] == "reproduction: red"
+    assert ("base", "tests/test_calc.py::test_red") in ran(log)
+
+
+UNTOUCHED = '''\
+import pytest
+
+from calc import double
+
+
+def test_one():
+    assert double(1) == 2
+
+
+def test_two():
+    assert double(2) == 4
+
+
+def test_three():
+    assert double(3) == 6
+    assert double(0) == 0
+
+
+class TestMore:
+    def test_four(self):
+        assert double(4) == 8
+
+    def test_five(self):
+        assert double(5) == 10
+
+
+@pytest.mark.parametrize("x", [7])
+def test_seven(x):
+    assert double(x) == 2 * x
+'''
+
+
+def test_an_untouched_test_in_a_changed_file_is_not_listed(tmp_path, log):
+    # The head adds an import, changes test_two and test_four, deletes a
+    # line from test_three, widens test_seven's parameters and adds
+    # test_six. Main changed test_one since the head branched: that is
+    # main's change, not the PR's.
+    head_file = (
+        "import calc\n" + UNTOUCHED
+        .replace("double(2) == 4", "double(-2) == -4")
+        .replace("    assert double(0) == 0\n", "")
+        .replace("double(4) == 8", "calc.double(4) == 8")
+        .replace("[7]", "[7, 8]")
+        + "\n\ndef test_six():\n    assert double(6) == 12\n")
+    repo, base_sha, _ = make_repo(
+        tmp_path,
+        ancestor={"calc.py": CALC, "tests/test_calc.py": UNTOUCHED,
+                  "tests/test_other.py": "def test_other():\n    pass\n"},
+        base={"tests/test_calc.py":
+              UNTOUCHED.replace("double(1) == 2", "double(1) + 0 == 2")},
+        head={"tests/test_calc.py": head_file},
+    )
+
+    record = repro(repo, base_sha, tmp_path)
+
+    listed = ["tests/test_calc.py::test_two",
+              "tests/test_calc.py::test_three",
+              "tests/test_calc.py::TestMore::test_four",
+              "tests/test_calc.py::test_seven",
+              "tests/test_calc.py::test_six"]
+    assert [test["id"] for test in record["tests"]] == listed
+    assert {test["outcome"] for test in record["tests"]} == {
+        "passes-on-base"}
+    assert {node_id.split("[")[0] for _, node_id in ran(log)} == set(listed)
+    assert record["line"] == "reproduction: passes-on-base"
+
+
+def test_a_test_command_that_is_not_pytest_is_unsupported(tmp_path, log):
+    # The Makefile runs pytest, but nothing can pick single tests out of it.
+    repo, base_sha, _ = make_repo(
+        tmp_path,
+        ancestor={"pyproject.toml": MAKE_PYPROJECT, "calc.py": BUGGY_CALC,
+                  "Makefile": "test:\n\tpython3 -m pytest -q\n"},
+        base={},
+        head={"calc.py": CALC, "tests/test_calc.py":
+              "from calc import double\n\n\n"
+              "def test_three():\n    assert double(3) == 6\n"},
+    )
+
+    record = repro(repo, base_sha, tmp_path)
+
+    assert record["reproduction"] == "unsupported"
+    assert record["line"] == "reproduction: unsupported"
+    assert record["test_source"] == "pyproject.toml [tool.command-center] test"
+    assert record["tests"] == []
+    assert ran(log) == []

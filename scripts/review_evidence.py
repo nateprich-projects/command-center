@@ -29,11 +29,19 @@ The worktrees are removed on every path. A merge that cannot be made at all
 a caller can fall back to the head-only run; a conflict is evidence and is
 recorded instead. Uncommitted changes in the checkout are not part of HEAD
 and are not tested.
+
+``reproduction`` asks the other question a reviewer has: do the tests the
+PR adds or changes fail without its code (#1803, plan #1783 ticket 3)? It
+runs them on the base, with the PR's test paths from the head, and writes
+one line: ``reproduction: red``, ``passes-on-base``, ``no signal``, or
+``unsupported`` for a test command that is not pytest.
 """
 
 from __future__ import annotations
 
 import argparse
+import ast
+import contextlib
 import copy
 import json
 import os
@@ -43,7 +51,8 @@ import shlex
 import shutil
 import sys
 import tempfile
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Set, Tuple
+from xml.etree import ElementTree
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -274,15 +283,15 @@ def _resolve(checkout: os.PathLike, base: str) -> Tuple[pathlib.Path, str, str]:
     return root, shas[0], shas[1]
 
 
-def merged_suite(checkout: os.PathLike, base: str, *,
-                 work_dir: Optional[os.PathLike] = None) -> dict:
-    """Merge the checkout's HEAD into ``base`` and run the suite there.
+@contextlib.contextmanager
+def _worktrees(root: pathlib.Path, work_dir: Optional[os.PathLike]):
+    """Yield ``worktree(name, sha)``, which adds a detached worktree.
 
-    ``work_dir`` is where the temporary worktrees go (default: the system
-    temporary directory); it must be outside the checkout. Returns the
-    record ``render`` serialises.
+    They go in one temporary directory under ``work_dir`` (default: the
+    system temporary directory), which must be outside the checkout, and
+    are removed with it on every path. Shared by the merged suite and the
+    reproduction run (#1803).
     """
-    root, head_sha, base_sha = _resolve(checkout, base)
     if work_dir is not None:
         pathlib.Path(work_dir).mkdir(parents=True, exist_ok=True)
     temp = pathlib.Path(tempfile.mkdtemp(
@@ -307,13 +316,26 @@ def merged_suite(checkout: os.PathLike, base: str, *,
             raise ReviewEvidenceError(
                 "the merge worktree must be outside the checkout: "
                 "{}".format(temp))
-        return _merge_and_run(worktree, head_sha, base_sha)
+        yield worktree
     except (implement.ImplementError, OSError) as exc:
         # run_tests' own failures are caught where they run; anything here
         # is git plumbing or plan resolution, so no merge could be tested.
         raise ReviewEvidenceError(str(exc)) from None
     finally:
         _remove(root, temp, added)
+
+
+def merged_suite(checkout: os.PathLike, base: str, *,
+                 work_dir: Optional[os.PathLike] = None) -> dict:
+    """Merge the checkout's HEAD into ``base`` and run the suite there.
+
+    ``work_dir`` is where the temporary worktrees go (default: the system
+    temporary directory); it must be outside the checkout. Returns the
+    record ``render`` serialises.
+    """
+    root, head_sha, base_sha = _resolve(checkout, base)
+    with _worktrees(root, work_dir) as worktree:
+        return _merge_and_run(worktree, head_sha, base_sha)
 
 
 def _merge_and_run(worktree, head_sha: str, base_sha: str) -> dict:
@@ -405,6 +427,355 @@ def _remove(root: pathlib.Path, temp: pathlib.Path,
             _git(root, "worktree", "prune", check=False)
         except (implement.ImplementError, OSError):
             pass
+
+
+# -- reproduction ----------------------------------------------------------
+
+#: One added test's outcome on the base, and the line's value, which is the
+#: tests' outcomes combined; ``unsupported`` is the line's alone (#1803).
+RED = "red"
+PASSES_ON_BASE = "passes-on-base"
+NO_SIGNAL = "no signal"
+UNSUPPORTED = "unsupported"
+
+#: A call-phase failure that only says the base lacks a symbol. When the PR
+#: adds that symbol, the test never reached the behaviour it is about.
+_MISSING_SYMBOL_RE = re.compile(
+    r"^(?:ImportError|ModuleNotFoundError|AttributeError|NameError): "
+    r"(?:cannot import name '(\w+)'|No module named '([\w.]+)'"
+    r"|.*?has no attribute '(\w+)'|name '(\w+)' is not defined)")
+
+_HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+
+
+def _is_test_file(path: str) -> bool:
+    """Whether pytest collects the file by default (``test_*.py``,
+    ``*_test.py``)."""
+    name = path.rsplit("/", 1)[-1]
+    return name.endswith(".py") and (
+        name.startswith("test_") or name.endswith("_test.py"))
+
+
+def _is_test_path(path: str) -> bool:
+    """Whether a path belongs to the tests rather than the code under test.
+
+    A test file, a conftest, or anything under a ``tests``/``test``
+    directory, so helpers and fixture data travel with the tests.
+    """
+    parts = path.split("/")
+    return (_is_test_file(path) or parts[-1] == "conftest.py"
+            or any(part in ("test", "tests") for part in parts[:-1]))
+
+
+def _changed_paths(root: pathlib.Path, old: str,
+                   new: str) -> List[Tuple[str, str]]:
+    """(status, path) for every path that differs from ``old`` to ``new``.
+
+    With renames off, a rename is a delete and an add, so each side's path
+    is named as itself.
+    """
+    fields = _git(root, "diff", "--name-status", "--no-renames", "-z",
+                  old, new).stdout.split("\0")
+    return [(fields[index][:1], fields[index + 1])
+            for index in range(0, len(fields) - 1, 2) if fields[index]]
+
+
+def _blob(root: pathlib.Path, sha: str, path: str) -> Optional[str]:
+    """The file's text at ``sha``, or None where it does not exist."""
+    proc = _git(root, "cat-file", "blob", "{}:{}".format(sha, path),
+                check=False)
+    return proc.stdout if proc.returncode == 0 else None
+
+
+def _test_spans(source: str) -> List[Tuple[str, int, int]]:
+    """(name, first line, last line) of each test pytest collects by default.
+
+    ``test*`` functions at module level and in ``Test*`` classes, nested
+    ones included, named as in a node id (``TestC::test_f``). A test's
+    lines start at its first decorator, so a changed parametrize list
+    changes the test. A file that does not parse has none.
+    """
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        return []
+    spans: List[Tuple[str, int, int]] = []
+
+    def walk(body, prefix: str) -> None:
+        for node in body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) \
+                    and node.name.startswith("test"):
+                first = min([node.lineno] + [
+                    decorator.lineno for decorator in node.decorator_list])
+                spans.append((prefix + node.name, first, node.end_lineno))
+            elif isinstance(node, ast.ClassDef) \
+                    and node.name.startswith("Test"):
+                walk(node.body, prefix + node.name + "::")
+
+    walk(tree.body, "")
+    return spans
+
+
+def _pr_test_ids(root: pathlib.Path, merge_base: str, head_sha: str,
+                 paths: Sequence[str]) -> List[str]:
+    """The node ids of the tests the PR adds or changes, in file order.
+
+    Read from the hunks of the PR's own diff, from the merge base as a PR
+    shows it, so a test the base changed since is not the PR's. A test is
+    changed when a line the PR adds lies in it at the head, or a line the
+    PR removes lay in it at the merge base and it is still there. A test
+    whose own lines are untouched is not listed, even in a changed file.
+    """
+    ids: List[str] = []
+    for path in paths:
+        diff = _git(root, "--literal-pathspecs", "diff", "--no-color",
+                    "--no-ext-diff", "--no-textconv", "--no-renames", "-U0",
+                    merge_base, head_sha, "--", path).stdout
+        added_lines, removed_lines = set(), set()
+        for line in diff.splitlines():
+            match = _HUNK_RE.match(line)
+            if not match:
+                continue
+            old, old_count, new, new_count = (
+                int(group) if group is not None else 1
+                for group in match.groups())
+            removed_lines.update(range(old, old + old_count))
+            added_lines.update(range(new, new + new_count))
+        head_spans = _test_spans(_blob(root, head_sha, path) or "")
+        touched = {name for name, first, last in head_spans
+                   if any(first <= line <= last for line in added_lines)}
+        touched.update(
+            name for name, first, last in
+            _test_spans(_blob(root, merge_base, path) or "")
+            if any(first <= line <= last for line in removed_lines))
+        for name, _, _ in head_spans:
+            node_id = "{}::{}".format(path, name)
+            if name in touched and node_id not in ids:
+                ids.append(node_id)
+    return ids
+
+
+def _defined_names(source: str) -> Set[str]:
+    """Every name a module defines or binds: functions, classes, assigned
+    names and attributes, and imported names."""
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        return set()
+    names: Set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                             ast.ClassDef)):
+            names.add(node.name)
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+            names.add(node.id)
+        elif isinstance(node, ast.Attribute) \
+                and isinstance(node.ctx, ast.Store):
+            names.add(node.attr)
+        elif isinstance(node, ast.alias):
+            names.add((node.asname or node.name).split(".")[0])
+    return names
+
+
+def _added_symbols(root: pathlib.Path, base_sha: str, head_sha: str,
+                   paths: Sequence[str]) -> Set[str]:
+    """The names the PR's code defines that the base does not.
+
+    Across the non-test Python files the PR changes: what the head's copy
+    defines less what the base's does, and for a module the base lacks, its
+    own name and its packages'. Defined, not mentioned: a fix that adds a
+    line calling ``.strip()`` does not make an AttributeError on ``strip``
+    a missing symbol.
+    """
+    added: Set[str] = set()
+    for path in paths:
+        if not path.endswith(".py"):
+            continue
+        head = _blob(root, head_sha, path)
+        if head is None:
+            continue
+        base = _blob(root, base_sha, path)
+        added |= _defined_names(head) - _defined_names(base or "")
+        if base is None:
+            added.update(part for part in path[:-3].split("/")
+                         if part != "__init__")
+    return added
+
+
+def _junit_key(node_id: str) -> Tuple[str, str]:
+    """The (classname, name) pytest's JUnit report gives a node id.
+
+    ``tests/t.py::TestC::test_f`` is ``("tests.t.TestC", "test_f")``; a
+    file's collection error is reported as ``("", "tests.t")``.
+    """
+    names = node_id.split("::")
+    names[0] = re.sub(r"\.py$", "", names[0].replace("/", "."))
+    return ".".join(names[:-1]), names[-1]
+
+
+def _junit_cases(path: pathlib.Path) -> List[Tuple[Tuple[str, str], str,
+                                                   str]]:
+    """(key, kind, first message line) per case in pytest's JUnit report.
+
+    The key drops parameters, so every case of a parametrized test shares
+    its function's. The kind is ``failure`` (a call-phase failure: pytest
+    reports setup and teardown failures as ``error``), ``error`` (those,
+    and a file that cannot be collected), ``skipped``, or ``pass``.
+    """
+    try:
+        tree = ElementTree.parse(str(path))
+    except (OSError, ElementTree.ParseError):
+        return []
+    cases = []
+    for case in tree.iter("testcase"):
+        key = (case.get("classname") or "",
+               (case.get("name") or "").split("[", 1)[0])
+        kind, message = "pass", ""
+        for tag in ("failure", "error", "skipped"):
+            child = case.find(tag)
+            if child is not None:
+                kind, message = tag, (child.get("message") or "").strip()
+                break
+        cases.append((key, kind, message.splitlines()[0] if message else ""))
+    return cases
+
+
+def _run_added(tree: pathlib.Path, prefix: Sequence[str],
+               node_ids: Sequence[str], report: pathlib.Path
+               ) -> Tuple[list, Dict[str, str]]:
+    """Run the node ids in the tree: (JUnit cases, dropped id → reason).
+
+    Pytest runs nothing when one node id is in a file it cannot collect or
+    names a test it does not find. So when the first run ran none of them,
+    those ids are dropped, and the rest run once more: a file's collection
+    error is read from the report, a test not found from the output, as
+    the base re-run does.
+    """
+    pending = list(node_ids)
+    dropped: Dict[str, str] = {}
+    cases: list = []
+    for attempt in range(2):
+        if not pending:
+            break
+        # A report left by the first run must not be read as the second's.
+        with contextlib.suppress(FileNotFoundError):
+            report.unlink()
+        argv = list(prefix) + ["-q", "--junitxml={}".format(report)] + pending
+        passed, output = _run_one(tree, argv)
+        cases = _junit_cases(report)
+        keys = {key for key, _, _ in cases}
+        if passed or attempt or any(
+                _junit_key(node_id) in keys for node_id in pending):
+            break
+        uncollected = {key for key, kind, _ in cases
+                       if kind == "error" and not key[0]}
+        for node_id in pending:
+            if _junit_key(node_id.split("::", 1)[0]) in uncollected:
+                dropped[node_id] = "collection error"
+        for node_id in _not_found(output, pending):
+            dropped.setdefault(node_id, "not collected")
+        if not any(node_id in dropped for node_id in pending):
+            break
+        pending = [node_id for node_id in pending if node_id not in dropped]
+    return cases, dropped
+
+
+def _combine(outcomes: Sequence[str]) -> str:
+    """Red if any is red; else passes-on-base if any passes; else no
+    signal, which is also the answer for no tests at all."""
+    if RED in outcomes:
+        return RED
+    if PASSES_ON_BASE in outcomes:
+        return PASSES_ON_BASE
+    return NO_SIGNAL
+
+
+def _case_outcome(kind: str, message: str, added: Set[str]) -> str:
+    """A pass passes on the base; a call-phase failure is red, a crash and
+    ``DID NOT RAISE`` included, unless it only names a missing symbol the
+    PR adds. A setup error, a collection error or a skip is no signal."""
+    if kind == "pass":
+        return PASSES_ON_BASE
+    if kind != "failure":
+        return NO_SIGNAL
+    match = _MISSING_SYMBOL_RE.match(message)
+    if match:
+        symbol = next(group for group in match.groups() if group)
+        if symbol.rsplit(".", 1)[-1] in added:
+            return NO_SIGNAL
+    return RED
+
+
+def reproduction(checkout: os.PathLike, base: str, *,
+                 work_dir: Optional[os.PathLike] = None) -> dict:
+    """Run the tests the checkout's HEAD adds or changes on ``base``.
+
+    The tree is the base with the PR's changed test paths (tests, conftests,
+    their helpers and data) taken from the head, so every non-test path the
+    PR changes is the base's. ``work_dir`` is as for ``merged_suite``.
+    Returns the record ``render`` serialises; ``line`` is the one
+    reproduction line.
+    """
+    root, head_sha, base_sha = _resolve(checkout, base)
+    with _worktrees(root, work_dir) as worktree:
+        return _reproduce(root, worktree, head_sha, base_sha)
+
+
+def _reproduce(root: pathlib.Path, worktree, head_sha: str,
+               base_sha: str) -> dict:
+    record = {
+        "schema_version": SCHEMA_VERSION,
+        "head": head_sha,
+        "base": base_sha,
+        "reproduction": NO_SIGNAL,
+        "line": None,
+        "test_source": None,
+        "tests": [],
+    }
+    proc = _git(root, "merge-base", base_sha, head_sha, check=False)
+    if proc.returncode != 0:
+        raise ReviewEvidenceError("the head and the base share no history")
+    merge_base = proc.stdout.strip()
+    changed = _changed_paths(root, merge_base, head_sha)
+    test_paths = [(status, path) for status, path in changed
+                  if _is_test_path(path)]
+    tree = worktree("reproduction", base_sha)
+    kept = [path for status, path in test_paths if status != "D"]
+    if kept:
+        _git(tree, "--literal-pathspecs", "checkout", head_sha, "--", *kept)
+    for status, path in test_paths:
+        if status == "D" and (tree / path).is_file():
+            (tree / path).unlink()
+    commands, record["test_source"] = implement.default_test_plan(tree)
+    prefix = next(filter(None, map(pytest_prefix, commands)), None)
+    if prefix is None:
+        # Nothing here can pick single tests out of another runner.
+        record["reproduction"] = UNSUPPORTED
+    else:
+        node_ids = _pr_test_ids(root, merge_base, head_sha, [
+            path for path in kept if _is_test_file(path)])
+        added = _added_symbols(root, base_sha, head_sha, [
+            path for _, path in changed if not _is_test_path(path)])
+        cases, dropped = _run_added(tree, prefix, node_ids,
+                                    tree.parent / "reproduction.xml")
+        for node_id in node_ids:
+            key = _junit_key(node_id)
+            results = [(_case_outcome(kind, message, added), message)
+                       for case_key, kind, message in cases
+                       if case_key == key]
+            if node_id in dropped or not results:
+                outcome = NO_SIGNAL
+                detail = dropped.get(node_id, "not run")
+            else:
+                outcome = _combine([result for result, _ in results])
+                detail = next(message for result, message in results
+                              if result == outcome)
+            record["tests"].append(
+                {"id": node_id, "outcome": outcome, "detail": detail})
+        record["reproduction"] = _combine(
+            [test["outcome"] for test in record["tests"]])
+    record["line"] = "reproduction: {}".format(record["reproduction"])
+    return record
 
 
 # -- output ----------------------------------------------------------------

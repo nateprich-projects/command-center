@@ -177,9 +177,14 @@ def test_inferred_premises_attach_records_for_cited_tickets_and_prs(
 
     def fake_pr(repo, number):
         fetched.append(("pr", repo, number))
+        ticket_number = 1597 if number == 1613 else 1598
         return {
             "number": number,
             "title": "PR {}".format(number),
+            "body": (
+                "Part of #1581.\n\nImplements #{}.\n\n"
+                "Summary: the review-lane begin reads the backoff."
+            ).format(ticket_number),
             "state": "CLOSED",
             "mergedAt": "2026-09-27T00:00:00Z",
             "headRefName": "ticket/{}".format(number),
@@ -190,8 +195,13 @@ def test_inferred_premises_attach_records_for_cited_tickets_and_prs(
     def fake_ticket(repo, number):
         fetched.append(("issue", repo, number))
         parent = None
-        body = "Body {}".format(number)
+        body = "Issue body {}".format(number)
+        if number == 1581:
+            body = ("## Ticket 1\n#1597 waits out backoff.\n\n"
+                    "## Ticket 4\n#1600 measures run evidence after "
+                    "#1597 and #1599, which require #1598.")
         if number == 1597:
+            body = "Parent plan: #1581."
             parent = {
                 "number": 1581,
                 "ref": REPO + "#1581",
@@ -205,7 +215,7 @@ def test_inferred_premises_attach_records_for_cited_tickets_and_prs(
             "title": "Issue {}".format(number),
             "url": "https://github.com/{}/issues/{}".format(REPO, number),
             "body": body,
-            "state": "CLOSED",
+            "state": "OPEN" if number == 1581 else "CLOSED",
             "parent": parent,
             "comments": [],
         }
@@ -225,6 +235,15 @@ def test_inferred_premises_attach_records_for_cited_tickets_and_prs(
     assert {row["kind"] for row in records} == {"issue", "pull_request"}
     assert {row[1] for row in fetched} == {REPO}
     assert {row[2] for row in fetched} == {1581, 1597, 1612, 1613}
+    by_ref = {row["ref"]: row for row in records}
+    assert by_ref[REPO + "#1613"]["url"] == (
+        "https://github.com/{}/pull/1613".format(REPO))
+    assert "Implements #1597" in by_ref[REPO + "#1613"]["body"]
+    assert by_ref[REPO + "#1597"]["state"] == "CLOSED"
+    assert "Parent plan: #1581" in by_ref[REPO + "#1597"]["issue"]["body"]
+    assert by_ref[REPO + "#1581"]["state"] == "OPEN"
+    assert "#1600 measures run evidence" in (
+        by_ref[REPO + "#1581"]["issue"]["body"])
     assert any(row.get("comments", {}).get("status") == "empty"
                for row in records if row["kind"] == "pull_request")
 

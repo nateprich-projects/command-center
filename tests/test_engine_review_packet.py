@@ -1130,7 +1130,7 @@ def test_review_checklist_probes_inferred_premises_against_live_evidence():
 
 
 def test_inferred_premise_packet_loads_explicitly_cited_evidence(monkeypatch):
-    view = pr_view()
+    view = pr_view(body="Part of #28. Implements #29.")
     premise = {
         "claim": "PR #31 for ticket #29 resembles PR #30",
         "evidence": "owner/repo#31 and #29 under #28; compare PR #30",
@@ -1175,6 +1175,11 @@ def test_inferred_premise_packet_loads_explicitly_cited_evidence(monkeypatch):
     assert attached["status"] == "available"
     assert {row["ref"] for row in attached["records"]} == {
         REPO + "#28", REPO + "#29", REPO + "#30", REPO + "#31"}
+    assert all(row["body"] == "Part of #28. Implements #29."
+               for row in attached["records"]
+               if row["kind"] == "pull_request")
+    assert all(row["state"] == "OPEN"
+               for row in attached["records"] if row["kind"] == "issue")
 
 
 def test_a_ticket_without_a_comments_list_gets_an_empty_one():
@@ -1198,11 +1203,15 @@ def test_fetch_ticket_reads_comments_with_the_ticket(monkeypatch):
     def fake_gh_json(*args):
         seen["args"] = args
         return {"number": 9, "title": "t", "url": "u", "body": "b",
-                "parent": None, "comments": []}
+                "state": "CLOSED", "parent": None, "comments": []}
 
     monkeypatch.setattr(funnel, "_gh_json", fake_gh_json)
-    assert review.fetch_ticket(REPO, 9)["comments"] == []
-    assert "comments" in seen["args"][-1].split(",")
+    found = review.fetch_ticket(REPO, 9)
+    fields = seen["args"][-1].split(",")
+    assert found["comments"] == []
+    assert found["state"] == "CLOSED"
+    assert "comments" in fields
+    assert "state" in fields
 
 
 def test_fetch_ticket_uses_parent_comments_already_in_the_parent_row(monkeypatch):

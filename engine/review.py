@@ -1854,6 +1854,11 @@ def _read_premise_reference(ref: str, is_pull_request: bool) -> Dict:
     repo, number = parts
     if is_pull_request:
         view = fetch_pr(repo, number)
+        if not isinstance(view, dict):
+            view = {}
+        body_section = pr_body_section(view)
+        pr_body = body_section["pr_body"]
+        pr_body_truncated = body_section["pr_body_truncated"]
         files = view.get("files") if isinstance(view, dict) else None
         changed_files = None
         if isinstance(files, list):
@@ -1865,15 +1870,21 @@ def _read_premise_reference(ref: str, is_pull_request: bool) -> Dict:
         complete = (
             isinstance(view.get("title"), str)
             and isinstance(view.get("state"), str)
+            and isinstance(pr_body, str)
+            and pr_body_truncated is False
             and isinstance(files, list)
             and isinstance(comments, dict)
             and comments.get("status") in ("available", "empty")
         )
         return {
             "ref": ref,
+            "url": "https://github.com/{}/pull/{}".format(repo, number),
             "kind": "pull_request",
             "status": "available" if complete else "partial",
             "title": view.get("title"),
+            "body": pr_body,
+            "body_truncated": pr_body_truncated,
+            "departures": body_section["pr_departures"],
             "state": view.get("state"),
             "merged_at": view.get("mergedAt"),
             "head_ref": view.get("headRefName"),
@@ -1890,6 +1901,7 @@ def _read_premise_reference(ref: str, is_pull_request: bool) -> Dict:
     )
     return {
         "ref": ref,
+        "url": issue.get("url"),
         "kind": "issue",
         "status": "available" if complete else "partial",
         "state": issue.get("state"),

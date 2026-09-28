@@ -4335,6 +4335,11 @@ def awaiting_review(
         for row in _pr_rows_for_ref(pr_facts, item.ref):
             if str(row.get("state") or "OPEN").upper() != "OPEN":
                 continue
+            # Anyone can open a PR named ticket/<n> from a fork; letting it
+            # hold the ticket out of the queue would let a stranger stall
+            # the funnel's work (#1794).
+            if not is_funnel_pr(item.repo, row):
+                continue
             # A PR whose review asked for changes is *not* blocked: its ticket
             # goes back to the engineer to fix. Without this a rejected PR has no
             # owner — the reviewer will not revisit it and the engineer is never
@@ -5219,7 +5224,8 @@ def _recent_merged_pr_rows(
 ) -> List[Dict[str, object]]:
     """Read merged PRs updated within the window using a light paged query.
 
-    The portfolio metric only needs the branch and merge timestamps. Reusing
+    The portfolio metric only needs the branch, the merge timestamps, and
+    the fields that say whether a PR is the funnel's own (#1794). Reusing
     ``ticket_pr_index`` would also request CI rollups and scan every PR state;
     the brief's 100-row bound can also hide valid merges. Merged PRs sort by
     ``updatedAt``, so the first row older than the cutoff proves that later
@@ -5237,7 +5243,10 @@ def _recent_merged_pr_rows(
       first: {page_size}, after: $cursor, states: [MERGED],
       orderBy: {{field: UPDATED_AT, direction: DESC}}
     ) {{
-      nodes {{ state headRefName mergedAt updatedAt }}
+      nodes {{
+        state headRefName mergedAt updatedAt
+        isCrossRepository headRepository {{ nameWithOwner }} author {{ login }}
+      }}
       pageInfo {{ hasNextPage endCursor }}
     }}
   }}
@@ -5287,6 +5296,9 @@ def _recent_merged_pr_rows(
                 "state": node.get("state"),
                 "headRefName": node.get("headRefName"),
                 "mergedAt": node.get("mergedAt"),
+                "isCrossRepository": node.get("isCrossRepository"),
+                "headRepository": node.get("headRepository"),
+                "author": node.get("author"),
             })
 
         if not page_info.get("hasNextPage"):
@@ -5347,7 +5359,8 @@ def command_center_ticket_pr_share(
         if merged_at < cutoff:
             continue
         merged += 1
-        if ticket_ref_from_branch(REPO, row.get("headRefName") or ""):
+        # A merged fork PR named ticket/<n> is not ticket work (#1794).
+        if ticket_ref_from_pr(REPO, row):
             ticket_merged += 1
 
     definition = (
@@ -15220,15 +15233,15 @@ def cmd_reject(items: List[Item], now: datetime, pr: str, note: Optional[str]) -
 
     data = json.loads(run(
         "gh", "pr", "view", number, "--repo", repo,
-        "--json", "title,url,headRefName,merged",
+        "--json", "title,url,headRefName,merged," + PR_TRUST_JSON_FIELDS,
     ))
     if not data.get("merged"):
         raise GitHubError(
             "PR #{} is not merged — a rejected merge is one that landed".format(number)
         )
 
-    branch = data.get("headRefName") or ""
-    ref = ticket_ref_from_branch(repo, branch)
+    # Only the funnel's own PR reopens the ticket its branch names (#1794).
+    ref = ticket_ref_from_pr(repo, data)
     ticket = next((i for i in items if i.ref == ref), None) if ref else None
 
     # 1. Reopen the ticket, so the work is visibly unfinished again.
@@ -15670,16 +15683,21 @@ def _subissue_rows(item: Item) -> List[dict]:
 
 
 def _ticket_prs(repo: str, number: int) -> List[Tuple[str, int]]:
-    """Return every PR ever made from a ticket's convention-named branch."""
+    """Return every funnel PR ever made from a ticket's convention-named branch.
+
+    ``--head`` matches the branch name in any fork, so only the funnel's own
+    PRs are the ticket's (#1794).
+    """
     rows = _gh_json(
         "gh", "pr", "list", "--repo", repo, "--state", "all",
-        "--head", "ticket/{}".format(number), "--json", "number",
+        "--head", "ticket/{}".format(number),
+        "--json", "number," + PR_TRUST_JSON_FIELDS,
     )
     if rows is None or not isinstance(rows, list):
         raise GitHubError("could not read PRs for {}#{}".format(repo, number))
     found: List[Tuple[str, int]] = []
     for row in rows:
-        if not isinstance(row, dict):
+        if not isinstance(row, dict) or not is_funnel_pr(repo, row):
             continue
         pr_number = row.get("number")
         if isinstance(pr_number, int) and not isinstance(pr_number, bool):
@@ -15972,6 +15990,10 @@ def _batched_pr_query(
         if include_body:
             lines.append("        body")
         lines.append("        author { login }")
+        # Who opened the PR and where its head lives decide whether it is
+        # the funnel's own PR at all (#1794); a branch name alone does not.
+        lines.append("        isCrossRepository")
+        lines.append("        headRepository { nameWithOwner }")
         lines.append("        mergedBy { login }")
         if include_reviews:
             lines.append(
@@ -16036,12 +16058,12 @@ def _normalise_pr_node(node: object) -> Optional[Dict[str, object]]:
         for name in (
             "number", "title", "state", "url", "headRefName",
             "headRefOid", "mergeable", "mergeStateStatus", "mergedAt",
-            "createdAt", "closedAt",
+            "createdAt", "closedAt", "isCrossRepository",
         )
     }
     if "body" in node:
         row["body"] = node.get("body")
-    for name in ("author", "mergedBy"):
+    for name in ("author", "mergedBy", "headRepository"):
         value = node.get(name)
         row[name] = value if isinstance(value, dict) else None
 
@@ -16249,13 +16271,23 @@ def _pr_rows_for_ref(
     pr_facts: Optional[Mapping[str, Optional[Dict[str, object]]]],
     ref: str,
 ) -> Tuple[Dict[str, object], ...]:
-    """Return every row for a ticket branch, with legacy-map compatibility."""
+    """Return every funnel PR row for a ticket branch, legacy maps included.
+
+    The one accessor the review queue, ``awaiting_review`` and the approved
+    merge reconciliation read rows through, so it keeps only the funnel's own
+    PRs (#1794) whatever map a caller supplies: a fork or another author's PR
+    on ``ticket/<n>`` is never offered, never blocks the ticket, and never
+    reaches the merge gate from here. ``ticket_pr_facts`` already drops them;
+    this holds for injected maps too.
+    """
     if pr_facts is None:
         return ()
+    repo = ref.rsplit("#", 1)[0]
     rows_by_ref = getattr(pr_facts, "rows_by_ref", None)
     if isinstance(rows_by_ref, Mapping) and ref in rows_by_ref:
         return tuple(
-            row for row in rows_by_ref[ref] if isinstance(row, dict)
+            row for row in rows_by_ref[ref]
+            if isinstance(row, dict) and is_funnel_pr(repo, row)
         )
     fact = pr_facts.get(ref)
     # A fact with neither a PR number nor a state is a branch-only record: a
@@ -16264,7 +16296,7 @@ def _pr_rows_for_ref(
     # (#968). Older fixture maps carry ``state`` without ``number``.
     if isinstance(fact, dict) and (
         fact.get("number") is not None or fact.get("state")
-    ):
+    ) and is_funnel_pr(repo, fact):
         return (fact,)
     return ()
 
@@ -16331,13 +16363,20 @@ def ticket_pr_index(
         include_closing_refs=include_comments,
         include_refs=False,
     )
-    bounded_rows = list(snapshot.rows_by_repo.get(repo, ()))
+    # Only the funnel's own PRs are indexed or counted (#1794): the outcome
+    # walker pairs ``all_rows`` with tickets by branch and by closing
+    # reference, and a fork PR named ``ticket/<n>`` is neither the ticket's
+    # attempt nor its merge. Truncation is still judged on the whole scan.
+    bounded_rows = [
+        row for row in snapshot.rows_by_repo.get(repo, ())
+        if is_funnel_pr(repo, row)
+    ]
     truncated = bool(snapshot.pr_truncated_by_repo.get(repo))
     index = TicketPRIndex(all_rows=bounded_rows)
     for row in bounded_rows:
         if not isinstance(row, dict):
             continue
-        ref = ticket_ref_from_branch(repo, row.get("headRefName") or "")
+        ref = ticket_ref_from_pr(repo, row)
         # `gh pr list` returns newest first, so the first row for a branch is
         # the one the old per-ticket lookup's `rows[0]` used to return.
         if ref and ref not in index:
@@ -16417,7 +16456,10 @@ def ticket_pr_facts(
     rows_by_ref: Dict[str, List[Dict[str, object]]] = {}
     for repo in repos:
         for row in snapshot.rows_by_repo.get(repo, ()):
-            ref = ticket_ref_from_branch(repo, row.get("headRefName") or "")
+            # A fork's or another author's PR on a ticket branch is not the
+            # ticket's PR (#1794), so it never becomes a fact: not a review
+            # candidate, not an awaiting-review block, not a merge candidate.
+            ref = ticket_ref_from_pr(repo, row)
             if ref:
                 rows_by_ref.setdefault(ref, []).append(row)
 
@@ -16506,6 +16548,10 @@ def review_queue(
                 continue
             head = row.get("headRefName") or ""
             if not head.startswith("ticket/"):
+                continue
+            if not is_funnel_pr(repo, row):
+                # A fork or another author's PR is never offered, and never
+                # rejected below either: no verdict is written on it (#1794).
                 continue
             conflict = _conflicting_branch_blocker(row)
             if conflict is not None:
@@ -16855,8 +16901,9 @@ def approved_merge_candidates(
             repo = ticket.repo
             if str(row.get("state") or "OPEN").upper() != "OPEN":
                 continue
-            branch = row.get("headRefName") or ""
-            row_ref = ticket_ref_from_branch(repo, branch)
+            # Checked again here, not only in the row accessor: this list is
+            # what the lanes merge unattended (#1794).
+            row_ref = ticket_ref_from_pr(repo, row)
             if row_ref != ref or row.get("number") is None:
                 continue
             verdict = _row_verdict(row, repo)
@@ -18292,9 +18339,17 @@ def cmd_review(repo: Optional[str], pr: int, verdict: str, ci: str,
     """
     repo = resolve_repo(repo)
     head = (_gh_json("gh", "pr", "view", str(pr), "--repo", repo,
-                     "--json", "headRefOid,state") or {})
+                     "--json", "headRefOid,state," + PR_TRUST_JSON_FIELDS)
+            or {})
     if head.get("state") != "OPEN":
         raise GitHubError("PR #{} is {}, not open".format(pr, head.get("state")))
+    # A verdict on a fork's or another author's PR would put the funnel's
+    # judgement on work that is not its own (#1794).
+    foreign = foreign_pr_reason(repo, head)
+    if foreign is not None:
+        raise GitHubError(
+            "refusing to review PR #{}: it is not the funnel's own PR, "
+            "because {}".format(pr, foreign))
     sha = head.get("headRefOid")
     if not sha:
         raise GitHubError("could not read the head commit of PR #{}".format(pr))
@@ -18399,6 +18454,11 @@ def _record_unmergeable_rejection(
         data = _pr_fact_for_number(repo, pr, include_comments=True) or {}
     if data.get("state") != "OPEN":
         return
+    if not is_funnel_pr(repo, data):
+        # Writing a verdict is acting on the PR, and releasing a claim acts
+        # on the ticket its branch names; neither follows from a PR that is
+        # not the funnel's own (#1794).
+        return
     sha = data.get("headRefOid")
     reason = _conflicting_branch_blocker(data)
     if not sha or reason is None:
@@ -18476,6 +18536,106 @@ def ticket_ref_from_branch(repo: str, branch: str) -> Optional[str]:
         return None
     tail = branch.split("/", 1)[1]
     return "{}#{}".format(repo, tail) if tail.isdigit() else None
+
+
+#: The ``gh pr view`` / ``gh pr list`` JSON fields ``foreign_pr_reason`` reads
+#: (#1794). Every such read that pairs a PR with a ticket or acts on one asks
+#: for them; the batched GraphQL read asks for the equivalent fields itself.
+PR_TRUST_JSON_FIELDS = (
+    "isCrossRepository,headRepository,headRepositoryOwner,author"
+)
+
+
+def pr_head_repository(row: object) -> Optional[str]:
+    """The ``owner/name`` a PR's head branch lives in, or None if unreadable.
+
+    Three wire shapes carry it (#1794): the batched GraphQL read asks for
+    ``headRepository { nameWithOwner }``; ``gh pr ... --json`` gives
+    ``headRepository.name`` beside ``headRepositoryOwner.login``; REST gives
+    ``head.repo.full_name``. GitHub reports no head repository once a fork is
+    deleted. Shapes that name two different repositories have no single
+    answer, so they read as unreadable, as ``comment_author`` treats a row
+    naming two logins.
+    """
+    if not isinstance(row, Mapping):
+        return None
+    found: Dict[str, str] = {}
+    head_repo = row.get("headRepository")
+    if isinstance(head_repo, Mapping):
+        full = head_repo.get("nameWithOwner")
+        if not (isinstance(full, str) and full):
+            owner = row.get("headRepositoryOwner")
+            login = owner.get("login") if isinstance(owner, Mapping) else None
+            name = head_repo.get("name")
+            full = (
+                "{}/{}".format(login, name)
+                if isinstance(login, str) and login
+                and isinstance(name, str) and name
+                else None
+            )
+        if full:
+            found[full.lower()] = full
+    head = row.get("head")
+    if isinstance(head, Mapping):
+        repo = head.get("repo")
+        full = repo.get("full_name") if isinstance(repo, Mapping) else None
+        if isinstance(full, str) and full:
+            found[full.lower()] = full
+    return next(iter(found.values())) if len(found) == 1 else None
+
+
+def foreign_pr_reason(repo: str, row: object) -> Optional[str]:
+    """Why a PR is not the funnel's own, or None when it is (#1794).
+
+    The funnel pairs a PR with its ticket by the ``ticket/<n>`` branch name,
+    and command-center is public: anyone can fork it and open a PR from a
+    branch of that name, which would otherwise be offered to the review lane
+    (a prompt-injection surface that also spends its budget), block the
+    ticket as awaiting review, and reach the merge gate. A branch name proves
+    nothing. The funnel's PRs are the ones whose head is in the base
+    repository and whose author is a trusted account: Nate and every agent
+    open PRs as the owner account, the one ``TRUSTED_COMMENT_AUTHORS`` names
+    for verdicts (#1787).
+
+    Same repository means GitHub's ``isCrossRepository`` is false, or, on a
+    read without that field (REST), the head repository is the base. Either
+    signal saying otherwise refuses. Fail closed: a PR whose head repository
+    or author cannot be read is not the funnel's.
+    """
+    if not isinstance(row, Mapping):
+        return "the PR could not be read"
+    cross = row.get("isCrossRepository")
+    head = pr_head_repository(row)
+    if cross is True:
+        return "it was opened from another repository ({})".format(
+            head or "unreadable")
+    if head is not None and head.lower() != str(repo or "").lower():
+        return "its head repository {} is not {}".format(head, repo)
+    if cross is not False and head is None:
+        return "its head repository could not be read"
+    author = comment_author(row)
+    if author is None:
+        return "its author could not be read"
+    if author.lower() not in TRUSTED_COMMENT_AUTHORS:
+        return "it was opened by {}, not a trusted account".format(author)
+    return None
+
+
+def is_funnel_pr(repo: str, row: object) -> bool:
+    """Whether a PR is the funnel's own: same repository, trusted author."""
+    return foreign_pr_reason(repo, row) is None
+
+
+def ticket_ref_from_pr(repo: str, row: object) -> Optional[str]:
+    """The ticket a PR finishes, or None; only the funnel's own PRs pair.
+
+    ``ticket_ref_from_branch`` with the trust check in front (#1794): every
+    place that pairs a fetched PR row with its ticket goes through here, so a
+    fork or another author's PR named ``ticket/<n>`` pairs with nothing.
+    """
+    if not is_funnel_pr(repo, row):
+        return None
+    return ticket_ref_from_branch(repo, str(row.get("headRefName") or ""))
 
 
 #: The marker's ticket list, read from the project's own sub-issues at close
@@ -18838,7 +18998,8 @@ def merged_pr_facts(items: Sequence[Item]) -> MergedPRFacts:
             snapshot.pr_truncated_by_repo.get(repo)
         )
         for row in snapshot.rows_by_repo.get(repo, ()):
-            ref = ticket_ref_from_branch(repo, row.get("headRefName") or "")
+            # Only the funnel's own merged PR finishes a ticket (#1794).
+            ref = ticket_ref_from_pr(repo, row)
             if ref in open_ticket_refs:
                 merged_ticket_refs.add(ref)
 
@@ -18885,6 +19046,13 @@ def merge_blockers(
 
     if data.get("state") != "OPEN":
         why.append("PR is {}, not open".format(data.get("state")))
+
+    # A PR named ticket/<n> can come from any fork of a public repository.
+    # Only the funnel's own PR merges, and an unreadable head repository or
+    # author refuses (#1794).
+    foreign = foreign_pr_reason(repo, data)
+    if foreign is not None:
+        why.append("PR #{} is not the funnel's own PR: {}".format(pr, foreign))
 
     mergeable = str(data.get("mergeable") or "").upper()
     conflict = _conflicting_branch_blocker(data)
@@ -18939,6 +19107,19 @@ def merge_blockers(
             why.append("CI not green: " + ", ".join(str(f) for f in failed))
         elif not checks:
             why.append("no CI checks reported — refusing to merge unverified work")
+        # A skipped check ran nothing, so it verified nothing (#1794). No
+        # member repository sets required checks in branch protection; every
+        # check the rollup reports is one this gate requires. command-center's
+        # own pytest job skips itself on a fork's PR, which would otherwise
+        # read as green here. No member repository's PR CI skips a job in
+        # normal runs (checked 2026-09-28), so this refuses nothing that
+        # merges today.
+        skipped = [c.get("name") or c.get("context") for c in checks
+                   if str(c.get("conclusion") or c.get("state") or "").upper()
+                   == "SKIPPED"]
+        if skipped:
+            why.append("CI not green: {} skipped — a skipped check verified "
+                       "nothing".format(", ".join(str(s) for s in skipped)))
 
     verdict = _row_verdict(data, repo)
     if verdict is None:

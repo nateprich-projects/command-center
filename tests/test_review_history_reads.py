@@ -242,6 +242,9 @@ def merge_fact():
         "statusCheckRollup": [{"name": "tests", "conclusion": "SUCCESS"}],
         "comments": comments,
         "verdict": funnel._latest_verdict_from_comments(comments),
+        # The funnel's own PR: same-repository head, owner author (#1794).
+        "isCrossRepository": False,
+        "author": {"login": "nateprich"},
     }
 
 
@@ -282,6 +285,8 @@ def wire_packet(monkeypatch, events=None):
             "closingIssuesReferences": [{
                 "number": 10, "repository": {"nameWithOwner": REPO},
             }],
+            "isCrossRepository": False,
+            "author": {"login": "nateprich"},
         }
     monkeypatch.setattr(review, "fetch_pr", fetch_pr)
     monkeypatch.setattr(review, "fetch_scope", lambda *args: (

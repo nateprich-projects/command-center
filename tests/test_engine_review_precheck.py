@@ -63,6 +63,9 @@ def pr_view(**kw):
         ],
         "commits": [{"oid": SHA, "committedDate": HEAD_DATE}],
         "files": [{"path": "funnel.py"}],
+        # The funnel's own PR: same-repository head, owner author (#1794).
+        "isCrossRepository": False,
+        "author": {"login": "nateprich"},
     }
     data.update(kw)
     return data

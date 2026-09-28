@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pathlib
+import re
 import sys
 
 import pytest
@@ -160,3 +161,104 @@ def test_trim_normalizes_the_legacy_needs_you_heading():
     found = migrate.trim_routing_prose(
         "## Needs you\n\n- Gates: Who may approve this?\n")
     assert found == "## Needs Nate\n\n- Gates: Who may approve this?\n"
+
+
+# -- Class gains Bug (#1845) -------------------------------------------------
+
+CLASS_BEFORE_BUG = [
+    {"id": "opt-investigate", "name": "Investigate", "description": "",
+     "color": "BLUE"},
+    {"id": "opt-broken", "name": "Broken", "description": "Seen to fail",
+     "color": "RED"},
+    {"id": "opt-maintenance", "name": "Maintenance", "description": "",
+     "color": "YELLOW"},
+    {"id": "opt-improve", "name": "Improve", "description": "",
+     "color": "GREEN"},
+    {"id": "opt-new", "name": "New", "description": "", "color": "PURPLE"},
+    {"id": "opt-replace", "name": "Replace", "description": "",
+     "color": "PINK"},
+]
+
+
+class FakeProject:
+    """GraphQL answers for the Project's fields; a mutation's option list is
+    parsed back into the field the next read returns, new options minted an
+    ID, as GitHub does."""
+
+    def __init__(self, class_options, keep_ids=True):
+        self.options = [dict(option) for option in class_options]
+        self.keep_ids = keep_ids
+        self.mutations = []
+
+    def __call__(self, query, **variables):
+        if query == funnel.PROJECT_FIELDS_QUERY:
+            return {"user": {"projectV2": {"fields": {"nodes": [
+                {"id": funnel.STATUS_FIELD_ID, "name": "Status",
+                 "options": []},
+                {"id": funnel.CLASS_FIELD_ID, "name": "Class",
+                 "options": [dict(option) for option in self.options]},
+            ]}}}}
+        assert "updateProjectV2Field" in query
+        assert 'fieldId: "{}"'.format(funnel.CLASS_FIELD_ID) in query
+        self.mutations.append(query)
+        rows = re.findall(r"\{((?:id:\"[^\"]*\",)?name:\"[^\"]*\")", query)
+        options = []
+        for index, row in enumerate(rows):
+            found = re.match(r'(?:id:"([^"]*)",)?name:"([^"]*)"', row)
+            option_id, name = found.group(1), found.group(2)
+            if option_id is None or not self.keep_ids:
+                option_id = "minted-{}".format(index)
+            options.append({"id": option_id, "name": name,
+                            "description": "", "color": "GRAY"})
+        self.options = options
+        return {}
+
+
+def test_class_extension_adds_bug_and_resubmits_every_existing_option_id(
+        monkeypatch):
+    project = FakeProject(CLASS_BEFORE_BUG)
+    monkeypatch.setattr(funnel, "gh_graphql", project)
+
+    assert migrate.ensure_class_options(apply=True) == [
+        "extend Class with Bug"]
+
+    [mutation] = project.mutations
+    for option in CLASS_BEFORE_BUG:
+        assert 'id:"{}",name:"{}"'.format(
+            option["id"], option["name"]) in mutation
+    # Existing descriptions and colours ride along unchanged.
+    assert 'description:"Seen to fail",color:RED' in mutation
+    # Bug alone carries no id, so it is the one option GitHub mints.
+    assert '{name:"Bug"' in mutation
+    assert mutation.count("name:") == 7
+    assert [option["id"] for option in project.options] == [
+        option["id"] for option in CLASS_BEFORE_BUG] + ["minted-6"]
+
+
+def test_class_extension_is_a_no_op_once_bug_exists(monkeypatch):
+    project = FakeProject(CLASS_BEFORE_BUG + [
+        {"id": "opt-bug", "name": "Bug", "description": "", "color": "ORANGE"},
+    ])
+    monkeypatch.setattr(funnel, "gh_graphql", project)
+
+    assert migrate.ensure_class_options(apply=True) == []
+    assert project.mutations == []
+
+
+def test_class_extension_dry_run_writes_nothing(monkeypatch):
+    project = FakeProject(CLASS_BEFORE_BUG)
+    monkeypatch.setattr(funnel, "gh_graphql", project)
+
+    assert migrate.ensure_class_options(apply=False) == [
+        "extend Class with Bug"]
+    assert project.mutations == []
+
+
+def test_class_extension_refuses_success_when_an_option_id_did_not_survive(
+        monkeypatch):
+    project = FakeProject(CLASS_BEFORE_BUG, keep_ids=False)
+    monkeypatch.setattr(funnel, "gh_graphql", project)
+
+    with pytest.raises(migrate.MigrationError,
+                       match=r"lost .*Investigate \(opt-investigate\)"):
+        migrate.ensure_class_options(apply=True)

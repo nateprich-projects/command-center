@@ -334,14 +334,22 @@ WIP_LIMIT = 4
 STAGES = ["Ideas", "Shaped", "Ready", "Building", "Done", "Parked"]
 
 #: The ladder, best-first. Only finite classes may preempt in-flight work.
-LADDER = ["Investigate", "Broken", "Maintenance", "Improve", "New", "Replace"]
+#: Bug is a latent defect: found by reading, review or tests, with no observed
+#: occurrence. It ranks below Replace and never preempts, so latent finds no
+#: longer ride Broken's preemption past every other class (#1832, #1845).
+LADDER = [
+    "Investigate", "Broken", "Maintenance", "Improve", "New", "Replace", "Bug",
+]
 
 #: The finite classes. `plan.md`: "Broken and Maintenance preempt in-flight
 #: work — and this is only safe because both are finite. The governing rule:
 #: only classes that are finite may preempt." `startable()` ranks these ahead
 #: of in-flight work of the unbounded classes (#435). The WIP-cap preemption in
 #: `claim_ticket()` stays Broken-only: Maintenance may preempt ranking, not the
-#: cap (`test_maintenance_does_not_preempt_the_limit`).
+#: cap (`test_maintenance_does_not_preempt_the_limit`). Bug is deliberately
+#: absent: reading and review keep finding latent defects, so the class is
+#: unbounded, and an unbounded class with preemption starves everything below
+#: it (#1832).
 PREEMPTING_CLASSES = frozenset({"Broken", "Maintenance"})
 
 #: Repo tiers for the engineers' queue (Nate, 2026-09-25): 1 is the tooling
@@ -364,10 +372,18 @@ PREEMPTING = {"Broken", "Maintenance"}
 
 #: Existing-work classes and finite investigations may take the unattended
 #: shaping path. Origin remains an independent condition: class describes the
-#: work, not who raised it.
+#: work, not who raised it. Bug is existing work too: a latent defect in
+#: something already shipped (#1845).
 SELF_APPROVABLE_CLASSES = frozenset(
-    {"Investigate", "Broken", "Maintenance", "Improve"}
+    {"Investigate", "Broken", "Maintenance", "Improve", "Bug"}
 )
+
+#: The defect classes, for measurement only. Broken is an observed failure
+#: and Bug a latent one; ordering keeps them apart, but a fix of either is a
+#: defect fix. Latent finds were classed Broken until #1832 split them out,
+#: so the upkeep share and the fix-on-fix join count both, or those series
+#: would drop at the split (#1845).
+DEFECT_CLASSES = frozenset({"Broken", "Bug"})
 
 #: Which stages can wait on a human, and the question each one asks.
 GATES = {
@@ -5223,10 +5239,14 @@ def maintenance_load(items: Iterable[Item], now: datetime) -> Dict[str, object]:
         and i.closed_at >= cutoff
         and i.state_reason != "NOT_PLANNED"
     ]
-    # The Execution metrics plan defines upkeep as these three project
-    # classes.  Keep this reporting definition separate from PREEMPTING,
+    # The Execution metrics plan defines upkeep as these project classes,
+    # with Bug counted beside Broken since #1832 split latent defects out of
+    # it (#1845).  Keep this reporting definition separate from PREEMPTING,
     # which controls ticket ordering and intentionally has different scope.
-    upkeep = [i for i in recent if i.klass in {"Broken", "Maintenance", "Investigate"}]
+    upkeep = [
+        i for i in recent
+        if i.klass in DEFECT_CLASSES | {"Maintenance", "Investigate"}
+    ]
 
     started_new = []
     for item in items:
@@ -5403,18 +5423,22 @@ def _regression_ticket_ref(body: Optional[str]) -> Optional[str]:
 def recorded_cause_regressions(
     items: Iterable[Item], now: datetime
 ) -> Dict[str, object]:
-    """Count recent Broken projects with an explicit cause record.
+    """Count recent defect projects with an explicit cause record.
 
     A capture marker is durable evidence on the project itself. A rejection
     marker is the regression issue created by ``funnel reject``; its Ticket
     line is joined to the loaded child ticket and then to that ticket's
     parent. Human prose elsewhere in an issue is deliberately ignored.
+
+    Defect means Broken or Bug (``DEFECT_CLASSES``, #1845). The keys keep
+    their ``broken_`` names because the metrics rows and fix_recurrence.py
+    read them.
     """
     rows = list(items)
     cutoff = now - MAINTENANCE_WINDOW
     projects = [
         item for item in rows
-        if item.parent is None and item.klass == "Broken"
+        if item.parent is None and item.klass in DEFECT_CLASSES
     ]
     recent_projects = [item for item in projects if _metric_recent(item, cutoff)]
     project_refs = {item.ref for item in recent_projects}
@@ -5460,9 +5484,9 @@ def recorded_cause_regressions(
         "window_days": MAINTENANCE_WINDOW.days,
         "broken_fix_tickets": broken_fix_tickets,
         "definition": (
-            "parent projects classified Broken with a created, status, or "
-            "closed event in the last 30 days and a capture caused_by marker "
-            "or a recent funnel reject regression record"
+            "parent projects classified Broken or Bug with a created, "
+            "status, or closed event in the last 30 days and a capture "
+            "caused_by marker or a recent funnel reject regression record"
         ),
         "status": "available",
         "available": True,
@@ -12522,7 +12546,11 @@ def _can_close_itself(item: Item) -> bool:
     if parse_analysis_marker(body) is not None:
         return False
 
-    if item.klass in {"Investigate", "Broken", "Maintenance"}:
+    # Bug closes itself exactly as Broken does (#1845). #987's final accept
+    # rule names the upkeep classes as SELF_APPROVABLE_CLASSES and lets every
+    # one but Improve close itself whoever raised it; Bug is a defect class,
+    # upkeep like Broken, so no Bug project waits at `Accept it?`.
+    if item.klass in {"Investigate", "Broken", "Maintenance", "Bug"}:
         return True
     if item.klass != "Improve":
         return False

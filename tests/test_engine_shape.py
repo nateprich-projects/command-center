@@ -658,6 +658,17 @@ def test_nates_origin_holds():
     assert (status, reason) == ("Shaped", "origin is Nate's")
 
 
+def test_an_agent_raised_bug_self_approves_and_a_nate_raised_one_holds():
+    """Bug is latent defect work in something shipped, so it takes the
+    unattended path when an agent raised it, like Broken (#1845)."""
+    validated = shape.validate_answer(answer(proposed_class="Bug"))
+    assert shape.decide(validated, klass="Bug", origin_voice="agent") == (
+        "Ready", "needs_nate all null; class Bug self-approvable; origin agent")
+    assert shape.decide(
+        validated, klass="Bug", origin_voice="nate-relayed") == (
+        "Shaped", "origin is Nate's")
+
+
 def test_a_missing_origin_holds():
     status, _ = shape.decide(
         shape.validate_answer(answer()),
@@ -1226,7 +1237,8 @@ def test_improve_is_explicitly_covered_by_agent_output_review_and_close_policy()
     assert funnel.gate_question(item) is None
 
 
-@pytest.mark.parametrize("klass", ["Broken", "Investigate", "Maintenance"])
+@pytest.mark.parametrize(
+    "klass", ["Broken", "Investigate", "Maintenance", "Bug"])
 @pytest.mark.parametrize("origin", ["agent", "nate-direct", "nate-relayed"])
 def test_self_approvable_upkeep_classes_close_after_all_tickets(klass, origin):
     item = idea(

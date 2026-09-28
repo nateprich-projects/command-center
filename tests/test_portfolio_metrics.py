@@ -96,6 +96,38 @@ def test_recorded_cause_regressions_lists_recent_broken_fix_tickets():
     assert report["broken_fix_tickets"] == [{"ticket": 401, "project": 40}]
 
 
+def test_bug_projects_count_as_defects_beside_broken():
+    """#1845: latent finds were Broken until #1832 split them out as Bug, so
+    the defect measures count both or they drop at the split."""
+    broken = _item(50, "Observed failure", klass="Broken")
+    bug = _item(51, "Latent defect", klass="Bug",
+                body=funnel.append_caused_by("A note", ["#700"], at=NOW))
+    improve = _item(52, "Improvement", klass="Improve")
+    bug_fix = _item(511, "Bug fix ticket", parent=bug.ref, state="CLOSED",
+                    closed_at=NOW - timedelta(days=1))
+    feature = _item(521, "Feature ticket", parent=improve.ref,
+                    state="CLOSED", closed_at=NOW - timedelta(days=1))
+
+    report = funnel.recorded_cause_regressions(
+        [broken, bug, improve, bug_fix, feature], NOW)
+
+    assert report["broken_projects"] == 2
+    assert report["with_recorded_cause"] == 1
+    assert report["broken_fix_tickets"] == [{"ticket": 511, "project": 51}]
+
+
+def test_a_closed_bug_project_is_upkeep():
+    bug = _item(60, "Closed latent defect", klass="Bug", state="CLOSED",
+                closed_at=NOW - timedelta(days=1))
+    new = _item(61, "Closed new project", klass="New", state="CLOSED",
+                closed_at=NOW - timedelta(days=1))
+
+    report = funnel.maintenance_load([bug, new], NOW)
+
+    assert report["closed_in_window"] == 2
+    assert report["upkeep_projects"] == 1
+
+
 def test_maintenance_load_exposes_project_counts_not_ticket_counts():
     broken = _item(
         20, "Closed broken project", klass="Broken", state="CLOSED",

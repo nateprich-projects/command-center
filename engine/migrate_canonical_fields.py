@@ -5,6 +5,9 @@ The first phase creates/extends the schema, backfills every open Project row,
 and verifies the values while leaving legacy prose intact. The second phase
 removes that prose after field-reading code is live. Both phases derive state
 from GitHub and are safe to re-run.
+
+``ensure_class_options`` is separate from both: it extends the existing Class
+field to every ladder class (Bug, #1845) and touches no row.
 """
 
 from __future__ import annotations
@@ -38,6 +41,10 @@ OPTION_STYLE = {
     "claude-code-environment": (
         "Requires the Claude Code environment", "PURPLE"),
     "external-event": ("Waiting on a named external condition", "YELLOW"),
+    # The one Class option the live field predates (#1845).
+    "Bug": (
+        "Latent defect: found by reading, review or tests, never observed; "
+        "never preempts", "YELLOW"),  # the live field's other six colours are taken
 }
 
 RISK_LINE = re.compile(
@@ -201,6 +208,62 @@ def ensure_schema(*, apply: bool) -> List[str]:
                     funnel._field_options(field)):
                 raise MigrationError(
                     "schema verification failed for {}".format(name))
+    return changes
+
+
+def ensure_class_options(*, apply: bool) -> List[str]:
+    """Give the Project's Class field every ladder class; return the changes.
+
+    ``LADDER`` gained Bug in #1845 and the live field predates it. This goes
+    through ``_update_options``, which resubmits every existing option ID, so
+    no Class already on the board is orphaned. A field that already has every
+    class is left alone, so re-running it is a no-op. Dry run unless
+    ``apply``; from the repository root::
+
+        python3 -c 'from engine import migrate_canonical_fields as m; print(m.ensure_class_options(apply=True))'
+
+    After the write it re-reads the field and refuses to report success unless
+    every class is there and every option ID it started with survived under
+    its old name.
+    """
+    field = _one_field(_fields(), "Class")
+    if field is None:
+        raise MigrationError("Project is missing the existing Class field")
+    # capture, approve, reject and shape-apply write Class through this
+    # constant, so the field extended must be that one, not a namesake.
+    if field.get("id") != funnel.CLASS_FIELD_ID:
+        raise MigrationError(
+            "Class field is {}, not funnel.CLASS_FIELD_ID {}".format(
+                field.get("id"), funnel.CLASS_FIELD_ID))
+    missing = [value for value in funnel.LADDER
+               if value not in funnel._field_options(field)]
+    if not missing:
+        return []
+    changes = ["extend Class with {}".format(", ".join(missing))]
+    if not apply:
+        return changes
+
+    kept = {
+        option.get("id"): option.get("name")
+        for option in field.get("options") or []
+        if isinstance(option, dict)
+    }
+    _update_options(field, funnel.LADDER)
+
+    verified = _one_field(_fields(), "Class")
+    after = {
+        option.get("id"): option.get("name")
+        for option in (verified or {}).get("options") or []
+        if isinstance(option, dict)
+    }
+    lost = sorted(
+        "{} ({})".format(name, option_id)
+        for option_id, name in kept.items() if after.get(option_id) != name)
+    absent = [value for value in funnel.LADDER if value not in after.values()]
+    if lost or absent:
+        raise MigrationError(
+            "Class verification failed: lost {}; absent {}".format(
+                ", ".join(lost) or "none", ", ".join(absent) or "none"))
     return changes
 
 

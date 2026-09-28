@@ -352,6 +352,46 @@ def test_agent_capture_sets_class_after_project_add(monkeypatch):
     assert calls[class_index][2]["option"] == "Broken-option"
 
 
+def test_capture_class_bug_is_accepted_and_written(monkeypatch):
+    """`--class Bug` passes the CLI's class choices and sets the Bug option
+    (#1845), where before it was refused as an invalid choice."""
+    calls = []
+
+    def run(args, capture_output, text=True):
+        if args[1:3] == ["issue", "create"]:
+            return SimpleNamespace(
+                returncode=0,
+                stdout="https://github.com/owner/repo/issues/123\n",
+                stderr="",
+            )
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps({"id": "project-item-123"}),
+            stderr="",
+        )
+
+    def graphql(query, **variables):
+        calls.append(variables)
+        return {}
+
+    monkeypatch.setattr(funnel.subprocess, "run", run)
+    monkeypatch.setattr(funnel, "gh_graphql", graphql)
+    monkeypatch.setattr(
+        funnel, "_option_id", lambda field_id, name: "{}-option".format(name)
+    )
+
+    assert funnel.main([
+        "capture", "A latent defect found in review", "--repo", "owner/repo",
+        "--run", "capture-run", "--agent", "claude",
+        "--origin", "agent", "--class", "Bug", "--note", "Read in review.",
+    ], _items=[]) == 0
+
+    assert [
+        variables["option"] for variables in calls
+        if variables.get("field") == funnel.CLASS_FIELD_ID
+    ] == ["Bug-option"]
+
+
 def test_nate_relayed_capture_without_class_leaves_class_unset(monkeypatch):
     calls = []
 

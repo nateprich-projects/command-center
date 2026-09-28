@@ -3,7 +3,9 @@
 
 A squash commit on main names its ticket in its subject, ``… (#<ticket>)
 (#<pr>)``. Given which tickets belong to Broken projects, this reads the
-trailing window of those commits and answers two questions:
+trailing window of those commits and answers two questions (Broken here
+means a defect project, Broken or Bug: the brief's ``broken_fix_tickets``
+join counts both since #1845):
 
 * **Fix-on-fix share.** Of the Broken-fix commits that modify existing
   non-test code, how many rewrite mostly lines that another Broken project's

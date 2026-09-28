@@ -2146,6 +2146,12 @@ def test_queue_and_begin_share_one_startable_view_for_the_165_regression(
         startable_items=[project, ticket],
         startable_agent="codex",
     )
+    readiness = {
+        repo: funnel.MemberRepoReadiness(
+            repo, topic=True, ci_workflow=True,
+            stock_labels=(), dependabot=True,
+        ),
+    }
     calls = []
     original_listing = funnel.startable_listing
 
@@ -2161,13 +2167,14 @@ def test_queue_and_begin_share_one_startable_view_for_the_165_regression(
     monkeypatch.setattr(funnel, "startable_listing", counted_listing)
     result, writes = _implementing_begin(
         monkeypatch, capsys, view, tier="standard",
+        repo_readiness=readiness,
     )
 
     assert result["do"] == "ticket"
     assert result["work"]["ref"] == ticket.ref
     assert [ref for ref, value in writes if value] == [ticket.ref]
     assert funnel.cmd_queue(
-        view, NOW, repo_readiness={}, pr_facts={},
+        view, NOW, repo_readiness=readiness, pr_facts={},
     ) == 0
     queue_output = capsys.readouterr().out
     assert "Startable by Codex (1)" in queue_output

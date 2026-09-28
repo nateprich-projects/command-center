@@ -493,6 +493,24 @@ def test_ticket_1643_named_false_gate_fixtures_do_not_escalate():
         )
 
 
+def test_ticket_1770_sibling_citation_matches_generic_but_not_plan_scan():
+    fixtures = json.loads(
+        (FIXTURES / "escalation_plan_false_gates.json").read_text()
+    )
+    fixture = next(
+        item for item in fixtures
+        if item["source"].startswith("Ticket #1770:")
+    )
+
+    # A broad credentials regex sees the sibling's verb and noun together;
+    # the proposal scan must ignore that non-proposal section (#1643/#1679).
+    generic = re.compile(
+        funnel.ESCALATION_PATTERNS["credentials"], re.IGNORECASE
+    )
+    assert generic.search(fixture["body"])
+    assert funnel.plan_escalation_matches(fixture["body"]) == []
+
+
 def test_plan_scan_ignores_risky_actions_inside_code_blocks():
     fence = "```"
     code_blocks = [

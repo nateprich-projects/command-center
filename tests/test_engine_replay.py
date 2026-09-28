@@ -363,9 +363,27 @@ QUOTING_LINES = [
     # An outcome is one of the engine's three, in its own case...
     _timing("judge.3", 412, 2, "failed:payouts-round-half-even"),
     _timing("judge.3", 412, 2, "FAILED"),
-    # ...and elapsed and calls are digits alone.
+    # ...and elapsed and calls are ASCII digits alone: no letters in either
+    # case, no underscores, no hex, and no non-ASCII digits (which \\d takes).
     _timing("judge.3", "payouts-round-half-even", 2, "failed"),
     _timing("judge.3", 412, "payouts-round-half-even", "failed"),
+    _timing("judge.3", "PayoutsRoundHalfEven", 2, "failed"),
+    _timing("judge.3", "payouts_round", 2, "failed"),
+    _timing("judge.3", "abc123", 2, "failed"),
+    _timing("judge.3", "\u0664\u0661\u0662", 2, "failed"),
+    _timing("judge.3", 412, "PayoutsRoundHalfEven", "failed"),
+    _timing("judge.3", 412, "payouts", "failed"),
+    _timing("judge.3", 412, "a1", "failed"),
+    _timing("judge.3", 412, "\u0662", "failed"),
+    # A shape part is framer, auditor, or a numbered sibling or decider, and
+    # every index is ASCII digits: no other word, no letters in an index.
+    _timing("shape.payouts", 412, 2, "failed"),
+    _timing("shape.framerx", 412, 2, "failed"),
+    _timing("judge.ab", 412, 2, "failed"),
+    _timing("judge.1a", 412, 2, "failed"),
+    _timing("shape.sibling.ab", 412, 2, "failed"),
+    _timing("shape.decider.\u0663", 412, 2, "failed"),
+    _timing("lister2", 412, 2, "failed"),
 ]
 
 

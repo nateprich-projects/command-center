@@ -361,13 +361,13 @@ def test_rejected_1614_post_deploy_acceptance_is_a_verified_deferral():
     assert fixture["checkable_verification_requirement"] in requirements
     assert fixture["expected_deferred_requirement"] in requirements
     marked = review.mark_verified_premise_requirements(packet, [{
-        "requirement": fixture["expected_checkable_requirement"],
-        "status": "met",
-        "evidence": "the before timing and same-ticket verification are present",
-    }, {
         "requirement": fixture["checkable_verification_requirement"],
         "status": "met",
         "evidence": "the verification is present on this ticket",
+    }, {
+        "requirement": fixture["expected_checkable_requirement"],
+        "status": "met",
+        "evidence": "the before timing is present on this ticket",
     }, {
         "requirement": fixture["expected_deferred_requirement"],
         "status": "unsure",

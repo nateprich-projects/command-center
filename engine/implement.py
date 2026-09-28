@@ -368,7 +368,15 @@ def _read_done_answer(answer: dict) -> dict:
     ):
         raise ImplementError(
             "answer evidence must be a non-empty list of non-empty GitHub URLs")
-    extra = sorted(set(answer) - {"done", "summary", "departures", "evidence"})
+    # Where the implementer says review should look hardest (#1807). It is
+    # optional and may be empty, so an answer without it parses as before.
+    risks = answer.get("risks")
+    if "risks" in answer and (not isinstance(risks, list) or not all(
+        isinstance(value, str) and value.strip() for value in risks
+    )):
+        raise ImplementError("answer risks must be a list of non-empty strings")
+    extra = sorted(
+        set(answer) - {"done", "summary", "departures", "evidence", "risks"})
     if extra:
         raise ImplementError("answer has unknown field(s): {}".format(", ".join(extra)))
     found = {
@@ -378,6 +386,8 @@ def _read_done_answer(answer: dict) -> dict:
     }
     if "evidence" in answer:
         found["evidence"] = [value.strip() for value in evidence]
+    if "risks" in answer:
+        found["risks"] = [value.strip() for value in risks]
     return found
 
 
@@ -1021,6 +1031,12 @@ def render_pr_body(ticket: dict, answer: dict, *, continued: bool,
         lines.extend("- " + value for value in answer["departures"])
     else:
         lines.append("- None.")
+    if answer.get("risks"):
+        # Only when there are some (#1807): a body without risks stays the
+        # template it always was. The label also ends the Departures section
+        # review.parse_departures reads, so a risk never reads as a departure.
+        lines.extend(["", "Risks:"])
+        lines.extend("- " + value for value in answer["risks"])
     lines.extend([
         "",
         "Branch:",

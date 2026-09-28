@@ -74,8 +74,10 @@ def funnel_wait_rule() -> str:
     return funnel.CODEX_IMPLEMENT_VENDOR["begin_wait"]
 
 
-def test_routine_is_under_the_500_word_acceptance_limit():
-    assert len(routine().split()) < 500
+def test_routine_is_under_its_word_limit():
+    """#818 set 500 words; #1807's testing rules and `risks` field raised
+    it to 600, so the routine stays judgement text."""
+    assert len(routine().split()) < 600
 
 
 def test_setup_header_keeps_the_sandbox_boundary_for_nate():

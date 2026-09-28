@@ -46,14 +46,24 @@ after a successful push or a finish that records work not kept; if a push fails,
 it leaves the directory for diagnosis.
 
 Implement only what the ticket and plan require. Do not change project `Status`
-or `Class`, do not merge, and do not repair unrelated defects. Make the code
-change and return exactly one structured answer:
+or `Class`, do not merge, and do not repair unrelated defects. Refactor nothing
+beyond the ticket; a needed refactor is a departure and its own ticket.
+
+Test at the seams the ticket names, one behaviour per seam, or through the
+changed code's public interface when it names none. When the first Accept item
+begins `Reproduction:`, write that failing test first and see it fail before the
+fix. Expected values come from an independent source, never recomputed the way
+the code computes them. Run the affected test files while working;
+`finish-ticket` runs the full suite.
+
+Make the code change and return exactly one structured answer:
 
 For a no-diff success, include the optional non-empty evidence list of GitHub
 URLs named by the ticket's Accept. The finish check verifies each artifact
 against this run's heartbeat start.
 
-- success: `{"done":true,"summary":"...","departures":[]}`
+- success: `{"done":true,"summary":"...","departures":[]}`, optionally with a
+  `risks` list: where review should look hardest
 - a required unavailable human action:
   `{"blocked_on_human":{"reason":"<allowlisted reason>","action":"..."}}`
 - an unlanded named prerequisite before any change: `{"declined":"..."}`

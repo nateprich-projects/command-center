@@ -2631,6 +2631,15 @@ def _remove_codex_run_checkout(root: pathlib.Path, number: int,
     worktrees also sit in the runs root (#1804), but one level down, under
     ``review-evidence-*``, so no guard below can match them; they are
     removed by review_evidence itself.
+
+    Call it only once this run has pushed the ticket branch. #1711 also
+    removed the checkout once a finish recorded work not kept, but that
+    checkout can hold the only copy of the work: a stray-file refusal, a
+    ``_keep_work`` failure before its push, a superseded run, a decline or
+    a human step. Those paths never ran live while the root went unmatched,
+    so matching it (#1856) would have started deleting that work. They leave
+    the directory for a later run or Nate to recover: a leaked directory is
+    the safe failure, lost work is not.
     """
     if agent != "codex":
         return False
@@ -2688,10 +2697,10 @@ def _keep_work(root: pathlib.Path, number: int, branch: str, *, ref: str,
 
     Never opens a PR. Returns a short phrase for the heartbeat note. The same
     pre-PR scratch check applies here so a WIP branch cannot carry run debris.
-    The second result is true if the push path failed; that checkout is kept
-    for diagnosis.
+    The second result is true only once the branch is pushed, which is the
+    only time the Codex checkout may be removed (#1856); every other result
+    keeps it, for diagnosis or because it holds the only copy of the work.
     """
-    push_attempted = False
     try:
         _require_current_claim(ref, run, agent)
         paths = _working_tree_paths(root)
@@ -2708,14 +2717,13 @@ def _keep_work(root: pathlib.Path, number: int, branch: str, *, ref: str,
                      timeout=LOCAL_GIT_TIMEOUT_SECONDS).stdout.strip()
         if not ahead.isdigit() or int(ahead) < 1:
             return "no work to keep", False
-        push_attempted = True
         _push_ticket_branch(root, branch, ref=ref, run=run, agent=agent)
-        return "work kept on {}".format(branch), False
+        return "work kept on {}".format(branch), True
     except SupersededRunError:
         raise
     except ImplementError as exc:
         first = str(exc).splitlines()[0] if str(exc) else "unknown error"
-        return "work NOT kept: {}".format(first[:120]), push_attempted
+        return "work NOT kept: {}".format(first[:120]), False
 
 
 def _checkpoint_work(root: pathlib.Path, number: int, branch: str, *,
@@ -2762,7 +2770,7 @@ def _recover_answer_error(
     release_effect = release or (
         lambda target: release_claim(target, run=run, agent=agent)
     )
-    kept, push_failed = _keep_work(
+    kept, pushed = _keep_work(
         context["root"], context["number"], context["branch"],
         ref=ref, run=run, agent=agent, reason="answer unreadable",
     )
@@ -2775,7 +2783,7 @@ def _recover_answer_error(
         note = _with_markers(note, "answer error: {} | {}".format(
             first[:200], _member_kept(kept)))
     heartbeat_finish(agent, run, "errored", note, ref)
-    if not push_failed:
+    if pushed:
         _remove_codex_run_checkout(context["root"], context["number"], agent)
     return True
 
@@ -2826,7 +2834,9 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
         release_effect(ref)
         heartbeat_finish(
             agent, run, "errored", _stray_note(exc, repo=resolved), ref)
-        _remove_codex_run_checkout(context["root"], context["number"], agent)
+        # The note asks for the scratch to be removed and the work
+        # re-staged, and the work may be pushed nowhere: keep the checkout
+        # (#1856).
         raise
     except CommandTimeoutError as exc:
         _record_command_timeout(
@@ -2844,7 +2854,7 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
         # conflict with main finishes the same way, so the backoff bounds a
         # ticket that keeps conflicting (#1804).
         conflict = isinstance(exc, MergeConflictError)
-        kept, push_failed = _keep_work(
+        kept, pushed = _keep_work(
             context["root"], context["number"], context["branch"],
             ref=ref, run=run, agent=agent,
             reason=("merge conflict with origin/main" if conflict else
@@ -2878,7 +2888,7 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
         if posted is False:
             note += " | failing tests NOT posted to the ticket"
         heartbeat_finish(agent, run, "errored", note, ref)
-        if not push_failed:
+        if pushed:
             _remove_codex_run_checkout(
                 context["root"], context["number"], agent)
         raise
@@ -2902,9 +2912,8 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
                 ", ".join(evidence))
             if extra_note:
                 note += "; " + extra_note.strip()
+            # Nothing was pushed, so the checkout stays (#1856).
             heartbeat_finish(agent, run, "done", note, ref)
-            _remove_codex_run_checkout(
-                context["root"], context["number"], agent)
             return {"number": context["number"], "url": ticket["url"],
                     "closed": True}
         # Re-read immediately before pushing so a ticket branch never carries
@@ -2927,7 +2936,9 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
         release_effect(ref)
         heartbeat_finish(
             agent, run, "errored", _stray_note(exc, repo=resolved), ref)
-        _remove_codex_run_checkout(context["root"], context["number"], agent)
+        # The note asks for the scratch to be removed and the work
+        # re-staged, and the work may be pushed nowhere: keep the checkout
+        # (#1856).
         raise
     except CommandTimeoutError as exc:
         _record_command_timeout(
@@ -2983,7 +2994,8 @@ def finish_blocked_on_human(
     """File the human step, block the ticket, release, and finish. No PR.
 
     No test run, commit, or push happens here: the finish records the
-    implementation as not kept, then removes this run's Codex checkout.
+    implementation as not kept and leaves this run's Codex checkout, which
+    may hold the only copy of it (#1856; #1711 removed it).
     A failure after the sub-issue exists names it, so the retry starts
     from GitHub's truth rather than filing a second one.
 
@@ -3044,7 +3056,6 @@ def finish_blocked_on_human(
     if extra_note:
         note += "; " + extra_note.strip()
     heartbeat_finish(agent, run, "skipped-human-step", note, ref)
-    _remove_codex_run_checkout(context["root"], context["number"], agent)
     return {"ticket": ref,
             "human_step": {"number": created["number"],
                            "ref": created["ref"],
@@ -3147,7 +3158,6 @@ def finish_declined(
         if extra_note:
             note += "; " + extra_note.strip()
         heartbeat_finish(agent, run, "done", note, ref)
-        _remove_codex_run_checkout(context["root"], context["number"], agent)
         return {"ticket": ref, "declined": reason}
     accept_conflict_routed = (
         decline_class == "accept-body-conflict" and decline_target is not None
@@ -3289,7 +3299,6 @@ def finish_declined(
     if extra_note:
         note += "; " + extra_note.strip()
     heartbeat_finish(agent, run, "skipped-blocked", note, ref)
-    _remove_codex_run_checkout(context["root"], context["number"], agent)
     return {"ticket": ref, "declined": reason}
 
 
@@ -3312,7 +3321,11 @@ def dry_run_main() -> int:
 
 def _record_superseded_finish(args: argparse.Namespace, ref: str,
                               reason: str) -> int:
-    """Finish a refused run without releasing, committing, or pushing work."""
+    """Finish a refused run without releasing, committing, or pushing work.
+
+    The checkout stays: this run keeps none of its work, so the checkout
+    may hold the only copy (#1856).
+    """
     if not args.run:
         print("finish-ticket: cannot record superseded finish without --run",
               file=sys.stderr)
@@ -3325,14 +3338,6 @@ def _record_superseded_finish(args: argparse.Namespace, ref: str,
         print("finish-ticket: {}; heartbeat finish failed: {}".format(
             note, exc), file=sys.stderr)
         return 1
-    try:
-        context = checkout_context()
-    except ImplementError:
-        context = None
-    if context is not None:
-        _remove_codex_run_checkout(
-            context["root"], context["number"], args.agent,
-        )
     print(json.dumps({
         "ticket": ref, "superseded": True, "work_kept": False,
     }, sort_keys=True))

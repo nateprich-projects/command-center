@@ -311,7 +311,8 @@ def test_finish_refusal_records_superseded_without_keeping_work(
         "--git-dir", str(remote), "for-each-ref", "--format=%(refname)",
         "refs/heads/ticket/42",
     ).stdout == ""
-    assert not clone.exists()
+    # Kept nowhere else, so the checkout stays (#1856; #1711 removed it).
+    assert (clone / "implemented.txt").read_text() == "unkept work\n"
 
 
 def test_packet_carries_ticket_plan_verdict_blocking_and_prior_digest():
@@ -1263,7 +1264,7 @@ def test_finish_removes_a_checkout_under_the_heartbeat_runs_root(
     assert pathlib.Path.cwd() == tmp_path / "heartbeat" / "codex-runs"
 
 
-def test_finish_ticket_removes_codex_run_checkout_after_recording_not_kept(
+def test_finish_ticket_keeps_codex_run_checkout_after_recording_not_kept(
         tmp_path, monkeypatch):
     _, clone = make_codex_run_clone(tmp_path, monkeypatch)
     (clone / "unfinished.txt").write_text("not kept\n")
@@ -1296,7 +1297,9 @@ def test_finish_ticket_removes_codex_run_checkout_after_recording_not_kept(
 
     assert effects["released"] == [REPO + "#42"]
     assert effects["finished"][0][2] == "skipped-human-step"
-    assert not clone.exists()
+    # Nothing was pushed, so the checkout holds the only copy (#1856; #1711
+    # removed it).
+    assert (clone / "unfinished.txt").read_text() == "not kept\n"
 
 
 def test_finish_ticket_keeps_codex_run_checkout_when_push_fails(
@@ -1337,6 +1340,164 @@ def test_finish_ticket_keeps_codex_run_checkout_when_push_fails(
     assert (clone / "implemented.txt").exists()
 
 
+#: Both run roots, for the tests of which finishes may remove a checkout:
+#: the heartbeat one is live, and CLAUDE_DIR's is the one #1711 matched, so
+#: its removal on a not-kept path shows on origin/main before #1856.
+RUN_ROOTS = pytest.mark.parametrize(
+    "make_run_clone", (make_heartbeat_codex_run_clone, make_codex_run_clone),
+    ids=("heartbeat", "claude-dir"))
+
+
+@RUN_ROOTS
+def test_a_stray_file_refusal_keeps_the_run_checkout(
+        tmp_path, monkeypatch, make_run_clone):
+    # The reviewer's reproduction on PR #1860: answer.json beside uncommitted
+    # work. Nothing reaches the remote, and the note asks for the scratch to
+    # be removed and the work re-staged, so the checkout is the only copy of
+    # the work and stays (#1856).
+    remote, clone = make_run_clone(tmp_path, monkeypatch)
+    _stub_claim_state(monkeypatch, "owned")
+    (clone / "work.txt").write_text("only copy\n")
+    (clone / "answer.json").write_text("{}\n")
+    monkeypatch.setattr(
+        implement, "fetch_ticket", lambda repo, number: ticket(number))
+    effects = {"released": [], "finished": []}
+
+    with pytest.raises(implement.StrayFileError):
+        implement.finish_done(
+            answer(), run="run-42", repo=REPO, cwd=clone,
+            test_commands=[[sys.executable, "-c", "pass"]],
+            release=effects["released"].append,
+            heartbeat_finish=lambda *args: effects["finished"].append(args),
+            pr_effect=lambda *args: pytest.fail("a stray file opens no PR"),
+        )
+
+    assert effects["finished"][0][2] == "errored"
+    assert run_git("--git-dir", str(remote), "branch", "--list",
+                   "ticket/42").stdout == ""
+    assert (clone / "work.txt").read_text() == "only copy\n"
+
+
+@RUN_ROOTS
+def test_a_stray_file_before_the_only_push_keeps_unpushed_commits(
+        tmp_path, monkeypatch, make_run_clone):
+    # A run that committed without pushing leaves the checkpoint nothing to
+    # push, so a scratch file its tests write is refused before the finish's
+    # only push, and the commit exists nowhere but the checkout (#1856).
+    remote, clone = make_run_clone(tmp_path, monkeypatch)
+    _stub_claim_state(monkeypatch, "owned")
+    (clone / "implemented.txt").write_text("only copy\n")
+    run_git("add", "implemented.txt", cwd=clone)
+    run_git("commit", "--quiet", "-m", "local only", cwd=clone)
+    monkeypatch.setattr(
+        implement, "fetch_ticket", lambda repo, number: ticket(number))
+    effects = {"released": [], "finished": []}
+
+    with pytest.raises(implement.StrayFileError):
+        implement.finish_done(
+            answer(), run="run-42", repo=REPO, cwd=clone,
+            test_commands=[[sys.executable, "-c",
+                            "open('answer.json', 'w').write('{}')"]],
+            release=effects["released"].append,
+            heartbeat_finish=lambda *args: effects["finished"].append(args),
+            pr_effect=lambda *args: pytest.fail("a stray file opens no PR"),
+        )
+
+    assert effects["finished"][0][2] == "errored"
+    assert run_git("--git-dir", str(remote), "branch", "--list",
+                   "ticket/42").stdout == ""
+    assert run_git("log", "-1", "--format=%s",
+                   cwd=clone).stdout.strip() == "local only"
+
+
+@RUN_ROOTS
+def test_a_keep_work_failure_before_its_push_keeps_the_run_checkout(
+        tmp_path, monkeypatch, make_run_clone):
+    # A commit git refuses fails the checkpoint, then _keep_work's own commit,
+    # so nothing is pushed and the finish records work NOT kept. #1711 removed
+    # the checkout there, since only a failed push kept it (#1856).
+    remote, clone = make_run_clone(tmp_path, monkeypatch)
+    _stub_claim_state(monkeypatch, "owned")
+    hooks = clone / ".git" / "hooks"
+    (hooks / "pre-commit").write_text("#!/bin/sh\necho refused >&2\nexit 1\n")
+    (hooks / "pre-commit").chmod(0o755)
+    run_git("config", "core.hooksPath", str(hooks), cwd=clone)
+    (clone / "implemented.txt").write_text("only copy\n")
+    monkeypatch.setattr(
+        implement, "fetch_ticket", lambda repo, number: ticket(number))
+    effects = {"released": [], "finished": []}
+
+    with pytest.raises(implement.ImplementError, match="git commit"):
+        implement.finish_done(
+            answer(), run="run-42", repo=REPO, cwd=clone,
+            test_commands=[[sys.executable, "-c", "pass"]],
+            release=effects["released"].append,
+            heartbeat_finish=lambda *args: effects["finished"].append(args),
+            pr_effect=lambda *args: pytest.fail("a failed commit opens no PR"),
+        )
+
+    (finished,) = effects["finished"]
+    assert finished[2] == "errored"
+    assert "work NOT kept" in finished[3]
+    assert run_git("--git-dir", str(remote), "branch", "--list",
+                   "ticket/42").stdout == ""
+    assert (clone / "implemented.txt").read_text() == "only copy\n"
+
+
+@RUN_ROOTS
+def test_a_failed_finish_that_pushes_its_work_removes_the_run_checkout(
+        tmp_path, monkeypatch, make_run_clone):
+    # Failing tests keep the work on ticket/42. Once it is pushed the remote
+    # holds it, so the checkout goes (#1856).
+    remote, clone = make_run_clone(tmp_path, monkeypatch)
+    _stub_claim_state(monkeypatch, "owned")
+    (clone / "implemented.txt").write_text("done\n")
+    monkeypatch.setattr(
+        implement, "fetch_ticket", lambda repo, number: ticket(number))
+    effects = {"released": [], "finished": []}
+
+    with pytest.raises(implement.ImplementError, match="SystemExit"):
+        implement.finish_done(
+            answer(), run="run-42", repo=REPO, cwd=clone,
+            test_commands=[[sys.executable, "-c", "raise SystemExit(3)"]],
+            release=effects["released"].append,
+            heartbeat_finish=lambda *args: effects["finished"].append(args),
+            pr_effect=lambda *args: pytest.fail("failed tests open no PR"),
+            comment_effect=lambda *args, **kwargs: None,
+        )
+
+    assert "work kept on ticket/42" in effects["finished"][0][3]
+    assert run_git("--git-dir", str(remote), "show",
+                   "ticket/42:implemented.txt").stdout == "done\n"
+    assert not clone.exists()
+
+
+@RUN_ROOTS
+def test_a_decline_keeps_the_run_checkout(
+        tmp_path, monkeypatch, make_run_clone):
+    # A decline pushes nothing, and whatever the run left is its only copy
+    # (#1856; #1711 removed it).
+    _, clone = make_run_clone(tmp_path, monkeypatch)
+    (clone / "halfway.txt").write_text("not finished\n")
+    monkeypatch.setattr(
+        implement, "fetch_ticket", lambda repo, number: ticket(number))
+    effects = {"released": [], "finished": []}
+
+    implement.finish_declined(
+        "prerequisite has not landed",
+        run="run-42", repo=REPO, cwd=clone,
+        release=effects["released"].append,
+        heartbeat_finish=lambda *args: effects["finished"].append(args),
+        block_effect=lambda *args, **kwargs: None,
+        comment_effect=lambda *args, **kwargs: None,
+        needs_effect=lambda *args: None,
+        human_needs_effect=lambda *args: None,
+    )
+
+    assert effects["finished"][0][2] == "skipped-blocked"
+    assert (clone / "halfway.txt").read_text() == "not finished\n"
+
+
 def test_codex_run_cleanup_leaves_checkout_outside_runtime_root(
         tmp_path, monkeypatch):
     runtime_root = tmp_path / "runtime"
@@ -1370,6 +1531,17 @@ def test_heartbeat_root_cleanup_refuses_another_tickets_checkout(
     # 4 is a prefix of 42, which a string match would take.
     assert not implement._remove_codex_run_checkout(checkout, 4, "codex")
     assert not implement._remove_codex_run_checkout(checkout, 43, "codex")
+    assert (checkout / "work.txt").exists()
+    assert implement._remove_codex_run_checkout(checkout, 42, "codex")
+    assert not checkout.exists()
+
+
+def test_heartbeat_root_cleanup_is_for_codex_runs_only(
+        tmp_path, monkeypatch):
+    runs_root = point_runs_roots_at(tmp_path, monkeypatch)
+    checkout = _run_dir(runs_root / LIVE_RUN_NAME.format(42))
+
+    assert not implement._remove_codex_run_checkout(checkout, 42, "claude")
     assert (checkout / "work.txt").exists()
     assert implement._remove_codex_run_checkout(checkout, 42, "codex")
     assert not checkout.exists()
@@ -1813,7 +1985,7 @@ def test_a_member_answer_error_note_drops_the_git_error(
     (clone / "implemented.txt").write_text("done\n")
     monkeypatch.setattr(implement, "_keep_work", lambda *args, **kwargs: (
         "work NOT kept: git push failed: remote: Repository not found for "
-        "owner/private-widgets", True))
+        "owner/private-widgets", False))
     finished = []
 
     assert implement._recover_answer_error(
@@ -1822,6 +1994,26 @@ def test_a_member_answer_error_note_drops_the_git_error(
         heartbeat_finish=lambda *args: finished.append(args))
 
     assert finished[0][3] == "answer error: answer is not valid JSON: boom | work NOT kept"
+
+
+@pytest.mark.parametrize(("kept", "pushed"), (
+    ("work kept on ticket/42", True),
+    ("work NOT kept: git commit failed", False),
+), ids=("pushed", "not-pushed"))
+def test_an_answer_error_removes_the_run_checkout_only_once_pushed(
+        tmp_path, monkeypatch, kept, pushed):
+    _, clone = make_heartbeat_codex_run_clone(tmp_path, monkeypatch)
+    (clone / "implemented.txt").write_text("done\n")
+    monkeypatch.setattr(implement, "_keep_work",
+                        lambda *args, **kwargs: (kept, pushed))
+
+    assert implement._recover_answer_error(
+        implement.ImplementError("answer is not valid JSON: boom"),
+        run="run-42", repo=REPO, cwd=clone, release=lambda ref: None,
+        heartbeat_finish=lambda *args: None)
+
+    # Unpushed, the checkout is the only copy (#1856).
+    assert clone.exists() is not pushed
 
 
 def test_finish_ticket_requires_the_deterministic_branch(tmp_path):

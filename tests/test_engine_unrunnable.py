@@ -244,29 +244,29 @@ def test_a_checkable_inferred_pointer_keeps_the_probe_path(monkeypatch):
 
 
 def test_merged_pr_evidence_pointer_keeps_the_probe_path(monkeypatch):
+    source = json.loads((ROOT / "tests" / "fixtures" /
+                         "review_1626_1613_live_evidence.json").read_text())
+    records = source["records"]
+    assert records["pr_1613"]["approval"]["blocking"] == []
+    assert records["pr_1613"]["approval"]["verdict"] == "approved"
+    assert records["pr_1612_rejection"]["verdict"] == "rejected"
+    assert (records["pr_1612_rejection"]["reviewed_at"]
+            < records["pr_1613"]["approval"]["reviewed_at"]
+            < records["pr_1613"]["merged_at"]
+            < records["plan_1581_edit"]["provenance_at"])
+
     data = live_fixture()
-    data["issues"][REPO + "#1597"]["state"] = "CLOSED"
-    data["issues"][REPO + "#1613"] = {
-        "state": "CLOSED",
-        "parent": REPO + "#1581",
-        "blocked_by": [],
-    }
+    data["issues"].update(source["issue_states"])
     install_github_fixture(monkeypatch, data)
 
     packet = rejected_1612_fixture()["packet"]
-    packet["ticket"] = {"ref": REPO + "#1652", "number": 1652}
+    packet["ticket"] = {"ref": source["reviewed_ticket"], "number": 1652}
     packet["plan_premises"][0].update({
         "parent_ref": REPO + "#1626",
-        "ticket_refs": [REPO + "#1652"],
+        "ticket_refs": [source["reviewed_ticket"]],
     })
     premise = packet["plan_premises"][0]["premises"][0]
-    premise.update({
-        "claim": (
-            "PR #1613 for ticket #1597 has the same uncheckable later-sibling "
-            "premise shape as PR #1612"),
-        "evidence": (
-            REPO + "#1613 for #1597 shares #1581 later-sibling evidence shape"),
-    })
+    premise.update(source["plan_premise"])
     probe = (
         "Probe the parent plan #1626 premise labelled inferred against live "
         "evidence using its evidence pointer: '{}' (evidence pointer: {}); "

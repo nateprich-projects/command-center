@@ -1213,7 +1213,7 @@ def test_shared_listing_preserves_finite_order_and_investigate_position():
     ]
 
 
-@pytest.mark.parametrize(
+@_pytest.mark.parametrize(
     ("klass", "should_start"),
     [("Broken", True), ("Maintenance", False), ("Investigate", False)],
 )

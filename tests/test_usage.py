@@ -378,13 +378,13 @@ def test_repeated_message_ids_count_once_across_transcripts(tmp_path, monkeypatc
     assert reading["opus_output_tokens"] == {"five_hour": 1300, "seven_day": 1300}
 
 
-def test_recalibrated_capacities_reproduce_the_paired_app_sample(
+def test_weekly_capacity_uses_the_paired_sample_and_five_hour_stays_conservative(
         tmp_path, monkeypatch):
-    """The deduplicated transcript counts match the paired 43% / 14% app sample."""
+    """Only the cleanly calibrating weekly window is fitted to the app sample."""
     import time as _time
     sample_at = _time.time()
     monkeypatch.setattr(usage, "last_weekly_reset", lambda n: sample_at - 8 * 3600)
-    monkeypatch.setattr(usage, "promo_multiplier", lambda window, now: 1.0)
+    promo_config(tmp_path, monkeypatch, "weekly limits without a confirmed promo")
     transcript(tmp_path / "paired.jsonl", [
         ("claude-opus-5", 530879, _at(sample_at, 1), "five-hour-message"),
         ("claude-opus-5", 406755, _at(sample_at, 6), "weekly-only-message"),
@@ -396,7 +396,10 @@ def test_recalibrated_capacities_reproduce_the_paired_app_sample(
     assert reading["opus_output_tokens"] == {
         "five_hour": 530879, "seven_day": 937634,
     }
-    assert reading["windows"]["five_hour"]["used_percent"] == pytest.approx(43.0)
+    assert usage.FIVE_HOUR_CAPACITY > 801303 * 5
+    assert reading["windows"]["five_hour"]["used_percent"] == pytest.approx(
+        100.0 * 530879 / usage.FIVE_HOUR_CAPACITY
+    )
     assert reading["windows"]["seven_day"]["used_percent"] == pytest.approx(14.0)
 
 
@@ -411,7 +414,8 @@ def promo_config(tmp_path, monkeypatch, text, bar="seven_day"):
     return cfg
 
 
-def test_a_live_promo_raises_capacity(tmp_path, monkeypatch):
+def test_a_promo_with_percentage_and_future_end_date_raises_capacity(
+        tmp_path, monkeypatch):
     promo_config(tmp_path, monkeypatch, "+50% weekly limits promo through Dec 31")
     assert usage.promo_multiplier("seven_day", NOW) == 1.5
     assert usage.capacity("seven_day", NOW) == usage.WEEKLY_CAPACITY * 1.5
@@ -427,6 +431,17 @@ def test_an_unparseable_promo_is_ignored(tmp_path, monkeypatch):
     """Assuming a boost that is not real permits overspending; ignoring a real
     one only makes the gate stricter. Fail toward strict."""
     promo_config(tmp_path, monkeypatch, "bigger limits for a while!")
+    assert usage.promo_multiplier("seven_day", NOW) == 1.0
+
+
+@pytest.mark.parametrize("notice", [
+    "weekly limits promo through Dec 31",  # no percentage
+    "+50% weekly limits promo",  # no end date
+    "+50% weekly limits promo through Feb 30",  # invalid end date
+])
+def test_a_promo_requires_a_parseable_percentage_and_future_end_date(
+        tmp_path, monkeypatch, notice):
+    promo_config(tmp_path, monkeypatch, notice)
     assert usage.promo_multiplier("seven_day", NOW) == 1.0
 
 

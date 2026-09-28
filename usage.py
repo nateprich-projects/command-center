@@ -64,19 +64,22 @@ MUSE_SESSIONS = os.path.expanduser(
 #: counting it adds arithmetic without changing a decision.
 BUDGETED_MODEL = "opus"
 
-#: Base capacity in Opus output tokens, recalibrated 2026-09-27 against Claude's
-#: account sample at 2026-09-27 10:53 UTC. The deduplicated transcript had
-#: 530,879 tokens in the trailing five hours while the app read 43%, and
-#: 937,634 since the weekly reset while the app read 14%. The resulting
-#: capacities reproduce that paired sample: 530,879 / 43% and 937,634 / 14%.
-#: The five-hour estimate is still the weaker signal because the provider's
-#: first-use reset is not visible here; its calibrated capacity remains above
-#: the largest observed five-hour stretch that did not hit a limit.
-FIVE_HOUR_CAPACITY = 1_234_602.0
+#: The five-hour percentage does not calibrate cleanly: 262,413 tokens read
+#: 45%, while an 801,303-token stretch did not hit the limit. plan.md says to
+#: keep this capacity above the observed stretch instead of fitting one sample.
+#: The recorded stretch scales to 4,006,515 tokens under the documented 5x
+#: plan increase, so retain the conservative 4,500,000-token capacity.
+FIVE_HOUR_CAPACITY = 4_500_000.0
+
+#: Weekly capacity is recalibrated from Claude's 2026-09-27 account sample:
+#: 937,634 deduplicated Opus output tokens read 14% of the seven-day window.
+#: The base remains subject to a promo multiplier only when the app's cached
+#: notice includes a parseable percentage and a future end date.
 WEEKLY_CAPACITY = 6_697_386.0
 
-#: No extra inflation: the paired account sample calibrates these constants
-#: against the same deduplicated counts the fallback uses.
+#: No extra inflation. The weekly capacity uses the same deduplicated count as
+#: its paired sample; the five-hour capacity stays conservative, and the
+#: reserves carry the margin.
 ESTIMATE_HAIRCUT = 1.0
 
 #: When the weekly window resets, in local time. The estimate counts tokens
@@ -134,25 +137,28 @@ def promo_multiplier(window: str, now: float) -> float:
         if not isinstance(notice, dict) or notice.get("bar") != window:
             continue
         text = str(notice.get("text") or "")
-        percent = re.search(r"\+\s*(\d{1,3})\s*%", text)
-        through = re.search(
+        percent_match = re.search(r"\+\s*(\d{1,3})\s*%", text)
+        through_match = re.search(
             r"through\s+([A-Z][a-z]{2})\w*\s+(\d{1,2})", text
         )
-        if not percent or not through:
+        if percent_match is None or through_match is None:
             continue
         month = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
                  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
-        try:
-            index = month.index(through.group(1)) + 1
-        except ValueError:
-            continue
         today = datetime.datetime.fromtimestamp(now, timezone.utc)
-        ends = datetime.datetime(
-            today.year, index, int(through.group(2)), 23, 59, tzinfo=timezone.utc
-        )
-        if ends < today:
+        try:
+            index = month.index(through_match.group(1)) + 1
+            ends = datetime.datetime(
+                today.year, index, int(through_match.group(2)), 23, 59,
+                tzinfo=timezone.utc,
+            )
+            percent = int(percent_match.group(1))
+        except (ValueError, OverflowError):
+            continue
+        # Both fields must parse, and expiry must be later than this reading.
+        if ends.timestamp() <= now:
             continue  # lapsed, or a stale cached notice
-        return 1.0 + int(percent.group(1)) / 100.0
+        return 1.0 + percent / 100.0
     return 1.0
 
 

@@ -135,7 +135,9 @@ def test_review_uses_the_only_member_and_reports_it(monkeypatch, capsys):
     monkeypatch.setattr(funnel, "member_repos", lambda: [ONE])
     monkeypatch.setattr(
         funnel, "_gh_json",
-        lambda *args: {"state": "OPEN", "headRefOid": "abc123"},
+        lambda *args: {"state": "OPEN", "headRefOid": "abc123",
+                       "isCrossRepository": False,
+                       "author": {"login": "nateprich"}},
     )
 
     def run(args, capture_output, text=True):
@@ -195,7 +197,9 @@ def test_all_commands_honor_explicit_repo_with_multiple_members(monkeypatch, cap
 
     monkeypatch.setattr(
         funnel, "_gh_json",
-        lambda *args: {"state": "OPEN", "headRefOid": "abc123"},
+        lambda *args: {"state": "OPEN", "headRefOid": "abc123",
+                       "isCrossRepository": False,
+                       "author": {"login": "nateprich"}},
     )
     assert funnel.cmd_review(
         explicit, 7, "approved", "green", [], None,

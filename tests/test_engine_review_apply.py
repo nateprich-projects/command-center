@@ -966,3 +966,34 @@ def test_validate_only_final_malformed_exits_1_without_recording(
     out = capsys.readouterr()
     assert "invalid JSON" in out.err
     assert review_apply.ERRORED_OUTCOME not in out.out
+
+
+# -- only the funnel's own PR names the merge subject (#1794) ------------------
+
+@pytest.mark.parametrize("fact, hydrated", [
+    ({"headRefName": "ticket/9", "isCrossRepository": False,
+      "author": {"login": "nateprich"}}, [REPO + "#9", REPO + "#1"]),
+    ({"headRefName": "ticket/9", "isCrossRepository": True,
+      "headRepository": {"nameWithOwner": "mallory/repo"},
+      "author": {"login": "mallory"}}, None),
+    ({"headRefName": "ticket/9", "isCrossRepository": False,
+      "author": {"login": "mallory"}}, None),
+    ({"headRefName": "ticket/9"}, None),
+    (None, None),
+])
+def test_merge_history_is_loaded_only_for_the_funnels_own_pr(
+        monkeypatch, fact, hydrated):
+    parent = funnel.Item(repo=REPO, number=1, title="p", url="",
+                         state="OPEN")
+    ticket = funnel.Item(repo=REPO, number=9, title="t", url="",
+                         state="OPEN", parent=REPO + "#1")
+    calls = []
+    monkeypatch.setattr(
+        funnel, "load_items", lambda include_details=True: [parent, ticket])
+    monkeypatch.setattr(
+        funnel, "hydrate_item_details",
+        lambda items, subjects: calls.append([s.ref for s in subjects]))
+
+    review_apply.load_merge_items(REPO, fact)
+
+    assert calls == ([hydrated] if hydrated else [])

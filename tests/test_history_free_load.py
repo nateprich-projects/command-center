@@ -320,7 +320,9 @@ class World:
         if args[:3] == ("gh", "issue", "view") and "state" in args:
             return {"state": "OPEN"}
         if args[:3] == ("gh", "pr", "view"):
-            return {"headRefOid": "abc123", "state": "OPEN"}
+            return {"headRefOid": "abc123", "state": "OPEN",
+                    "isCrossRepository": False,
+                    "author": {"login": "nateprich"}}
         if args[:3] == ("gh", "issue", "view"):
             return {"comments": []}
         return []

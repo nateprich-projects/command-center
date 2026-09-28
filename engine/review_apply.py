@@ -412,8 +412,9 @@ def load_merge_items(repo: str, pr_fact: Optional[dict]) -> list:
     failed read raises, and ``apply_approved`` treats that as a refused merge.
     """
     items = funnel.load_items(include_details=False)
-    branch = pr_fact.get("headRefName") if isinstance(pr_fact, dict) else None
-    ref = funnel.ticket_ref_from_branch(repo, branch or "")
+    # Only the funnel's own PR names a ticket whose history is worth loading;
+    # the gate refuses any other PR before it reads that history (#1794).
+    ref = funnel.ticket_ref_from_pr(repo, pr_fact)
     if ref is None:
         return items
     ticket = next((item for item in items if item.ref == ref), None)

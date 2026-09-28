@@ -808,7 +808,7 @@ test("the Budget panel renders D1-D6, marks Muse pace resets, and explains the D
   ]);
   const fixture = JSON.parse(fixtureText);
   fixture.metrics.D.D3.reading_type = {
-    kind: "category",
+    ...fixture.metrics.D.D1.pace_band,
     daily: new Array(fixture.days.length).fill("estimated"),
   };
   const previousDocument = globalThis.document;

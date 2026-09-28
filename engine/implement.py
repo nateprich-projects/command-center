@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 import pathlib
@@ -80,6 +81,26 @@ class SupersededRunError(ImplementError):
         self.ref = ref
         self.reason = reason
         super().__init__("superseded {}: {}".format(ref, reason))
+
+
+class MergedSuiteError(ImplementError):
+    """The suite fails on the merge with origin/main where main does not.
+
+    Its text is shaped like pytest's (``FAILED <id>`` lines and a counts
+    line), so the failure note and ticket comment read it as they read a
+    head-only run (#1804).
+    """
+
+
+class MergeConflictError(ImplementError):
+    """The ticket's work does not merge with origin/main (#1804)."""
+
+    def __init__(self, base: str, paths: Sequence[str]):
+        # Kept apart from the message so a member-repo finish note can count
+        # them without naming them (#1796).
+        self.paths = list(paths)
+        super().__init__("merge with origin/main {} conflicts: {}".format(
+            base[:12], ", ".join(self.paths)))
 
 
 
@@ -985,6 +1006,104 @@ def run_tests(root: pathlib.Path,
         )
         rendered.append(shlex.join(argv))
     return rendered, source
+
+
+def _review_evidence():
+    """``scripts/review_evidence.py`` (#1802), loaded when a finish needs it.
+
+    ``scripts/`` is not a package, and the script imports this module, so
+    it cannot be imported at the top of this one.
+    """
+    path = (pathlib.Path(__file__).resolve().parent.parent
+            / "scripts" / "review_evidence.py")
+    spec = importlib.util.spec_from_file_location("review_evidence", str(path))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _merged_failure(record: dict) -> MergedSuiteError:
+    """The error for a merged run that fails where main does not.
+
+    It names the command that stopped the plan and the failing ids: those
+    main does not share, or every id when the base could not be compared
+    (another runner, or a pytest run that stopped early). The counts line
+    counts only failures main does not share, which is what fails the
+    finish.
+    """
+    failed = [entry["command"] for entry in record["commands"]
+              if entry["result"] == "fail"]
+    lines = ["{} failed on the merge with origin/main {}".format(
+        failed[-1] if failed else "the test command", record["base"][:12])]
+    lines.extend("FAILED {}".format(node_id) for node_id in
+                 record["new_failures"] or record["failing"])
+    if record["new_failures"]:
+        lines.append("{} failed".format(len(record["new_failures"])))
+    return MergedSuiteError("\n".join(lines))
+
+
+def _run_finish_tests(root: pathlib.Path,
+                      commands: Optional[Sequence[Sequence[str]]] = None
+                      ) -> Tuple[List[str], Optional[str], Optional[str]]:
+    """Run the finish's suite on the work merged with current main (#1804).
+
+    A head passing its own suite says nothing about the merge it becomes:
+    another PR can land on main meanwhile, and a clash shows only on the
+    merge (#1742). So this fetches origin/main and runs
+    ``review_evidence.merged_suite`` instead of the head-only run: the
+    checkout's HEAD merged into main in a temporary worktree beside the
+    checkout, which for a Codex run is its ``codex-runs/`` directory. The
+    worktree is removed on every path, and it is outside the checkout, so
+    nothing in it can reach ``_commit_if_needed``.
+
+    The merge takes the committed HEAD, and that is the tree this finish
+    commits: ``_checkpoint_work`` has already committed every path
+    ``_commit_if_needed`` would stage, and nothing runs between the two.
+
+    Only a failure main does not share fails the finish
+    (``MergedSuiteError``); a conflict raises ``MergeConflictError``. Where
+    no merge can be made (``ReviewEvidenceError``: no origin/main, a
+    worktree git refuses, no test command on the merge), the head-only run
+    runs as it always has. Explicit ``commands`` are a caller's choice and
+    run on the head: the merged suite resolves the repository's own plan.
+
+    Returns the commands run, the test-command source, and a phrase for the
+    finish note when they ran on the merge (None on the head alone).
+    """
+    if commands is not None:
+        tests, source = run_tests(root, commands)
+        return tests, source, None
+    # A failed fetch leaves origin/main where this clone last saw it, which
+    # is still a merge worth testing; the record names the base it used.
+    _run(["git", "fetch", "origin",
+          "+refs/heads/main:refs/remotes/origin/main"],
+         cwd=root, check=False, timeout=REMOTE_GIT_TIMEOUT_SECONDS)
+    try:
+        evidence = _review_evidence()
+    except OSError:
+        evidence = None
+    record = None
+    if evidence is not None:
+        try:
+            record = evidence.merged_suite(
+                root, "origin/main", work_dir=root.parent)
+        except (evidence.ReviewEvidenceError, OSError):
+            record = None
+    if record is None:
+        tests, source = run_tests(root, None)
+        return tests, source, None
+    if record["result"] == "conflict":
+        raise MergeConflictError(record["base"], record["conflicts"])
+    if record["blocking"]:
+        raise _merged_failure(record)
+    tested = "tested on the merge with origin/main"
+    if record["result"] == "fail":
+        # Every failure is main's own: it does not fail the finish, but the
+        # note says the suite was not green (AGENTS.md, "Verification").
+        tested += " ({} failing as on origin/main)".format(
+            len(record["failing"]))
+    return ([entry["command"] for entry in record["commands"]],
+            record["test_source"], tested)
 
 
 _GITHUB_REMOTE_RE = re.compile(
@@ -2290,6 +2409,22 @@ def _stray_note(exc: StrayFileError, *, repo: str) -> str:
         "names withheld".format(count, "" if count == 1 else "s")))
 
 
+def _conflict_note(exc: MergeConflictError, kept: str, *, repo: str) -> str:
+    """The note for work that does not merge with origin/main (#1804).
+
+    A member repo's note counts the conflicted paths without naming them
+    (#1796). Nothing goes to the ticket: merging origin/main, which the
+    next run must do anyway, shows them again.
+    """
+    note = "{} | {}".format(exc, kept)
+    if _is_public_repo(repo):
+        return note
+    count = len(exc.paths)
+    return _with_markers(note, (
+        "merge with origin/main conflicts in {} path{}, names withheld | "
+        "{}".format(count, "" if count == 1 else "s", _member_kept(kept))))
+
+
 def _note_test_source(source: str, *, repo: str) -> str:
     """Name the test command's source; a member repo's CI step by kind only.
 
@@ -2494,6 +2629,10 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
                 extra_note: Optional[str] = None) -> dict:
     """Perform every happy-path effect and return the resulting PR identity.
 
+    The suite runs on the work merged with current origin/main where a merge
+    can be made (#1804, ``_run_finish_tests``): a failure main does not
+    share, or a conflict, finishes ``errored`` like any failing test.
+
     A member repository's notes withhold its content (#1796): a failing
     test's ids go to the ticket through ``comment_effect`` instead.
     """
@@ -2513,7 +2652,8 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
             ref=ref, run=run, agent=agent,
         )
         phase = "tests"
-        tests, test_source = run_tests(context["root"], test_commands)
+        tests, test_source, tested = _run_finish_tests(
+            context["root"], test_commands)
     except SupersededRunError:
         raise
     except StrayFileError as exc:
@@ -2534,14 +2674,19 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
     except ImplementError as exc:
         # A failed checkpoint or test must not strand the run. Retry saving
         # remaining work without opening a PR, then finish errored so the next
-        # run continues the branch instead of starting again from main.
+        # run continues the branch instead of starting again from main. A
+        # conflict with main finishes the same way, so the backoff bounds a
+        # ticket that keeps conflicting (#1804).
+        conflict = isinstance(exc, MergeConflictError)
         kept, push_failed = _keep_work(
             context["root"], context["number"], context["branch"],
             ref=ref, run=run, agent=agent,
-            reason=("tests failed" if phase == "tests" else "checkpoint retry"),
+            reason=("merge conflict with origin/main" if conflict else
+                    "tests failed" if phase == "tests" else
+                    "checkpoint retry"),
         )
         posted = None
-        if phase == "tests" and not _is_public_repo(resolved):
+        if phase == "tests" and not conflict and not _is_public_repo(resolved):
             # The ids leave the public note, so they go to the ticket, and
             # before the release: the run that claims it next reads them in
             # its packet (#1796). A failed post must not strand the run.
@@ -2554,10 +2699,16 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
             except (funnel.GitHubError, OSError, subprocess.SubprocessError):
                 posted = False
         release_effect(ref)
-        note = (
-            _failure_note(exc, kept, repo=resolved) if phase == "tests" else
-            _checkpoint_note(exc, kept, repo=resolved)
-        )
+        if conflict:
+            note = _conflict_note(exc, kept, repo=resolved)
+        elif phase == "tests":
+            note = _failure_note(exc, kept, repo=resolved)
+            if isinstance(exc, MergedSuiteError):
+                # This module's words, so a member note keeps them too: the
+                # next run must merge main to see the failure.
+                note += " | on the merge with origin/main"
+        else:
+            note = _checkpoint_note(exc, kept, repo=resolved)
         if posted is False:
             note += " | failing tests NOT posted to the ticket"
         heartbeat_finish(agent, run, "errored", note, ref)
@@ -2625,6 +2776,10 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
     if test_source is not None:
         note += " (tests: {})".format(
             _note_test_source(test_source, repo=resolved))
+    if tested:
+        # Absent when the head ran alone, so a lane that can never merge
+        # shows in the heartbeat rather than passing silently (#1804).
+        note += "; " + tested
     if extra_note:
         note += "; " + extra_note.strip()
     heartbeat_finish(agent, run, "done", note, ref)

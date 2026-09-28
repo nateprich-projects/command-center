@@ -1075,6 +1075,11 @@ def derive_row(
         "usage.py claude windows",
         "Claude usage reading is unavailable",
     )
+    if isinstance(claude, Mapping) and isinstance(claude.get("estimated"), bool):
+        metrics["D"]["D3"]["reading_type"] = _fact(
+            "estimated" if claude["estimated"] else "app",
+            "usage.py claude estimated",
+        )
     cost = None
     if signal:
         signals = signal.get("signals")

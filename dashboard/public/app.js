@@ -1832,6 +1832,12 @@ function renderBudgetMetrics(series, container) {
     && root.D.D2.funnel_vs_personal.gap);
 
   const claude = appendBudgetTile(container, "D3", "Claude window usage");
+  const claudeReadingType = latestSeriesValue(get(["D", "D3", "reading_type"]), index);
+  if (claudeReadingType === "estimated") {
+    appendBudgetDetail(claude, "Reading", "Estimated transcript fallback", "estimated-usage");
+  } else if (claudeReadingType === "app") {
+    appendBudgetDetail(claude, "Reading", "Claude app sample");
+  }
   for (const [windowName, label] of [["five_hour", "Five-hour window"], ["seven_day", "Seven-day window"]]) {
     const used = get(["D", "D3", "windows", windowName, "used_percent"]);
     appendBudgetMetric(claude, label, used, days, "percent-points");

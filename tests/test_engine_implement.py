@@ -31,6 +31,9 @@ from engine import implement  # noqa: E402
 
 
 REPO = "owner/repo"
+#: command-center, whose heartbeat branch is public. REPO above stands for a
+#: private member repository (#1796).
+PUBLIC_REPO = funnel.REPO
 ACCEPT_BODY_CONFLICT_REASON = (
     "The requested edit to routines/muse-implement.md is blocked by the "
     "plan's active #794 routine freeze. Only tickets under #794 or #1044 "
@@ -56,17 +59,17 @@ LIVE_1497_PENDING_GATE_ANSWER = (
 )
 
 
-def ticket(number=42):
+def ticket(number=42, repo=REPO):
     return {
-        "ref": "{}#{}".format(REPO, number),
+        "ref": "{}#{}".format(repo, number),
         "number": number,
         "title": "implement the bounded runner",
-        "url": "https://github.com/{}/issues/{}".format(REPO, number),
+        "url": "https://github.com/{}/issues/{}".format(repo, number),
         "body": "Parent: #7.\n\nWhat: do it.\n\nRisk: escalated",
         "parent": {
             "number": 7,
             "title": "the settled plan",
-            "url": "https://github.com/{}/issues/7".format(REPO),
+            "url": "https://github.com/{}/issues/7".format(repo),
         },
     }
 
@@ -332,6 +335,8 @@ def test_collect_fetches_the_parent_plan_and_open_pr_verdict(monkeypatch):
     monkeypatch.setattr(
         implement, "fetch_agents_md", lambda repo: ("# Rules\n", False, False)
     )
+    monkeypatch.setattr(
+        implement, "fetch_ticket_comments", lambda repo, number: [])
 
     found = implement.collect(REPO, 42)
     assert found["plan"]["ref"] == REPO + "#7"
@@ -836,7 +841,9 @@ def test_pre_pr_stray_check_names_answer_and_never_opens_a_pr(
     (clone / "answer.json").write_text(
         '{"done":true,"summary":"private run summary"}\n'
     )
-    monkeypatch.setattr(implement, "fetch_ticket", lambda repo, number: ticket(number))
+    # command-center's note names the path; a member repo's counts it (#1796).
+    monkeypatch.setattr(implement, "fetch_ticket",
+                        lambda repo, number: ticket(number, PUBLIC_REPO))
 
     effects = {"prs": [], "released": [], "finished": []}
 
@@ -844,7 +851,7 @@ def test_pre_pr_stray_check_names_answer_and_never_opens_a_pr(
         implement.finish_done(
             answer(),
             run="run-42",
-            repo=REPO,
+            repo=PUBLIC_REPO,
             cwd=clone,
             test_commands=[[sys.executable, "-c", "pass"]],
             release=effects["released"].append,
@@ -853,7 +860,7 @@ def test_pre_pr_stray_check_names_answer_and_never_opens_a_pr(
         )
 
     assert effects["prs"] == []
-    assert effects["released"] == [REPO + "#42"]
+    assert effects["released"] == [PUBLIC_REPO + "#42"]
     assert effects["finished"][0][:3] == (
         "codex", "run-42", "errored",
     )
@@ -960,7 +967,10 @@ def test_finish_ticket_releases_and_errors_when_tests_fail(tmp_path, monkeypatch
     remote, clone = make_clone(tmp_path)
     _stub_claim_state(monkeypatch, "owned")
     (clone / "implemented.txt").write_text("done\n")
-    monkeypatch.setattr(implement, "fetch_ticket", lambda repo, number: ticket(number))
+    # command-center's note keeps the output's first line; a member repo's
+    # does not (#1796).
+    monkeypatch.setattr(implement, "fetch_ticket",
+                        lambda repo, number: ticket(number, PUBLIC_REPO))
 
     effects = {"released": [], "finished": []}
 
@@ -971,7 +981,7 @@ def test_finish_ticket_releases_and_errors_when_tests_fail(tmp_path, monkeypatch
         implement.finish_done(
             answer(),
             run="run-42",
-            repo=REPO,
+            repo=PUBLIC_REPO,
             cwd=clone,
             test_commands=[[sys.executable, "-c", "raise SystemExit(3)"]],
             release=effects["released"].append,
@@ -979,12 +989,12 @@ def test_finish_ticket_releases_and_errors_when_tests_fail(tmp_path, monkeypatch
             pr_effect=no_pr,
         )
 
-    assert effects["released"] == [REPO + "#42"]
+    assert effects["released"] == [PUBLIC_REPO + "#42"]
     (finished,), = [effects["finished"]]
     assert finished[:3] == ("codex", "run-42", "errored")
     assert finished[3].startswith("tests failed: ")
     assert "SystemExit(3)" in finished[3]
-    assert finished[4] == REPO + "#42"
+    assert finished[4] == PUBLIC_REPO + "#42"
 
     assert "work kept on ticket/42" in finished[3]
 
@@ -1087,8 +1097,10 @@ def test_finish_ticket_keeps_codex_run_checkout_when_push_fails(
     _, clone = make_codex_run_clone(tmp_path, monkeypatch)
     _stub_claim_state(monkeypatch, "owned")
     (clone / "implemented.txt").write_text("done\n")
+    # command-center's note names the git error; a member repo's does not.
     monkeypatch.setattr(
-        implement, "fetch_ticket", lambda repo, number: ticket(number))
+        implement, "fetch_ticket",
+        lambda repo, number: ticket(number, PUBLIC_REPO))
     pushes = {"count": 0}
 
     def fail_the_post_test_push(*args, **kwargs):
@@ -1104,7 +1116,7 @@ def test_finish_ticket_keeps_codex_run_checkout_when_push_fails(
         implement.finish_done(
             answer(),
             run="run-42",
-            repo=REPO,
+            repo=PUBLIC_REPO,
             cwd=clone,
             test_commands=[[sys.executable, "-c", "raise SystemExit(3)"]],
             release=effects["released"].append,
@@ -1112,7 +1124,7 @@ def test_finish_ticket_keeps_codex_run_checkout_when_push_fails(
             pr_effect=lambda *args: pytest.fail("failed tests must not open a PR"),
         )
 
-    assert effects["released"] == [REPO + "#42"]
+    assert effects["released"] == [PUBLIC_REPO + "#42"]
     assert "work NOT kept: git push failed" in effects["finished"][0][3]
     assert clone.is_dir()
     assert (clone / "implemented.txt").exists()
@@ -1137,10 +1149,373 @@ def test_a_failure_note_names_the_failing_tests():
         "FAILED tests/test_a.py::test_one - AssertionError\n"
         "==== 1 failed, 90 passed, 1 error in 3.2s ====\n"
     )
-    note = implement._failure_note(implement.ImplementError(output), "work kept on ticket/9")
+    note = implement._failure_note(
+        implement.ImplementError(output), "work kept on ticket/9",
+        repo=PUBLIC_REPO)
     assert "tests/test_a.py::test_one; tests/test_b.py::test_two" in note
     assert "1 failed, 90 passed, 1 error in 3.2s" in note
     assert note.endswith("work kept on ticket/9")
+
+
+# --- Member-repo notes withhold the repository's content (#1796) ---
+#
+# The heartbeat branch is public and every member repository is private.
+# Every id, path and repository name below is invented for these tests.
+
+MEMBER_PYTEST_OUTPUT = (
+    "..F..E                                                     [100%]\n"
+    "=================================== FAILURES ===================\n"
+    "tests/test_widgets.py:12: AssertionError\n"
+    "=========================== short test summary info ============\n"
+    "FAILED tests/test_widgets.py::test_rotates_the_key - AssertionError\n"
+    "ERROR tests/test_gadgets.py::test_opens_the_vault - RuntimeError: boom\n"
+    "1 failed, 4 passed, 1 error in 0.21s\n"
+)
+MEMBER_TEST_IDS = (
+    "tests/test_widgets.py::test_rotates_the_key",
+    "tests/test_gadgets.py::test_opens_the_vault",
+)
+
+
+def failing_pytest(tmp_path, output=MEMBER_PYTEST_OUTPUT):
+    """A test command that prints ``output`` and fails.
+
+    The output lives in a file outside the clone, so the ids appear only in
+    what the command prints, never in its argv.
+    """
+    path = tmp_path / "pytest-output.txt"
+    path.write_text(output)
+    return [sys.executable, "-c",
+            "import sys; sys.stdout.write(open(sys.argv[1]).read()); "
+            "raise SystemExit(1)", str(path)]
+
+
+def _failing_finish(tmp_path, monkeypatch, repo, **effects):
+    """Run finish_done over a failing suite; return the ordered effects."""
+    _, clone = make_clone(tmp_path)
+    _stub_claim_state(monkeypatch, "owned")
+    (clone / "implemented.txt").write_text("done\n")
+    monkeypatch.setattr(implement, "fetch_ticket",
+                        lambda found, number: ticket(number, repo))
+    events = []
+
+    def comment(target, number, body, **kwargs):
+        events.append(("comment", target, number, body, kwargs))
+
+    with pytest.raises(implement.ImplementError):
+        implement.finish_done(
+            answer(), run="run-42", repo=repo, cwd=clone,
+            test_commands=[failing_pytest(tmp_path)],
+            release=lambda ref: events.append(("release", ref)),
+            heartbeat_finish=lambda *args: events.append(("finish",) + args),
+            pr_effect=lambda *args: pytest.fail("failed tests open no PR"),
+            **{"comment_effect": comment, **effects},
+        )
+    return events
+
+
+@pytest.mark.parametrize(("repo", "public"), (
+    (PUBLIC_REPO, True),
+    ("NatePrich-Projects/Command-Center", True),
+    ("nateprich-projects/command-center-fork", False),
+    ("someone/command-center", False),
+    (REPO, False),
+))
+def test_only_command_center_is_public(repo, public):
+    assert implement._is_public_repo(repo) is public
+
+
+def test_a_member_repo_failure_note_carries_counts_and_no_test_id(
+        tmp_path, monkeypatch):
+    events = _failing_finish(tmp_path, monkeypatch, REPO)
+
+    (_, _, _, outcome, note, ref), = [e for e in events if e[0] == "finish"]
+    assert outcome == "errored" and ref == REPO + "#42"
+    assert note == (
+        "tests failed: 1 failed, 4 passed, 1 error | work kept on ticket/42")
+
+
+def test_a_member_repo_failure_posts_the_ids_on_its_own_ticket_first(
+        tmp_path, monkeypatch):
+    events = _failing_finish(tmp_path, monkeypatch, REPO)
+
+    # Before the release, so the run that claims the ticket next finds it.
+    assert [event[0] for event in events] == ["comment", "release", "finish"]
+    _, target, number, body, kwargs = events[0]
+    assert (target, number) == (REPO, 42)
+    assert kwargs["run"] == "run-42" and kwargs["agent"] == "codex"
+    for test_id in MEMBER_TEST_IDS:
+        assert test_id in body
+    assert "Counts: `1 failed, 4 passed, 1 error in 0.21s`" in body
+    assert "Work: work kept on ticket/42" in body
+    # A bare #N here would link the member repository's own issue N.
+    assert "#1796" not in body
+
+
+def test_a_command_center_failure_note_is_unchanged_and_posts_nothing(
+        tmp_path, monkeypatch):
+    events = _failing_finish(
+        tmp_path, monkeypatch, PUBLIC_REPO,
+        comment_effect=lambda *args, **kwargs: pytest.fail(
+            "command-center's note already names its failing tests"))
+
+    (_, _, _, _, note, _), = [e for e in events if e[0] == "finish"]
+    assert note == (
+        "tests failed: " + "; ".join(MEMBER_TEST_IDS)
+        + " | 1 failed, 4 passed, 1 error in 0.21s"
+        + " | work kept on ticket/42")
+
+
+def test_an_unposted_ticket_comment_still_releases_and_finishes(
+        tmp_path, monkeypatch):
+    def refuse(*args, **kwargs):
+        raise funnel.GitHubError("comment refused")
+
+    events = _failing_finish(
+        tmp_path, monkeypatch, REPO, comment_effect=refuse)
+
+    assert [event[0] for event in events] == ["release", "finish"]
+    assert events[1][4] == (
+        "tests failed: 1 failed, 4 passed, 1 error | work kept on ticket/42"
+        " | failing tests NOT posted to the ticket")
+
+
+def test_the_next_runs_packet_shows_the_ids_the_failed_run_posted(
+        tmp_path, monkeypatch):
+    events = _failing_finish(tmp_path, monkeypatch, REPO)
+    _, _, _, body, kwargs = events[0]
+    # As post_agent_comment stamps it on the ticket.
+    posted = funnel.append_provenance(
+        body, "agent", at=datetime(2026, 9, 28, 9, 0, tzinfo=timezone.utc),
+        run=kwargs["run"], agent=kwargs["agent"])
+    read = []
+
+    def thread(repo, number):
+        read.append((repo, number))
+        return [{"author": {"login": "nateprich"}, "body": posted,
+                 "createdAt": "2026-09-28T09:00:00Z"}]
+
+    monkeypatch.setattr(funnel, "resolve_repo", lambda repo: REPO)
+    monkeypatch.setattr(funnel, "read_issue_comments", thread)
+    monkeypatch.setattr(
+        implement, "fetch_plan", lambda repo, found: {"number": 7})
+    monkeypatch.setattr(
+        implement, "fetch_verdict_blocking", lambda repo, number: {})
+    monkeypatch.setattr(
+        implement, "fetch_prior_run", lambda number, agent: None)
+    monkeypatch.setattr(
+        implement, "fetch_agents_md", lambda repo: ("", True, False))
+
+    packet = implement.collect(REPO, 42)
+
+    assert read == [(REPO, 42)]
+    for test_id in MEMBER_TEST_IDS:
+        assert test_id in packet["issue_thread"]
+    assert "### @nateprich — 2026-09-28T09:00:00Z" in packet["issue_thread"]
+    json.dumps(packet)
+
+
+def test_a_packet_without_comments_keeps_its_shape():
+    bare = implement.build_packet(
+        repo=REPO, ticket=ticket(), plan=None, verdict={}, prior_run=None)
+    empty = implement.build_packet(
+        repo=REPO, ticket=ticket(), plan=None, verdict={}, prior_run=None,
+        issue_comments=[])
+    assert "issue_thread" not in bare and "issue_thread" not in empty
+
+
+def test_an_unreadable_ticket_thread_fails_the_packet_closed(
+        monkeypatch, capsys):
+    def short_read(repo, number):
+        raise funnel.GitHubError("comments pagination is incomplete")
+
+    monkeypatch.setattr(funnel, "resolve_repo", lambda repo: REPO)
+    monkeypatch.setattr(implement, "fetch_ticket",
+                        lambda repo, number: ticket(number))
+    monkeypatch.setattr(funnel, "read_issue_comments", short_read)
+
+    assert implement.packet_main(["42", "--repo", REPO]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "comments pagination is incomplete" in captured.err
+
+
+def test_a_member_note_rebuilds_the_counts_from_numbers_alone():
+    # A printed line shaped like pytest's summary is still only numbers.
+    output = "..\n2 passed checks for tests/test_widgets.py::test_rotates_the_key\n"
+    note = implement._failure_note(
+        implement.ImplementError(output), repo=REPO)
+    assert note == "tests failed: 2 passed"
+
+
+def test_a_member_note_drops_the_git_error_from_work_not_kept():
+    kept = ("work NOT kept: git push --set-upstream origin ticket/42 failed: "
+            "remote: Repository not found for owner/private-widgets")
+    note = implement._failure_note(
+        implement.ImplementError(MEMBER_PYTEST_OUTPUT), kept, repo=REPO)
+    assert note == "tests failed: 1 failed, 4 passed, 1 error | work NOT kept"
+
+
+@pytest.mark.parametrize(("output", "error_class"), (
+    ("could not derive a test command from this checkout", "unclassified"),
+    ("python3 -m pytest -q failed: fatal: unable to access "
+     "'https://example.test/owner/private-widgets.git/': Connection timed out",
+     "floor"),
+    ("python3 -m pytest -q failed: ImportError while importing test module "
+     "'tests/test_widgets.py'", "regression"),
+))
+def test_a_member_note_without_counts_classifies_as_the_full_note_did(
+        output, error_class):
+    exc = implement.ImplementError(output)
+    runtime = {"head": "abc123"}
+    full = implement._failure_note(
+        exc, "work kept on ticket/42", repo=PUBLIC_REPO)
+    member = implement._failure_note(exc, "work kept on ticket/42", repo=REPO)
+
+    assert heartbeat.classify_error(full, runtime) == error_class
+    assert heartbeat.classify_error(member, runtime) == error_class
+    assert member.startswith(
+        "tests failed: no pytest counts line | work kept on ticket/42")
+    assert "private-widgets" not in member
+    assert "test_widgets" not in member
+
+
+def test_the_ticket_comment_lists_fifty_ids_and_counts_the_rest():
+    ids = ["tests/test_widgets.py::test_case_{:02d}".format(n)
+           for n in range(52)]
+    output = "".join("FAILED {} - AssertionError\n".format(value)
+                     for value in ids) + "52 failed in 1.00s\n"
+    body = implement._failure_comment(implement.ImplementError(output))
+    assert all(value in body for value in ids[:50])
+    assert ids[50] not in body and ids[51] not in body
+    assert "(+2 more)" in body
+
+
+def test_the_ticket_comment_carries_the_first_line_when_pytest_named_nothing():
+    body = implement._failure_comment(implement.ImplementError(
+        "python3 -m pytest -q failed: ImportError while importing test "
+        "module 'tests/test_widgets.py'\nmore"))
+    assert "ImportError while importing test module 'tests/test_widgets.py'" in body
+    assert "Counts:" not in body
+
+
+def test_a_member_checkpoint_note_withholds_the_git_command():
+    exc = implement.ImplementError(
+        "git add -- src/private_widgets.py failed: fatal: pathspec did not "
+        "match\nmore")
+    kept = "work NOT kept: git push failed: remote unavailable"
+    assert implement._checkpoint_note(exc, kept, repo=PUBLIC_REPO) == (
+        "checkpoint failed: git add -- src/private_widgets.py failed: fatal: "
+        "pathspec did not match; work NOT kept: git push failed: remote "
+        "unavailable")
+    assert implement._checkpoint_note(exc, kept, repo=REPO) == (
+        "checkpoint failed; work NOT kept")
+
+
+def test_a_member_stray_refusal_counts_paths_without_naming_them(
+        tmp_path, monkeypatch):
+    _, clone = make_clone(tmp_path)
+    (clone / "implemented.txt").write_text("done\n")
+    (clone / "answer.json").write_text("{}\n")
+    (clone / "tmp").mkdir()
+    (clone / "tmp" / "private_widgets.txt").write_text("notes\n")
+    monkeypatch.setattr(implement, "fetch_ticket",
+                        lambda repo, number: ticket(number))
+    finished = []
+
+    with pytest.raises(implement.StrayFileError) as raised:
+        implement.finish_done(
+            answer(), run="run-42", repo=REPO, cwd=clone,
+            test_commands=[[sys.executable, "-c", "pass"]],
+            release=lambda ref: None,
+            heartbeat_finish=lambda *args: finished.append(args),
+            pr_effect=lambda *args: pytest.fail("stray scratch opens no PR"),
+        )
+
+    assert raised.value.paths == ["answer.json", "tmp/private_widgets.txt"]
+    (row,) = finished
+    assert row[3] == (
+        "pre-PR stray-file check refused 2 run-scratch paths; names withheld")
+
+
+@pytest.mark.parametrize(("repo", "named"), ((PUBLIC_REPO, True), (REPO, False)))
+def test_a_member_pr_note_names_a_ci_test_step_by_kind_only(
+        tmp_path, monkeypatch, repo, named):
+    remote, clone = make_clone(tmp_path)
+    _stub_claim_state(monkeypatch, "empty")
+    write_workflow(
+        clone,
+        "jobs:\n"
+        "  test:\n"
+        "    steps:\n"
+        "      - name: tests for the widget vault\n"
+        "        run: python -c pass\n",
+        name="vault.yml",
+    )
+    (clone / "implemented.txt").write_text("done\n")
+    monkeypatch.setattr(implement, "fetch_ticket",
+                        lambda found, number: ticket(number, repo))
+    bodies, finished = [], []
+
+    def open_pr(target, context, found_ticket, body):
+        bodies.append(body)
+        return {"number": 91, "url": "https://example.test/pull/91"}
+
+    implement.finish_done(
+        answer(), run="run-42", repo=repo, cwd=clone,
+        release=lambda ref: None,
+        heartbeat_finish=lambda *args: finished.append(args),
+        pr_effect=open_pr,
+    )
+
+    source = 'CI .github/workflows/vault.yml step "tests for the widget vault"'
+    assert source in bodies[0]
+    assert finished[0][3] == "PR #91 (tests: {})".format(
+        source if named else "CI workflow step")
+
+
+@pytest.mark.parametrize(("repo", "note"), (
+    (PUBLIC_REPO, "declined: prerequisite #165 has not landed"),
+    (REPO, "declined; reason on the ticket"),
+))
+def test_a_decline_note_names_the_reason_only_for_command_center(
+        tmp_path, monkeypatch, repo, note):
+    _, clone = make_clone(tmp_path)
+    monkeypatch.setattr(implement, "fetch_ticket",
+                        lambda found, number: ticket(number, repo))
+    comments, finished = [], []
+
+    implement.finish_declined(
+        "prerequisite #165 has not landed",
+        run="run-42", repo=repo, cwd=clone,
+        release=lambda ref: None,
+        heartbeat_finish=lambda *args: finished.append(args),
+        block_effect=lambda *args, **kwargs: None,
+        comment_effect=lambda *args, **kwargs: comments.append(args),
+        needs_effect=lambda *args: None,
+        human_needs_effect=lambda *args: None,
+        prerequisite_facts_effect=lambda ref: None,
+    )
+
+    assert comments[0][2] == "**Declined:** prerequisite #165 has not landed"
+    assert finished[0][3] == note
+
+
+def test_a_member_answer_error_note_drops_the_git_error(
+        tmp_path, monkeypatch):
+    _, clone = make_clone(tmp_path)
+    (clone / "implemented.txt").write_text("done\n")
+    monkeypatch.setattr(implement, "_keep_work", lambda *args, **kwargs: (
+        "work NOT kept: git push failed: remote: Repository not found for "
+        "owner/private-widgets", True))
+    finished = []
+
+    assert implement._recover_answer_error(
+        implement.ImplementError("answer is not valid JSON: boom"),
+        run="run-42", repo=REPO, cwd=clone, release=lambda ref: None,
+        heartbeat_finish=lambda *args: finished.append(args))
+
+    assert finished[0][3] == "answer error: answer is not valid JSON: boom | work NOT kept"
 
 
 def test_finish_ticket_requires_the_deterministic_branch(tmp_path):
@@ -1777,7 +2152,7 @@ def test_finish_declined_labels_comments_releases_and_finishes(
         ("https://github.com/{}/issues/42".format(REPO), REPO + "#42")]
     assert effects["finished"] == [
         ("codex", "run-42", "skipped-blocked",
-         "declined: prerequisite has not landed", REPO + "#42")
+         "declined; reason on the ticket", REPO + "#42")
     ]
 
     refs = run_git("--git-dir", str(remote), "show-ref").stdout
@@ -1837,7 +2212,7 @@ def test_finish_declined_open_prerequisite_records_only_native_edge(
     assert effects["released"] == [REPO + "#42"]
     assert effects["finished"] == [
         ("codex", "run-42", "skipped-blocked",
-         "declined: {}".format(reason), REPO + "#42")
+         "declined; reason on the ticket", REPO + "#42")
     ]
 
 
@@ -2228,7 +2603,7 @@ def test_finish_declined_falls_back_to_blocked_for_non_prerequisite_cases(
     assert effects["released"] == [REPO + "#42"]
     assert effects["finished"] == [
         ("codex", "run-42", "skipped-blocked",
-         "declined: {}".format(reason), REPO + "#42")
+         "declined; reason on the ticket", REPO + "#42")
     ]
     if open_state is None:
         assert effects["looked_up"] == []

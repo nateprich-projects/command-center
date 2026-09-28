@@ -27,6 +27,7 @@
       "merged_at": "2026-09-26T18:22:02Z",
       "approval": {
         "url": "https://github.com/nateprich-projects/command-center/pull/1613#issuecomment-5848693337",
+        "head_sha": "0809a6de7c67b84d3d9305f4a2200aac45d4637f",
         "reviewed_at": "2026-09-26T18:20:45.040808Z",
         "verdict": "approved",
         "ci": "green",

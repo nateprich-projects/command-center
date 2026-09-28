@@ -278,13 +278,23 @@ def test_a_checkable_inferred_pointer_keeps_the_probe_path(monkeypatch):
     assert "deferred_answer" not in premise
 
 
-def test_merged_pr_evidence_pointer_keeps_the_probe_path(monkeypatch):
+def test_merged_pr_evidence_pointer_keeps_the_1653_probe_path(monkeypatch):
     source = json.loads((ROOT / "tests" / "fixtures" /
                          "review_1626_1613_live_evidence.json").read_text())
     records = source["records"]
     assert records["pr_1613"]["approval"]["blocking"] == []
     assert records["pr_1613"]["approval"]["verdict"] == "approved"
+    assert records["pr_1613"]["approval"]["url"] == (
+        "https://github.com/nateprich-projects/command-center/pull/1613"
+        "#issuecomment-5848693337")
+    assert records["pr_1613"]["approval"]["head_sha"] == (
+        "0809a6de7c67b84d3d9305f4a2200aac45d4637f")
     assert records["pr_1612_rejection"]["verdict"] == "rejected"
+    assert source["plan_premise"]["claim"] == (
+        "PR #1613 for ticket #1597 has the same uncheckable later-sibling "
+        "premise shape as PR #1612")
+    assert source["finding"].startswith(
+        "The same-review-shape claim is contradicted by the live history:")
     assert (records["pr_1612_rejection"]["reviewed_at"]
             < records["pr_1613"]["approval"]["reviewed_at"]
             < records["pr_1613"]["merged_at"]
@@ -295,10 +305,11 @@ def test_merged_pr_evidence_pointer_keeps_the_probe_path(monkeypatch):
     install_github_fixture(monkeypatch, data)
 
     packet = rejected_1612_fixture()["packet"]
-    packet["ticket"] = {"ref": source["reviewed_ticket"], "number": 1652}
+    reviewed_ticket = REPO + "#1653"
+    packet["ticket"] = {"ref": reviewed_ticket, "number": 1653}
     packet["plan_premises"][0].update({
         "parent_ref": REPO + "#1626",
-        "ticket_refs": [source["reviewed_ticket"]],
+        "ticket_refs": [reviewed_ticket],
     })
     premise = packet["plan_premises"][0]["premises"][0]
     premise.update(source["plan_premise"])

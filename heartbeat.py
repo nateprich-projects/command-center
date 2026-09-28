@@ -1612,6 +1612,8 @@ def usage_snapshot(agent: str) -> Optional[Dict]:
         # *which* five-hour window a run belonged to, and the idle gate in
         # usage.py needs that to ask whether this window was already open.
         snapshots = {}
+        if agent == "claude" and isinstance(reading.get("estimated"), bool):
+            snapshots["estimated"] = reading["estimated"]
         for name, window in reading.get("windows", {}).items():
             snapshot = {
                 "used_percent": window.get("used_percent"),

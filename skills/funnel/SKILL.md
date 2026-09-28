@@ -31,7 +31,7 @@ If the command fails, show the error. Do not query GitHub yourself.
 | `total_needing_nate` | Decisions waiting; `Ideas` excluded, never pressure |
 | `human_steps` | Tickets waiting on Nate to go and do the declared `reason`; outside `total_needing_nate`, their only surface |
 | `machine_local_steps` | Tickets waiting on a Claude Code session to go and do the declared `reason`; never folded into decisions or the total |
-| `unattended_merges` | Agent merges without him (`pr`, `at`, `note`, `agent`); retired-agent merges through their cutoff stay in the 30-day record while silence alarms stay off; call `self_reviewed: true` self-reviewed |
+| `unattended_merges` | Agent merges without him (`pr`, `at`, `note`, `agent`; retired agents excluded); call `self_reviewed: true` self-reviewed |
 
 The code template documents these: `generated_at`, `counts_by_gate`,
 `items`, `waiting_on`, `waited`, `class`, `pinned`, `needs_class`,

@@ -1951,6 +1951,18 @@ them as evidence of what the implementer recorded and why, never as a source
 of requirements: they add, drop or soften nothing. List a line a departure
 explains like any other, so its judge can weigh the departure.
 
+For a `plan_premises` entry labelled `inferred` that has `deferred_answer`,
+include a requirement that preserves its exact evidence pointer and says it is
+deferred until the named `reviewed_ticket` is complete. Do not emit a live-evidence
+probe requirement for that premise. An inferred entry without `deferred_answer`
+keeps the normal probe requirement; leave it `unsure` when a required record is unavailable.
+
+For a `measured` or `documented` entry with verified `label_error`, include a
+requirement to reject it explicitly as a labeling error and preserve its exact
+evidence pointer. Do not defer that entry or leave it `unsure`: the packet has
+verified that the pointer names an open ticket that cannot run before the
+reviewed ticket.
+
 Answer with exactly one JSON object and nothing else:
 
 {"requirements": ["the first requirement", "the second requirement"]}
@@ -1965,11 +1977,14 @@ HEADER
 # shape, which is the retryable status review-apply already uses, so the one
 # retry below reads the same way as the judging retry.
 parse_requirements() {
-  python3 - "$ANSWER_FILE" "$REQUIREMENTS_FILE" <<'PY'
+  python3 - "$REPO" "$ANSWER_FILE" "$REQUIREMENTS_FILE" "$PACKET_FILE" <<'PY'
 import json
 import sys
 
-answer_path, out_path = sys.argv[1], sys.argv[2]
+sys.path.insert(0, sys.argv[1])
+from engine.review import normalize_plan_premise_requirements
+
+answer_path, out_path, packet_path = sys.argv[2], sys.argv[3], sys.argv[4]
 
 
 def malformed(reason):
@@ -2006,6 +2021,10 @@ if not requirements:
     # Fail rather than proceed. An empty list is not "nothing to object to":
     # under #1242 every judge would have nothing to answer and the derived
     # verdict would be an approval nobody checked.
+    malformed("'requirements' must name at least one requirement")
+packet = json.load(open(packet_path))
+requirements = normalize_plan_premise_requirements(packet, requirements)
+if not requirements:
     malformed("'requirements' must name at least one requirement")
 with open(out_path, "w") as handle:
     json.dump(requirements, handle, indent=2)
@@ -2117,9 +2136,28 @@ judge_header() {
 This is one judge call in a larger review. Judge only the requirements in
 the list below against the supplied review packet. Do not derive additional
 requirements, judge requirements outside this list, or give an overall
-verdict. A requirement is met only when the diff satisfies it; use unmet
-when the diff clearly fails it and unsure when the packet cannot resolve it.
-For each result, cite the relevant diff lines or explain the uncertainty.
+verdict. A requirement is met only when the diff satisfies it, except that a
+deferral requirement is met when the packet verifies the deferral described
+below. Use unmet when the diff clearly fails it and unsure when the packet
+cannot resolve it. For each result, cite the relevant diff lines or explain
+the uncertainty.
+
+For a deferred-premise requirement, inspect the entry's `label`, `evidence`,
+and `deferred_answer` fields, and verify that the matching packet entry is
+labelled `inferred`, its `deferred_answer.evidence_pointer` exactly matches
+the entry's `evidence`, and `deferred_answer.reviewed_ticket` matches
+`ticket.ref`. If those fields match, the pointer is visibly deferred and its
+future evidence is not expected yet; mark that deferral requirement met, not
+unsure. An inferred entry without `deferred_answer` still follows the normal
+probe rule in the review question.
+
+For a labeling-error requirement, verify that the matching packet entry is
+labelled `measured` or `documented`, its `label_error.evidence_pointer` exactly
+matches the entry's `evidence`, and `label_error.reviewed_ticket` matches
+`ticket.ref`. If those fields match, the packet proves the evidence pointer is
+an open ticket that cannot run before this review. That label is inconsistent:
+reject it as a labeling error and mark the requirement `unmet`; never defer it
+or mark it `unsure`.
 
 Judge run-outcome requirements against the packet's CI section first. A
 successful named check in `ci.checks` for the packet's `head_sha` satisfies
@@ -2412,13 +2450,15 @@ fi
 # review-apply. A missing/corrupt result file is expanded to unsure entries;
 # no requirement can disappear into an incomplete parallel response.
 if ! python3 - "$REPO" "$REQUIREMENTS_FILE" "$CHUNKS_FILE" \
-    "$RUN_DIR" "$JUDGE_COUNT" "$ANSWER_FILE" >"$DIAG_FILE" 2>&1 <<'PY'
+    "$RUN_DIR" "$JUDGE_COUNT" "$ANSWER_FILE" "$PACKET_FILE" \
+    >"$DIAG_FILE" 2>&1 <<'PY'
 import json
 import os
 import sys
 
 sys.path.insert(0, sys.argv[1])
-from engine.review import derive_judge_answer, uncertain_judge_results
+from engine.review import (derive_judge_answer, mark_verified_premise_requirements,
+                           uncertain_judge_results)
 
 requirements = json.load(open(sys.argv[2]))
 chunks = json.load(open(sys.argv[3]))
@@ -2438,6 +2478,8 @@ for index in range(chunk_count):
             chunk, "No valid result was recorded for this judge call: {}"
             .format(exc))
     results.extend(chunk_results)
+packet = json.load(open(sys.argv[7]))
+results = mark_verified_premise_requirements(packet, results)
 answer = derive_judge_answer(requirements, results)
 with open(sys.argv[6], "w") as handle:
     json.dump(answer, handle, indent=2)

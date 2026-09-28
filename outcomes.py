@@ -720,6 +720,15 @@ def derive_outcome(
     if runs:
         pricing_rows = list(rate_rows) if rate_rows is not None else api_pricing.load_rates()
         for run in runs:
+            provider = run.get("provider")
+            model = run.get("model")
+            if run.get("token_usage") is None and (
+                not isinstance(provider, str) or not provider.strip()
+                or not isinstance(model, str) or not model.strip()
+            ):
+                # Without either captured token data or the pricing identity,
+                # this legacy run has no pricing observation to annotate.
+                continue
             run["notional_api_cost"] = api_pricing.price_run(run, pricing_rows)
 
     return {

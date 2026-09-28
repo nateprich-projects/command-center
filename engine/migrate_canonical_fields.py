@@ -44,7 +44,7 @@ OPTION_STYLE = {
     # The one Class option the live field predates (#1845).
     "Bug": (
         "Latent defect: found by reading, review or tests, never observed; "
-        "never preempts", "ORANGE"),
+        "never preempts", "YELLOW"),  # the live field's other six colours are taken
 }
 
 RISK_LINE = re.compile(

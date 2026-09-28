@@ -620,7 +620,7 @@ main[hidden] { display: none; }
 .chip-blocked, .chip-pin, .chip-gate, .owner-nate, .owner-claude, .owner-muse,
 .owner-codex, .owner-blocked, .owner-queued, .chip-queued, .owner-paused, .chip-paused,
 .chip-finished, .chip-unblocks, .chip-class-broken, .chip-class-maintenance, .chip-class-improve,
-.chip-class-new, .chip-class-replace, .chip-class-investigate {
+.chip-class-new, .chip-class-replace, .chip-class-investigate, .chip-class-bug {
   border-color: color-mix(in srgb, currentColor 48%, transparent);
 }
 .pip-unknown { background: repeating-linear-gradient(135deg, var(--pip-open) 0 3px, var(--pip-unknown-stripe) 3px 6px); }
@@ -649,6 +649,7 @@ main[hidden] { display: none; }
 .chip-class-new { color: var(--green); }
 .chip-class-replace { color: var(--lavender); }
 .chip-class-investigate { color: var(--accent-ink); }
+.chip-class-bug { color: var(--pip-blocked-pip); }
 
 /* The phone board is a separate presentation of the same ordered payload. It
    stays out of the wide DOM view so the desktop grid remains unchanged. */

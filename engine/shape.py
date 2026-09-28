@@ -103,8 +103,8 @@ NEEDS_FIELDS = (
 #: false-hold cases before they are recorded.
 AGENT_SELF_APPROVABLE_OUTPUT_REVIEW = {
     "scope": (
-        "For agent-origin Investigate, Broken, Maintenance, and Improve "
-        "work, ask Scope and priority only for a concrete unresolved "
+        "For agent-origin Investigate, Broken, Maintenance, Improve, and "
+        "Bug work, ask Scope and priority only for a concrete unresolved "
         "stakeholder tradeoff. Do not ask generic permission to implement "
         "the work."),
     "scheduling": (

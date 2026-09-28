@@ -606,6 +606,10 @@ def _latency_sums(
     return {"by_agent_and_job": grouped}, None
 
 
+#: Since #1845 "Broken" here means both defect classes, Broken and Bug, since
+#: Bug holds the latent finds that were Broken before #1832. The text stays as
+#: it is because it is also the B3 series key (SERIES_LEAF_SOURCES): changing
+#: it would drop every earlier fix-on-fix row from the series.
 FIX_RECURRENCE_SOURCE = (
     "fix_recurrence.py: Broken fixes whose modified lines were mostly written "
     "by another Broken project's fix in the prior 7 days / Broken fixes that "
@@ -1820,9 +1824,12 @@ def _github_snapshot(
         if all(getattr(item, "klass", None) is not None for item in closed):
             brief["maintenance_load"] = {
                 "closed_in_window": len(closed),
+                # The same upkeep classes as funnel.maintenance_load, Bug
+                # beside Broken (#1845).
                 "upkeep_projects": sum(
                     1 for item in closed
-                    if getattr(item, "klass", None) in {"Broken", "Maintenance", "Investigate"}
+                    if getattr(item, "klass", None)
+                    in funnel.DEFECT_CLASSES | {"Maintenance", "Investigate"}
                 ),
             }
         start_times = _building_times(projects)
@@ -1850,8 +1857,10 @@ def _github_snapshot(
             "parked": sum(1 for item in closed_projects if getattr(item, "status", None) == "Parked") if status_known else None,
             "net_open_growth": len(created_projects) - len(closed_projects),
         }
+        # Defect projects, as funnel.recorded_cause_regressions counts them.
         broken_created = [
-            item for item in created_projects if getattr(item, "klass", None) == "Broken"
+            item for item in created_projects
+            if getattr(item, "klass", None) in funnel.DEFECT_CLASSES
         ]
         unknown_created_class = any(
             getattr(item, "klass", None) is None for item in created_projects

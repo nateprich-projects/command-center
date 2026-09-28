@@ -458,22 +458,24 @@ def test_unknown_status_still_appears_rather_than_vanishing():
 def test_unset_class_sorts_last_and_never_preempts():
     """A forgotten field must never acquire preemption rights."""
     assert ladder_index(None) > ladder_index("Replace")
+    assert ladder_index(None) > ladder_index("Bug")
     assert ladder_index(None) != ladder_index("Broken")
     assert ladder_index("nonsense") > ladder_index("Replace")
 
 
 def test_ladder_is_in_the_documented_order():
     ranks = [ladder_index(c) for c in [
-        "Investigate", "Broken", "Maintenance", "Improve", "New", "Replace"
+        "Investigate", "Broken", "Maintenance", "Improve", "New", "Replace",
+        "Bug",
     ]]
-    assert ranks == sorted(ranks) and len(set(ranks)) == 6
+    assert ranks == sorted(ranks) and len(set(ranks)) == 7
 
 
 def test_investigate_is_first_without_gaining_preemption():
     assert ladder_index("Investigate") == 0
     assert funnel.PREEMPTING_CLASSES == frozenset({"Broken", "Maintenance"})
     assert funnel.SELF_APPROVABLE_CLASSES == frozenset(
-        {"Investigate", "Broken", "Maintenance", "Improve"}
+        {"Investigate", "Broken", "Maintenance", "Improve", "Bug"}
     )
 
 
@@ -732,6 +734,43 @@ def test_a_class_above_broken_on_the_ladder_does_not_preempt_by_position(monkeyp
     rows = [project(1, "Building", "Improve"), ticket(2, 1),
             project(3, "Ready", "Investigate"), ticket(4, 3)]
     assert [i.number for i in startable(rows)] == [2, 4]
+
+
+# -- Bug: a latent defect, last on the ladder, never preempting (#1845) -----
+
+
+def test_a_bug_never_outranks_startable_work_of_another_class():
+    """#1832: Broken is what was seen to fail and preempts; Bug is latent and
+    ranks below Replace. The Bug is the oldest work here, so neither age nor
+    number can be what puts it last."""
+    rows = []
+    for n, klass in ((1, "Bug"), (2, "Replace"), (3, "Broken"), (4, "New"),
+                     (5, "Maintenance"), (6, "Improve"), (7, "Investigate")):
+        rows += [project(n, "Building", klass, days=30 - n),
+                 ticket(10 + n, n, days=30 - n)]
+    assert [i.number for i in startable(rows)] == [13, 15, 17, 16, 14, 12, 11]
+
+
+def test_a_ready_bug_waits_behind_in_flight_work_that_ready_broken_passes():
+    """Bug is unbounded, so it is not in PREEMPTING_CLASSES: the Building
+    commitment holds against it, as against any other unbounded class."""
+    rows = [project(1, "Building", "Replace", days=1), ticket(2, 1, days=1),
+            project(3, "Ready", "Bug", days=30), ticket(4, 3, days=30),
+            project(5, "Ready", "Broken", days=1), ticket(6, 5, days=1)]
+    assert [i.number for i in startable(rows)] == [6, 2, 4]
+
+
+def test_finite_work_outranks_a_bug_whatever_else_favours_it():
+    """Pinned, tier 1 and already Building, a Bug still follows Ready Broken
+    and Maintenance work in a hobby repo: only finite classes preempt."""
+    rows = [
+        tier_project(TOOLING, 1, "Building", "Bug", pinned=True),
+        tier_ticket(TOOLING, 2, 1),
+        tier_project(HOBBY, 3, "Ready", "Broken"), tier_ticket(HOBBY, 4, 3),
+        tier_project(HOBBY, 5, "Ready", "Maintenance"),
+        tier_ticket(HOBBY, 6, 5),
+    ]
+    assert [i.number for i in startable(rows)] == [4, 6, 2]
 
 
 def test_tickets_inherit_their_parents_class():
@@ -1115,6 +1154,14 @@ def test_maintenance_does_not_preempt_the_limit():
 def test_investigate_does_not_preempt_the_limit():
     rows = _at_limit([project(3, "Building", "Investigate"), ticket(4, 3)])
     assert next_ticket(rows, NOW) is None
+
+
+def test_a_bug_waits_for_a_free_slot_and_then_takes_it():
+    """Only Broken may exceed the cap (#1845 keeps Bug out of it)."""
+    rows = _at_limit([project(3, "Building", "Bug"), ticket(4, 3)])
+    assert next_ticket(rows, NOW) is None
+    one_slot_free = rows[2:]
+    assert getattr(next_ticket(one_slot_free, NOW), "number", None) == 4
 
 
 def test_broken_does_not_stack_on_broken_work_already_running():

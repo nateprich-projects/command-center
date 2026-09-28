@@ -42,6 +42,7 @@ ZAI_CUTOFF = datetime(2026, 9, 27, 6, 0,
 
 def test_the_zai_cutoff_is_2026_09_27_0600_pacific():
     assert heartbeat.ZAI_STANDARD_UNTIL == ZAI_CUTOFF == 1790514000
+    assert heartbeat.RETIRED_AGENT_CUTOFFS == {"zcode": ZAI_CUTOFF}
     pacific = datetime.fromtimestamp(ZAI_CUTOFF, timezone(timedelta(hours=-7)))
     assert (pacific.month, pacific.day, pacific.hour) == (9, 27, 6)
 

@@ -4912,9 +4912,9 @@ def unattended_approvals(
 def _connector_gate_candidate(item: Item, cutoff: datetime,
                               now: datetime) -> bool:
     """Return whether an item could hold a recent connector gate answer."""
-    # API status writes do not always emit a status event. Current Ready and
-    # Parked items can still carry a recent answer even when history is stale.
-    if item.state == "OPEN" and item.status in ("Ready", "Parked"):
+    # API status writes do not always emit a status event. Open Ready, Building,
+    # and Parked items can still carry a recent answer when history is stale.
+    if item.state == "OPEN" and item.status in ("Ready", "Building", "Parked"):
         return True
     if (item.status in ("Done", "Parked") and item.closed_at is not None
             and cutoff <= item.closed_at <= now):

@@ -566,6 +566,53 @@ def test_connector_gate_answer_survives_missing_ready_status_event():
     assert records[0]["provenance"]["voice"] == "nate-relayed"
 
 
+def test_connector_gate_answer_survives_building_without_ready_status_event():
+    now = datetime(2026, 9, 28, 0, 30, tzinfo=timezone.utc)
+    item = funnel.Item(
+        repo="nateprich-projects/command-center", number=1739,
+        title="Built connector-approved project",
+        url="https://example.invalid/1739", state="OPEN", status="Building",
+        status_events=[{
+            "previous_status": None, "status": "Ideas",
+            "at": datetime(2026, 9, 27, 20, 0, tzinfo=timezone.utc),
+        }],
+    )
+    answered_at = datetime(2026, 9, 28, 0, 14, 59, tzinfo=timezone.utc)
+    instruction = "Approve the plan and begin implementation."
+    body = funnel.append_provenance(
+        "General-chat gate instruction received for `approve`.",
+        "nate-relayed", at=answered_at, run="connector-run-1739",
+        agent="codex", instruction=instruction,
+    )
+
+    class FixtureCommentCache:
+        def comment_tails(self, candidates):
+            return {
+                candidate.ref: [{
+                    "body": body,
+                    "createdAt": answered_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                }]
+                for candidate in candidates
+            }
+
+    records = funnel.connector_gate_answers(
+        [item], now, brief_cache=FixtureCommentCache()
+    )
+
+    assert records == [{
+        "ref": "nateprich-projects/command-center#1739",
+        "title": "Built connector-approved project",
+        "url": "https://example.invalid/1739",
+        "gate": "approve",
+        "at": answered_at.isoformat(),
+        "instruction": instruction,
+        "provenance": {
+            "voice": "nate-relayed", "at": answered_at.isoformat(),
+            "agent": "codex", "run": "connector-run-1739",
+        },
+    }]
+
+
 def test_brief_keeps_connector_answer_records_out_of_gate_counts(
     monkeypatch, capsys
 ):
@@ -1672,6 +1719,9 @@ def test_brief_marks_an_unreadable_comment_section_instead_of_empty_result(
 def test_brief_surfaces_blocked_comment_load_failures(
     monkeypatch, capsys
 ):
+    monkeypatch.setattr(
+        funnel, "connector_gate_answers", lambda *args, **kwargs: []
+    )
     item = funnel.Item(
         repo="nateprich/beta", number=93, title="Blocked ticket",
         url="https://example.invalid/93", state="OPEN", status="Building",

@@ -541,6 +541,19 @@ def test_the_pattern_is_pinned_to_its_reviewed_source():
     assert replay.TIMING_LINE.flags == re.UNICODE
 
 
+def test_the_pinned_pattern_is_the_only_gate(monkeypatch):
+    # With the pattern swapped for one that takes a single fixed line, no
+    # timing line or quoting line passes: timing_lines has no second way in
+    # that the pin above would not see (#1784).
+    monkeypatch.setattr(replay, "TIMING_LINE", re.compile(r"only-this"))
+    lines = (["only-this"]
+             + [_timing(part, 412, 2, outcome) for part in VALID_PARTS
+                for outcome in VALID_OUTCOMES]
+             + QUOTING_LINES)
+
+    assert replay.timing_lines("\n".join(lines).encode()) == [{}]
+
+
 def test_every_valid_value_is_accepted():
     for part in VALID_PARTS:
         assert _accepted(_timing(part, 412, 2, "failed"))

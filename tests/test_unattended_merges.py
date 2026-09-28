@@ -60,7 +60,7 @@ def _wire(monkeypatch, spools, retired=frozenset({"zcode"})):
     return read
 
 
-def test_every_live_agent_is_read_and_each_record_names_its_agent(monkeypatch):
+def test_every_provider_is_read_and_each_record_names_its_agent(monkeypatch):
     spools = {
         "claude": [_finish("claude", merged=101, days_ago=1, note="merged PR #101")],
         "muse": [_finish("muse", merged=202, days_ago=2, note="merged PR #202"),
@@ -73,7 +73,7 @@ def test_every_live_agent_is_read_and_each_record_names_its_agent(monkeypatch):
 
     assert [(m["pr"], m["agent"]) for m in found] == [(202, "muse"), (101, "claude")]
     assert all(set(m) == {"pr", "at", "note", "agent"} for m in found)
-    assert set(read) == {"claude", "codex", "muse"}
+    assert set(read) == {"claude", "codex", "muse", "zcode"}
 
 
 def test_already_merged_finish_note_is_rendered_from_the_done_record(monkeypatch):
@@ -90,15 +90,85 @@ def test_already_merged_finish_note_is_rendered_from_the_done_record(monkeypatch
     assert "observed already-merged PR" in found[0]["note"]
 
 
-def test_a_retired_agent_is_never_read(monkeypatch):
-    spools = {"zcode": [_finish("zcode", merged=303)],
-              "muse": [_finish("muse", merged=202)]}
+def test_retired_merges_stop_at_cutoff_but_stay_out_of_silence_alarms(monkeypatch):
+    retired_at = datetime.fromtimestamp(
+        heartbeat.ZAI_STANDARD_UNTIL, timezone.utc
+    )
+    now = retired_at + timedelta(days=1)
+    spools = {
+        "zcode": [
+            {"agent": "zcode", "phase": "finish", "run": "before",
+             "ts": (retired_at + timedelta(seconds=30)).timestamp(),
+             "merged": 1491, "note": "merged PR #1491"},
+            {"agent": "zcode", "phase": "finish", "run": "at",
+             "ts": (retired_at + timedelta(seconds=30)).timestamp(),
+             "merged": 1553, "note": "merged PR #1553"},
+            {"agent": "zcode", "phase": "finish", "run": "after",
+             "ts": (retired_at + timedelta(minutes=1)).timestamp(),
+             "merged": 1568, "note": "merged PR #1568"},
+            {"agent": "zcode", "phase": "finish", "run": "old-count-zero",
+             "ts": (retired_at - timedelta(days=1)).timestamp(),
+             "merged": "0", "note": "legacy merge count"},
+            {"agent": "zcode", "phase": "finish", "run": "old-count-bool",
+             "ts": (retired_at - timedelta(days=1)).timestamp(),
+             "merged": True, "note": "legacy merge count"},
+        ],
+        "muse": [_finish("muse", merged=202)],
+    }
     read = _wire(monkeypatch, spools)
+    monkeypatch.setattr(
+        funnel, "_recent_merged_pr_rows",
+        lambda repo, cutoff: [
+            {"number": 1491, "mergedAt": (retired_at - timedelta(days=1)).isoformat()},
+            {"number": 1553, "mergedAt": retired_at.isoformat()},
+            {"number": 1568, "mergedAt": (retired_at + timedelta(seconds=1)).isoformat()},
+        ],
+    )
 
-    found = funnel.unattended_merges(NOW)
+    found = funnel.unattended_merges(now)
 
-    assert [m["pr"] for m in found] == [202]
+    assert {(row["pr"], row["agent"]) for row in found} == {
+        (1491, "zcode"), (1553, "zcode"), (202, "muse"),
+    }
+    assert "zcode" in read
+
+    read.clear()
+    health = funnel.agent_health(now)
+    assert all(row["agent"] != "zcode" for row in health)
     assert "zcode" not in read
+
+
+def test_recent_merged_pr_rows_include_number_for_cutoff_lookup(monkeypatch):
+    merged_at = datetime.fromtimestamp(
+        heartbeat.ZAI_STANDARD_UNTIL, timezone.utc
+    ) - timedelta(seconds=1)
+    queries = []
+
+    def fake_graphql(query, **variables):
+        queries.append(query)
+        return {"repo0": {"pullRequests": {
+            "nodes": [{
+                "number": 1491, "state": "MERGED",
+                "headRefName": "ticket/1491",
+                "mergedAt": merged_at.isoformat(),
+                "updatedAt": merged_at.isoformat(),
+            }],
+            "pageInfo": {"hasNextPage": False, "endCursor": None},
+        }}
+        }
+
+    monkeypatch.setattr(funnel, "gh_graphql", fake_graphql)
+
+    found = funnel._recent_merged_pr_rows(
+        funnel.REPO, merged_at - timedelta(days=1)
+    )
+
+    assert found == [{
+        "number": 1491, "state": "MERGED", "headRefName": "ticket/1491",
+        "mergedAt": merged_at.isoformat(),
+    }]
+    assert len(queries) == 1
+    assert "nodes { number state headRefName mergedAt updatedAt }" in queries[0]
 
 
 def test_rows_outside_the_window_fall_out(monkeypatch):

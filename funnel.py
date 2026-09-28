@@ -2017,6 +2017,17 @@ def required_tier(title: str, body: str, failed_before: bool = False) -> str:
     return "escalated" if escalation_reasons(title, body, failed_before) else "standard"
 
 
+def _ticket_work_tier(item: Item) -> Optional[str]:
+    """Route from canonical Risk; missing risk stays eligible but escalates."""
+    if item.risk is None:
+        return "escalated"
+    if item.risk not in RISK_OPTIONS:
+        return None
+    if item.risk == "escalated":
+        return "escalated"
+    return required_tier(item.title, _loaded_item_body(item))
+
+
 def _decline_route_withholds_startability(
     item: Item, by_ref: Dict[str, Item],
 ) -> bool:
@@ -2089,6 +2100,7 @@ def _startable_without_repo_readiness(
         or item.open_blockers
         or item.children_total
         or needs not in NEEDS_OPTIONS
+        or (item.risk is not None and item.risk not in RISK_OPTIONS)
         or (
             needs in ("agent", "external-event")
             and item.block_comments_error is not None
@@ -2763,6 +2775,7 @@ def _filter_prequalified_startable_items(
         item for item in candidates
         if item.state == "OPEN"
         and item.ref not in awaiting_review
+        and (item.risk is None or item.risk in RISK_OPTIONS)
         and not _repo_blocking_reasons(item, repo_readiness)
         and item.ref not in backed_off
     ]
@@ -4636,7 +4649,7 @@ def next_ticket_for_tier(items: Sequence[Item], now: datetime,
         if ticket is None or tier is None:
             return ticket
 
-        if required_tier(ticket.title, _loaded_item_body(ticket)) == tier:
+        if _ticket_work_tier(ticket) == tier:
             return ticket
         excluded.add(ticket.ref)
 
@@ -8976,12 +8989,12 @@ ITEM_NODE_FIELDS = """\
 """
 
 # Shared queue/begin startability scan. Keep this Project list projection to
-# the fields the startable predicate, parent checks, and ordering need. The
-# issue body is needed for startability checks; timeline and child history are
-# read only after the candidate set is known.
+# the fields the startable predicate, parent checks, ordering, and tier routing
+# need. The issue body is needed for startability checks; timeline and child
+# history are read only after the candidate set is known.
 # The response aliases name the shared listing contract: startable issue
-# facts, Status, Class, gate (Needs), and claim. Pinned is also read for the
-# settled ordering rule; Origin and Risk do not route ticket work here.
+# facts, Status, Class, gate (Needs), claim, and canonical ticket Risk. Pinned
+# is also read for the settled ordering rule; Origin does not route ticket work.
 STARTABLE_ITEM_NODE_FIELDS = """\
           id
           claim: fieldValueByName(name: "In motion since") {
@@ -8994,6 +9007,9 @@ STARTABLE_ITEM_NODE_FIELDS = """\
             ... on ProjectV2ItemFieldSingleSelectValue { name }
           }
           gate: fieldValueByName(name: "Needs") {
+            ... on ProjectV2ItemFieldSingleSelectValue { name }
+          }
+          risk: fieldValueByName(name: "Risk") {
             ... on ProjectV2ItemFieldSingleSelectValue { name }
           }
           pinned: fieldValueByName(name: "Pinned") {

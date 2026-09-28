@@ -2107,18 +2107,22 @@ def test_codex_begin_skips_the_other_tier_before_claiming(monkeypatch, capsys):
     assert [ref for ref, value in writes if value] == [standard.ref]
 
 
-def test_begin_routes_unset_risk_tickets_with_existing_escalation_scan():
+def test_begin_routes_unset_risk_to_escalated_lane():
     standard_project, standard = _ticket(
         8, 9, body="ordinary implementation details"
     )
-    escalated_project, escalated = _ticket(
-        10, 11, body="Risk: escalated — database migration"
+    missing_project, missing = _ticket(
+        10, 11, body="ordinary implementation details"
     )
-    standard.risk = None
-    escalated.risk = None
+    unknown_project, unknown = _ticket(
+        12, 13, body="ordinary implementation details"
+    )
+    missing.risk = None
+    unknown.risk = "unrecognized"
     rows = [
         standard_project, standard,
-        escalated_project, escalated,
+        missing_project, missing,
+        unknown_project, unknown,
     ]
 
     assert funnel.next_ticket_for_tier(
@@ -2126,7 +2130,8 @@ def test_begin_routes_unset_risk_tickets_with_existing_escalation_scan():
     ) is standard
     assert funnel.next_ticket_for_tier(
         rows, NOW, tier="escalated",
-    ) is escalated
+    ) is missing
+    assert unknown not in funnel.startable(rows)
 
 
 def test_queue_and_begin_share_one_startable_view_for_the_165_regression(
@@ -2238,7 +2243,7 @@ def test_queue_and_begin_share_one_startable_view_for_the_165_regression(
     monkeypatch.setattr(funnel, "startable_listing", counted_listing)
     monkeypatch.setattr(funnel, "next_ticket_for_tier", counted_next)
     result, writes = _implementing_begin(
-        monkeypatch, capsys, view, tier="standard",
+        monkeypatch, capsys, view, tier="escalated",
         repo_readiness=readiness,
     )
 

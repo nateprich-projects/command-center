@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import json
 import pathlib
-import re
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -632,15 +631,20 @@ def test_ticket_1722_direct_migration_verbs_are_spelled_out():
 
 
 def test_ticket_1770_every_verb_carrying_category_has_a_direct_action_entry():
-    """These three categories can carry their own proposing verb."""
-    assert {"data-migration", "authorisation", "credentials"} <= set(
-        funnel._PLAN_DIRECT_ACTIONS
-    )
+    """Each category's own verb shape is represented in the direct table."""
+    examples = {
+        "data-migration": "migrate the schema",
+        "authorisation": "grant the service permissions",
+        "credentials": "rotate the deploy credentials",
+    }
+    assert set(examples) <= set(funnel._PLAN_DIRECT_ACTIONS)
+    for category, phrase in examples.items():
+        assert funnel._PLAN_DIRECT_ACTIONS[category].search(phrase), category
 
 
 def test_ticket_1770_credentials_direct_actions_use_literal_rotate_forms_and_terms():
     direct = funnel._PLAN_DIRECT_ACTIONS["credentials"]
-    for verb in ("rotate", "rotates", "rotated", "rotating"):
+    for verb in funnel._CREDENTIALS_PLAN_ACTION_FORMS.split("|"):
         assert direct.search("{} the deploy credentials".format(verb)), verb
 
     for noun in ("API key", "access token", "client secret",
@@ -648,6 +652,8 @@ def test_ticket_1770_credentials_direct_actions_use_literal_rotate_forms_and_ter
                  "credentials"):
         assert direct.search("rotate the deploy {}".format(noun)), noun
 
+    for invalid in ("changeing", "rotateing", "useing", "writed"):
+        assert direct.search("{} the deploy credentials".format(invalid)) is None
     assert direct.search("rotate the deploy secret key") is None
 
 
@@ -666,8 +672,15 @@ def test_ticket_1770_credentials_direct_actions_reuse_existing_vocabulary():
     )[1]
     assert direct_tail.startswith("(?:") and direct_tail.endswith(r")\b")
     direct_credentials = direct_tail[3:-3]
-
+    matcher_terms = "{}|{}".format(
+        funnel._CREDENTIALS_MATCHER_NAMED_TERMS,
+        funnel._CREDENTIALS_MATCHER_ACTION_NOUN,
+    )
+    assert direct_credentials == matcher_terms
     matcher = funnel.ESCALATION_PATTERNS["credentials"]
-    plain_terms = re.search(r"\\b\(([^()]*)\)\\b\|", matcher).group(1)
-    final_term = re.search(r"\\s\+([^\\]+)\\b$", matcher).group(1)
-    assert direct_credentials == "{}|{}".format(plain_terms, final_term)
+    assert matcher.startswith(
+        r"(?<!no )\b(" + funnel._CREDENTIALS_MATCHER_NAMED_TERMS + r")\b|"
+    )
+    assert matcher.endswith(
+        r"\s+" + funnel._CREDENTIALS_MATCHER_ACTION_NOUN + r"\b"
+    )

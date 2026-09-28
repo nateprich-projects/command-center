@@ -230,7 +230,8 @@ class Board:
 def merge_fact():
     comments = [{"body": funnel.REVIEW_MARKER + "\n\n```json\n" + json.dumps({
         "verdict": "approved", "ci": "green", "head_sha": SHA,
-        "blocking": []}) + "\n```"}]
+        "blocking": []}) + "\n```",
+        "author": {"login": "nateprich"}}]
     return {
         "number": PR,
         "title": "Do the ticket",

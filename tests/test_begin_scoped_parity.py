@@ -96,6 +96,7 @@ def _verdict_comment(verdict, head):
         "body": funnel.REVIEW_MARKER + "\n\n```json\n" + json.dumps(payload)
         + "\n```",
         "createdAt": _stamp(NOW - timedelta(hours=1)),
+        "author": {"login": "nateprich"},
     }
 
 

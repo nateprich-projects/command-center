@@ -15,6 +15,8 @@ from funnel import DriftFacts, Item  # noqa: E402
 
 REPO = "owner/repo"
 READY = datetime(2026, 9, 1, 10, 0, tzinfo=timezone.utc)
+#: The owner account, the only comment author whose verdict counts (#1787).
+OWNER = {"login": "nateprich"}
 BUILDING = datetime(2026, 9, 1, 11, 0, tzinfo=timezone.utc)
 
 
@@ -155,10 +157,10 @@ def test_fetch_drift_facts_reads_all_ticket_pr_verdicts_and_histories(monkeypatc
             number = args[3]
             if number == "20":
                 return {"comments": [
-                    {"body": review_rejected},
-                    {"body": review_approved},
+                    {"body": review_rejected, "author": OWNER},
+                    {"body": review_approved, "author": OWNER},
                 ]}
-            return {"comments": [{"body": review_approved}]}
+            return {"comments": [{"body": review_approved, "author": OWNER}]}
         if args[1:3] == ("issue", "list"):
             return [{
                 "title": funnel.REGRESSION_PREFIX + "21: old change",
@@ -177,3 +179,29 @@ def test_fetch_drift_facts_reads_all_ticket_pr_verdicts_and_histories(monkeypatc
     assert facts.regression_pr_numbers == (21,)
     assert len(facts.review_verdicts) == 3
     assert any(query == funnel.DRIFT_STATUS_QUERY for query, _ in calls)
+
+
+def test_a_forged_rejection_raises_no_drift_signal(monkeypatch):
+    """Only the owner's verdicts are review history (#1787)."""
+    def body(value):
+        return funnel.REVIEW_MARKER + "\n\n```json\n" + json.dumps(
+            verdict(value)) + "\n```"
+
+    def gh_json(*args):
+        assert args[1:3] == ("pr", "view")
+        return {"comments": [
+            {"body": body("approved"), "author": OWNER},
+            {"body": body("approved"), "user": OWNER},
+            {"body": body("rejected"), "author": {"login": "mallory"}},
+            {"body": body("rejected")},
+        ]}
+
+    monkeypatch.setattr(funnel, "_gh_json", gh_json)
+
+    verdicts = funnel._review_verdicts([(REPO, 20)])
+
+    assert [found["verdict"] for found in verdicts] == ["approved", "approved"]
+    facts = DriftFacts(ready_at=READY, building_at=BUILDING,
+                       review_verdicts=verdicts)
+    assert funnel.DRIFT_REJECTED_REVIEW not in funnel.drift_since_approval(
+        project(), facts)

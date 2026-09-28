@@ -116,6 +116,27 @@ def test_latest_verdict_is_chronological_not_pr_list_order():
     assert record["turns"] == 2
 
 
+def test_only_the_owners_verdicts_are_outcomes():
+    """A forged verdict is neither a turn nor the review result (#1787)."""
+    owner = verdict_comment("rejected", at="2026-09-10T08:30:00Z")
+    forged = verdict_comment("approved", at="2026-09-10T08:45:00Z",
+                             author="mallory")
+    unauthored = dict(verdict_comment("approved", at="2026-09-10T08:50:00Z"))
+    unauthored.pop("author")
+    rest_owner = verdict_comment("rejected", at="2026-09-10T08:40:00Z")
+    rest_owner["user"] = rest_owner.pop("author")
+    record = outcomes.derive_outcome(
+        ticket(),
+        [pr(10, created="2026-09-10T08:00:00Z")],
+        {10: {"comments": [owner, rest_owner, forged, unauthored]}},
+        now=NOW,
+    )
+
+    assert record["review_result"] == "rejected"
+    assert record["turns"] == 2
+    assert record["prs"][0]["first_review_result"] == "rejected"
+
+
 def test_no_verdicts_are_unknown_turns_not_zero():
     record = outcomes.derive_outcome(
         ticket(),

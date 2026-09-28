@@ -11,6 +11,7 @@ import signal
 import stat
 import subprocess
 import sys
+from collections import Counter
 from types import SimpleNamespace
 
 import pytest
@@ -3023,9 +3024,8 @@ def test_run_passes_a_measured_bound_to_each_command_kind(
         implement.subprocess, "Popen",
         lambda command, **kwargs: CompletedCommand(command),
     )
-    # This is the finish-ticket inventory: checkout/repository resolution,
-    # staged and unstaged path discovery, remote-branch inspection, commit,
-    # rebase-preserving push, and the test command families run_tests accepts.
+    # These fixtures pin timeout classification. The full Git callsite
+    # inventory is checked below and recorded in docs/finish-subprocess-bounds.md.
     commands = [
         (["git", "rev-parse", "--show-toplevel"],
          implement.LOCAL_GIT_TIMEOUT_SECONDS),
@@ -3067,8 +3067,19 @@ def test_run_passes_a_measured_bound_to_each_command_kind(
          implement.TEST_COMMAND_TIMEOUT_SECONDS),
         ([sys.executable, "-m", "pytest", "-q"],
          implement.TEST_COMMAND_TIMEOUT_SECONDS),
+        (["sh", "-c", "make check test"],
+         implement.TEST_COMMAND_TIMEOUT_SECONDS),
+        (["sh", "-c", "python3 -m pytest tests/ -q"],
+         implement.TEST_COMMAND_TIMEOUT_SECONDS),
         ([sys.executable, "-m", "compileall", "engine"],
-         implement.OTHER_COMMAND_TIMEOUT_SECONDS),
+         implement.COMPILE_COMMAND_TIMEOUT_SECONDS),
+        ([sys.executable, "-c",
+          "from pathlib import Path; compile(Path('funnel.py').read_text(), "
+          "'funnel.py', 'exec')"],
+         implement.COMPILE_COMMAND_TIMEOUT_SECONDS),
+        ([sys.executable, "-c",
+          "import sys; print('%d.%d' % sys.version_info[:2])"],
+         implement.INTERPRETER_PROBE_TIMEOUT_SECONDS),
     ]
 
     for command, _ in commands:
@@ -3108,6 +3119,69 @@ def test_every_subprocess_callsite_has_an_explicit_timeout():
     assert all(has_timeout(call) for call in direct_runs)
 
 
+def test_finish_git_invocation_sites_match_the_recorded_inventory():
+    source = pathlib.Path(implement.__file__).read_text()
+    tree = ast.parse(source)
+    actual = Counter()
+    for node in ast.walk(tree):
+        if (not isinstance(node, ast.Call)
+                or not isinstance(node.func, ast.Name)
+                or node.func.id != "_run" or not node.args
+                or not isinstance(node.args[0], ast.List)):
+            continue
+        command = node.args[0].elts
+        if (not command or not isinstance(command[0], ast.Constant)
+                or command[0].value != "git"):
+            continue
+        if len(command) < 2:
+            actual[("<missing-subcommand>", "")] += 1
+            continue
+        subcommand = command[1]
+        if isinstance(subcommand, ast.Constant):
+            second = str(subcommand.value)
+        elif isinstance(subcommand, ast.Starred):
+            second = "<path-command>"
+        else:
+            second = "<dynamic>"
+        following = ""
+        if len(command) > 2 and isinstance(command[2], ast.Constant):
+            following = str(command[2].value)
+        actual[(second, following)] += 1
+
+    expected = Counter({
+        ("rev-parse", "--show-toplevel"): 1,
+        ("branch", "--show-current"): 1,
+        ("remote", "get-url"): 2,
+        ("ls-remote", "--exit-code"): 2,
+        ("<path-command>", ""): 1,
+        ("add", "--"): 1,
+        ("commit", "-m"): 2,
+        ("rev-list", "--count"): 2,
+        ("fetch", "origin"): 1,
+        ("merge-base", "--is-ancestor"): 1,
+        ("merge", "-s"): 1,
+        ("push", "--set-upstream"): 1,
+    })
+    assert actual == expected
+
+    inventory = (ROOT / "docs" / "finish-subprocess-bounds.md").read_text()
+    assert "16 bounded Git callsites" in inventory
+    for command in (
+        "git diff --name-only -z",
+        "git diff --cached --name-only -z",
+        "git ls-files --others --exclude-standard -z",
+        "git diff --name-only -z origin/main...HEAD",
+        "git ls-files -z -- <selected paths>",
+        "git fetch origin",
+        "git merge-base --is-ancestor",
+        "git merge -s ours",
+        "git push --set-upstream origin",
+        "make",
+        "python3 -m pytest",
+    ):
+        assert command in inventory
+
+
 def test_slow_command_finishes_before_its_bound(tmp_path):
     result = implement._run(
         [sys.executable, "-c",
@@ -3131,11 +3205,17 @@ def test_run_tests_applies_test_bound_to_shell_wrapped_command(
     implement.run_tests(tmp_path, [
         ["sh", "-c", "python3 -m pytest tests/ -q"],
         ["sh", "-c", "make check test"],
+        [sys.executable, "-m", "unittest", "discover"],
+        [sys.executable, "-c",
+         "from pathlib import Path; compile(Path('funnel.py').read_text(), "
+         "'funnel.py', 'exec')"],
     ])
 
     assert [call["timeout"] for call in seen] == [
         implement.TEST_COMMAND_TIMEOUT_SECONDS,
         implement.TEST_COMMAND_TIMEOUT_SECONDS,
+        implement.TEST_COMMAND_TIMEOUT_SECONDS,
+        implement.COMPILE_COMMAND_TIMEOUT_SECONDS,
     ]
 
 

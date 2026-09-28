@@ -363,16 +363,24 @@ def _read_blocked_answer(value: object) -> dict:
 
 CLAIM_TTL_SECONDS = 2 * 60 * 60
 
-# Git inspection and fetches on the current checkout completed in under a
-# second. The larger remote bound also covers ordinary network variance.
+# Measured 2026-09-28 on this checkout: local Git inventory calls took at most
+# 0.0054s, disposable-repo add/commit/merge at most 0.0216s, and GitHub
+# ls-remote/fetch 0.9282s/1.0166s. The caps retain ample headroom for repo and
+# network variance while staying below the two-hour claim TTL.
 LOCAL_GIT_TIMEOUT_SECONDS = 2 * 60
 REMOTE_GIT_TIMEOUT_SECONDS = 10 * 60
 
 # The latest green CI run (#36331008053) spent 6m54s in pytest. Allow more
 # than six times that duration while staying well below the two-hour claim TTL.
 TEST_COMMAND_TIMEOUT_SECONDS = 45 * 60
-OTHER_COMMAND_TIMEOUT_SECONDS = 10 * 60
+# This checkout's CI syntax-compile command took 0.0800s across seven runs;
+# compileall took 0.1176s. Keep compilation separate from the full test suite.
+COMPILE_COMMAND_TIMEOUT_SECONDS = 2 * 60
+# The Python version probe took at most 0.0160s across seven runs. Unknown
+# helper commands share this measured cap; the live finish path has no
+# unclassified command site.
 INTERPRETER_PROBE_TIMEOUT_SECONDS = 20
+OTHER_COMMAND_TIMEOUT_SECONDS = INTERPRETER_PROBE_TIMEOUT_SECONDS
 
 
 def _command_label(command: Sequence[str]) -> str:
@@ -391,17 +399,29 @@ def _command_label(command: Sequence[str]) -> str:
     return "{} command".format(program or "subprocess")
 
 
+def _is_compile_command(command: Sequence[str]) -> bool:
+    """Whether the command only compiles source rather than running tests."""
+    return any(
+        "compileall" in str(part).lower()
+        or re.search(r"\bcompile\s*\(", str(part))
+        for part in command
+    )
+
+
 def _command_timeout_seconds(command: Sequence[str]) -> float:
     """Choose a per-invocation bound from the observed finish workload."""
     if command and os.path.basename(command[0]) == "git":
         if len(command) > 1 and command[1] in ("fetch", "ls-remote", "push"):
             return REMOTE_GIT_TIMEOUT_SECONDS
         return LOCAL_GIT_TIMEOUT_SECONDS
-    if command and (
-        os.path.basename(command[0]) in ("make", "npm", "pytest", "py.test")
-        or "pytest" in command
-    ):
+    rendered = " ".join(str(part) for part in command)
+    if re.search(r"(?<![\w.])(?:make|npm|pytest|py\.test)(?![\w.])",
+                 rendered):
         return TEST_COMMAND_TIMEOUT_SECONDS
+    if any("sys.version_info" in str(part) for part in command):
+        return INTERPRETER_PROBE_TIMEOUT_SECONDS
+    if _is_compile_command(command):
+        return COMPILE_COMMAND_TIMEOUT_SECONDS
     return OTHER_COMMAND_TIMEOUT_SECONDS
 
 
@@ -902,7 +922,9 @@ def run_tests(root: pathlib.Path,
             argv[0] = python
         _run(
             argv, cwd=root, env=env,
-            timeout=TEST_COMMAND_TIMEOUT_SECONDS,
+            timeout=(COMPILE_COMMAND_TIMEOUT_SECONDS
+                     if _is_compile_command(argv)
+                     else TEST_COMMAND_TIMEOUT_SECONDS),
         )
         rendered.append(shlex.join(argv))
     return rendered, source

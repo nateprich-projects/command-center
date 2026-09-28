@@ -16539,9 +16539,149 @@ def shapeable_idea(items: Sequence[Item], tier: Optional[str],
     return None
 
 
+#: The heading ``render_plan`` writes, and the variants a plan writer uses:
+#: a trailing colon, closing hashes, a parenthetical naming the reasons.
+_PLAN_RISK_RATIONALE_RE = re.compile(
+    r"^ {0,3}#{1,6}[ \t]+Risk rationale\b[^\n]*$", re.IGNORECASE | re.MULTILINE
+)
+_PLAN_SECTION_END_RE = re.compile(
+    r"^ {0,3}#{1,6}[ \t]+|^[ \t]*<!-- command-center-[\w-]+ -->", re.MULTILINE
+)
+_PLAN_RISK_RATIONALE_ENTRY_RE = re.compile(
+    r"^[ \t]*[-*+][ \t]+(?P<reason>[\w-]+)[ \t]*:"
+)
+#: A rationale section in exactly the words render_plan uses for an empty
+#: list is not a declaration; any other prose, even prose opening "No", is.
+_PLAN_RISK_RATIONALE_NONE_RE = re.compile(r"(?i)\ANone recorded\.?\Z")
+#: ``Risk: escalated`` as a plan writer states it: a bare line, a bulleted or
+#: numbered list item, a heading, or bold (``- Risk: escalated``,
+#: ``1. Risk: escalated``, ``## Risk: escalated``, ``**Risk:** escalated``).
+#: ``RISK_LINE`` reads only the bare form; the #1034 union caught the others
+#: by accident.
+_PLAN_RISK_MARKER_RE = re.compile(
+    r"^[ \t]*(?:#{1,6}[ \t]+|(?:[-*+]|\d+[.)])[ \t]+)?[*_]{0,2}Risk[*_]{0,2}"
+    r"[ \t]*:[ \t]*[*_]{0,2}[ \t]*escalated\b[*_]{0,2}(?P<what>.*)$",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def plan_declared_risks(plan_body: str) -> List[str]:
+    """Risks a plan body declares, as distinct from wording-scan hits (#1721).
+
+    The one definition of a declared risk: ``engine/shape.py`` reads it from
+    the rendered scan body beside the typed ``escalated_risk`` list, and the
+    Shaped sweep reads it from the stored body, where the runner has rendered
+    that list as a ``Risk rationale`` section. A declaration is a
+    ``Risk rationale`` section, however it got into the body, or a
+    ``Risk: escalated`` line; either holds a plan at Shaped, while a hit from
+    ``plan_escalation_matches`` alone only raises the review tier. The text is
+    the one that scan reads, so quoted, code and Rejected text declares
+    nothing. A rationale section with prose but no readable entry counts as
+    ``declared``, so a malformed record holds rather than releases; one that
+    is empty or says ``None`` declares nothing.
+    """
+    text = _strip_plan_prose_quotes(
+        asserted_text(_plan_escalation_scan_text(plan_body or ""))
+    )
+    declared: List[str] = []
+
+    def add(reason: str) -> None:
+        if reason not in declared:
+            declared.append(reason)
+
+    for heading in _PLAN_RISK_RATIONALE_RE.finditer(text):
+        section = text[heading.end():]
+        boundary = _PLAN_SECTION_END_RE.search(section)
+        if boundary is not None:
+            section = section[:boundary.start()]
+        content = section.strip()
+        if not content or _PLAN_RISK_RATIONALE_NONE_RE.match(content):
+            continue
+        readable = False
+        for line in section.splitlines():
+            entry = _PLAN_RISK_RATIONALE_ENTRY_RE.match(line)
+            if (entry is not None
+                    and entry.group("reason") in ESCALATION_PATTERNS):
+                readable = True
+                add(entry.group("reason"))
+        if not readable:
+            add("declared")
+    for marker in _PLAN_RISK_MARKER_RE.finditer(text):
+        stated = marker.group("what").strip(" \t*_—-:#").strip()
+        add("declared: " + stated if stated else "declared")
+    return declared
+
+
+def scan_only_escalation_note(reasons: Sequence[str]) -> str:
+    """Self-approval wording for a scan hit that no longer holds (#1721)."""
+    named = " ({})".format(", ".join(reasons)) if reasons else ""
+    return "scan-only escalation{} raises the review tier".format(named)
+
+
+#: The shape runner's record of the risk decision it made (#1721): the
+#: declared risks the decision held on, possibly none, and the scan's reasons.
+#: Prose cannot stand in for it: the readers that find a declaration in prose
+#: strip code and quotes across the whole body, so a malformed fence or quote
+#: in the narrative can blank the rendered Risk rationale below it.
+SHAPE_RISK_MARKER = "<!-- command-center-shape-risk -->"
+
+
+def shape_risk_block(declared: Sequence[str], scan: Sequence[str]) -> str:
+    """Build the runner-owned risk record written into a shaped plan body."""
+    record = {"declared": list(declared), "scan": list(scan)}
+    return "{}\n\n```json\n{}\n```".format(
+        SHAPE_RISK_MARKER, json.dumps(record, indent=2, sort_keys=True)
+    )
+
+
+def parse_shape_risk_record(body: str) -> Optional[Dict[str, List[str]]]:
+    """The runner's risk record, or ``None`` when absent or unreadable.
+
+    The newest block wins, as for every runner record, so a marker the
+    shaper quoted in the narrative above cannot outrank the runner's own.
+    """
+    found = _marked_json(body, SHAPE_RISK_MARKER)
+    if found is None:
+        return None
+    declared = found.get("declared")
+    scan = found.get("scan")
+    if not (isinstance(declared, list)
+            and all(isinstance(reason, str) for reason in declared)
+            and isinstance(scan, list)
+            and all(isinstance(reason, str) for reason in scan)):
+        return None
+    return {"declared": declared, "scan": scan}
+
+
+def _shaped_risk_holds(item: Item, body: str) -> bool:
+    """Whether a Shaped plan's Risk still holds it (#1721).
+
+    Until #1721 an escalated Risk held a plan whoever set it. Now it is
+    released only on the runner's own record that the decision declared no
+    risk, and only when no declaration shows in the prose either. A plan
+    with no record, shaped before #1721 or by hand, or an unreadable one,
+    holds; so do unset or unknown Risk and a body the load did not carry.
+    ``Needs: human`` keeps its own hold whatever the Risk: after #1721 the
+    shape runner never writes it for a scan hit, so it records some other
+    reason to wait.
+    """
+    if item.risk == "standard":
+        return False
+    if item.risk != "escalated" or not body.strip():
+        return True
+    record = parse_shape_risk_record(body)
+    if record is None or record["declared"]:
+        return True
+    return bool(plan_declared_risks(body))
+
+
 def shaped_self_approvable(item: Item,
                            by_ref: Dict[str, Item]) -> bool:
-    """Re-evaluate one Shaped plan with the existing self-approval rule."""
+    """Re-evaluate one Shaped plan with the existing self-approval rule.
+
+    Only a declared risk holds (#1721): an escalated Risk the wording scan
+    set alone no longer does.
+    """
     body = _loaded_item_body(item)
     override = parse_origin_override(body)
     override_target = override["target"] if override is not None else None
@@ -16550,7 +16690,7 @@ def shaped_self_approvable(item: Item,
         item.origin,
         override_target,
         needs_nate=item.needs == "human",
-        escalated=item.risk != "standard",
+        escalated=_shaped_risk_holds(item, body),
         state=item.state,
     )
 
@@ -16587,6 +16727,11 @@ def sweep_shaped_self_approvals(
         reason = "needs_nate all null; class {} self-approvable; {}".format(
             klass, owner_basis
         )
+        # Eligible with an escalated Risk means the scan set it and nothing
+        # declared it (#1721): it stays escalated for the review tier.
+        scan_only = item.risk == "escalated"
+        if scan_only:
+            reason += "; " + scan_only_escalation_note(plan_is_escalated(body))
 
         try:
             status_error = _write_status(item, "Ready", now)
@@ -16596,7 +16741,9 @@ def sweep_shaped_self_approvals(
             errors.append({"ref": item.ref, "error": status_error})
             continue
 
-        basis = "{}; no escalated risk".format(reason)
+        basis = "{}; {}".format(
+            reason, "no declared risk" if scan_only else "no escalated risk"
+        )
         authority_signals = needs_nate_signals(body)
         if authority_signals:
             basis += "; authority signals: {}".format(

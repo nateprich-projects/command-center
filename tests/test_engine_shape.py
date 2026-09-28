@@ -674,18 +674,24 @@ def test_an_override_to_agents_restores_eligibility():
     assert reason.endswith("origin override to agents")
 
 
-def test_escalated_risk_holds():
+def test_a_scan_only_hit_advances_and_names_the_raised_tier():
+    # #1721 reverses #1034's union: a wording-scan hit with nothing
+    # declared no longer holds the plan; the reason says why Risk is
+    # escalated anyway.
     status, reason = shape.decide(
         shape.validate_answer(answer()),
         klass="Improve", origin_voice="agent",
         escalation_reasons=["credentials"])
     assert (status, reason) == (
-        "Shaped", "escalated risk (credentials)")
+        "Ready",
+        "needs_nate all null; class Improve self-approvable; origin agent; "
+        "scan-only escalation (credentials) raises the review tier")
 
 
 def test_a_scan_match_line_is_in_the_escalation_explanation():
     status, reason = shape.decide(
-        shape.validate_answer(answer()),
+        shape.validate_answer(answer(escalated_risk=[
+            {"reason": "credentials", "why": "reads a new secret"}])),
         klass="Improve", origin_voice="agent",
         escalation_reasons=["credentials"],
         escalation_matches=[{
@@ -695,6 +701,221 @@ def test_a_scan_match_line_is_in_the_escalation_explanation():
     assert (status, reason) == (
         "Shaped",
         "escalated risk (credentials: Read credentials from the environment.)")
+
+
+def test_a_risk_escalated_line_in_the_plan_is_a_declaration_and_holds():
+    # The plan's writer stated the risk, so it holds like the typed list,
+    # whatever the scan passed in (#1721).
+    status, reason = shape.decide(
+        shape.validate_answer(answer(
+            plan_markdown="# Plan\n\nRisk: escalated — destructive\n")),
+        klass="Improve", origin_voice="agent",
+        escalation_reasons=["declared: destructive"],
+        escalation_matches=[{
+            "reason": "declared: destructive",
+            "line": "Risk: escalated — destructive",
+        }])
+    assert status == "Shaped"
+    assert reason == ("escalated risk (declared: destructive: "
+                      "Risk: escalated — destructive)")
+
+
+DECLARED_IN_PLAN = [
+    pytest.param(
+        "# Plan\n\nWe will rotate the deploy api-key monthly.\n\n"
+        "## Risk rationale\n\n"
+        "- credentials: the plan rotates the deploy api-key\n",
+        ["credentials"], id="rationale section in plan_markdown"),
+    pytest.param(
+        "# Plan\n\nWe will rotate the deploy api-key monthly.\n\n"
+        "- Risk: escalated — credentials\n",
+        ["declared: credentials"], id="list-item marker"),
+    pytest.param(
+        "# Plan\n\nWe will rotate the deploy api-key monthly.\n\n"
+        "**Risk:** escalated — credentials\n",
+        ["declared: credentials"], id="bold marker"),
+    pytest.param(
+        "# Plan\n\nWe will rotate the deploy api-key monthly.\n\n"
+        "1. Risk: escalated — credentials\n",
+        ["declared: credentials"], id="numbered marker"),
+    pytest.param(
+        "# Plan\n\n## Risk: escalated — credentials\n\n"
+        "We will rotate the deploy api-key monthly.\n",
+        ["declared: credentials"], id="heading marker"),
+    pytest.param(
+        "# Plan\n\nWe will rotate the deploy api-key monthly.\n\n"
+        "## Risk rationale:\n\n- credentials: rotates the key\n",
+        ["credentials"], id="rationale heading with a colon"),
+    pytest.param(
+        "# Plan\n\nWe will rotate the deploy api-key monthly.\n\n"
+        "## Risk rationale ##\n\n- credentials: rotates the key\n",
+        ["credentials"], id="rationale heading with closing hashes"),
+    pytest.param(
+        "# Plan\n\nWe will rotate the deploy api-key monthly.\n\n"
+        "## Risk rationale (credentials)\n\n- credentials: rotates the key\n",
+        ["credentials"], id="rationale heading naming its reason"),
+    pytest.param(
+        "# Plan\n\nWe will rotate the deploy api-key monthly.\n\n"
+        "## Risk rationale\n\n"
+        "No secret leaves the box, but it rotates the key.\n",
+        ["declared"], id="rationale prose opening No"),
+]
+
+
+@pytest.mark.parametrize("plan_markdown,declared", DECLARED_IN_PLAN)
+def test_a_declaration_written_into_the_plan_holds(
+        monkeypatch, capsys, plan_markdown, declared):
+    """Review of PR #1740: one definition of declared. A rationale section
+    or marker the shaper wrote into plan_markdown, with the typed list
+    empty, holds at shape time exactly as the sweep reads it later."""
+    item = idea(42, klass="Broken")
+    candidate = answer(proposed_class="Broken",
+                       plan_markdown=plan_markdown, escalated_risk=[])
+    validated = shape.validate_answer(candidate)
+    assert shape.declared_risks(validated) == declared
+
+    assert shape.preview_decision([item], item, validated)[0] == "Shaped"
+    calls = stub_gh(monkeypatch, item)
+    assert shape.apply_shape(
+        [item], NOW, item.ref, candidate,
+        run="shape-run", agent="muse") == 0
+    assert (item.status, item.risk, item.needs) == (
+        "Shaped", "escalated", "human")
+    assert gh_calls(calls, "gh", "issue", "comment") == []
+    assert funnel.plan_declared_risks(item.body) == declared
+    assert funnel.parse_shape_risk_record(item.body)["declared"] == declared
+    assert "review tier" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("declaration", [
+    "## Risk rationale\n\n- destructive: drops the retired table\n",
+    "- Risk: escalated — destructive\n",
+])
+def test_a_plan_written_declaration_writes_risk_escalated_without_a_scan_hit(
+        monkeypatch, declaration):
+    """A declared risk held at Shaped must not carry Risk standard, which
+    the Shaped sweep would read as no hold at all."""
+    item = idea(42, klass="Broken")
+    project_writes = []
+    monkeypatch.setattr(
+        funnel, "write_project_select",
+        lambda item_id, field, value, ref:
+            project_writes.append((field, value)),
+    )
+    stub_gh(monkeypatch, item)
+    candidate = answer(
+        proposed_class="Broken",
+        plan_markdown="# Plan\n\nDisplay source freshness.\n\n" + declaration,
+        escalated_risk=[])
+    assert shape._plan_escalation_matches(
+        shape.validate_answer(candidate)) == []
+    assert shape.apply_shape(
+        [item], NOW, item.ref, candidate,
+        run="shape-run", agent="muse") == 0
+    assert item.status == "Shaped"
+    assert project_writes == [("Risk", "escalated"), ("Needs", "human")]
+    item.needs = "none"
+    assert funnel.shaped_self_approvable(item, {item.ref: item}) is False
+
+
+GATES_QUESTION = {"exposure": None, "gates": ["Who may write Ready?"],
+                  "scope": None, "preference": None}
+REAL_CREDENTIALS = [{"reason": "credentials",
+                     "why": "rotates the deploy api-key"}]
+
+
+def _shape_answer_gates_and_sweep(monkeypatch, plan_markdown,
+                                  escalated_risk):
+    """Shape a plan held by a Gates question, answer it as Nate does, and
+    run the real Shaped sweep over the stored body."""
+    item = idea(42, klass="Broken")
+    stub_gh(monkeypatch, item)
+    assert shape.apply_shape(
+        [item], NOW, item.ref,
+        answer(proposed_class="Broken", plan_markdown=plan_markdown,
+               escalated_risk=escalated_risk, needs_nate=GATES_QUESTION),
+        run="shape-run", agent="muse") == 0
+    assert (item.status, item.risk, item.needs) == (
+        "Shaped", "escalated", "human")
+    item.body = funnel.answered_gates_body(item.body, "yes", "Nate", at=NOW)
+    item.needs = "human" if funnel.plan_needs_nate(item.body) else "none"
+    assert item.needs == "none"
+
+    def write_status(target, status, now):
+        target.status = status
+        return None
+
+    monkeypatch.setattr(funnel, "_write_status", write_status)
+    monkeypatch.setattr(
+        funnel, "_run_gh",
+        lambda argv, **kwargs: SimpleNamespace(
+            returncode=0, stdout="", stderr=""))
+    advanced, errors = funnel.sweep_shaped_self_approvals(
+        [item], NOW, run="begin-run", agent="muse")
+    assert errors == []
+    return item, advanced
+
+
+@pytest.mark.parametrize("plan_markdown,risks", [
+    pytest.param("# Plan\n\n```\nlog\n", REAL_CREDENTIALS,
+                 id="unclosed backtick fence"),
+    pytest.param("# Plan\n\n~~~\nlog\n", REAL_CREDENTIALS,
+                 id="unclosed tilde fence"),
+    pytest.param("# Plan\n\n````\nlog\n```\n\nDo it.\n", REAL_CREDENTIALS,
+                 id="four-backtick fence closed by three"),
+    pytest.param('Ship the 3" panel.\n',
+                 [{"reason": "credentials",
+                   "why": 'rotates the 4" deploy api-key'}],
+                 id="straight quotes spanning the rationale"),
+    pytest.param("# Plan\n\nKeep the ‘legacy path working.\n",
+                 [{"reason": "credentials",
+                   "why": "rotates Nate’s deploy api-key"}],
+                 id="curly opener and an apostrophe"),
+])
+def test_a_declared_risk_holds_after_its_gates_answer_despite_bad_markdown(
+        monkeypatch, plan_markdown, risks):
+    """Review of PR #1740: prose readers blank a rendered Risk rationale
+    under a malformed fence or quote, so the sweep released a declared risk
+    once Nate answered the Gates question. The runner's record holds it."""
+    item, advanced = _shape_answer_gates_and_sweep(
+        monkeypatch, plan_markdown, risks)
+    assert advanced == []
+    assert item.status == "Shaped"
+    assert funnel.parse_shape_risk_record(item.body)["declared"] == [
+        "credentials"]
+
+
+def test_a_scan_only_plan_is_swept_once_its_gates_answer_lands(monkeypatch):
+    item, advanced = _shape_answer_gates_and_sweep(
+        monkeypatch, "# Plan\n\nWe will rotate the deploy api-key monthly.\n",
+        [])
+    assert funnel.parse_shape_risk_record(item.body) == {
+        "declared": [], "scan": ["credentials"]}
+    assert advanced == [{"ref": item.ref, "status": "Ready"}]
+    assert (item.status, item.risk) == ("Ready", "escalated")
+
+
+def test_a_none_rationale_in_the_plan_declares_nothing():
+    for plan_markdown in (
+            "# Plan\n\nDo the thing.\n\n## Risk rationale\n\n"
+            "None recorded.\n",
+            "# Plan\n\nDo the thing.\n\n## Risk rationale\n\n"
+            "## Next\n"):
+        assert funnel.plan_declared_risks(plan_markdown) == []
+        validated = shape.validate_answer(answer(plan_markdown=plan_markdown))
+        assert shape.declared_risks(validated) == []
+        assert shape.decide(validated, klass="Improve",
+                            origin_voice="agent")[0] == "Ready"
+
+
+def test_a_scan_only_hit_is_not_named_as_a_hold_reason():
+    status, reason = shape.decide(
+        shape.validate_answer(answer(needs_nate={
+            "exposure": None, "gates": ["Who may write Ready?"],
+            "scope": None, "preference": None})),
+        klass="Improve", origin_voice="agent",
+        escalation_reasons=["credentials"])
+    assert (status, reason) == ("Shaped", "open question under Gates")
 
 
 def test_a_declared_risk_holds_with_a_clean_scan():
@@ -710,15 +931,16 @@ def test_a_declared_risk_holds_with_a_clean_scan():
         "Shaped", "escalated risk (data-migration)")
 
 
-def test_a_scan_hit_holds_with_an_empty_declaration():
-    # #1034: there is no standard override — an empty declaration never
-    # clears what the wording scan found.
+def test_a_scan_hit_with_an_empty_declaration_no_longer_holds():
+    # #1721 reverses #1034 here: an empty declaration with a scan hit
+    # advances; the Risk write, not the gate, carries the scan.
     status, reason = shape.decide(
         shape.validate_answer(answer(escalated_risk=[])),
         klass="Improve", origin_voice="agent",
         escalation_reasons=["credentials"])
-    assert (status, reason) == (
-        "Shaped", "escalated risk (credentials)")
+    assert status == "Ready"
+    assert reason.endswith(
+        "; scan-only escalation (credentials) raises the review tier")
 
 
 def test_preview_ignores_the_recorded_1503_no_backfill_citation():
@@ -766,22 +988,28 @@ def test_preview_and_risk_write_share_the_rendered_escalation_scan(
         lambda item_id, field, value, ref:
             project_writes.append((field, value)),
     )
-    stub_gh(monkeypatch, item)
+    calls = stub_gh(monkeypatch, item)
 
     preview_status, preview_reason = shape.preview_decision(
         [item], item, shape.validate_answer(candidate))
 
+    # #1721: the scan hit raises the tier and no longer holds the plan;
+    # preview and the live write agree on both.
     assert (preview_status, preview_reason) == (
-        "Shaped",
-        "escalated risk (data-migration: - Backfill recent records from "
-        "the canonical source.)",
+        "Ready",
+        "needs_nate all null; class Broken self-approvable; origin agent; "
+        "scan-only escalation (data-migration) raises the review tier",
     )
     assert shape.apply_shape(
         [item], NOW, item.ref, candidate,
         run="shape-run", agent="muse") == 0
-    assert item.status == "Shaped"
+    assert item.status == "Ready"
     assert ("Risk", "escalated") in project_writes
-    assert ("Needs", "human") in project_writes
+    assert ("Needs", "none") in project_writes
+    comments = [call[1][-1]
+                for call in gh_calls(calls, "gh", "issue", "comment")]
+    assert len([body for body in comments
+                if "Escalation scan" in body]) == 1
 
     expected_scan_body = shape.render_plan(shape.validate_answer(candidate))
     assert "Backfill recent records" in expected_scan_body
@@ -1661,16 +1889,173 @@ def test_apply_reports_an_unconfirmed_status_without_marking(monkeypatch):
     assert all("--remove-label" not in args[0] for args in watched)
 
 
-def test_apply_holds_an_escalated_plan_at_shaped(monkeypatch, capsys):
+def test_apply_advances_a_scan_only_plan_with_risk_escalated(
+        monkeypatch, capsys):
+    # #1721: the wording scan alone raises the review tier, records its
+    # reasons and matching lines in one comment, and holds nothing.
     item = idea(42)
-    stub_gh(monkeypatch, item)
+    project_writes = []
+    monkeypatch.setattr(
+        funnel, "write_project_select",
+        lambda item_id, field, value, ref:
+            project_writes.append((field, value)),
+    )
+    calls = stub_gh(monkeypatch, item)
     assert shape.apply_shape(
         [item], NOW, item.ref,
         answer(plan_markdown="# Plan\n\nRotate the api-key monthly.\n"),
         run="shape-run", agent="muse") == 0
+    assert item.status == "Ready"
+    assert item.risk == "escalated"
+    assert item.needs == "none"
+    assert project_writes == [("Risk", "escalated"), ("Needs", "none")]
+    assert "needs-shaping" not in item.labels
+    assert funnel.parse_shape_risk_record(item.body) == {
+        "declared": [], "scan": ["credentials"]}
+
+    comments = [call[1][-1]
+                for call in gh_calls(calls, "gh", "issue", "comment")]
+    assert len(comments) == 2
+    approvals = [body for body in comments
+                 if funnel.parse_self_approval(body) is not None]
+    assert [funnel.parse_self_approval(body) for body in approvals] == [
+        "needs_nate all null; class Improve self-approvable; origin agent; "
+        "scan-only escalation (credentials) raises the review tier; "
+        "no declared risk"]
+    scans = [body for body in comments if body not in approvals]
+    assert len(scans) == 1
+    assert "- `credentials`\n  > Rotate the api-key monthly." in scans[0]
+    assert "review tier raised, plan not held" in scans[0]
+    assert funnel.parse_provenance(scans[0]) == {
+        "agent": "muse", "at": NOW.isoformat(), "run": "shape-run",
+        "voice": "agent"}
+    output = capsys.readouterr().out
+    assert "advanced to Ready: " in output
+    assert ("escalation scan raised the review tier (the scan alone holds "
+            "nothing): credentials: Rotate the api-key monthly.") in output
+
+
+def test_apply_lists_every_scan_reason_in_one_comment(monkeypatch, capsys):
+    item = idea(42)
+    calls = stub_gh(monkeypatch, item)
+    assert shape.apply_shape(
+        [item], NOW, item.ref,
+        answer(plan_markdown=(
+            "# Plan\n\nRotate the api-key monthly.\n\n"
+            "This change will migrate the active schema.\n")),
+        run="shape-run", agent="muse") == 0
+    assert item.status == "Ready"
+    scans = [call[1][-1]
+             for call in gh_calls(calls, "gh", "issue", "comment")
+             if funnel.parse_self_approval(call[1][-1]) is None]
+    assert len(scans) == 1
+    assert ("- `credentials`\n  > Rotate the api-key monthly.\n"
+            "- `data-migration`\n  > This change will migrate the active "
+            "schema.") in scans[0]
+    assert ("scan-only escalation (credentials, data-migration) raises "
+            "the review tier") in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("held", ["open question", "class New"])
+def test_apply_posts_the_scan_comment_when_another_field_holds(
+        monkeypatch, held):
+    """The comment must not say the plan was not held when an open
+    question or the class holds it at Shaped (review of PR #1740)."""
+    item = idea(42, klass="New" if held == "class New" else "Improve")
+    calls = stub_gh(monkeypatch, item)
+    needs_nate = {"exposure": None, "gates": None, "scope": None,
+                  "preference": None}
+    if held == "open question":
+        needs_nate["gates"] = ["Who may write Ready?"]
+    assert shape.apply_shape(
+        [item], NOW, item.ref,
+        answer(plan_markdown="# Plan\n\nRotate the api-key monthly.\n",
+               needs_nate=needs_nate),
+        run="shape-run", agent="muse") == 0
     assert item.status == "Shaped"
-    assert "escalated risk (credentials: Rotate the api-key monthly.)" \
-        in capsys.readouterr().out
+    assert (item.risk, item.needs) == ("escalated", "human")
+    comments = [call[1][-1]
+                for call in gh_calls(calls, "gh", "issue", "comment")]
+    assert len(comments) == 1
+    assert funnel.parse_self_approval(comments[0]) is None
+    assert "- `credentials`" in comments[0]
+    assert "not held" not in comments[0]
+    assert "waits at Shaped for another reason" in comments[0]
+
+
+def test_the_ready_scan_comment_says_the_plan_was_not_held(monkeypatch):
+    item = idea(42)
+    calls = stub_gh(monkeypatch, item)
+    assert shape.apply_shape(
+        [item], NOW, item.ref,
+        answer(plan_markdown="# Plan\n\nRotate the api-key monthly.\n"),
+        run="shape-run", agent="muse") == 0
+    scans = [call[1][-1]
+             for call in gh_calls(calls, "gh", "issue", "comment")
+             if funnel.parse_self_approval(call[1][-1]) is None]
+    assert len(scans) == 1
+    assert "review tier raised, plan not held" in scans[0]
+    assert "another reason" not in scans[0]
+
+
+TRUE_PROPOSALS = json.loads(
+    (ROOT / "tests/fixtures/escalation_plan_true_proposals.json").read_text(
+        encoding="utf-8"))
+
+
+@pytest.mark.parametrize(
+    "fixture", TRUE_PROPOSALS,
+    ids=[fixture["source"] for fixture in TRUE_PROPOSALS])
+def test_true_proposals_still_write_risk_escalated(monkeypatch, fixture):
+    """The scan still routes real proposals to the escalated reviewer."""
+    item = idea(42, klass="Broken")
+    project_writes = []
+    monkeypatch.setattr(
+        funnel, "write_project_select",
+        lambda item_id, field, value, ref:
+            project_writes.append((field, value)),
+    )
+    calls = stub_gh(monkeypatch, item)
+    candidate = answer(proposed_class="Broken",
+                       plan_markdown="# Plan\n\n" + fixture["body"])
+    assert shape.apply_shape(
+        [item], NOW, item.ref, candidate,
+        run="shape-run", agent="muse") == 0
+    assert ("Risk", "escalated") in project_writes
+    assert item.status == "Ready"
+    scans = [call[1][-1]
+             for call in gh_calls(calls, "gh", "issue", "comment")
+             if "Escalation scan" in call[1][-1]]
+    assert len(scans) == 1
+    for reason in fixture["expected_reasons"]:
+        assert "- `{}`".format(reason) in scans[0]
+
+
+SCAN_ONLY_HOLDS = json.loads(
+    (ROOT / "tests/fixtures/escalation_plan_scan_only_holds.json").read_text(
+        encoding="utf-8"))
+
+
+@pytest.mark.parametrize(
+    "fixture", SCAN_ONLY_HOLDS,
+    ids=[fixture["source"].split(" ")[0] for fixture in SCAN_ONLY_HOLDS])
+def test_recorded_sibling_citation_holds_now_advance(monkeypatch, fixture):
+    """#1658, #1195 and #1675 were held at Shaped on 2026-09-27 by a
+    `Siblings checked` line the scan read as a data migration."""
+    item = idea(42, klass="Broken")
+    candidate = answer(proposed_class="Broken",
+                       plan_markdown=fixture["body"])
+
+    status, reason = shape.preview_decision(
+        [item], item, shape.validate_answer(candidate))
+    assert status == "Ready", reason
+
+    stub_gh(monkeypatch, item)
+    assert shape.apply_shape(
+        [item], NOW, item.ref, candidate,
+        run="shape-run", agent="muse") == 0
+    assert item.status == "Ready"
+    assert item.needs == "none"
 
 
 def test_apply_holds_a_declared_risk_with_a_clean_scan(
@@ -1687,10 +2072,154 @@ def test_apply_holds_a_declared_risk_with_a_clean_scan(
         run="shape-run", agent="muse") == 0
     assert item.status == "Shaped"
     assert item.risk == "escalated"
+    assert item.needs == "human"
     assert "- data-migration: backfills the ledger table" in item.body
     assert "Risk: escalated" not in item.body
     assert not funnel.plan_is_escalated(item.body)
+    # The runner's record and the body's rationale both carry the hold.
+    assert funnel.parse_shape_risk_record(item.body) == {
+        "declared": ["data-migration"], "scan": []}
+    assert funnel.plan_declared_risks(item.body) == ["data-migration"]
     assert "escalated risk (data-migration)" in capsys.readouterr().out
+
+
+def test_apply_holds_a_hypothetical_bug_why_the_scan_corroborates(
+        monkeypatch, capsys):
+    """Review of PR #1740: the output review dropped a declaration whose why
+    names a hypothetical bug, and with the union gone nothing held the plan.
+    The shaper called it risky and the plan does rotate the api-key, so it
+    waits for Nate."""
+    item = idea(42, klass="Broken")
+    project_writes = []
+    monkeypatch.setattr(
+        funnel, "write_project_select",
+        lambda item_id, field, value, ref:
+            project_writes.append((field, value)),
+    )
+    calls = stub_gh(monkeypatch, item)
+    candidate = answer(
+        proposed_class="Broken",
+        plan_markdown="# Plan\n\nWe will rotate the deploy api-key monthly.\n",
+        escalated_risk=[{
+            "reason": "credentials",
+            "why": "a bug in the implementation could leak the api-key",
+        }])
+
+    reviewed, rejected = shape.review_shape_output_for_item(
+        [item], item, shape.validate_answer(candidate))
+    assert rejected == []
+    assert reviewed["escalated_risk"] == candidate["escalated_risk"]
+    assert shape.preview_decision([item], item, reviewed)[0] == "Shaped"
+
+    assert shape.apply_shape(
+        [item], NOW, item.ref, candidate,
+        run="shape-run", agent="muse") == 0
+    assert item.status == "Shaped"
+    assert project_writes == [("Risk", "escalated"), ("Needs", "human")]
+    assert gh_calls(calls, "gh", "issue", "comment") == []
+    assert funnel.plan_declared_risks(item.body) == ["credentials"]
+    assert "held at Shaped: escalated risk (credentials: " \
+        in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("plan_markdown,risk", [
+    pytest.param("# Plan\n\nThis change will migrate the active schema.\n",
+                 "credentials", id="credentials declared, migration scanned"),
+    pytest.param("# Plan\n\nWe will rotate the deploy api-key monthly.\n",
+                 "data-migration",
+                 id="migration declared, credentials scanned"),
+])
+def test_a_hypothetical_bug_why_holds_when_the_scan_finds_another_risk(
+        monkeypatch, plan_markdown, risk):
+    """Review of PR #1740: base held these through the union. A declaration
+    whose why names a hypothetical bug is kept whenever the scan finds any
+    risky action, not only one of the same kind."""
+    item = idea(42, klass="Broken")
+    candidate = answer(
+        proposed_class="Broken", plan_markdown=plan_markdown,
+        escalated_risk=[{
+            "reason": risk,
+            "why": "a bug in the implementation could leak the api-key",
+        }])
+    reviewed, rejected = shape.review_shape_output_for_item(
+        [item], item, shape.validate_answer(candidate))
+    assert rejected == []
+    assert [entry["reason"] for entry in reviewed["escalated_risk"]] == [risk]
+    assert shape.preview_decision([item], item, reviewed)[0] == "Shaped"
+    stub_gh(monkeypatch, item)
+    assert shape.apply_shape(
+        [item], NOW, item.ref, candidate,
+        run="shape-run", agent="muse") == 0
+    assert (item.status, item.needs) == ("Shaped", "human")
+
+
+def test_a_hypothetical_why_cannot_vouch_for_itself():
+    """The corroborating scan reads the plan without the typed whys: a why
+    that would match the scan if rendered does not keep itself."""
+    why = "a bug in the implementation could rotate the access token"
+    rendered_rationale = "## Risk rationale\n\n- credentials: {}\n".format(
+        why)
+    assert funnel.plan_escalation_matches(rendered_rationale)
+    item = idea(42, klass="Broken")
+    candidate = shape.validate_answer(answer(
+        proposed_class="Broken",
+        plan_markdown="# Plan\n\nDisplay source freshness.\n",
+        escalated_risk=[{"reason": "credentials", "why": why}]))
+    reviewed, rejected = shape.review_shape_output_for_item(
+        [item], item, candidate)
+    assert reviewed["escalated_risk"] == []
+    assert rejected == [
+        "escalated risk based only on a hypothetical implementation bug"]
+    assert shape.preview_decision([item], item, reviewed)[0] == "Ready"
+
+
+def test_apply_holds_a_risk_escalated_line_end_to_end(monkeypatch, capsys):
+    """A `Risk: escalated` line is a declaration: the plan holds, and no
+    scan comment says it was not held."""
+    item = idea(42, klass="Broken")
+    project_writes = []
+    monkeypatch.setattr(
+        funnel, "write_project_select",
+        lambda item_id, field, value, ref:
+            project_writes.append((field, value)),
+    )
+    calls = stub_gh(monkeypatch, item)
+    candidate = answer(
+        proposed_class="Broken",
+        plan_markdown=("# Plan\n\nRisk: escalated — destructive\n\n"
+                       "Permanently delete expired records.\n"),
+        escalated_risk=[])
+
+    assert shape.preview_decision(
+        [item], item, shape.validate_answer(candidate))[0] == "Shaped"
+    assert shape.apply_shape(
+        [item], NOW, item.ref, candidate,
+        run="shape-run", agent="muse") == 0
+    assert item.status == "Shaped"
+    assert project_writes == [("Risk", "escalated"), ("Needs", "human")]
+    assert gh_calls(calls, "gh", "issue", "comment") == []
+    output = capsys.readouterr().out
+    assert ("held at Shaped: escalated risk (declared: destructive: "
+            "Risk: escalated — destructive)") in output
+    assert "review tier raised" not in output
+
+
+def test_apply_holds_a_declared_risk_even_when_the_scan_also_hits(
+        monkeypatch, capsys):
+    item = idea(42)
+    calls = stub_gh(monkeypatch, item)
+    assert shape.apply_shape(
+        [item], NOW, item.ref,
+        answer(plan_markdown="# Plan\n\nRotate the api-key monthly.\n",
+               escalated_risk=[{"reason": "credentials",
+                                "why": "rotates the deploy api-key"}]),
+        run="shape-run", agent="muse") == 0
+    assert item.status == "Shaped"
+    assert (item.risk, item.needs) == ("escalated", "human")
+    # The declaration explains itself in the body; no scan comment.
+    assert gh_calls(calls, "gh", "issue", "comment") == []
+    assert "held at Shaped: escalated risk (credentials: " \
+        in capsys.readouterr().out
 
 
 def test_apply_records_sequencing_edges_with_the_body_write(

@@ -127,15 +127,14 @@ def test_implement_routines_ask_for_tests_that_catch_the_defect(routine):
     body = (ROOT / "routines" / (routine + ".md")).read_text(encoding="utf-8")
     normalized = " ".join(body.split()).lower()
 
-    assert ("test at the seams the ticket names, one behaviour per seam, or "
-            "through the changed code's public interface when it names none"
-            in normalized)
-    assert ("when the first accept item begins `reproduction:`, write that "
-            "failing test first and see it fail before the fix" in normalized)
-    assert ("expected values come from an independent source, never "
-            "recomputed the way the code computes them" in normalized)
-    assert ("refactor nothing beyond the ticket; a needed refactor is a "
-            "departure and its own ticket" in normalized)
+    assert ("test at the ticket's named seams (else the public interface), "
+            "one behaviour each" in normalized)
+    assert ("a `reproduction:` first accept item: write that test first and "
+            "see it fail" in normalized)
+    assert ("expected values: from an independent source, never recomputed "
+            "the code's way" in normalized)
+    assert ("no refactoring beyond the ticket; a needed one is a departure "
+            "and its own ticket" in normalized)
     assert ("run the affected test files while working; `finish-ticket` runs "
             "the full suite" in normalized)
-    assert "`risks` list: where review should look hardest" in normalized
+    assert "optional `risks`: where review should look hardest" in normalized

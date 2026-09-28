@@ -155,6 +155,7 @@ WRITERS = frozenset({
     "engine/implement.py:render_closed_step_route",
     "engine/implement.py:finish_declined",
     "engine/implement.py:close_declined_defer_note_proof",
+    "engine/implement.py:render_evidence_block",
 })
 
 TRUST_FILTERS = frozenset({"trusted_comment", "trusted_comments"})

@@ -136,28 +136,25 @@ def promo_multiplier(window: str, now: float) -> float:
         if not isinstance(notice, dict) or notice.get("bar") != window:
             continue
         text = str(notice.get("text") or "")
-        percent_match = re.search(r"\+\s*(\d{1,3})\s*%", text)
-        through_match = re.search(
+        percent = re.search(r"\+\s*(\d{1,3})\s*%", text)
+        through = re.search(
             r"through\s+([A-Z][a-z]{2})\w*\s+(\d{1,2})", text
         )
-        if percent_match is None or through_match is None:
+        if not percent or not through:
             continue
         month = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
                  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
-        today = datetime.datetime.fromtimestamp(now, timezone.utc)
         try:
-            index = month.index(through_match.group(1)) + 1
-            ends = datetime.datetime(
-                today.year, index, int(through_match.group(2)), 23, 59,
-                tzinfo=timezone.utc,
-            )
-            percent = int(percent_match.group(1))
-        except (ValueError, OverflowError):
+            index = month.index(through.group(1)) + 1
+        except ValueError:
             continue
-        # Both fields must parse, and expiry must be later than this reading.
-        if ends.timestamp() <= now:
+        today = datetime.datetime.fromtimestamp(now, timezone.utc)
+        ends = datetime.datetime(
+            today.year, index, int(through.group(2)), 23, 59, tzinfo=timezone.utc
+        )
+        if ends < today:
             continue  # lapsed, or a stale cached notice
-        return 1.0 + percent / 100.0
+        return 1.0 + int(percent.group(1)) / 100.0
     return 1.0
 
 

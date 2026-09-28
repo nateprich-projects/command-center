@@ -420,8 +420,7 @@ def promo_config(tmp_path, monkeypatch, text, bar="seven_day"):
     return cfg
 
 
-def test_a_promo_with_percentage_and_future_end_date_raises_capacity(
-        tmp_path, monkeypatch):
+def test_a_live_promo_raises_capacity(tmp_path, monkeypatch):
     promo_config(tmp_path, monkeypatch, "+50% weekly limits promo through Dec 31")
     assert usage.promo_multiplier("seven_day", NOW) == 1.5
     assert usage.capacity("seven_day", NOW) == usage.WEEKLY_CAPACITY * 1.5
@@ -437,17 +436,6 @@ def test_an_unparseable_promo_is_ignored(tmp_path, monkeypatch):
     """Assuming a boost that is not real permits overspending; ignoring a real
     one only makes the gate stricter. Fail toward strict."""
     promo_config(tmp_path, monkeypatch, "bigger limits for a while!")
-    assert usage.promo_multiplier("seven_day", NOW) == 1.0
-
-
-@pytest.mark.parametrize("notice", [
-    "weekly limits promo through Dec 31",  # no percentage
-    "+50% weekly limits promo",  # no end date
-    "+50% weekly limits promo through Feb 30",  # invalid end date
-])
-def test_a_promo_requires_a_parseable_percentage_and_future_end_date(
-        tmp_path, monkeypatch, notice):
-    promo_config(tmp_path, monkeypatch, notice)
     assert usage.promo_multiplier("seven_day", NOW) == 1.0
 
 

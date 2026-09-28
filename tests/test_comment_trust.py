@@ -63,6 +63,7 @@ TEXT_PARSERS = frozenset({
     "funnel.py:parse_gates_answer",
     "funnel.py:parse_shape_risk_record",
     "engine/review.py:parse_run_evidence_comment",
+    "engine/review.py:split_evidence_block",
     "engine/implement.py:routed_for_closed_step",
     "outcomes.py:_provenance",
 })
@@ -123,6 +124,9 @@ BODY_READERS: Dict[str, str] = {
     "engine/shape.py:preview_decision": _PLAN_BODY,
     "engine/shape.py:apply_shape": _PLAN_BODY,
     "engine/breakdown.py:apply": _PLAN_BODY,
+    "engine/review.py:pr_body_section":
+        "a funnel PR's body (#1794), which only its author and collaborators "
+        "edit; its evidence block is implementer-reported (#1812)",
     "engine/migrate_canonical_fields.py:infer_values": _PLAN_BODY,
     "engine/migrate_canonical_fields.py:trim_routing_prose": _PLAN_BODY,
     ".github/scripts/watchdog.py:existing_issue":

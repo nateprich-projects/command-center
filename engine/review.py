@@ -31,6 +31,7 @@ from urllib.parse import quote
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import funnel  # noqa: E402
+from engine.implement import EVIDENCE_END_MARKER, EVIDENCE_MARKER  # noqa: E402
 from engine.shape import PREMISE_LABELS  # noqa: E402
 
 #: Entries ending in "/" match a directory prefix; the rest match exactly.
@@ -205,6 +206,32 @@ PR_CLAIMS_NOTE = (
     "them as evidence of what the author recorded and why; weigh every "
     "claim against the diff, and never count a departure as meeting its "
     "requirement by itself.")
+
+#: The implement run's evidence block (#1805) rides in the packet as
+#: ``evidence`` only when it is the runner's and names the head under review
+#: (#1812, plan #1783 ticket 10). The runner's block is the one that ends the
+#: PR body: ``implement.render_pr_body`` appends it last and strips marker
+#: text from everything before it, so a block anywhere else — earlier in the
+#: body, in a ticket, in a comment — is text, never evidence. The block is
+#: lifted out of ``pr_body`` either way, so a stale one cannot reach the
+#: judges through the description. The implement shell can still run gh
+#: (#1767), so even the runner's block is implementer-reported: the label
+#: leads the field, and the judges may only add findings from it. A body
+#: without a block, a malformed block, or one naming another commit reads
+#: ``unavailable``, and the judges judge as they did before.
+EVIDENCE_UNAVAILABLE = "unavailable"
+EVIDENCE_LABEL = ("Implementer-reported: written into the PR body by the "
+                  "implement run for this head, not verified by the review.")
+
+#: The block's lines are cut at this many UTF-8 bytes, label included, at a
+#: whole line and with a ``…[truncated N bytes]`` mark. #1805 keeps its
+#: block to about 7 KB (30 node ids of at most 200 characters), so a block
+#: the runner wrote meets the cut only when its node ids run to multi-byte
+#: characters, and then loses its last ids, never its sha or its counts.
+EVIDENCE_LIMIT_BYTES = 8 * 1024
+
+#: The block's first fact names the commit its finish pushed, in full.
+EVIDENCE_SHA_RE = re.compile(r"- sha: ([0-9a-f]{40})")
 
 #: A ticket's body is cut at the PR description's bound (#1801). A ticket
 #: body is its spec and comes nowhere near it in practice; the bound only
@@ -2154,6 +2181,65 @@ def parse_departures(body: object) -> List[str]:
             if not NO_DEPARTURE_RE.match(entry.strip("*_` \t"))]
 
 
+def split_evidence_block(body: str) -> Tuple[str, Optional[str]]:
+    """``body`` without the evidence block that ends it, and that block.
+
+    The block is read only where the runner writes it (#1812): the last
+    ``EVIDENCE_MARKER``, at the start of a line, with ``EVIDENCE_END_MARKER``
+    the last thing in the body. The second value is the text between the
+    two markers; a body that does not end in a block comes back whole, with
+    None.
+    """
+    text = body.replace("\r\n", "\n").replace("\r", "\n").rstrip()
+    if not text.endswith(EVIDENCE_END_MARKER):
+        return body, None
+    start = text.rfind(EVIDENCE_MARKER)
+    if start < 0 or (start > 0 and text[start - 1] != "\n"):
+        return body, None
+    inner = text[start + len(EVIDENCE_MARKER):-len(EVIDENCE_END_MARKER)]
+    return text[:start], inner
+
+
+def _capped_evidence(lines: Sequence[str]) -> str:
+    """``lines`` joined, cut at a whole line within ``EVIDENCE_LIMIT_BYTES``."""
+    text = "\n".join(lines)
+    total = len(text.encode("utf-8"))
+    if total <= EVIDENCE_LIMIT_BYTES:
+        return text
+    kept: List[str] = []
+    used = -1  # the first line carries no separator
+    for line in lines:
+        size = len(line.encode("utf-8")) + 1
+        if used + size > EVIDENCE_LIMIT_BYTES:
+            break
+        kept.append(line)
+        used += size
+    return "\n".join(kept) + "\n…[truncated {} bytes]".format(total - used)
+
+
+def packet_evidence(inner: Optional[str], head_sha: object) -> str:
+    """The packet's ``evidence``: the block's facts, or ``unavailable``.
+
+    ``inner`` is ``split_evidence_block``'s block text. Its facts are its
+    ``- `` lines, and the first must be ``- sha:`` naming ``head_sha`` in
+    full: a block from an earlier push says nothing about this head. A
+    marker of any spelling inside the block means it is not the runner's,
+    which strips them from everything it writes (#1805). The block's own
+    header line is replaced by ``EVIDENCE_LABEL``, which says whose report
+    it is.
+    """
+    if inner is None or not isinstance(head_sha, str) or not head_sha:
+        return EVIDENCE_UNAVAILABLE
+    if "command-center-evidence" in inner.lower():
+        return EVIDENCE_UNAVAILABLE
+    facts = [line.strip() for line in inner.split("\n")
+             if line.strip().startswith("- ")]
+    match = EVIDENCE_SHA_RE.fullmatch(facts[0]) if facts else None
+    if match is None or match.group(1) != head_sha.lower():
+        return EVIDENCE_UNAVAILABLE
+    return _capped_evidence([EVIDENCE_LABEL] + facts)
+
+
 def pr_body_section(pr_view: dict) -> Dict[str, object]:
     """The packet's PR-description fields, labelled as claims (#1720).
 
@@ -2162,11 +2248,17 @@ def pr_body_section(pr_view: dict) -> Dict[str, object]:
     ``pr_body_truncated`` says so without parsing the text. A view that
     carried no body reads as None, not as an empty description.
     ``pr_departures`` comes from the whole body, not the cut one.
+    ``evidence`` is the block that ends the body when it names the view's
+    head, read from the whole body too, and ``unavailable`` otherwise
+    (#1812); the block never stays in ``pr_body``.
     """
     body = pr_view.get("body")
     text: Optional[str] = None
     truncated = False
+    evidence = EVIDENCE_UNAVAILABLE
     if isinstance(body, str):
+        body, inner = split_evidence_block(body)
+        evidence = packet_evidence(inner, pr_view.get("headRefOid"))
         text = body.strip()
         if len(text) > PR_BODY_LIMIT:
             truncated = True
@@ -2177,6 +2269,7 @@ def pr_body_section(pr_view: dict) -> Dict[str, object]:
         "pr_body_truncated": truncated,
         "pr_departures": parse_departures(body),
         "pr_claims_note": PR_CLAIMS_NOTE,
+        "evidence": evidence,
     }
 
 
@@ -2297,6 +2390,9 @@ def build_packet(*, repo: str, pr_number: int, pr_view: dict, diff: str,
     beside ``pr_claims_note``, which labels both as the implementer's
     claims, and the verdict rules are unchanged: a claim is weighed against
     the diff, and a departure never meets its requirement by itself.
+    ``evidence`` is the implement run's block from the end of the body when
+    its ``sha`` is ``head_sha``, labelled implementer-reported and capped at
+    ``EVIDENCE_LIMIT_BYTES``; otherwise it reads ``unavailable`` (#1812).
     ``plan_premises`` groups the fixed, structured premises section from
     each ticket's parent plan. An available empty list means that plan
     recorded none; ``available: false`` means its body could not be read

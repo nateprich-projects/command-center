@@ -12,6 +12,7 @@ import stat
 import subprocess
 import sys
 from collections import Counter
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -126,6 +127,157 @@ def make_codex_run_clone(tmp_path, monkeypatch, number=42):
     remote, clone = make_clone(tmp_path, clone_path=checkout)
     clone.chmod(0o700)
     return remote, clone
+
+
+def _stub_claim_state(monkeypatch, state):
+    monkeypatch.setattr(
+        implement, "_claim_state",
+        lambda ref, run, agent: (state, []),
+    )
+
+
+def test_claim_state_uses_the_latest_binding_after_the_claim(monkeypatch):
+    ref = REPO + "#42"
+    claim_time = datetime(2026, 9, 27, 18, 30, tzinfo=timezone.utc)
+    item = SimpleNamespace(
+        ref=ref, item_id="PVTI_42", in_motion_since=claim_time,
+    )
+    monkeypatch.setattr(funnel, "load_project_items_by_refs",
+                        lambda refs: [item])
+    records = {
+        "codex": [{
+            "run": "old-run", "phase": "bind",
+            "ts": int(claim_time.timestamp()) - 1,
+            "do": "ticket", "work": ref,
+        }],
+        "claude": [{
+            "run": "successor", "phase": "bind",
+            "ts": int(claim_time.timestamp()) + 1,
+            "do": "ticket", "work": ref,
+        }],
+    }
+    monkeypatch.setattr(
+        heartbeat, "read_github_strict", lambda agent: records.get(agent, []),
+    )
+
+    assert implement._claim_state(ref, "old-run", "codex")[0] == "other"
+    assert implement._claim_state(ref, "successor", "claude")[0] == "owned"
+
+
+def test_claim_state_fails_closed_without_a_binding_after_the_claim(monkeypatch):
+    ref = REPO + "#42"
+    claim_time = datetime(2026, 9, 27, 18, 30, tzinfo=timezone.utc)
+    item = SimpleNamespace(
+        ref=ref, item_id="PVTI_42", in_motion_since=claim_time,
+    )
+    monkeypatch.setattr(funnel, "load_project_items_by_refs",
+                        lambda refs: [item])
+    monkeypatch.setattr(heartbeat, "read_github_strict", lambda agent: [])
+
+    assert implement._claim_state(ref, "run-42", "codex")[0] == "unknown"
+
+
+def test_claim_state_refuses_when_heartbeat_bindings_are_unreadable(monkeypatch):
+    ref = REPO + "#42"
+    claim_time = datetime(2026, 9, 27, 18, 30, tzinfo=timezone.utc)
+    item = SimpleNamespace(
+        ref=ref, item_id="PVTI_42", in_motion_since=claim_time,
+    )
+    monkeypatch.setattr(funnel, "load_project_items_by_refs",
+                        lambda refs: [item])
+
+    def unreadable(_agent):
+        raise OSError("heartbeat is unavailable")
+
+    monkeypatch.setattr(heartbeat, "read_github_strict", unreadable)
+
+    with pytest.raises(implement.SupersededRunError,
+                       match="heartbeat bindings could not be read"):
+        implement._claim_state(ref, "run-42", "codex")
+
+
+def test_release_claim_noops_when_the_claim_is_empty(monkeypatch):
+    ref = REPO + "#42"
+    _stub_claim_state(monkeypatch, "empty")
+    monkeypatch.setattr(
+        funnel, "cmd_release",
+        lambda *args, **kwargs: pytest.fail("empty claim must not be written"),
+    )
+
+    implement.release_claim(ref, run="run-42")
+
+
+@pytest.mark.parametrize("state", ("other", "unknown"))
+def test_release_claim_refuses_other_or_unknown_holder(monkeypatch, state):
+    ref = REPO + "#42"
+    _stub_claim_state(monkeypatch, state)
+    monkeypatch.setattr(
+        funnel, "cmd_release",
+        lambda *args, **kwargs: pytest.fail("refused claim must not be written"),
+    )
+
+    with pytest.raises(implement.SupersededRunError):
+        implement.release_claim(ref, run="run-42")
+
+
+@pytest.mark.parametrize("state", ("other", "unknown"))
+def test_push_ticket_branch_refuses_other_or_unknown_holder(
+        tmp_path, monkeypatch, state):
+    remote, clone = make_clone(tmp_path)
+    (clone / "change.txt").write_text("not pushed\n")
+    _stub_claim_state(monkeypatch, state)
+
+    with pytest.raises(implement.SupersededRunError):
+        implement._push_ticket_branch(
+            clone, "ticket/42", ref=REPO + "#42", run="run-42",
+            agent="codex",
+        )
+
+    assert run_git("ls-remote", "--heads", "origin",
+                   "refs/heads/ticket/42", cwd=clone).stdout == ""
+
+
+@pytest.mark.parametrize("state", ("other", "unknown"))
+def test_finish_refusal_records_superseded_without_keeping_work(
+        tmp_path, monkeypatch, capsys, state):
+    remote, clone = make_codex_run_clone(tmp_path, monkeypatch)
+    (clone / "implemented.txt").write_text("unkept work\n")
+    answer_path = tmp_path / "answer.json"
+    answer_path.write_text(json.dumps(answer()))
+    _stub_claim_state(monkeypatch, state)
+    effects = {"released": [], "finished": []}
+    monkeypatch.chdir(clone)
+    monkeypatch.setattr(
+        implement, "release_claim",
+        lambda ref, **kwargs: effects["released"].append(ref),
+    )
+    monkeypatch.setattr(
+        implement, "finish_heartbeat",
+        lambda *args: effects["finished"].append(args),
+    )
+    monkeypatch.setattr(
+        implement, "run_tests",
+        lambda *args, **kwargs: pytest.fail("superseded work must not run tests"),
+    )
+
+    assert implement.finish_main([
+        "--answer-file", str(answer_path), "--run", "run-42", "--repo", REPO,
+    ]) == 0
+
+    result = json.loads(capsys.readouterr().out)
+    assert result == {
+        "ticket": REPO + "#42", "superseded": True, "work_kept": False,
+    }
+    assert effects["released"] == []
+    (finished,) = effects["finished"]
+    assert finished[:3] == ("codex", "run-42", "errored")
+    assert "superseded" in finished[3]
+    assert "work not kept" in finished[3]
+    assert run_git(
+        "--git-dir", str(remote), "for-each-ref", "--format=%(refname)",
+        "refs/heads/ticket/42",
+    ).stdout == ""
+    assert not clone.exists()
 
 
 def test_packet_carries_ticket_plan_verdict_blocking_and_prior_digest():
@@ -303,6 +455,7 @@ def test_done_answer_accepts_optional_nonempty_evidence_list():
 def test_no_diff_with_verified_evidence_closes_and_finishes(
         tmp_path, monkeypatch):
     _, clone = make_clone(tmp_path)
+    _stub_claim_state(monkeypatch, "empty")
     monkeypatch.setattr(implement, "fetch_ticket", lambda repo, number: ticket(number))
     monkeypatch.setattr(
         heartbeat, "read_github",
@@ -514,6 +667,7 @@ def test_no_diff_fails_closed_when_evidence_cannot_be_read(
 def test_done_with_diff_ignores_evidence(
         tmp_path, monkeypatch):
     _, clone = make_clone(tmp_path)
+    _stub_claim_state(monkeypatch, "empty")
     (clone / "implemented.txt").write_text("done\n")
     monkeypatch.setattr(
         implement, "fetch_ticket", lambda repo, number: ticket(number))
@@ -549,6 +703,7 @@ def test_done_with_diff_ignores_evidence(
 
 def test_finish_ticket_pushes_opens_pr_releases_and_finishes(tmp_path, monkeypatch):
     remote, clone = make_clone(tmp_path)
+    _stub_claim_state(monkeypatch, "empty")
     (clone / "implemented.txt").write_text("done\n")
     monkeypatch.setattr(implement, "fetch_ticket", lambda repo, number: ticket(number))
 
@@ -585,6 +740,63 @@ def test_finish_ticket_pushes_opens_pr_releases_and_finishes(tmp_path, monkeypat
         "--git-dir", str(remote), "show", "ticket/42:implemented.txt"
     ).stdout
     assert pushed == "done\n"
+
+
+def test_finish_ticket_checkpoints_before_tests_and_refuses_later_superseded_push(
+        tmp_path, monkeypatch, capsys):
+    remote, clone = make_codex_run_clone(tmp_path, monkeypatch)
+    (clone / "implemented.txt").write_text("checkpointed work\n")
+    answer_path = tmp_path / "answer.json"
+    answer_path.write_text(json.dumps(answer()))
+    monkeypatch.setattr(
+        implement, "fetch_ticket", lambda repo, number: ticket(number),
+    )
+
+    states = iter(("owned", "owned", "owned", "owned", "other"))
+    monkeypatch.setattr(
+        implement, "_claim_state",
+        lambda ref, run, agent: (next(states), []),
+    )
+    effects = {"released": [], "finished": []}
+    monkeypatch.setattr(
+        implement, "release_claim",
+        lambda ref, **kwargs: effects["released"].append(ref),
+    )
+    monkeypatch.setattr(
+        implement, "finish_heartbeat",
+        lambda *args: effects["finished"].append(args),
+    )
+    checkpoint = {}
+
+    def inspect_checkpoint(root, commands):
+        checkpoint["content"] = run_git(
+            "--git-dir", str(remote), "show",
+            "refs/heads/ticket/42:implemented.txt",
+        ).stdout
+        checkpoint["head"] = run_git(
+            "--git-dir", str(remote), "rev-parse", "refs/heads/ticket/42",
+        ).stdout.strip()
+        return ["python3 -m pytest -q"], None
+
+    monkeypatch.setattr(implement, "run_tests", inspect_checkpoint)
+    monkeypatch.chdir(clone)
+
+    assert implement.finish_main([
+        "--answer-file", str(answer_path), "--run", "run-42",
+        "--repo", REPO,
+    ]) == 0
+
+    result = json.loads(capsys.readouterr().out)
+    assert result["superseded"] is True
+    assert checkpoint["content"] == "checkpointed work\n"
+    assert run_git(
+        "--git-dir", str(remote), "rev-parse", "refs/heads/ticket/42",
+    ).stdout.strip() == checkpoint["head"]
+    assert effects["released"] == []
+    (finished,) = effects["finished"]
+    assert finished[:3] == ("codex", "run-42", "errored")
+    assert "superseded" in finished[3]
+    assert "work not kept" in finished[3]
 
 
 def test_pre_pr_stray_check_names_answer_and_never_opens_a_pr(
@@ -716,6 +928,7 @@ def test_addable_paths_keeps_only_what_git_add_can_match(tmp_path):
 
 def test_finish_ticket_releases_and_errors_when_tests_fail(tmp_path, monkeypatch):
     remote, clone = make_clone(tmp_path)
+    _stub_claim_state(monkeypatch, "owned")
     (clone / "implemented.txt").write_text("done\n")
     monkeypatch.setattr(implement, "fetch_ticket", lambda repo, number: ticket(number))
 
@@ -753,12 +966,13 @@ def test_finish_ticket_releases_and_errors_when_tests_fail(tmp_path, monkeypatch
     assert pushed == "done\n"
     subject = run_git("--git-dir", str(remote), "log", "-1", "--format=%s",
                       "ticket/42").stdout.strip()
-    assert subject == "WIP #42: tests failing"
+    assert subject == "WIP #42: checkpoint implementation"
 
 
 def test_finish_ticket_removes_owner_only_codex_run_checkout_after_push(
         tmp_path, monkeypatch):
     remote, clone = make_codex_run_clone(tmp_path, monkeypatch)
+    _stub_claim_state(monkeypatch, "owned")
     sibling = clone.parent / "ticket-42-20260927T163001123456Z"
     sibling.mkdir(mode=0o700)
     (clone / "implemented.txt").write_text("done\n")
@@ -841,14 +1055,19 @@ def test_finish_ticket_removes_codex_run_checkout_after_recording_not_kept(
 def test_finish_ticket_keeps_codex_run_checkout_when_push_fails(
         tmp_path, monkeypatch):
     _, clone = make_codex_run_clone(tmp_path, monkeypatch)
+    _stub_claim_state(monkeypatch, "owned")
     (clone / "implemented.txt").write_text("done\n")
     monkeypatch.setattr(
         implement, "fetch_ticket", lambda repo, number: ticket(number))
-    monkeypatch.setattr(
-        implement, "_push_ticket_branch",
-        lambda *args: (_ for _ in ()).throw(
-            implement.ImplementError("git push failed: remote unavailable")),
-    )
+    pushes = {"count": 0}
+
+    def fail_the_post_test_push(*args, **kwargs):
+        pushes["count"] += 1
+        if pushes["count"] > 1:
+            raise implement.ImplementError(
+                "git push failed: remote unavailable")
+
+    monkeypatch.setattr(implement, "_push_ticket_branch", fail_the_post_test_push)
     effects = {"released": [], "finished": []}
 
     with pytest.raises(implement.ImplementError, match="SystemExit"):
@@ -2375,6 +2594,7 @@ def test_add_declined_prerequisite_edge_uses_native_blocked_by(
 
 def test_finish_main_routes_blocked_and_declined_answers(
         tmp_path, monkeypatch, capsys):
+    _stub_claim_state(monkeypatch, "empty")
     routed = {}
     monkeypatch.setattr(implement, "_recover_answer_error", lambda *a, **k: False)
 
@@ -2411,6 +2631,7 @@ def test_finish_main_routes_blocked_and_declined_answers(
 
 
 def test_finish_main_accepts_inline_json(monkeypatch, capsys):
+    _stub_claim_state(monkeypatch, "empty")
     routed = {}
 
     def fake_done(found, **kwargs):
@@ -2428,6 +2649,7 @@ def test_finish_main_accepts_inline_json(monkeypatch, capsys):
 
 
 def test_finish_main_still_accepts_answer_on_stdin(monkeypatch, capsys):
+    _stub_claim_state(monkeypatch, "empty")
     routed = {}
     monkeypatch.setattr(
         implement.sys, "stdin",
@@ -2452,13 +2674,17 @@ def test_finish_main_still_accepts_answer_on_stdin(monkeypatch, capsys):
 def test_unreadable_answer_keeps_dirty_work_releases_and_finishes_errored(
         tmp_path, monkeypatch, capsys, answer_text, error):
     remote, clone = make_clone(tmp_path)
+    _stub_claim_state(monkeypatch, "owned")
     (clone / "implemented.txt").write_text("done\n")
     answer_path = tmp_path / "handoff.json"
     if answer_text is not None:
         answer_path.write_text(answer_text)
     effects = {"released": [], "finished": []}
     monkeypatch.chdir(clone)
-    monkeypatch.setattr(implement, "release_claim", effects["released"].append)
+    monkeypatch.setattr(
+        implement, "release_claim",
+        lambda ref, **kwargs: effects["released"].append(ref),
+    )
     monkeypatch.setattr(
         implement, "finish_heartbeat",
         lambda *args: effects["finished"].append(args),
@@ -2703,6 +2929,7 @@ def test_piped_run_lines_run_under_sh(tmp_path):
 def test_finish_done_records_the_test_source_in_pr_body_and_note(
         tmp_path, monkeypatch):
     remote, clone = make_clone(tmp_path)
+    _stub_claim_state(monkeypatch, "empty")
     passing = shlex.join([sys.executable, "-c", "pass"])
     (clone / "pyproject.toml").write_text(
         '[tool.command-center]\ntest = "{}"\n'.format(passing)
@@ -2739,6 +2966,7 @@ def test_finish_done_records_the_test_source_in_pr_body_and_note(
 def test_finish_done_keeps_work_when_the_resolved_command_fails(
         tmp_path, monkeypatch):
     remote, clone = make_clone(tmp_path)
+    _stub_claim_state(monkeypatch, "owned")
     failing = shlex.join([sys.executable, "-c", "raise SystemExit(3)"])
     (clone / "pyproject.toml").write_text(
         '[tool.command-center]\ntest = "{}"\n'.format(failing)
@@ -2806,7 +3034,8 @@ def test_finish_main_requires_answer_and_run_without_dry_run():
         implement.finish_main([])
 
 
-def test_a_rebased_ticket_branch_pushes_as_a_fast_forward_keeping_the_run_tree(tmp_path):
+def test_a_rebased_ticket_branch_pushes_as_a_fast_forward_keeping_the_run_tree(
+        tmp_path, monkeypatch):
     """#890: a stale-PR rebase rewrote ticket/42; the push must still land."""
     remote, clone = make_clone(tmp_path)
     (clone / "old.txt").write_text("first attempt\n")
@@ -2829,7 +3058,10 @@ def test_a_rebased_ticket_branch_pushes_as_a_fast_forward_keeping_the_run_tree(t
     run_git("commit", "--quiet", "-am", "second attempt", cwd=clone)
     local_tree = run_git("rev-parse", "HEAD^{tree}", cwd=clone).stdout.strip()
 
-    implement._push_ticket_branch(clone, "ticket/42")
+    _stub_claim_state(monkeypatch, "empty")
+    implement._push_ticket_branch(
+        clone, "ticket/42", ref=REPO + "#42", run="run-42", agent="codex",
+    )
 
     remote_tree = run_git("--git-dir", str(remote), "rev-parse",
                           "ticket/42^{tree}").stdout.strip()
@@ -3155,7 +3387,7 @@ def test_finish_git_invocation_sites_match_the_recorded_inventory():
         ("ls-remote", "--exit-code"): 2,
         ("<path-command>", ""): 1,
         ("add", "--"): 1,
-        ("commit", "-m"): 2,
+        ("commit", "-m"): 3,
         ("rev-list", "--count"): 2,
         ("fetch", "origin"): 1,
         ("merge-base", "--is-ancestor"): 1,
@@ -3165,7 +3397,7 @@ def test_finish_git_invocation_sites_match_the_recorded_inventory():
     assert actual == expected
 
     inventory = (ROOT / "docs" / "finish-subprocess-bounds.md").read_text()
-    assert "16 bounded Git callsites" in inventory
+    assert "17 bounded Git callsites" in inventory
     for command in (
         "git diff --name-only -z",
         "git diff --cached --name-only -z",
@@ -3219,12 +3451,13 @@ def test_run_tests_applies_test_bound_to_shell_wrapped_command(
     ]
 
 
-def test_timed_out_test_is_abandoned_and_finished_without_keeping_work(
+def test_timed_out_test_keeps_checkpointed_work_and_finishes(
         tmp_path, monkeypatch):
     remote, clone = make_clone(tmp_path)
     (clone / "implemented.txt").write_text("unfinished\n")
     monkeypatch.setattr(
         implement, "fetch_ticket", lambda repo, number: ticket(number))
+    _stub_claim_state(monkeypatch, "owned")
     effects = {"released": [], "finished": []}
     real_popen = subprocess.Popen
     spawned = []
@@ -3286,9 +3519,13 @@ def test_timed_out_test_is_abandoned_and_finished_without_keeping_work(
     assert effects["released"] == [REPO + "#42"]
     (finished,) = effects["finished"]
     assert finished[:3] == ("codex", "run-42", "errored")
-    assert finished[3].endswith("work NOT kept")
+    assert finished[3].endswith("work was checkpointed")
 
     # Restore the real process launcher before checking the bare remote.
     monkeypatch.setattr(implement.subprocess, "Popen", real_popen)
     refs = run_git("--git-dir", str(remote), "show-ref").stdout
-    assert "ticket/42" not in refs
+    assert "refs/heads/ticket/42" in refs
+    assert run_git(
+        "--git-dir", str(remote), "show",
+        "refs/heads/ticket/42:implemented.txt",
+    ).stdout == "unfinished\n"

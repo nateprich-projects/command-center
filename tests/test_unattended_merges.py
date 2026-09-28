@@ -130,6 +130,11 @@ def test_retired_merges_stop_at_cutoff_but_stay_out_of_silence_alarms(monkeypatc
     assert {(row["pr"], row["agent"]) for row in found} == {
         (1491, "zcode"), (1553, "zcode"), (202, "muse"),
     }
+    by_pr = {row["pr"]: row for row in found}
+    assert by_pr[1491]["at"] == (
+        retired_at - timedelta(days=1)
+    ).isoformat()
+    assert by_pr[1553]["at"] == retired_at.isoformat()
     assert "zcode" in read
 
     read.clear()

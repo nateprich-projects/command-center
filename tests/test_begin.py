@@ -2103,7 +2103,7 @@ def test_codex_begin_skips_the_other_tier_before_claiming(monkeypatch, capsys):
     assert [ref for ref, value in writes if value] == [standard.ref]
 
 
-def test_begin_uses_one_shared_startable_order_for_the_165_regression(
+def test_queue_and_begin_share_one_startable_view_for_the_165_regression(
     monkeypatch, capsys,
 ):
     import heartbeat
@@ -2139,23 +2139,43 @@ def test_begin_uses_one_shared_startable_order_for_the_165_regression(
         lambda rows: set(funnel.finished_by_comments_runs(rows)),
     )
 
+    view = funnel.ScopedItems(
+        [project, ticket],
+        scope="full",
+        startable_candidates=[ticket],
+        startable_items=[project, ticket],
+        startable_agent="codex",
+    )
     calls = []
     original_listing = funnel.startable_listing
 
-    def counted_listing(*args, **kwargs):
-        result = original_listing(*args, **kwargs)
-        calls.append([item.ref for item in result])
+    def counted_listing(items, *args, **kwargs):
+        result = original_listing(items, *args, **kwargs)
+        calls.append((
+            items is view.startable_items,
+            kwargs.get("candidate_items") is view.startable_candidates,
+            [item.ref for item in result],
+        ))
         return result
 
     monkeypatch.setattr(funnel, "startable_listing", counted_listing)
     result, writes = _implementing_begin(
-        monkeypatch, capsys, [project, ticket], tier="standard",
+        monkeypatch, capsys, view, tier="standard",
     )
 
     assert result["do"] == "ticket"
     assert result["work"]["ref"] == ticket.ref
     assert [ref for ref, value in writes if value] == [ticket.ref]
-    assert calls == [[ticket.ref]]
+    assert funnel.cmd_queue(
+        view, NOW, repo_readiness={}, pr_facts={},
+    ) == 0
+    queue_output = capsys.readouterr().out
+    assert "Startable by Codex (1)" in queue_output
+    assert ticket.ref in queue_output
+    assert calls == [
+        (True, True, [ticket.ref]),
+        (True, True, [ticket.ref]),
+    ]
 
 
 def test_muse_escalated_begin_no_longer_claims_a_ticket(monkeypatch, capsys):

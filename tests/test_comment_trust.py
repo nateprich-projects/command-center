@@ -78,6 +78,8 @@ COMMENT_READERS: Dict[str, str] = {
     "funnel.py:_latest_park_comment": "funnel.py:_latest_park_comment",
     "funnel.py:_closed_itself_item_json": "funnel.py:_closed_itself_item_json",
     "funnel.py:_cleared_block_item_json": "funnel.py:_cleared_block_item_json",
+    "funnel.py:_connector_gate_verb": "funnel.py:_connector_gate_verb",
+    "funnel.py:connector_gate_answers": "funnel.py:connector_gate_answers",
     "funnel.py:_codex_decline_events": "funnel.py:_decline_routing_comment_rows",
     "funnel.py:_decline_routing_outcome":
         "funnel.py:_decline_routing_comment_rows",

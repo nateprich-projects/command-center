@@ -4940,8 +4940,13 @@ def _connector_gate_candidate(item: Item, cutoff: datetime,
     return False
 
 
-def _connector_gate_verb(body: str) -> Optional[str]:
-    """Identify a connector gate comment by its durable visible body."""
+def _connector_gate_verb(comment: object) -> Optional[str]:
+    """Identify a trusted connector gate comment by its visible body."""
+    if not trusted_comment(comment) or not isinstance(comment, Mapping):
+        return None
+    body = comment.get("body")
+    if not isinstance(body, str):
+        return None
     visible = _visible_comment(body).strip()
     match = re.fullmatch(
         r"General-chat gate instruction received for `([^`]+)`\.", visible
@@ -4976,12 +4981,12 @@ def connector_gate_answers(
     found: List[Tuple[datetime, str, Dict[str, object]]] = []
     for item in candidates:
         for comment in comments_by_ref.get(item.ref, []):
-            if not isinstance(comment, dict):
+            if not isinstance(comment, Mapping) or not trusted_comment(comment):
                 continue
             body = comment.get("body")
             if not isinstance(body, str):
                 continue
-            verb = _connector_gate_verb(body)
+            verb = _connector_gate_verb(comment)
             if verb is None:
                 continue
             provenance = parse_provenance(body)

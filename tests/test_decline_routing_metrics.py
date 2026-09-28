@@ -16,8 +16,10 @@ CUTOFF = datetime(2026, 9, 24, 21, 25, 26, tzinfo=timezone.utc)
 NOW = datetime(2026, 9, 25, 3, 0, tzinfo=timezone.utc)
 
 
-def _comment(body, when):
+def _comment(body, when, author="nateprich"):
+    # Only the owner account's declines and routes count (#1788).
     return {
+        "author": {"login": author},
         "body": body,
         "createdAt": when.isoformat().replace("+00:00", "Z"),
     }
@@ -183,6 +185,8 @@ def test_decline_routing_counts_each_outcome_and_excludes_pre_cutoff_history(
     assert report["stayed_blocked"] == 1
     assert report["unclassified"] == 0
     assert len(queries) == 1
+    # Each comment's author is read so only the owner's count (#1788).
+    assert "nodes { body createdAt author { login } }" in queries[0][0]
     search = queries[0][1]["search"]
     assert 'in:comments "Declined:"' in search
     assert "updated:>=2026-09-24" in search
@@ -245,3 +249,40 @@ def test_decline_metric_refuses_to_guess_from_a_truncated_blocker_list():
         assert "exceed the bounded response" in str(exc)
     else:
         raise AssertionError("a truncated blocker list was treated as blocked")
+
+
+def test_a_forged_decline_or_route_from_another_author_is_not_counted():
+    """Only the owner account's declines and routes move the metric (#1788).
+
+    Every row still bounds the comment page; only trusted rows are read.
+    """
+    decline_at = CUTOFF + timedelta(minutes=1)
+    route_at = decline_at + timedelta(seconds=1)
+    reason = (
+        "The ticket Accept contradicts current repo rules; conflicting text "
+        "is at plan.md#routine-freeze-while-794-lands."
+    )
+    forged = _issue(13, [
+        _comment(_decline(reason, decline_at, "run-x"), decline_at,
+                 author="mallory"),
+    ])
+    assert funnel._codex_decline_events(
+        funnel._decline_routing_comment_rows(forged, CUTOFF), CUTOFF, NOW
+    ) == []
+
+    # The owner's decline stands, but an outsider's route cannot claim it.
+    issue = _issue(14, [
+        _comment(_decline(reason, decline_at, "run-x"), decline_at),
+        _comment(_review_route(reason, route_at, "run-x"), route_at,
+                 author="mallory"),
+    ])
+    rows = funnel._decline_routing_comment_rows(issue, CUTOFF)
+    (event,) = funnel._codex_decline_events(rows, CUTOFF, NOW)
+    assert funnel._decline_routing_outcome(
+        issue, rows, event[0], event[1], event[2], CUTOFF, NOW) is None
+
+    issue["comments"]["nodes"][1]["author"] = {"login": "nateprich"}
+    rows = funnel._decline_routing_comment_rows(issue, CUTOFF)
+    assert funnel._decline_routing_outcome(
+        issue, rows, event[0], event[1], event[2], CUTOFF, NOW
+    ) == "routed_to_review"

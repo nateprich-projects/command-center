@@ -1070,7 +1070,14 @@ def _sibling_packet(item) -> Dict:
 
 
 def issue_thread_section(comments: Sequence[Dict]) -> Optional[str]:
-    """Render every issue comment chronologically, preserving each body."""
+    """Render every issue comment chronologically, preserving each body.
+
+    Only the owner account's bodies are preserved (#1788). The shaper and
+    breakdown read this thread as send-back reasoning and corrections that
+    override a plan's premises, and anyone can comment on a public issue, so
+    any other author's comment keeps its place as a one-line placeholder
+    naming who posted it and when.
+    """
     if not isinstance(comments, (list, tuple)):
         raise funnel.GitHubError("could not read a complete issue thread")
     if not comments:
@@ -1095,7 +1102,10 @@ def issue_thread_section(comments: Sequence[Dict]) -> Optional[str]:
                 "could not read a complete issue thread") from exc
         if timestamp.tzinfo is None:
             raise funnel.GitHubError("could not read a complete issue thread")
-        ordered.append((timestamp, index, created_at, author.strip(), row["body"]))
+        body = row["body"]
+        if not funnel.trusted_comment(row):
+            body = funnel.untrusted_comment_placeholder(row, created_at)
+        ordered.append((timestamp, index, created_at, author.strip(), body))
     ordered.sort(key=lambda row: (row[0], row[1]))
     blocks = [
         "### @{} — {}\n\n{}".format(author, created_at, body)

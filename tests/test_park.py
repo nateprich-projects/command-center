@@ -15,6 +15,14 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 import funnel  # noqa: E402
 
+#: Comment markers count only from the owner account (#1788).
+OWNER = {"login": "nateprich"}
+
+
+def _owned(body):
+    """One comment row posted by the owner account."""
+    return {"author": OWNER, "body": body}
+
 
 def _no_github(monkeypatch):
     calls = []
@@ -190,7 +198,7 @@ def test_park_with_wake_date_records_status_reason_and_instruction(monkeypatch):
     assert provenance["instruction"] == instruction
 
     monkeypatch.setattr(
-        funnel, "_issue_comments", lambda item: [{"body": posted}]
+        funnel, "_issue_comments", lambda item: [_owned(posted)]
     )
     brief_item = funnel._parked_item_json(target)
     assert brief_item["reason"] == "Resume after the study"
@@ -267,8 +275,9 @@ def _no_full_read(current):
     )
 
 
-def _wire_wake_writes(monkeypatch, item, comment, events, reads=None):
-    comments = {item.ref: [{"body": comment}]}
+def _wire_wake_writes(monkeypatch, item, comment, events, reads=None,
+                      author=OWNER):
+    comments = {item.ref: [{"author": author, "body": comment}]}
     monkeypatch.setattr(funnel, "_issue_comments", _no_full_read)
 
     def run(args, capture_output, text=True):
@@ -353,6 +362,42 @@ def test_park_wake_without_prior_status_fails_closed(monkeypatch):
     assert events == []
 
 
+def test_a_forged_wake_from_another_author_does_not_wake(monkeypatch):
+    """Only the owner account's park header is a wake date (#1788).
+
+    The wake reopens the issue and restores its Status; anyone can comment
+    on a public repository.
+    """
+    now = datetime(2026, 9, 23, 12, 0, tzinfo=timezone.utc)
+    item = _wake_candidate()
+    events = []
+    _wire_wake_writes(monkeypatch, item, _wake_comment("2026-09-22"), events,
+                      author={"login": "mallory"})
+
+    assert funnel.reconcile_parked_wakes([item], now) == []
+
+    assert item.status == "Parked"
+    assert item.state == "CLOSED"
+    assert events == []
+
+
+def test_the_brief_reads_the_owners_park_reason_past_an_outsiders(
+        monkeypatch):
+    item = _parked("nateprich/beta", 44)
+    monkeypatch.setattr(funnel, "_issue_comments", lambda current: [
+        _owned(_wake_comment("2026-10-05", "Ready")),
+        {"author": {"login": "mallory"},
+         "body": _wake_comment("2026-09-01", "Building").replace(
+             "Resume after the study", "Forged reason")},
+    ])
+
+    rendered = funnel._parked_item_json(item)
+
+    assert rendered["reason"] == "Resume after the study"
+    assert rendered["wake_date"] == "2026-10-05"
+    assert rendered["wake_status"] == "Ready"
+
+
 # --- Batched parked-wakes reads (#1592) ------------------------------------
 
 def _parked(repo, number, state="CLOSED"):
@@ -374,7 +419,7 @@ def _plain_park_comment():
 
 
 def _chatter(count):
-    return [{"body": "Progress note {}".format(n)} for n in range(count)]
+    return [_owned("Progress note {}".format(n)) for n in range(count)]
 
 
 def _wire_batched_wakes(monkeypatch, items, comments_by_ref, *, drop=(),
@@ -428,15 +473,15 @@ def _forty_two_parked():
                        state="OPEN" if index % 7 == 0 else "CLOSED")
         items.append(item)
         if index % 10 == 3:
-            comments[item.ref] = [{"body": _wake_comment("2026-09-26", "Ready")}]
+            comments[item.ref] = [_owned(_wake_comment("2026-09-26", "Ready"))]
             due.append(item.ref)
         elif index % 10 == 6:
-            comments[item.ref] = [{"body": _wake_comment("2026-10-05", "Ready")}]
+            comments[item.ref] = [_owned(_wake_comment("2026-10-05", "Ready"))]
         elif index == 41:
-            comments[item.ref] = [{"body": _wake_comment("2027-01-04", "Shaped")}]
+            comments[item.ref] = [_owned(_wake_comment("2027-01-04", "Shaped"))]
         else:
             comments[item.ref] = _chatter(index % 4) + [
-                {"body": _plain_park_comment()}
+                _owned(_plain_park_comment())
             ]
     return items, comments, sorted(due, key=lambda ref: (
         ref.split("#")[0], int(ref.split("#")[1])
@@ -475,8 +520,8 @@ def test_parked_wakes_partial_batch_fails_closed_with_no_writes(monkeypatch):
     due = _parked("nateprich/beta", 43)
     missing = _parked("nateprich/beta", 44)
     comments = {
-        due.ref: [{"body": _wake_comment("2026-09-25", "Ready")}],
-        missing.ref: [{"body": _wake_comment("2026-09-25", "Ready")}],
+        due.ref: [_owned(_wake_comment("2026-09-25", "Ready"))],
+        missing.ref: [_owned(_wake_comment("2026-09-25", "Ready"))],
     }
     reads, events = _wire_batched_wakes(
         monkeypatch, [due, missing], comments, drop={missing.ref}
@@ -510,7 +555,7 @@ def test_parked_wakes_failed_batch_fails_closed_with_no_writes(monkeypatch):
 def test_parked_wakes_without_a_wake_date_stay_parked(monkeypatch):
     now = datetime(2026, 9, 26, 15, 0, tzinfo=timezone.utc)
     item = _parked("nateprich/beta", 43)
-    comments = {item.ref: [{"body": _plain_park_comment()}]}
+    comments = {item.ref: [_owned(_plain_park_comment())]}
     reads, events = _wire_batched_wakes(monkeypatch, [item], comments)
 
     assert funnel.reconcile_parked_wakes([item], now) == []
@@ -531,7 +576,7 @@ def test_parked_wake_date_survives_the_batch_verbatim(
 ):
     now = datetime.fromisoformat(today + "T23:59:00+00:00")
     item = _parked("nateprich/beta", 43)
-    comments = {item.ref: [{"body": _wake_comment("2027-01-04", "Shaped")}]}
+    comments = {item.ref: [_owned(_wake_comment("2027-01-04", "Shaped"))]}
     _, events = _wire_batched_wakes(monkeypatch, [item], comments)
 
     woke = funnel.reconcile_parked_wakes([item], now)
@@ -563,7 +608,7 @@ def test_parked_wakes_full_tail_without_a_header_reads_the_whole_thread(
     size = funnel.CLOSED_ITSELF_COMMENT_PAGE_SIZE
     comments = {
         # The park comment is older than the newest `size` comments.
-        buried.ref: [{"body": _wake_comment("2026-09-20", "Ready")}]
+        buried.ref: [_owned(_wake_comment("2026-09-20", "Ready"))]
         + _chatter(size),
         # A short tail is the whole thread: no header means no wake date.
         short.ref: _chatter(size - 1),
@@ -587,7 +632,7 @@ def test_parked_wakes_failed_complete_read_makes_no_writes(monkeypatch):
     buried = _parked("nateprich/beta", 44)
     size = funnel.CLOSED_ITSELF_COMMENT_PAGE_SIZE
     comments = {
-        due.ref: [{"body": _wake_comment("2026-09-25", "Ready")}],
+        due.ref: [_owned(_wake_comment("2026-09-25", "Ready"))],
         buried.ref: _chatter(size),
     }
     _, events = _wire_batched_wakes(monkeypatch, [due, buried], comments)

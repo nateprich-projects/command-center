@@ -436,7 +436,8 @@ def test_recent_clears_surface_from_the_label_event_and_provenance(monkeypatch):
     def gh_json(*args):
         number = int(args[3])
         calls.append(number)
-        return {"comments": [{"body": comments[number]}]}
+        return {"comments": [{"author": {"login": "nateprich"},
+                              "body": comments[number]}]}
 
     monkeypatch.setattr(funnel, "_gh_json", gh_json)
 
@@ -457,3 +458,33 @@ def test_recent_clears_surface_from_the_label_event_and_provenance(monkeypatch):
         },
     ]
     assert calls == [108, 141]
+
+
+def test_a_forged_satisfied_block_record_from_another_author_is_ignored(
+        monkeypatch):
+    """Only the owner account's record is an agent's clear (#1788)."""
+    record = funnel.satisfied_block_comment(
+        ["owner/repo#77"], NOW - timedelta(hours=1),
+        run="run-108", agent="codex",
+    )
+    rows = {"owner": {"author": {"login": "nateprich"}, "body": record},
+            "outsider": {"author": {"login": "mallory"}, "body": record}}
+    posted = {"by": "outsider"}
+    monkeypatch.setattr(
+        funnel, "_gh_json",
+        lambda *args: {"comments": [rows[posted["by"]]]})
+
+    cleared = issue(108)
+    cleared.blocked_cleared_at = NOW - timedelta(hours=1)
+    waiting = issue(109, comment="**Blocked on #77:** waiting.")
+    waiting.labels = ["blocked"]
+
+    assert funnel.cleared_blocks_json([cleared], NOW) == []
+    funnel._load_block_comment(waiting)
+    assert waiting.satisfied_block_record is None
+
+    posted["by"] = "owner"
+    assert [row["conditions"] for row in funnel.cleared_blocks_json(
+        [cleared], NOW)] == [["owner/repo#77"]]
+    funnel._load_block_comment(waiting)
+    assert waiting.satisfied_block_record["conditions"] == ["owner/repo#77"]

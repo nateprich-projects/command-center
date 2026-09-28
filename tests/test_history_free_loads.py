@@ -92,7 +92,7 @@ PAGES = [
 ]
 
 SHAPE_COMMENTS = [{
-    "author": {"login": "nate"},
+    "author": {"login": "nateprich"},
     "body": "The old premise is false.",
     "createdAt": "2026-09-25T01:00:00Z",
 }]

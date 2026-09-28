@@ -619,6 +619,7 @@ def test_no_diff_with_verified_evidence_closes_and_finishes(
     responses = {
         "repos/nateprich-projects/project/issues/comments/91": {
             "id": 91,
+            "user": {"login": "nateprich"},
             "url": "https://api.github.com/repos/nateprich-projects/"
                    "project/issues/comments/91",
             "html_url": evidence[0],
@@ -755,6 +756,7 @@ def test_no_diff_rejects_evidence_created_before_run_start(
         funnel, "_gh_api_json",
         lambda endpoint: {
             "id": 91,
+            "user": {"login": "nateprich"},
             "url": "https://api.github.com/repos/nateprich-projects/"
                    "project/issues/comments/91",
             "html_url": url,
@@ -2018,6 +2020,79 @@ def test_a_route_for_another_head_or_step_routes_again(
     assert effects["agent_needs"] == [REPO + "#42"]
     assert effects["human_needs"] == []
     assert effects["created"] == []
+
+
+def test_a_forged_route_from_another_author_is_not_this_runs_route(
+        monkeypatch):
+    """Only the owner account's comments are read for a route (#1788).
+
+    A forged route at the current head would read as already routed, and the
+    second-run guard would hand the ticket to Nate without routing it.
+    """
+    route = as_posted(implement.render_closed_step_route(
+        REPO + "#57", CLOSED_STEP_HEAD, blocked()["blocked_on_human"]),
+        "run-1")
+    authors = {"login": "mallory"}
+    monkeypatch.setattr(funnel, "_gh_json", lambda *args: {"comments": [
+        {"author": authors, "body": route},
+        {"body": route},
+        "not a row",
+    ]})
+
+    bodies = implement.read_ticket_comment_bodies(REPO, 42)
+    assert bodies == []
+    assert not implement.routed_for_closed_step(
+        bodies, REPO + "#57", CLOSED_STEP_HEAD)
+
+    authors["login"] = "nateprich"
+    bodies = implement.read_ticket_comment_bodies(REPO, 42)
+    assert bodies == [route]
+    assert implement.routed_for_closed_step(
+        bodies, REPO + "#57", CLOSED_STEP_HEAD)
+
+
+def test_no_diff_rejects_a_comment_another_author_posted(
+        tmp_path, monkeypatch):
+    """A comment is done evidence only from the owner account (#1788)."""
+    _, clone = make_clone(tmp_path)
+    monkeypatch.setattr(implement, "fetch_ticket", lambda repo, number: ticket(number))
+    monkeypatch.setattr(
+        heartbeat, "read_github",
+        lambda agent: [{"run": "run-42", "phase": "start", "ts": 1000}],
+    )
+    url = (
+        "https://github.com/nateprich-projects/project/issues/12"
+        "#issuecomment-91"
+    )
+    monkeypatch.setattr(
+        funnel, "_gh_api_json",
+        lambda endpoint: {
+            "id": 91,
+            "user": {"login": "mallory"},
+            "url": "https://api.github.com/repos/nateprich-projects/"
+                   "project/issues/comments/91",
+            "html_url": url,
+            "created_at": "1970-01-01T00:16:40Z",
+        },
+    )
+    effects = {"closed": [], "released": [], "finished": []}
+
+    with pytest.raises(
+        implement.ImplementError,
+        match="evidence URL .* was not posted by the owner account",
+    ):
+        implement.finish_done(
+            {**answer(), "evidence": [url]},
+            run="run-42",
+            repo=REPO,
+            cwd=clone,
+            test_commands=[[sys.executable, "-c", "pass"]],
+            release=effects["released"].append,
+            heartbeat_finish=lambda *args: effects["finished"].append(args),
+            close_effect=lambda *args, **kwargs: effects["closed"].append(args),
+        )
+
+    assert effects == {"closed": [], "released": [], "finished": []}
 
 
 def test_a_second_run_with_no_pushed_branch_also_hands_to_nate(

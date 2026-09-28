@@ -34,7 +34,8 @@ and are not tested.
 PR adds or changes fail without its code (#1803, plan #1783 ticket 3)? It
 runs them on the base, with the PR's test paths from the head, and writes
 one line: ``reproduction: red``, ``passes-on-base``, ``no signal``, or
-``unsupported`` for a test command that is not pytest.
+``unsupported`` for a test command that is not pytest. Given a budget, as a
+finish gives it (#1805), a run that outlasts it writes ``over budget``.
 """
 
 from __future__ import annotations
@@ -51,6 +52,7 @@ import shlex
 import shutil
 import sys
 import tempfile
+import time
 from typing import Dict, List, Optional, Sequence, Set, Tuple
 from xml.etree import ElementTree
 
@@ -207,15 +209,26 @@ def pytest_prefix(argv: Sequence[str]) -> Optional[List[str]]:
 
 # -- runs ------------------------------------------------------------------
 
-def _run_one(root: pathlib.Path, argv: Sequence[str]) -> Tuple[bool, str]:
+def _run_one(root: pathlib.Path, argv: Sequence[str],
+             timeout: Optional[float] = None) -> Tuple[bool, str]:
     """Run one command through ``run_tests``: (passed, failure output).
 
     ``run_tests`` raises on a failure with both streams in the message
     (#953), which is where the failing node ids are read from. A timeout
-    or a missing program is a failure with nothing to read.
+    or a missing program is a failure with nothing to read, except that a
+    run given its own ``timeout`` (the reproduction's budget, #1805) raises
+    ``CommandTimeoutError`` past it: running out of budget says nothing
+    about the tests.
     """
     try:
-        implement.run_tests(root, commands=[list(argv)])
+        if timeout is None:
+            implement.run_tests(root, commands=[list(argv)])
+        else:
+            implement.run_tests(root, commands=[list(argv)], timeout=timeout)
+    except implement.CommandTimeoutError as exc:
+        if timeout is not None:
+            raise
+        return False, str(exc)
     except (implement.ImplementError, OSError) as exc:
         return False, str(exc)
     return True, ""
@@ -437,6 +450,9 @@ RED = "red"
 PASSES_ON_BASE = "passes-on-base"
 NO_SIGNAL = "no signal"
 UNSUPPORTED = "unsupported"
+#: The line's value when the tests outlast the budget a caller gives
+#: (#1805): no test has an outcome then.
+OVER_BUDGET = "over budget"
 
 #: A call-phase failure that only says the base lacks a symbol. When the PR
 #: adds that symbol, the test never reached the behaviour it is about.
@@ -650,8 +666,13 @@ def _junit_cases(path: pathlib.Path) -> List[Tuple[Tuple[str, str], str,
     return cases
 
 
+class _OverBudget(Exception):
+    """The reproduction's test runs outlasted its budget (#1805)."""
+
+
 def _run_added(tree: pathlib.Path, prefix: Sequence[str],
-               node_ids: Sequence[str], report: pathlib.Path
+               node_ids: Sequence[str], report: pathlib.Path,
+               deadline: Optional[float] = None
                ) -> Tuple[list, Dict[str, str]]:
     """Run the node ids in the tree: (JUnit cases, dropped id → reason).
 
@@ -660,6 +681,9 @@ def _run_added(tree: pathlib.Path, prefix: Sequence[str],
     those ids are dropped, and the rest run once more: a file's collection
     error is read from the report, a test not found from the output, as
     the base re-run does.
+
+    With a ``deadline`` (``time.monotonic``), each run gets what is left of
+    it, and ``_OverBudget`` is raised when none is (#1805).
     """
     pending = list(node_ids)
     dropped: Dict[str, str] = {}
@@ -674,7 +698,15 @@ def _run_added(tree: pathlib.Path, prefix: Sequence[str],
         # failure must still run (#1829 review).
         argv = list(prefix) + ["-q", "--maxfail=0",
                                "--junitxml={}".format(report)] + pending
-        passed, output = _run_one(tree, argv)
+        remaining = None
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise _OverBudget()
+        try:
+            passed, output = _run_one(tree, argv, timeout=remaining)
+        except implement.CommandTimeoutError:
+            raise _OverBudget() from None
         cases = _junit_cases(report)
         keys = {key for key, _, _ in cases}
         if passed or attempt or any(
@@ -720,7 +752,8 @@ def _case_outcome(kind: str, message: str, added: Set[str]) -> str:
 
 
 def reproduction(checkout: os.PathLike, base: str, *,
-                 work_dir: Optional[os.PathLike] = None) -> dict:
+                 work_dir: Optional[os.PathLike] = None,
+                 budget: Optional[float] = None) -> dict:
     """Run the tests the checkout's HEAD adds or changes on ``base``.
 
     The tree is the base with the PR's changed test paths (tests, conftests,
@@ -728,14 +761,20 @@ def reproduction(checkout: os.PathLike, base: str, *,
     PR changes is the base's. ``work_dir`` is as for ``merged_suite``.
     Returns the record ``render`` serialises; ``line`` is the one
     reproduction line.
+
+    ``budget`` bounds the call in seconds, from its start (#1805: a finish
+    gives it four minutes). The test runs get what is left of it; one that
+    outlasts it is stopped, and the line is ``reproduction: over budget``
+    with no test outcomes. The worktree is removed on that path too.
     """
+    deadline = None if budget is None else time.monotonic() + budget
     root, head_sha, base_sha = _resolve(checkout, base)
     with _worktrees(root, work_dir) as worktree:
-        return _reproduce(root, worktree, head_sha, base_sha)
+        return _reproduce(root, worktree, head_sha, base_sha, deadline)
 
 
 def _reproduce(root: pathlib.Path, worktree, head_sha: str,
-               base_sha: str) -> dict:
+               base_sha: str, deadline: Optional[float] = None) -> dict:
     record = {
         "schema_version": SCHEMA_VERSION,
         "head": head_sha,
@@ -769,8 +808,14 @@ def _reproduce(root: pathlib.Path, worktree, head_sha: str,
             path for path in kept if _is_test_file(path)])
         added = _added_symbols(root, base_sha, head_sha, [
             path for _, path in changed if not _is_test_path(path)])
-        cases, dropped = _run_added(tree, prefix, node_ids,
-                                    tree.parent / "reproduction.xml")
+        try:
+            cases, dropped = _run_added(tree, prefix, node_ids,
+                                        tree.parent / "reproduction.xml",
+                                        deadline)
+        except _OverBudget:
+            record["reproduction"] = OVER_BUDGET
+            record["line"] = "reproduction: {}".format(OVER_BUDGET)
+            return record
         for node_id in node_ids:
             key = _junit_key(node_id)
             results = [(_case_outcome(kind, message, added), message)

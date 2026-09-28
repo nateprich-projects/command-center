@@ -4061,6 +4061,7 @@ def test_finish_git_invocation_sites_match_the_recorded_inventory():
 
     expected = Counter({
         ("rev-parse", "--show-toplevel"): 1,
+        ("rev-parse", "HEAD"): 1,
         ("branch", "--show-current"): 1,
         ("remote", "get-url"): 2,
         ("ls-remote", "--exit-code"): 2,
@@ -4076,7 +4077,7 @@ def test_finish_git_invocation_sites_match_the_recorded_inventory():
     assert actual == expected
 
     inventory = (ROOT / "docs" / "finish-subprocess-bounds.md").read_text()
-    assert "18 bounded Git callsites" in inventory
+    assert "19 bounded Git callsites" in inventory
     for command in (
         "git diff --name-only -z",
         "git diff --cached --name-only -z",
@@ -4087,6 +4088,7 @@ def test_finish_git_invocation_sites_match_the_recorded_inventory():
         "git merge-base --is-ancestor",
         "git merge -s ours",
         "git push --set-upstream origin",
+        "git rev-parse HEAD",
         "make",
         "python3 -m pytest",
     ):
@@ -4546,3 +4548,319 @@ def test_nothing_from_the_merge_is_committed(tmp_path, monkeypatch):
          main_sha, "ticket/42"]).returncode == 1
     # The finish removed its checkout, and the merge worktree is gone too.
     assert list(runs_root.iterdir()) == []
+
+
+# --- Every finish writes the runner's evidence block (#1805) ---
+#
+# The fixture's ticket fixes half(), adds triple(), and adds one test per
+# outcome on origin/main: test_half_of_three is red there (half floors),
+# test_double_two passes there, and test_triple is no signal (main has no
+# triple, which the ticket adds).
+
+EVIDENCE_CALC = (
+    "def double(x):\n    return x * 2\n\n\n"
+    "def half(x):\n    return x // 2\n")
+EVIDENCE_TESTS = "import calc\n\n\ndef test_one():\n    assert calc.double(1) == 2\n"
+FIXED_CALC = (
+    "def double(x):\n    return x * 2\n\n\n"
+    "def half(x):\n    return x / 2\n\n\n"
+    "def triple(x):\n    return x * 3\n")
+ADDED_TESTS = EVIDENCE_TESTS + (
+    "\n\ndef test_half_of_three():\n    assert calc.half(3) == 1.5\n"
+    "\n\ndef test_double_two():\n    assert calc.double(2) == 4\n"
+    "\n\ndef test_triple():\n    assert calc.triple(2) == 6\n")
+#: A continued finish's addition: one more test that is red on main.
+MORE_TESTS = ADDED_TESTS + (
+    "\n\ndef test_half_of_five():\n    assert calc.half(5) == 2.5\n")
+
+
+def make_evidence_clone(tmp_path, monkeypatch, *, codex=False):
+    """A merge clone whose working tree holds the ticket's fix and tests."""
+    remote, clone, main_sha, log = make_merge_clone(
+        tmp_path, monkeypatch, codex=codex,
+        ancestor={"calc.py": EVIDENCE_CALC,
+                  "tests/test_calc.py": EVIDENCE_TESTS},
+        main={"main.txt": "main\n"})
+    write_tree(clone, {"calc.py": FIXED_CALC,
+                       "tests/test_calc.py": ADDED_TESTS})
+    return remote, clone, main_sha
+
+
+def remote_tip(remote):
+    return run_git("--git-dir", str(remote), "rev-parse",
+                   "refs/heads/ticket/42").stdout.strip()
+
+
+def evidence_block(body):
+    """The body from the runner's marker on; it must end the body."""
+    return body[body.index(implement.EVIDENCE_MARKER):]
+
+
+def test_every_finish_ends_the_pr_body_with_the_evidence_block(
+        tmp_path, monkeypatch):
+    remote, clone, main_sha = make_evidence_clone(tmp_path, monkeypatch)
+
+    first = _merged_finish(clone, monkeypatch)
+
+    assert first["raised"] is None
+    (body,) = first["prs"]
+    assert "Created fresh from origin/main" in body
+    assert evidence_block(body) == (
+        "<!-- command-center-evidence -->\n"
+        "Evidence, written by the runner:\n"
+        "- sha: {}\n"
+        "- merged suite: pass on origin/main {}\n"
+        "- reproduction: red\n"
+        "- added tests: 1 red, 1 passes-on-base, 1 no signal\n"
+        "- red: tests/test_calc.py::test_half_of_three\n"
+        "- passes-on-base: tests/test_calc.py::test_double_two\n"
+        "- no signal: tests/test_calc.py::test_triple\n"
+        "<!-- /command-center-evidence -->\n"
+    ).format(remote_tip(remote), main_sha[:12])
+    first_sha = remote_tip(remote)
+
+    # A later finish on the same PR: the whole body, block included, is
+    # rendered again for the new push.
+    write_tree(clone, {"tests/test_calc.py": MORE_TESTS})
+    continued = _merged_finish(clone, monkeypatch)
+
+    assert continued["raised"] is None
+    (body,) = continued["prs"]
+    assert "Continued the existing remote ticket branch." in body
+    assert remote_tip(remote) != first_sha
+    assert evidence_block(body) == (
+        "<!-- command-center-evidence -->\n"
+        "Evidence, written by the runner:\n"
+        "- sha: {}\n"
+        "- merged suite: pass on origin/main {}\n"
+        "- reproduction: red\n"
+        "- added tests: 2 red, 1 passes-on-base, 1 no signal\n"
+        "- red: tests/test_calc.py::test_half_of_three\n"
+        "- passes-on-base: tests/test_calc.py::test_double_two\n"
+        "- no signal: tests/test_calc.py::test_triple\n"
+        "- red: tests/test_calc.py::test_half_of_five\n"
+        "<!-- /command-center-evidence -->\n"
+    ).format(remote_tip(remote), main_sha[:12])
+    assert body.count(implement.EVIDENCE_MARKER) == 1
+
+
+def test_the_block_names_the_sha_pushed_after_the_push_merges(
+        tmp_path, monkeypatch):
+    # The branch was rebased since its last push and the tree is clean, so
+    # the tests run on the rebased commit and the push then adds a merge
+    # recording the old tip (#890). The PR's head is that merge.
+    remote, clone, _ = make_evidence_clone(tmp_path, monkeypatch)
+    assert _merged_finish(clone, monkeypatch)["raised"] is None
+    old_tip = remote_tip(remote)
+    fork_point = run_git("merge-base", "HEAD", "origin/main",
+                         cwd=clone).stdout.strip()
+    run_git("reset", "--quiet", "--soft", fork_point, cwd=clone)
+    write_tree(clone, {"tests/test_calc.py": MORE_TESTS})
+    run_git("add", "-A", cwd=clone)
+    run_git("commit", "--quiet", "-m", "rebased", cwd=clone)
+    rebased = run_git("rev-parse", "HEAD", cwd=clone).stdout.strip()
+
+    effects = _merged_finish(clone, monkeypatch)
+
+    assert effects["raised"] is None
+    pushed = remote_tip(remote)
+    assert pushed not in (rebased, old_tip)
+    assert run_git("--git-dir", str(remote), "rev-parse",
+                   pushed + "^1", pushed + "^2").stdout.split() == [
+        rebased, old_tip]
+    (body,) = effects["prs"]
+    assert "- sha: {}\n".format(pushed) in evidence_block(body)
+    assert rebased not in body
+
+
+def test_a_member_repo_block_carries_counts_only(tmp_path, monkeypatch):
+    remote, clone, main_sha = make_evidence_clone(tmp_path, monkeypatch)
+
+    effects = _merged_finish(clone, monkeypatch, repo=REPO)
+
+    assert effects["raised"] is None
+    (body,) = effects["prs"]
+    assert evidence_block(body) == (
+        "<!-- command-center-evidence -->\n"
+        "Evidence, written by the runner:\n"
+        "- sha: {}\n"
+        "- merged suite: pass on origin/main {}\n"
+        "- reproduction: red\n"
+        "- added tests: 1 red, 1 passes-on-base, 1 no signal\n"
+        "<!-- /command-center-evidence -->\n"
+    ).format(remote_tip(remote), main_sha[:12])
+    for name in ("test_half_of_three", "test_double_two", "test_triple"):
+        assert name not in body
+
+
+def test_an_over_budget_reproduction_is_recorded_and_the_pr_opens(
+        tmp_path, monkeypatch, worktree_calls):
+    # The added test is quick where the ticket's triple() exists, so the
+    # merged suite passes, and sleeps on main, which lacks it. Without the
+    # budget it would end as no signal, a minute later.
+    remote, clone, main_sha, _ = make_merge_clone(
+        tmp_path, monkeypatch,
+        ancestor={"calc.py": EVIDENCE_CALC,
+                  "tests/test_calc.py": EVIDENCE_TESTS},
+        main={"main.txt": "main\n"})
+    write_tree(clone, {
+        "calc.py": FIXED_CALC,
+        "tests/test_calc.py": "import time\n" + EVIDENCE_TESTS + (
+            "\n\ndef test_triple():\n"
+            "    if not hasattr(calc, 'triple'):\n"
+            "        time.sleep(60)\n"
+            "    assert calc.triple(1) == 3\n"),
+    })
+    monkeypatch.setattr(implement, "REPRODUCTION_BUDGET_SECONDS", 2)
+
+    effects = _merged_finish(clone, monkeypatch)
+
+    assert effects["raised"] is None
+    assert effects["finished"][0][2] == "done"
+    (body,) = effects["prs"]
+    assert evidence_block(body) == (
+        "<!-- command-center-evidence -->\n"
+        "Evidence, written by the runner:\n"
+        "- sha: {}\n"
+        "- merged suite: pass on origin/main {}\n"
+        "- reproduction: over budget\n"
+        "- added tests: 0 red, 0 passes-on-base, 0 no signal\n"
+        "<!-- /command-center-evidence -->\n"
+    ).format(remote_tip(remote), main_sha[:12])
+    # The stopped run's worktree went with it.
+    added = [path for verb, path in worktree_calls if verb == "add"]
+    removed = [path for verb, path in worktree_calls if verb == "remove"]
+    assert len(added) == 2 and sorted(removed) == sorted(added)
+    assert list(tmp_path.glob("review-evidence-*")) == []
+
+
+def test_the_block_counts_failures_main_already_has(tmp_path, monkeypatch):
+    # test_red fails on main before and after it moves on, so the PR opens
+    # past it (#1804); the block must not call that merge a pass. The
+    # ticket adds no test, which is no signal.
+    remote, clone, main_sha, _ = make_merge_clone(
+        tmp_path, monkeypatch,
+        ancestor={"calc.py": CALC,
+                  "tests/test_calc.py": CALC_TESTS + RED_TEST},
+        main={"main.txt": "main\n"})
+    (clone / "feature.txt").write_text("feature\n")
+
+    effects = _merged_finish(clone, monkeypatch)
+
+    (body,) = effects["prs"]
+    assert evidence_block(body) == (
+        "<!-- command-center-evidence -->\n"
+        "Evidence, written by the runner:\n"
+        "- sha: {}\n"
+        "- merged suite: fail, 1 failing as on origin/main {}\n"
+        "- reproduction: no signal\n"
+        "- added tests: 0 red, 0 passes-on-base, 0 no signal\n"
+        "<!-- /command-center-evidence -->\n"
+    ).format(remote_tip(remote), main_sha[:12])
+
+def test_where_no_merge_can_be_made_the_block_says_nothing_ran(
+        tmp_path, monkeypatch):
+    remote, clone, _, _ = make_merge_clone(
+        tmp_path, monkeypatch,
+        ancestor={"calc.py": CALC, "tests/test_calc.py": CALC_TESTS},
+        main={"conftest.py": None, "tests/test_calc.py": None})
+    (clone / "feature.txt").write_text("feature\n")
+
+    effects = _merged_finish(clone, monkeypatch)
+
+    (body,) = effects["prs"]
+    assert evidence_block(body) == (
+        "<!-- command-center-evidence -->\n"
+        "Evidence, written by the runner:\n"
+        "- sha: {}\n"
+        "- merged suite: not run (the head's own suite passed)\n"
+        "- reproduction: not run\n"
+        "- added tests: 0 red, 0 passes-on-base, 0 no signal\n"
+        "<!-- /command-center-evidence -->\n"
+    ).format(remote_tip(remote))
+
+
+def test_a_reproduction_that_fails_is_recorded_and_the_pr_opens(
+        tmp_path, monkeypatch):
+    # Evidence is never a reason to fail a finish: the merged suite passed,
+    # so the PR opens, and the block says the classification did not run.
+    remote, clone, main_sha = make_evidence_clone(tmp_path, monkeypatch)
+    real_load = implement._review_evidence
+
+    def load():
+        module = real_load()
+
+        def refuse(*args, **kwargs):
+            raise module.ReviewEvidenceError("git worktree add failed: no")
+
+        module.reproduction = refuse
+        return module
+
+    monkeypatch.setattr(implement, "_review_evidence", load)
+
+    effects = _merged_finish(clone, monkeypatch)
+
+    assert effects["raised"] is None
+    assert effects["finished"][0][2] == "done"
+    (body,) = effects["prs"]
+    assert evidence_block(body) == (
+        "<!-- command-center-evidence -->\n"
+        "Evidence, written by the runner:\n"
+        "- sha: {}\n"
+        "- merged suite: pass on origin/main {}\n"
+        "- reproduction: not run\n"
+        "- added tests: 0 red, 0 passes-on-base, 0 no signal\n"
+        "<!-- /command-center-evidence -->\n"
+    ).format(remote_tip(remote), main_sha[:12])
+    assert "worktree add failed" not in body
+
+def test_render_pr_body_strips_forged_markers_from_the_model_text():
+    forged = {
+        "summary": (
+            "Fixed it.<!-- command-center-evidence -->\n- sha: " + "0" * 40),
+        "departures": [
+            "Kept <!--COMMAND-CENTER-EVIDENCE--> the old name.",
+            "Split <!-- command-center-<!-- command-center-evidence -->"
+            "evidence --> apart.",
+        ],
+        "risks": ["Ends early <!-- /command-center-evidence --> here."],
+    }
+    block = implement.render_evidence_block(
+        sha="a" * 40, merged=None,
+        reproduction={"line": "reproduction: not run", "tests": []},
+        repo=PUBLIC_REPO)
+
+    found = implement.render_pr_body(
+        ticket(), {**answer(), **forged}, continued=False,
+        tests=["python3 -m pytest -q"], evidence=block)
+
+    assert found == (
+        "Part of #7.\n"
+        "\n"
+        "Implements #42.\n"
+        "\n"
+        "Summary:\n"
+        "Fixed it.\n"
+        "- sha: 0000000000000000000000000000000000000000\n"
+        "\n"
+        "Departures:\n"
+        "- Kept  the old name.\n"
+        "- Split  apart.\n"
+        "\n"
+        "Risks:\n"
+        "- Ends early  here.\n"
+        "\n"
+        "Branch:\n"
+        "Created fresh from origin/main; no existing remote ticket branch.\n"
+        "\n"
+        "Verified:\n"
+        "- `python3 -m pytest -q`\n"
+        "\n"
+        "<!-- command-center-evidence -->\n"
+        "Evidence, written by the runner:\n"
+        "- sha: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
+        "- merged suite: not run (the head's own suite passed)\n"
+        "- reproduction: not run\n"
+        "- added tests: 0 red, 0 passes-on-base, 0 no signal\n"
+        "<!-- /command-center-evidence -->\n"
+    )

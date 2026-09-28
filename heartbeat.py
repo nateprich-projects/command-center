@@ -220,6 +220,11 @@ PROVIDERS = {"claude": "anthropic", "codex": "openai", "zcode": "zai",
 #: the two together.
 ZAI_STANDARD_UNTIL = 1790514000
 
+# Keep each retirement instant beside the policy that makes the lane retired.
+# Readers may use it to retain historical work without treating silence after
+# the cutoff as an active lane.
+RETIRED_AGENT_CUTOFFS = {"zcode": ZAI_STANDARD_UNTIL}
+
 
 def retired_agents(now: Optional[float] = None) -> frozenset:
     """Agents whose schedules are stopped on purpose, as of ``now``.
@@ -239,7 +244,10 @@ def retired_agents(now: Optional[float] = None) -> frozenset:
     lane that stopped, not the pause working.
     """
     now = time.time() if now is None else now
-    return frozenset() if now < ZAI_STANDARD_UNTIL else frozenset({"zcode"})
+    return frozenset(
+        agent for agent, cutoff in RETIRED_AGENT_CUTOFFS.items()
+        if now >= cutoff
+    )
 
 
 #: Read once per process. Every reader is a short-lived command (a brief, a

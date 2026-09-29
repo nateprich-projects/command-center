@@ -436,7 +436,14 @@ def test_metrics_derivation_runs_hourly_on_the_clock():
 #: -license` (#1762). Pinning DEVELOPER_DIR to the Command Line Tools routes
 #: the shims around Xcode.app, so its licence never gates a job (#1899).
 CLT_DEVELOPER_DIR = "/Library/Developer/CommandLineTools"
-ALL_PLISTS = sorted(path.name for path in (ROOT / "launchd").glob("*.plist"))
+#: The Remote Control listener is exempt: every interactive `claude rc` session
+#: it opens inherits its environment, and with the pin `xcodebuild` fails
+#: there ("requires Xcode"), so Nate could not build his Xcode projects from a
+#: remote session. It is a listener he drives, not an unattended job.
+PINNED_PLISTS = sorted(
+    path.name for path in (ROOT / "launchd").glob("*.plist")
+    if path.name != REMOTE_CONTROL_NAME
+)
 
 
 def _environment(path):
@@ -446,7 +453,7 @@ def _environment(path):
         return plistlib.load(handle).get("EnvironmentVariables") or {}
 
 
-@pytest.mark.parametrize("name", ALL_PLISTS)
+@pytest.mark.parametrize("name", PINNED_PLISTS)
 def test_every_launchd_job_pins_the_command_line_tools(name):
     """A new plist without the pin would be the one job an Xcode update stops."""
     env = _environment(ROOT / "launchd" / name)
@@ -490,3 +497,9 @@ def test_the_pinned_job_environment_resolves_tools_outside_xcode(tool):
         env=env, capture_output=True, text=True, check=False,
     )
     assert ran.returncode == 0, ran.stderr
+
+
+def test_the_remote_control_listener_leaves_developer_dir_to_the_session():
+    """Its sessions are Nate's own, and they need full Xcode."""
+    env = _environment(ROOT / "launchd" / REMOTE_CONTROL_NAME)
+    assert "DEVELOPER_DIR" not in env

@@ -15539,6 +15539,9 @@ def _write_status(item: Item, status: str, now: datetime) -> Optional[str]:
         _post_status_refusal(item, refusal)
         return refusal
 
+    if item.status == status:
+        return None
+
     try:
         response = gh_graphql(
             SET_FIELD,
@@ -15708,13 +15711,14 @@ def cmd_park(items: List[Item], now: datetime, ref: str, reason: str,
     # Done and Parked must remain distinguishable. Set the Project status first,
     # then close with NOT_PLANNED, then leave the reason where it can be read
     # without opening the Project.
-    gh_graphql(
-        SET_FIELD,
-        project=PROJECT_ID,
-        item=item.item_id,
-        field=STATUS_FIELD_ID,
-        option=_option_id(STATUS_FIELD_ID, "Parked"),
-    )
+    if item.status != "Parked":
+        gh_graphql(
+            SET_FIELD,
+            project=PROJECT_ID,
+            item=item.item_id,
+            field=STATUS_FIELD_ID,
+            option=_option_id(STATUS_FIELD_ID, "Parked"),
+        )
 
     close = _run_gh(
         ["gh", "issue", "close", str(item.number), "--repo", item.repo,
@@ -16072,8 +16076,10 @@ def cmd_reject(items: List[Item], now: datetime, pr: str, note: Optional[str]) -
         (i for i in items if ticket and i.ref == ticket.parent), None
     )
     if parent and parent.item_id:
-        gh_graphql(SET_FIELD, project=PROJECT_ID, item=parent.item_id,
-                   field=STATUS_FIELD_ID, option=_option_id(STATUS_FIELD_ID, "Building"))
+        if parent.status != "Building":
+            gh_graphql(SET_FIELD, project=PROJECT_ID, item=parent.item_id,
+                       field=STATUS_FIELD_ID,
+                       option=_option_id(STATUS_FIELD_ID, "Building"))
         gh_graphql(SET_FIELD, project=PROJECT_ID, item=parent.item_id,
                    field=CLASS_FIELD_ID, option=_option_id(CLASS_FIELD_ID, "Broken"))
         print("{} -> Building / Broken".format(parent.ref))

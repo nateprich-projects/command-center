@@ -4601,7 +4601,9 @@ def test_timed_out_test_keeps_checkpointed_work_and_finishes(
 
         def communicate(self, input=None, timeout=None):
             self.timeout = timeout
-            raise subprocess.TimeoutExpired(self.command, timeout)
+            raise subprocess.TimeoutExpired(
+                self.command, timeout, output=b"stdout marker",
+                stderr=b"stderr marker")
 
         def kill(self):
             self.killed = True
@@ -4624,7 +4626,9 @@ def test_timed_out_test_keeps_checkpointed_work_and_finishes(
             lambda pid, sig: killed.append((pid, sig)),
         )
 
-    with pytest.raises(implement.CommandTimeoutError, match="make test timed out"):
+    with pytest.raises(
+            implement.CommandTimeoutError,
+            match="make test timed out") as raised:
         implement.finish_done(
             answer(), run="run-42", repo=REPO, cwd=clone,
             test_commands=[["make", "test"]],
@@ -4636,6 +4640,7 @@ def test_timed_out_test_keeps_checkpointed_work_and_finishes(
 
     (process,) = spawned
     assert process.timeout == implement.TEST_COMMAND_TIMEOUT_SECONDS
+    assert raised.value.captured_output == "stdout marker\nstderr marker"
     assert process.waited is False
     if implement.os.name == "posix":
         assert killed == [(process.pid, signal.SIGKILL)]
@@ -4813,6 +4818,66 @@ def test_a_merge_only_failure_fails_the_finish(tmp_path, monkeypatch):
     assert failed_in.parent.parent == clone.parent.resolve()
     assert run_git("--git-dir", str(remote), "show",
                    "ticket/42:calc.py").stdout == BROKEN_FOR_THREE
+
+
+@pytest.mark.parametrize("test_command", [
+    "make test",
+    "python3 -m pytest -q",
+])
+def test_a_merged_suite_timeout_is_unclassified_and_keeps_work(
+        tmp_path, monkeypatch, test_command):
+    remote, clone, main_sha, _ = make_merge_clone(
+        tmp_path, monkeypatch,
+        ancestor={"pyproject.toml": (
+                  '[project]\nname = "fixture"\n\n'
+                  '[tool.command-center]\ntest = "{}"\n'.format(
+                      test_command))},
+        main={"main.txt": "main\n"})
+    (clone / "kept.txt").write_text("checkpointed\n")
+    real_run = implement._run
+
+    def timeout_make_test(command, **kwargs):
+        if command == ["make", "test"] or "pytest" in command:
+            output = "No module named pytest\n" + "progress line\n" * 300
+            raise implement.CommandTimeoutError(
+                command, 1, captured_output=output)
+        return real_run(command, **kwargs)
+
+    monkeypatch.setattr(implement, "_run", timeout_make_test)
+    effects = _merged_finish(clone, monkeypatch)
+
+    assert isinstance(effects["raised"], implement.MergedSuiteError)
+    assert effects["prs"] == []
+    (finished,) = effects["finished"]
+    assert finished[2] == "errored"
+    first_line = finished[3].splitlines()[0]
+    assert first_line.startswith("tests timed out: ")
+    assert "timed out on the merge with origin/main {}".format(
+        main_sha[:12]) in first_line
+    assert "[output truncated;" in finished[3]
+    assert "no module named pytest" in finished[3].casefold()
+    assert heartbeat.classify_error(
+        finished[3], {"head": "0123456789ab"}) == "unclassified"
+    assert run_git("--git-dir", str(remote), "show",
+                   "ticket/42:kept.txt").stdout == "checkpointed\n"
+
+
+def test_member_timeout_failure_note_redacts_command_and_output():
+    failure = implement.MergedSuiteError(
+        "tests timed out: private-command timed out on the merge with "
+        "origin/main 0123456789ab\n"
+        "[output truncated; setup markers retained: no module named pytest]\n"
+        "private source path and contents")
+
+    note = implement._failure_note(
+        failure, "work kept on ticket/42", repo=REPO)
+
+    assert "private-command" not in note
+    assert "private source path" not in note
+    assert "no module named pytest" in note
+    assert "tests timed out:" in note
+    assert heartbeat.classify_error(
+        note, {"head": "0123456789ab"}) == "unclassified"
 
 
 def test_uncommitted_work_is_what_the_merge_tests(tmp_path, monkeypatch):

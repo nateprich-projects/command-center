@@ -209,9 +209,35 @@ def pytest_prefix(argv: Sequence[str]) -> Optional[List[str]]:
 
 # -- runs ------------------------------------------------------------------
 
+_TIMEOUT_OUTPUT_LIMIT_BYTES = 2048
+_TIMEOUT_SETUP_MARKERS = (
+    "could not derive a test command",
+    "no module named pytest",
+    "requires python ",
+)
+
+
+def _timeout_output_excerpt(output: str) -> str:
+    """Keep a bounded tail and safe setup markers from a timed-out command."""
+    encoded = output.encode("utf-8", errors="replace")
+    if len(encoded) <= _TIMEOUT_OUTPUT_LIMIT_BYTES:
+        return output
+    excerpt = encoded[-_TIMEOUT_OUTPUT_LIMIT_BYTES:].decode(
+        "utf-8", errors="replace")
+    folded, shown = output.casefold(), excerpt.casefold()
+    preserved = [marker for marker in _TIMEOUT_SETUP_MARKERS
+                 if marker in folded and marker not in shown]
+    marker_note = ("; setup markers retained: {}".format(
+        ", ".join(preserved)) if preserved else "")
+    return ("[output truncated; showing final {} bytes{}]\n{}".format(
+        _TIMEOUT_OUTPUT_LIMIT_BYTES, marker_note, excerpt))
+
+
 def _run_one(root: pathlib.Path, argv: Sequence[str],
-             timeout: Optional[float] = None) -> Tuple[bool, str]:
-    """Run one command through ``run_tests``: (passed, failure output).
+             timeout: Optional[float] = None, *,
+             capture_timeout_output: bool = False
+             ) -> Tuple[bool, str, bool]:
+    """Run one command: (passed, failure output, timed out).
 
     ``run_tests`` raises on a failure with both streams in the message
     (#953), which is where the failing node ids are read from. A timeout
@@ -228,10 +254,11 @@ def _run_one(root: pathlib.Path, argv: Sequence[str],
     except implement.CommandTimeoutError as exc:
         if timeout is not None:
             raise
-        return False, str(exc)
+        output = (exc.captured_output if capture_timeout_output else str(exc))
+        return False, output, True
     except (implement.ImplementError, OSError) as exc:
-        return False, str(exc)
-    return True, ""
+        return False, str(exc), False
+    return True, "", False
 
 
 def rerun_on_base(base_root: pathlib.Path, prefix: Sequence[str],
@@ -255,7 +282,7 @@ def rerun_on_base(base_root: pathlib.Path, prefix: Sequence[str],
         # -rfE: the base run's summary is what is read, whatever the repo's
         # own report characters. The cache guard is run_tests' own.
         argv = list(prefix) + ["-q", "-rfE"] + ran
-        passed, output = _run_one(base_root, argv)
+        passed, output, _ = _run_one(base_root, argv)
         missing = [] if passed or attempt else _not_found(output, ran)
         if missing:
             ran = [node_id for node_id in ran if node_id not in missing]
@@ -389,13 +416,17 @@ def _merge_and_run(worktree, head_sha: str, base_sha: str) -> dict:
                for argv in commands]
     record["commands"] = entries
     for argv, entry in zip(commands, entries):
-        passed, output = _run_one(merge_root, argv)
+        passed, output, timed_out = _run_one(
+            merge_root, argv, capture_timeout_output=True)
         entry["result"] = "pass" if passed else "fail"
         if passed:
             continue
+        if timed_out:
+            entry["timed_out"] = True
+            entry["output"] = _timeout_output_excerpt(output)
         record["result"] = "fail"
         prefix = pytest_prefix(argv)
-        failing = failing_node_ids(output) if prefix else []
+        failing = failing_node_ids(output) if prefix and not timed_out else []
         if not failing or stopped_early(output):
             # Another runner, pytest ids that cannot be read, or a pytest
             # run that stopped before the rest of the suite ran: nothing
@@ -704,7 +735,7 @@ def _run_added(tree: pathlib.Path, prefix: Sequence[str],
             if remaining <= 0:
                 raise _OverBudget()
         try:
-            passed, output = _run_one(tree, argv, timeout=remaining)
+            passed, output, _ = _run_one(tree, argv, timeout=remaining)
         except implement.CommandTimeoutError:
             raise _OverBudget() from None
         cases = _junit_cases(report)

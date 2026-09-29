@@ -931,7 +931,7 @@ def test_the_review_prompt_is_judgement_text_under_500_words():
     prompt = body.split("\n---\n", 1)[1]
     assert prompt.count("PACKET_JSON") == 1
     normalized = " ".join(prompt.split()).lower()
-    assert "does this diff do what the ticket and the plan say" in normalized
+    assert "does this diff do what its tickets ask" in normalized
     assert "avoid what the plan rejected" in normalized
     assert '"verdict": "approved" | "rejected"' in prompt
     assert "exactly one json object and nothing else" in normalized
@@ -1418,7 +1418,7 @@ def test_an_approval_is_applied_and_finished_done(tmp_path):
     # One lister call and one judge call for the default single requirement.
     assert _muse_calls(repo) == 2
     prompt = (repo / "muse.prompt.2").read_text()
-    assert "Does this diff do what the ticket and the plan say" in prompt
+    assert "Does this diff do what its tickets ask" in prompt
     assert "This is one judge call in a larger review" in prompt
     assert "the thing the ticket asks for" in prompt
     assert '"verdict"' not in prompt.split("The assigned requirements are:", 1)[0]
@@ -3805,7 +3805,7 @@ def test_the_lister_asks_for_requirements_before_the_judge_is_asked(tmp_path):
     # The lister framing does not survive; this call judges only its assigned
     # requirements, and the runner derives the verdict after all chunks.
     assert "This call is not the review" not in judge
-    assert "Does this diff do what the ticket and the plan say" in judge
+    assert "Does this diff do what its tickets ask" in judge
     assert "posted PR" in judge
     assert "packet's CI section first" in judge
     assert (

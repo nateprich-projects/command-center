@@ -2139,11 +2139,16 @@ lister_header() {
 This call is not the review. Record no verdict and judge nothing: do not say
 whether the diff meets anything, and do not comment on its quality.
 
-List what this diff must do and what it must avoid — the requirements the
-ticket, its parent plan, and the repository's stated rules place on it. One
-checkable claim per entry, in the words of the ticket or the plan wherever it
-states one. Every later judge reads this list and nothing else, so a
-requirement missing here is never checked, and a vague one cannot be answered.
+List what this diff must do and what it must avoid. What it must do comes
+from the tickets it closes: their Do and Accept, as amended by Nate-voiced
+comments. `plan_md`, the parent plan and the repository's stated rules add
+only what the diff must not break or contradict: list such a rule as
+"Does not break: <the rule>", and only where the diff touches the code or
+behaviour it governs. Never list a rule as something the diff must implement
+unless a ticket asks for it. One checkable claim per entry, in the words of
+the ticket or the plan wherever it states one. Every later judge reads this
+list and nothing else, so a requirement missing here is never checked, and a
+vague one cannot be answered.
 
 The packet's `pr_body` (the PR description) and `pr_departures` (the entries
 of its Departures section) are the implementer's own claims. You may cite
@@ -2380,6 +2385,10 @@ deferral requirement is met when the packet verifies the deferral described
 below. Use unmet when the diff clearly fails it and unsure when the packet
 cannot resolve it. For each result, cite the relevant diff lines or explain
 the uncertainty.
+
+A `Does not break:` requirement is met unless a diff line breaks or
+contradicts the rule. That the diff does not implement the rule is never a
+reason for unmet or unsure.
 
 For a deferred-premise requirement, inspect the entry's `label`, `evidence`,
 and `deferred_answer` fields, and verify that the matching packet entry is

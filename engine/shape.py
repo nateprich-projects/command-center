@@ -1265,6 +1265,8 @@ def apply_shape(items: list, now: datetime, ref: str,
         block = funnel._marked_json_block(original_body, marker)
         if block is not None:
             carried_blocks.append(block)
+    # The runner risk record and provenance are written before these carried
+    # blocks below. The parser must not treat a later copied marker as newer.
     class_missing = item.klass not in funnel.LADDER
 
     rendered = render_plan(answer)

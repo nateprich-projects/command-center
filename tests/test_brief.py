@@ -978,7 +978,9 @@ def test_brief_surfaces_blocked_projects_and_tickets_oldest_first(
             "blocked_at": "2026-09-03T00:00:00+00:00",
         },
     ]
-    assert [row["ref"] for row in brief["items"]] == ["nateprich/beta#31"]
+    # The silent block's question is the funnel watch's, not Nate's (#1891).
+    assert [row["ref"] for row in brief["items"]] == []
+    assert [row["ref"] for row in brief["watch_gates"]] == ["nateprich/beta#31"]
     assert all(row["ref"] != "nateprich/beta#33" for row in brief["blocked"])
     assert calls == []
 
@@ -1128,11 +1130,12 @@ def test_brief_keeps_every_other_blocked_project_as_blocked_work(
         "conditions": ["#70"],
         "blocked_at": "2026-09-01T00:00:00+00:00",
     }
-    # The silent block still asks its own question, and is still counted.
-    assert [row["ref"] for row in brief["items"]] == ["nateprich/beta#61"]
-    assert brief["items"][0]["waiting_on"] == "Unblock or park?"
-    assert "waiting_reason" not in brief["items"][0]
-    assert brief["total_needing_nate"] == 1
+    # The silent block still asks its own question, which the funnel watch
+    # answers: it is listed under watch_gates and not counted (#1891).
+    assert brief["items"] == []
+    assert [row["ref"] for row in brief["watch_gates"]] == ["nateprich/beta#61"]
+    assert brief["watch_gates"][0]["question"] == "Unblock or park?"
+    assert brief["total_needing_nate"] == 0
 
 
 def test_brief_unblocked_finished_project_still_reads_as_ordinary_accept(

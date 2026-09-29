@@ -17330,6 +17330,62 @@ def ticket_branch_index(repo: str) -> Tuple[Set[str], bool]:
     return refs, truncated
 
 
+def _merge_batched_pr_reads(
+    open_read: BatchedPRRead, history: BatchedPRRead
+) -> BatchedPRRead:
+    """Combine the open-PR read with the closed-and-merged history read.
+
+    ``ticket_pr_facts`` asks for the two separately so only the open rows
+    carry comment tails (#1986), but every consumer below it expects the
+    single all-states snapshot it used to get. Rows return to CREATED_AT
+    descending, the order ``_batched_pr_query`` asks GitHub for, so the
+    newest row for a ticket branch is still the first one. Branch refs come
+    from the open read, the only one that asks for them.
+    """
+    repos = sorted(set(open_read.rows_by_repo) | set(history.rows_by_repo))
+    rows_by_repo: Dict[str, Tuple[Dict[str, object], ...]] = {}
+    for repo in repos:
+        # A PR merged between the two reads is returned by both, once open and
+        # once merged. The history read happens second, so its row is the later
+        # observation and wins; a row with no number cannot be paired and is
+        # kept as it is.
+        by_number: Dict[object, Dict[str, object]] = {}
+        rows: List[Dict[str, object]] = []
+        for row in list(open_read.rows_by_repo.get(repo, ())) + list(
+            history.rows_by_repo.get(repo, ())
+        ):
+            number = row.get("number")
+            if number is None:
+                rows.append(row)
+                continue
+            if number in by_number:
+                rows[rows.index(by_number[number])] = row
+            else:
+                rows.append(row)
+            by_number[number] = row
+        rows.sort(
+            key=lambda row: str(row.get("createdAt") or ""), reverse=True
+        )
+        rows_by_repo[repo] = tuple(rows)
+    return BatchedPRRead(
+        rows_by_repo=rows_by_repo,
+        branch_refs_by_repo={
+            repo: set(open_read.branch_refs_by_repo.get(repo, set()))
+            for repo in repos
+        },
+        # Either read hitting its bound leaves PR absence unestablished.
+        pr_truncated_by_repo={
+            repo: bool(open_read.pr_truncated_by_repo.get(repo))
+            or bool(history.pr_truncated_by_repo.get(repo))
+            for repo in repos
+        },
+        branches_truncated_by_repo={
+            repo: bool(open_read.branches_truncated_by_repo.get(repo))
+            for repo in repos
+        },
+    )
+
+
 def ticket_pr_facts(
     items: Sequence[Item],
 ) -> Dict[str, Optional[Dict[str, object]]]:
@@ -17340,6 +17396,16 @@ def ticket_pr_facts(
     per ticket or PR. The per-ticket PR form was the single largest GraphQL
     consumer in the system: 68 requests on the board of 2026-09-08, 93 of a
     full brief's 110 points, and it grew with the board (#272).
+
+    The scan is split by state so that only open PRs carry comment tails.
+    Asking for all three states with ``comments(last: 100)`` returned about
+    2 MB and, on the board of 2026-09-29, HTTP 502 or 504 from GitHub on two
+    attempts in three: the 35 s section budget tripped, and every open ticket
+    drew the "scan could not be established" pip (#1985). Verdicts are derived
+    for open rows only, a few lines below, so the history page's tails had no
+    reader. Halving ``PR_GRAPHQL_PR_PAGE_SIZE`` bought the same room once
+    before (#1217); removing the unread payload is the lever that does not
+    need pulling again as the board grows.
 
     An explicit ``None`` means both scans established no PR and no branch. A
     dict carries PR data when present plus ``branch_exists``; a branch without
@@ -17357,15 +17423,27 @@ def ticket_pr_facts(
     if not repos:
         return facts
 
-    snapshot = _read_batched_pr_snapshots(
-        repos,
-        states=("OPEN", "CLOSED", "MERGED"),
-        limit=MERGED_PR_SCAN_LIMIT,
-        include_comments=True,
-        include_reviews=False,
-        include_closing_refs=False,
-        include_refs=True,
-        include_body=True,
+    snapshot = _merge_batched_pr_reads(
+        _read_batched_pr_snapshots(
+            repos,
+            states=("OPEN",),
+            limit=MERGED_PR_SCAN_LIMIT,
+            include_comments=True,
+            include_reviews=False,
+            include_closing_refs=False,
+            include_refs=True,
+            include_body=True,
+        ),
+        _read_batched_pr_snapshots(
+            repos,
+            states=("CLOSED", "MERGED"),
+            limit=MERGED_PR_SCAN_LIMIT,
+            include_comments=False,
+            include_reviews=False,
+            include_closing_refs=False,
+            include_refs=False,
+            include_body=True,
+        ),
     )
     rows_by_ref: Dict[str, List[Dict[str, object]]] = {}
     for repo in repos:

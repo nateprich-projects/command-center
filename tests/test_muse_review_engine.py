@@ -2328,6 +2328,44 @@ def test_the_shape_prompt_is_judgement_text_under_500_words():
                 protocol))
 
 
+def test_every_shape_part_is_sent_the_bug_rule_and_the_smallest_fix(
+        tmp_path):
+    """Each shape part's prompt says what separates Broken from Bug, that a
+    Broken plan is the smallest fix, and offers Bug as a class (#1848, plan
+    #1832). Read from the sent prompts, not the file: the header above `---`
+    never reaches the model. The rule sits under the question, the part of
+    the routine every header says to follow; each header replaces the
+    routine's decision record or answer format, so a rule placed there
+    would not bind the framer that drafts the plan."""
+    proc, repo = _stubbed_runner(
+        tmp_path, _issue_begin("shape"), _issue_packet("shape"),
+        answers=(_framer_answer(),))
+
+    assert proc.returncode == 0, proc.stderr
+    parts = _shape_part_prompts(repo)
+    assert sorted(parts) == ["auditor", "decider", "framer", "sibling"]
+    rule = ("**broken** is an observed failure or a security or privacy "
+            "exposure; any other defect found by reading, review or tests "
+            "is **bug**. a broken plan fixes the observed failure with the "
+            "smallest change; hardening beyond it is separate bug or "
+            "improve ideas, not more tickets.")
+    for kind, prompts in parts.items():
+        for _, prompt in prompts:
+            normalized = " ".join(prompt.split()).lower()
+            question = normalized.split("## the question", 1)[1].split(
+                "## the decision record", 1)[0]
+            assert rule in question, kind
+            assert ("`proposed_class` names one ladder class: investigate, "
+                    "broken, maintenance, improve, new, replace, or bug. "
+                    "propose, never gate." in normalized), kind
+    # The framer's own header, which replaces the routine's answer format,
+    # offers Bug too.
+    framer = " ".join(parts["framer"][0][1].split()).lower()
+    header = framer.split("the text after this paragraph", 1)[0]
+    assert ("`proposed_class` names one ladder class: investigate, broken, "
+            "maintenance, improve, new, replace, or bug." in header)
+
+
 def test_the_runner_reads_the_issue_routines_at_run_time():
     """The issue prompts are the routine files, not copies: the drift
     surface #52 exists for must not come back in the engine."""

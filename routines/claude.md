@@ -53,7 +53,7 @@ shows; anything else stays at `Shaped`, with the reason printed. A
 wording-scan hit alone raises `Risk` to `escalated` and posts its reasons,
 but does not hold the plan (#1679). **Shaped
 is not approval.** If the capture origin is `agent` and Class is unset,
-pass `--class <Broken|Maintenance|Improve|New|Replace>`; otherwise add a
+pass `--class <Broken|Maintenance|Improve|New|Replace|Bug>`; otherwise add a
 `Proposed class: <one ladder name>` line and no `--class`. When Nate
 explicitly authorises `approve --yes` while Class is unset, the
 command adopts one exact whole-line `Proposed class:` value before the

@@ -1194,7 +1194,7 @@ escalated risk. So:
   named-ticket order in `depends_on` as `owner/repo#n` refs; `[]` when the
   plan waits on nothing.
 - `proposed_class` names one ladder class: Investigate, Broken, Maintenance,
-  Improve, New, or Replace.
+  Improve, New, Replace, or Bug.
 
 Answer with exactly one JSON object and nothing else:
 

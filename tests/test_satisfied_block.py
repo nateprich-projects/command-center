@@ -225,6 +225,81 @@ def test_fully_satisfied_blocks_are_recorded_then_cleared(
     assert waiting.blocked_cleared_at == NOW
 
 
+def test_declined_unblock_clears_legacy_human_needs_before_label(
+    monkeypatch,
+):
+    # #1902's post-decline shape: a declined, condition-backed Unblock? whose
+    # Needs field still says human after the watch removes the blocked label.
+    waiting = issue(
+        1902, comment="**Blocked on #1899:** waiting for the evidence."
+    )
+    waiting.parent = REPO + "#1901"
+    waiting.labels = ["blocked"]
+    waiting.needs = "human"
+    waiting.item_id = "project-item-1902"
+    waiting.decline_reason = "The accepted evidence is not available."
+    blocker = issue(1899, state="CLOSED")
+    actions = []
+
+    def run(args, capture_output, text=True):
+        actions.append(("gh", tuple(args)))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    def write_project_select(item_id, field, value, ref):
+        actions.append(("project", item_id, field, value, ref))
+
+    monkeypatch.setattr(funnel.subprocess, "run", run)
+    monkeypatch.setattr(funnel, "write_project_select", write_project_select)
+
+    cleared = funnel.clear_satisfied_blocks(
+        [waiting, blocker], NOW, run="run-1956", agent="codex"
+    )
+
+    assert cleared == [{
+        "ref": waiting.ref,
+        "conditions": [blocker.ref],
+        "cleared_at": NOW.isoformat(),
+    }]
+    assert waiting.needs == "none"
+    assert actions[1] == (
+        "project", "project-item-1902", "Needs", "none", waiting.ref
+    )
+    assert actions[2] == (
+        "gh", (
+            "gh", "issue", "edit", "1902", "--repo", REPO,
+            "--remove-label", "blocked",
+        ),
+    )
+
+
+def test_satisfied_human_step_without_decline_keeps_needs_human(monkeypatch):
+    waiting = issue(
+        1903, comment="**Blocked on #1899:** complete Nate's step."
+    )
+    waiting.parent = REPO + "#1901"
+    waiting.labels = ["blocked"]
+    waiting.needs = "human"
+    waiting.item_id = "project-item-1903"
+    blocker = issue(1899, state="CLOSED")
+    project_writes = []
+
+    monkeypatch.setattr(
+        funnel.subprocess, "run",
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=0, stdout="", stderr=""
+        ),
+    )
+    monkeypatch.setattr(
+        funnel, "write_project_select",
+        lambda *args: project_writes.append(args),
+    )
+
+    funnel.clear_satisfied_blocks([waiting, blocker], NOW)
+
+    assert waiting.needs == "human"
+    assert project_writes == []
+
+
 def test_satisfied_block_marker_must_start_a_runner_comment_line():
     record = funnel.satisfied_block_comment(
         ["owner/repo#77"], NOW, run="run-1874", agent="codex",

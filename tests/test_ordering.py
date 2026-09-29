@@ -1324,6 +1324,289 @@ def test_next_cli_filters_machine_local_work_by_requesting_agent(
     assert payload["ref"] == rows[1].ref
 
 
+# -- The Bug share: one start in four, counted over eight (#1846) ------------
+
+
+def _share_board(bug_repo):
+    """Five single-ticket Bug projects and sixteen Improve ones, all Ready.
+
+    The Improve work is in a hobby repo. With the Bugs there too the ladder
+    puts every Bug last; with them in the tooling tier, repo tier puts every
+    Bug first. Either way only the share can space them.
+    """
+    rows = []
+    for k in range(5):
+        rows += [tier_project(bug_repo, 100 + k, "Ready", "Bug"),
+                 tier_ticket(bug_repo, 200 + k, 100 + k)]
+    for k in range(16):
+        rows += [tier_project(HOBBY, 300 + k, "Ready", "Improve"),
+                 tier_ticket(HOBBY, 400 + k, 300 + k)]
+    return rows
+
+
+def _started(rows, starts, chosen, lane="codex"):
+    """Record a start the way begin's binding does, with its class."""
+    starts.append({
+        "run": "run-{}".format(len(starts)), "agent": lane, "phase": "bind",
+        "ts": 1_000 + len(starts), "do": "ticket", "work": chosen.ref,
+        "class": effective_class(chosen, {row.ref: row for row in rows}),
+    })
+    return starts[-1]["class"]
+
+
+def _one_lane_pulls(rows, starts, pulls):
+    """A lane asks, starts what it is given, and finishes it before asking
+    again, so no Bug is ever in flight when it asks."""
+    classes = []
+    for _ in range(pulls):
+        chosen = next_ticket(
+            rows, NOW, recent_starts=funnel.recent_ticket_starts(starts))
+        classes.append(_started(rows, starts, chosen))
+        chosen.state = "CLOSED"
+    return classes
+
+
+@_pytest.mark.parametrize("bug_repo", [HOBBY, TOOLING])
+@_pytest.mark.parametrize("prior", [0, 8])
+def test_a_single_lane_gets_one_bug_in_every_four_starts(bug_repo, prior):
+    """Nate's worry, 2026-09-28: a lane that starts up, sees no Bug running
+    and grabs one. This lane never has a Bug running, from an empty history
+    or one of eight Improve starts, and still gets three Bugs in twelve."""
+    rows = _share_board(bug_repo)
+    starts = []
+    for k in range(prior):
+        starts.append({"run": "old-{}".format(k), "agent": "codex",
+                       "phase": "bind", "ts": k, "do": "ticket",
+                       "work": "{}#9{}".format(HOBBY, k), "class": "Improve"})
+
+    assert _one_lane_pulls(rows, starts, 12) == (
+        ["Bug", "Improve", "Improve", "Improve"] * 3)
+
+
+def test_a_bug_just_started_makes_the_next_three_starts_something_else():
+    rows = _share_board(TOOLING)
+    starts = []
+    _started(rows, starts, rows[1])
+    rows[1].state = "CLOSED"
+
+    assert _one_lane_pulls(rows, starts, 8) == (
+        ["Improve", "Improve", "Improve", "Bug"] * 2)
+
+
+def test_observed_broken_and_maintenance_still_go_first_on_the_bugs_turn():
+    """Finite work leads, and its starts do not use up the Bugs' turn: the
+    Bug, which the ladder alone puts last, goes straight after it."""
+    rows = [
+        project(1, "Ready", "Bug"), ticket(2, 1),
+        project(3, "Ready", "Improve"), ticket(4, 3),
+        project(5, "Ready", "Maintenance"), ticket(6, 5),
+        project(7, "Ready", "Broken"), ticket(8, 7),
+    ]
+    assert funnel.bug_share_due([])
+    starts, order = [], []
+    for _ in range(4):
+        chosen = next_ticket(
+            rows, NOW, recent_starts=funnel.recent_ticket_starts(starts))
+        _started(rows, starts, chosen)
+        order.append(chosen.number)
+        chosen.state = "CLOSED"
+
+    assert order == [8, 6, 2, 4]
+
+    favoured = [
+        tier_project(TOOLING, 11, "Building", "Bug", pinned=True),
+        tier_ticket(TOOLING, 12, 11),
+        tier_project(HOBBY, 13, "Ready", "Broken"),
+        tier_ticket(HOBBY, 14, 13),
+    ]
+    assert next_ticket(favoured, NOW, recent_starts=[]).number == 14
+
+
+def test_a_bug_fills_a_pull_that_nothing_else_can():
+    """Off its turn a Bug waits for other work, but never leaves a lane idle."""
+    rows = [
+        project(1, "Ready", "Bug"), ticket(2, 1),
+        project(3, "Ready", "Improve"),
+        ticket(4, 3, in_motion_since=claimed(5)),
+    ]
+    just_started = ["Bug"]
+    assert not funnel.bug_share_due(just_started)
+
+    assert next_ticket(rows, NOW, recent_starts=just_started).number == 2
+
+    rows[3].in_motion_since = None
+    assert next_ticket(rows, NOW, recent_starts=just_started).number == 4
+
+
+def test_four_lanes_pulling_together_do_not_exceed_the_share():
+    """Each lane's starts are in its own heartbeat. The count reads them all
+    through the same rows the backoff reads, so four lanes share one quarter
+    rather than taking a quarter each."""
+    import heartbeat
+
+    rows = _share_board(TOOLING)
+    by_ref = {row.ref: row for row in rows}
+    lanes = ["claude", "codex", "muse", "zcode"]
+    running = {}
+    classes = []
+    for pull in range(16):
+        lane = lanes[pull % len(lanes)]
+        if lane in running:
+            finished = running.pop(lane)
+            finished.state, finished.in_motion_since = "CLOSED", None
+        history = funnel.recent_ticket_starts(funnel._backoff_rows())
+        chosen = next_ticket(rows, NOW, recent_starts=history)
+        chosen.in_motion_since = NOW
+        running[lane] = chosen
+        klass = effective_class(chosen, by_ref)
+        heartbeat._spool(lane, {
+            "run": "{}-{}".format(lane, pull), "agent": lane, "phase": "bind",
+            "ts": 1_000 + pull, "do": "ticket", "work": chosen.ref,
+            "class": klass,
+        })
+        classes.append(klass)
+
+    assert classes == ["Bug", "Improve", "Improve", "Improve"] * 4
+    assert all(classes[k:k + 8].count("Bug") <= 2 for k in range(9))
+
+
+def test_an_empty_or_short_history_counts_what_exists():
+    rows = [project(1, "Ready", "Bug"), ticket(2, 1),
+            project(3, "Ready", "Improve"), ticket(4, 3)]
+
+    assert funnel.recent_ticket_starts([]) == []
+    assert next_ticket(rows, NOW, recent_starts=[]).number == 2
+    assert next_ticket(rows, NOW).number == 2
+    assert next_ticket(
+        rows, NOW, recent_starts=["Improve", "Bug", "Improve"]).number == 4
+    assert next_ticket(
+        rows, NOW, recent_starts=["Bug", "Improve", "Improve", "Improve"],
+    ).number == 2
+
+
+def test_two_bugs_together_hold_the_next_until_one_leaves_the_last_eight():
+    """Counting the start being decided: two lanes that took Bugs at once
+    leave room for the next only when the window of eight holds one of
+    them. Worked by hand: B, B and five others is three Bugs in eight."""
+    assert [
+        funnel.bug_share_due(["Bug", "Bug"] + ["Improve"] * others)
+        for others in range(8)
+    ] == [False] * 6 + [True] * 2
+
+
+def test_a_building_or_pinned_bug_keeps_its_place_off_the_bugs_turn():
+    """Both are commitments: the share counted the Building project's first
+    start, and a pin is Nate's ordering call (#673). A Ready Bug that ranks
+    first only by repo tier waits."""
+    just_started = ["Bug"]
+    ready_improve = [tier_project(HOBBY, 3, "Ready", "Improve"),
+                     tier_ticket(HOBBY, 4, 3)]
+
+    building = [tier_project(TOOLING, 1, "Building", "Bug"),
+                tier_ticket(TOOLING, 2, 1)]
+    assert next_ticket(building + ready_improve, NOW,
+                       recent_starts=just_started).number == 2
+
+    pinned = [tier_project(HOBBY, 5, "Ready", "Bug", pinned=True),
+              tier_ticket(HOBBY, 6, 5)]
+    assert next_ticket(pinned + ready_improve, NOW,
+                       recent_starts=just_started).number == 6
+
+    by_tier = [tier_project(TOOLING, 7, "Ready", "Bug"),
+               tier_ticket(TOOLING, 8, 7)]
+    assert [i.number for i in startable(by_tier + ready_improve)] == [8, 4]
+    assert next_ticket(by_tier + ready_improve, NOW,
+                       recent_starts=just_started).number == 4
+
+
+def test_a_bug_ticket_that_blocks_improve_work_goes_with_that_work():
+    """It ranks as Improve, so the share does not hold it back: holding it
+    would leave the Improve ticket waiting on its own prerequisite."""
+    rows = [
+        project(1, "Ready", "Bug"), ticket(2, 1),
+        project(3, "Ready", "Improve"),
+        ticket(4, 3, open_blockers=["nateprich/beta#2"]),
+        project(5, "Ready", "Improve"), ticket(6, 5),
+    ]
+    assert next_ticket(rows, NOW, recent_starts=["Bug"]).number == 2
+
+
+def test_the_bugs_turn_goes_to_the_oldest_bug_whatever_its_tier():
+    rows = [
+        tier_project(TOOLING, 1, "Ready", "Bug"),
+        tier_ticket(TOOLING, 2, 1, created_at=at(5)),
+        tier_project(HOBBY, 3, "Ready", "Bug"),
+        tier_ticket(HOBBY, 40, 3, created_at=at(20)),
+        tier_project(HOBBY, 5, "Ready", "Improve"), tier_ticket(HOBBY, 6, 5),
+    ]
+    assert [i.number for i in startable(rows)] == [2, 6, 40]
+    assert next_ticket(rows, NOW, recent_starts=[]).number == 40
+
+
+def test_the_start_history_reads_ticket_bindings_from_every_lane_in_order():
+    def bind(run, agent, ts, work, klass=None, do="ticket"):
+        row = {"run": run, "agent": agent, "phase": "bind", "ts": ts,
+               "do": do, "work": work}
+        if klass:
+            row["class"] = klass
+        return row
+
+    rows = [
+        bind("a", "codex", 5, "o/r#1", "Bug"),
+        bind("b", "claude", 3, "o/r#2", "Improve"),
+        bind("c", "muse", 4, "96", do="review"),
+        {"run": "a", "agent": "codex", "phase": "start", "ts": 1},
+        # Bound before #1846 recorded a class: not a Bug, as none existed.
+        bind("d", "codex", 6, "o/r#3"),
+        # A run bound twice is one start, its latest, and in that place.
+        bind("e", "codex", 2, "o/r#4", "Bug"),
+        bind("e", "codex", 8, "o/r#5", "New"),
+    ]
+    assert funnel.recent_ticket_starts(rows) == ["Improve", "Bug", None, "New"]
+
+    many = [bind("r{}".format(k), "codex", k, "o/r#{}".format(k), "Improve")
+            for k in range(10)]
+    many[1]["class"] = "Bug"
+    many[2]["class"] = "Bug"
+    assert funnel.recent_ticket_starts(many) == ["Bug"] + ["Improve"] * 7
+
+
+def test_next_cli_counts_another_lanes_bug_start_from_the_heartbeat(
+    monkeypatch, capsys
+):
+    """`funnel next` reads the history from the rows it reads the backoff
+    from: a Bug the Saturday lane just started is this pull's reason to
+    take Improve work over a Bug that repo tier would put first."""
+    import heartbeat
+
+    heartbeat._spool("claude", {
+        "run": "sat", "agent": "claude", "phase": "bind", "ts": 5,
+        "do": "ticket", "work": TOOLING + "#90", "class": "Bug",
+    })
+    rows = [tier_project(TOOLING, 1, "Ready", "Bug"),
+            tier_ticket(TOOLING, 2, 1),
+            tier_project(HOBBY, 3, "Ready", "Improve"),
+            tier_ticket(HOBBY, 4, 3)]
+    monkeypatch.setattr(funnel, "load_items", lambda: rows)
+    monkeypatch.setattr(funnel, "awaiting_review", lambda items: set())
+    monkeypatch.setattr(funnel, "ticket_pr_facts", lambda items: {})
+    monkeypatch.setattr(funnel, "_ticket_body", lambda repo, number: "")
+    monkeypatch.setattr(
+        funnel,
+        "repo_readiness_for_items",
+        lambda items: {
+            repo: funnel.MemberRepoReadiness(
+                repo, topic=True, ci_workflow=True,
+                stock_labels=(), dependabot=True,
+            )
+            for repo in (TOOLING, HOBBY)
+        },
+    )
+
+    assert funnel.main(["next"]) == 0
+    assert json.loads(capsys.readouterr().out)["ref"] == rows[3].ref
+
+
 # -- The portfolio signal ---------------------------------------------------
 
 

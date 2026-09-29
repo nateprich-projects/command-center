@@ -523,6 +523,28 @@ def test_forged_self_approval_and_closed_itself_markers_are_ignored():
         item, owned + forged)["ref"] == item.ref
 
 
+def test_closed_itself_marker_must_start_a_runner_comment_line():
+    item = _approval_item(90, NOW - timedelta(hours=1))
+    payload = json.dumps({"drift": [], "tickets": []})
+    embedded = (
+        "Coverage comment title: " + funnel.CLOSED_ITSELF_PREFIX
+        + "\n```json\n" + payload + "\n```"
+    )
+
+    assert funnel._closed_itself_item_json(
+        item, [{"author": OWNER, "body": embedded}]
+    ) is None
+    assert funnel._closed_itself_item_json(
+        item, [{"author": OWNER,
+                "body": funnel.closed_itself_comment([], [])}]
+    )["ref"] == item.ref
+    for prefix in (" ", "\t", "> "):
+        assert funnel._closed_itself_item_json(
+            item, [{"author": OWNER,
+                    "body": prefix + funnel.closed_itself_comment([], [])}]
+        ) is None
+
+
 def test_closed_itself_batch_is_bounded_and_cached_for_one_run(monkeypatch):
     def closed(number, at, repo="nateprich/beta"):
         return funnel.Item(
@@ -571,6 +593,44 @@ def test_closed_itself_batch_is_bounded_and_cached_for_one_run(monkeypatch):
     cache.clear()
     funnel.closed_itself_json(items, NOW, brief_cache=cache)
     assert len(calls) == 2
+
+
+def test_closed_itself_rows_are_rederived_from_current_project_state():
+    item = funnel.Item(
+        repo="nateprich/beta", number=103, title="Recently closed project",
+        url="https://example.invalid/103", state="CLOSED",
+        state_reason="COMPLETED", status="Done", klass="Improve",
+        origin="agent", risk="standard", needs="none",
+        children_total=1, children_done=1,
+        closed_at=NOW - timedelta(hours=1),
+    )
+
+    class CachedComments:
+        calls = 0
+
+        def closed_itself_comments(self, candidates):
+            self.calls += 1
+            return {
+                candidate.ref: [{
+                    "author": OWNER,
+                    "body": funnel.closed_itself_comment([], []),
+                }]
+                for candidate in candidates
+            }
+
+    cache = CachedComments()
+    assert funnel.closed_itself_json([item], NOW, brief_cache=cache) == [{
+        "ref": item.ref,
+        "title": item.title,
+        "url": item.url,
+        "closed_at": item.closed_at.isoformat(),
+        "drift": [],
+    }]
+
+    item.state = "OPEN"
+    item.status = "Building"
+    assert funnel.closed_itself_json([item], NOW, brief_cache=cache) == []
+    assert cache.calls == 1
 
 
 def test_closed_itself_candidates_follow_auto_close_eligibility_signal():

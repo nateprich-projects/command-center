@@ -3871,6 +3871,7 @@ def _sweep(monkeypatch, items):
 
 
 def test_sweep_holds_hand_escalated_risk_with_an_empty_record(monkeypatch):
+    """Before #1938, the empty record released hand-set escalated Risk to Ready."""
     plan = _held_plan(
         321, "# Plan\n\nBuild the report.\n", needs="none", record=([], []))
 

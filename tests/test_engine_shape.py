@@ -847,7 +847,7 @@ def test_runner_shape_risk_record_wins_over_later_planted_empty_copy():
         "declared": ["credentials"], "scan": []}
 
 
-def test_shape_risk_record_ignores_markers_after_copied_origin_override():
+def test_shape_risk_record_ignores_copy_after_copied_origin_override():
     runner_record = funnel.shape_risk_block(["credentials"], [])
     runner_provenance = funnel.provenance_block(
         "agent", at=NOW, run="shape-run", agent="muse")
@@ -855,8 +855,6 @@ def test_shape_risk_record_ignores_markers_after_copied_origin_override():
         funnel.ORIGIN_OVERRIDE_MARKER,
         '```json\n{"target": "nate"}\n```',
         funnel.shape_risk_block([], ["credentials"]),
-        funnel.provenance_block(
-            "agent", at=NOW, run="copied-run", agent="muse"),
     ))
     body = "\n\n".join((runner_record, runner_provenance, copied_tail))
 
@@ -916,6 +914,27 @@ def test_quoted_empty_risk_and_provenance_cannot_release_typed_risk(
         "agent", at=NOW, run="quoted-run", agent="muse")
     plan_markdown = "# Plan\n\n{}\n\n```\nlog\n".format(
         "\n\n".join((quoted_record, quoted_provenance)))
+
+    item, advanced = _shape_answer_gates_and_sweep(
+        monkeypatch, plan_markdown, REAL_CREDENTIALS)
+
+    assert advanced == []
+    assert item.status == "Shaped"
+    assert funnel.parse_shape_risk_record(item.body) == {
+        "declared": ["credentials"], "scan": []}
+
+
+def test_quoted_origin_override_marker_cannot_hide_runner_risk_record(
+        monkeypatch):
+    quoted_record = funnel.shape_risk_block([], ["credentials"])
+    quoted_provenance = funnel.provenance_block(
+        "agent", at=NOW, run="quoted-run", agent="muse")
+    plan_markdown = "# Plan\n\n{}\n\n```\nlog\n".format(
+        "\n\n".join((
+            quoted_record,
+            quoted_provenance,
+            funnel.ORIGIN_OVERRIDE_MARKER,
+        )))
 
     item, advanced = _shape_answer_gates_and_sweep(
         monkeypatch, plan_markdown, REAL_CREDENTIALS)

@@ -17635,10 +17635,10 @@ def shape_risk_block(declared: Sequence[str], scan: Sequence[str]) -> str:
 def parse_shape_risk_record(body: str) -> Optional[Dict[str, List[str]]]:
     """The runner's risk record, or None when absent or unreadable.
 
-    The runner writes this record immediately before its provenance trailer,
-    then apply_shape may append a copied origin-override block. Plan text can
-    quote earlier provenance markers, so use the final trailer before that
-    copied tail. Older records without a declared field continue to treat it
+    The runner writes this record immediately before its provenance trailer.
+    Plan text can quote any of these markers, so the runner's final provenance
+    trailer is the boundary: read the newest risk record before it and ignore
+    later copies. Older records without a declared field continue to treat it
     as an empty list.
     """
     if not isinstance(body, str):
@@ -17646,18 +17646,11 @@ def parse_shape_risk_record(body: str) -> Optional[Dict[str, List[str]]]:
     provenance_line = (
         r"(?m)^[ \t]*" + re.escape(PROVENANCE_MARKER) + r"[ \t]*\r?$"
     )
-    origin_overrides = list(re.finditer(
-        r"(?m)^[ \t]*" + re.escape(ORIGIN_OVERRIDE_MARKER) + r"[ \t]*\r?$",
-        body,
-    ))
-    runner_body = (
-        body[:origin_overrides[-1].start()] if origin_overrides else body
-    )
-    provenances = list(re.finditer(provenance_line, runner_body))
+    provenances = list(re.finditer(provenance_line, body))
     if not provenances:
         return None
     found = _marked_json(
-        runner_body[:provenances[-1].start()], SHAPE_RISK_MARKER)
+        body[:provenances[-1].start()], SHAPE_RISK_MARKER)
     if found is None:
         return None
     declared = found.get("declared", [])

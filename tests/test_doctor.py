@@ -1403,8 +1403,8 @@ def test_spool_record_age_does_not_use_file_mtime(tmp_path, monkeypatch):
     assert "2 days" not in result.found
 
 
-def test_doctor_fails_on_a_block_nothing_can_clear():
-    """#1432: a Codex decline left Needs agent and no parseable condition."""
+def test_doctor_accepts_a_declined_unblock_with_a_watch_gate():
+    """#1432's decline now has an Unblock question owned by the watch."""
     declined = funnel.Item(
         repo="owner/repo", number=289, title="declined", url="", state="OPEN",
         labels=["blocked"], needs="agent", parent="owner/repo#276",
@@ -1413,10 +1413,9 @@ def test_doctor_fails_on_a_block_nothing_can_clear():
 
     result = funnel.check_block_conditions([declined])
 
-    assert not result.ok
+    assert result.ok
     assert result.found == (
-        "owner/repo#289: stranded: blocked with no condition that can clear "
-        "it, and no one is asked (Needs: agent)"
+        "owner/repo#289: still-waiting (block comment is not parseable)"
     )
 
 

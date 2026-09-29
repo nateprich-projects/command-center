@@ -130,7 +130,7 @@ def test_lister_requirement_is_normalized_to_the_verified_deferral():
     assert all("Probe the parent plan" not in row for row in result)
 
 
-def test_only_matching_canonical_probe_is_replaced():
+def test_canonical_deferral_replaces_every_probe_of_its_premise():
     fixture = rejected_1612_fixture()
     packet = fixture["packet"]
     premise = packet["plan_premises"][0]["premises"][0]
@@ -148,8 +148,9 @@ def test_only_matching_canonical_probe_is_replaced():
     result = review.normalize_plan_premise_requirements(
         packet, [acceptance, wrong_pointer_probe, probe])
 
-    assert acceptance in result
-    assert wrong_pointer_probe in result
+    # Every probe of the premise goes, whatever pointer it cites (#1966).
+    assert result == [acceptance, result[-1]]
+    assert wrong_pointer_probe not in result
     assert probe not in result
     assert "Defer the inferred premise 'CI'" in result[-1]
 
@@ -177,7 +178,7 @@ def test_verified_deferral_does_not_remain_unsure_at_judgement():
     }]
 
 
-def test_unverified_deferred_fields_keep_the_probe_requirement():
+def test_unverified_deferred_fields_add_no_deferral_and_drop_the_probe():
     fixture = rejected_1612_fixture()
     packet = fixture["packet"]
     packet["plan_premises"][0]["premises"][0]["deferred_answer"] = {
@@ -185,9 +186,9 @@ def test_unverified_deferred_fields_keep_the_probe_requirement():
         "reviewed_ticket": REPO + "#1597",
     }
 
+    # A premise probe is never a review requirement (#1966).
     assert review.normalize_plan_premise_requirements(
-        packet, [fixture["rejected_requirement"]]) == [
-            fixture["rejected_requirement"]]
+        packet, [fixture["rejected_requirement"]]) == []
 
 
 @pytest.mark.parametrize("label", ["measured", "documented"])
@@ -248,7 +249,7 @@ def test_verified_forward_label_error_becomes_a_canonical_rejection(
     }]
 
 
-def test_unverified_label_error_fields_keep_the_model_probe():
+def test_unverified_label_error_fields_add_no_rejection_and_drop_the_probe():
     fixture = rejected_1612_fixture()
     packet = fixture["packet"]
     premise = packet["plan_premises"][0]["premises"][0]
@@ -262,9 +263,9 @@ def test_unverified_label_error_fields_keep_the_model_probe():
         },
     })
 
+    # A premise probe is never a review requirement (#1966).
     assert review.normalize_plan_premise_requirements(
-        packet, [fixture["rejected_requirement"]]) == [
-            fixture["rejected_requirement"]]
+        packet, [fixture["rejected_requirement"]]) == []
 
 
 def test_a_checkable_inferred_pointer_keeps_the_probe_path(monkeypatch):
@@ -322,7 +323,9 @@ def test_merged_pr_evidence_pointer_keeps_the_1653_probe_path(monkeypatch):
     review.annotate_unrunnable_premises(packet)
 
     assert "deferred_answer" not in premise
-    assert review.normalize_plan_premise_requirements(packet, [probe]) == [probe]
+    # Undeferred, the probe still goes: premise probes are out of review
+    # scope (Nate, 2026-09-28; #1966).
+    assert review.normalize_plan_premise_requirements(packet, [probe]) == []
 
 
 def test_later_same_plan_ticket_is_unrunnable_without_dependency_edges(

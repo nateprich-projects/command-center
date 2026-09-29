@@ -72,9 +72,11 @@ misbehaving run — evidence, not speculation), record it before finishing
 with `funnel capture`. Put the observed evidence in the note, choose its
 class at capture using `skills/shape`'s "Class it when you file it" rule,
 and say why. Agents class their own captures, never his existing issues.
+`Broken` refuses without `--observed`; a defect that has not happened is
+`Bug`, captured without it.
 
 ```bash
-python3 /Users/nateprich/.claude/command-center-run/funnel.py capture "<title>" --repo nateprich-projects/command-center --origin agent --class <Broken|Maintenance|Improve|New|Replace> --note "<evidence>"
+python3 /Users/nateprich/.claude/command-center-run/funnel.py capture "<title>" --repo nateprich-projects/command-center --origin agent --class <Broken|Maintenance|Improve|New|Replace|Bug> --note "<evidence>" --observed "<run or heartbeat id, CI run, log line, or wedge>"
 ```
 
 This is the sanctioned exception to the review rule to act only on the PR

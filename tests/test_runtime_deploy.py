@@ -185,7 +185,7 @@ def test_league_health_check_uses_venv_and_daily_snapshot_verifier(
     python = str(tmp_path / ".venv" / "bin" / "python")
     assert calls[0][0] == [python, "scripts/check-python.py"]
     assert calls[1][0] == [
-        python, "scripts/run-module.py", "lib.snapshot_io", "--verify",
+        python, "scripts/run-module.py", "the_league._internal.snapshot_io", "--verify",
         "data/fp_projections", "data/fp_snapshots",
     ]
     assert all(call[1] == tmp_path for call in calls)

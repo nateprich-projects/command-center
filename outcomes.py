@@ -31,6 +31,21 @@ import session_usage
 REPO = "nateprich-projects/command-center"
 HEARTBEAT_BRANCH = "heartbeat"
 OUTCOMES_PATH = "outcomes.jsonl"
+REPO_ALIASES = {
+    "nateprich-projects/FF-Weekly-Start-Sit": "nateprich-projects/Fantasy-GM",
+}
+
+
+def _canonical_ticket_ref(ticket_ref: str) -> str:
+    """Resolve the one settled repository rename for outcome joins."""
+    repo, separator, number = ticket_ref.rpartition("#")
+    if not separator:
+        return ticket_ref
+    canonical_repo = REPO_ALIASES.get(repo)
+    if canonical_repo is None:
+        return ticket_ref
+    return "{}#{}".format(canonical_repo, number)
+
 
 # ``funnel.ticket_pr_index`` defaults to the brief's 100-row diagnostic bound.
 # Outcome derivation asks for a larger whole-repository scan, and refuses to
@@ -487,7 +502,11 @@ def _ticket_runs(
         finishes = _latest_by_run(rows, "finish")
         bindings = _latest_by_run(rows, "bind")
         for run, binding in bindings.items():
-            if binding.get("do") != "ticket" or str(binding.get("work")) != ticket_ref:
+            if (
+                binding.get("do") != "ticket"
+                or _canonical_ticket_ref(str(binding.get("work")))
+                != _canonical_ticket_ref(ticket_ref)
+            ):
                 continue
             start = starts.get(run, {})
             finish = finishes.get(run)
@@ -1521,8 +1540,34 @@ def _read_blob(repo: str, sha: str, size: object, path: str = OUTCOMES_PATH) -> 
 def read_records(
     repo: str = REPO, branch: str = HEARTBEAT_BRANCH
 ) -> List[Dict[str, object]]:
-    """Read the durable derived records from the heartbeat branch."""
-    return _read_remote(repo, branch)[0]
+    """Read durable outcomes with renamed ticket refs joined canonically.
+
+    When both keys exist the current-repo record is authoritative. An old-only
+    row is returned under its normalized ref, while the raw heartbeat-branch
+    ledger stays untouched as the rename history.
+    """
+    records = _read_remote(repo, branch)[0]
+    current_by_ref = {
+        row["ticket"]: row
+        for row in records
+        if isinstance(row.get("ticket"), str)
+        and _canonical_ticket_ref(row["ticket"]) == row["ticket"]
+    }
+    normalized: List[Dict[str, object]] = []
+    seen = set()
+    for row in records:
+        original_ref = row.get("ticket")
+        if not isinstance(original_ref, str):
+            continue
+        canonical_ref = _canonical_ticket_ref(original_ref)
+        if canonical_ref in seen:
+            continue
+        seen.add(canonical_ref)
+        selected = current_by_ref.get(canonical_ref, row)
+        normalized_row = dict(selected)
+        normalized_row["ticket"] = canonical_ref
+        normalized.append(normalized_row)
+    return normalized
 
 
 def _new_records(
@@ -1565,19 +1610,58 @@ def _heal_empty_runs(
     was. There is deliberately no date cutoff: ``muse.jsonl`` had already
     outgrown the inline read when Muse implemented (2026-09-18 to 09-22), so
     its runs were never read at all (#1655).
+
+    Renamed refs join through the same alias as stored reads and heartbeat
+    bindings. Keep an old-keyed row as history; when it has no current-key
+    twin, add the healed current-key record alongside it. If a current twin
+    already exists, heal only that row.
     """
     fresh_by_ticket: Dict[str, Mapping[str, object]] = {}
     for row in derived:
         if isinstance(row, Mapping) and isinstance(row.get("ticket"), str):
-            fresh_by_ticket.setdefault(row["ticket"], row)
+            ticket_ref = row["ticket"]
+            canonical_ref = _canonical_ticket_ref(ticket_ref)
+            current = fresh_by_ticket.get(canonical_ref)
+            if current is None or ticket_ref == canonical_ref:
+                fresh_by_ticket[canonical_ref] = row
+
+    current_refs = set()
+    for row in existing:
+        ticket_ref = row.get("ticket")
+        if isinstance(ticket_ref, str):
+            canonical_ref = _canonical_ticket_ref(ticket_ref)
+            if ticket_ref == canonical_ref:
+                current_refs.add(canonical_ref)
+
     combined: List[Dict[str, object]] = []
     healed: List[Dict[str, object]] = []
+    materialized_refs = set(current_refs)
     for row in existing:
-        fresh = fresh_by_ticket.get(row.get("ticket"))
+        ticket_ref = row.get("ticket")
+        if not isinstance(ticket_ref, str):
+            combined.append(dict(row))
+            continue
+        canonical_ref = _canonical_ticket_ref(ticket_ref)
+        fresh = fresh_by_ticket.get(canonical_ref)
+
+        # The raw old-key row remains the rename trail when a current twin
+        # exists. Its current twin is the sole record that can be healed.
+        if ticket_ref != canonical_ref and canonical_ref in current_refs:
+            combined.append(dict(row))
+            continue
+
         if fresh is not None and _runs_empty(row) and _has_runs(fresh):
             replacement = dict(fresh)
-            combined.append(replacement)
-            healed.append(replacement)
+            replacement["ticket"] = canonical_ref
+            if ticket_ref == canonical_ref:
+                combined.append(replacement)
+                healed.append(replacement)
+            else:
+                combined.append(dict(row))
+                if canonical_ref not in materialized_refs:
+                    combined.append(replacement)
+                    healed.append(replacement)
+                    materialized_refs.add(canonical_ref)
         else:
             combined.append(dict(row))
     return combined, healed

@@ -46,6 +46,9 @@ RETRY_EXIT = 3
 #: idea keeps its needs-shaping label, so the next run asks again.
 FINAL_ATTEMPT = 2
 
+#: Marker consumed by the shape runner for a clean stale-apply refusal.
+SKIPPED_STALE_SHAPE_OUTCOME = "run outcome: skipped-stale-shape"
+
 
 def validation_exit(attempt: Optional[int]) -> int:
     """The exit for a malformed answer, recording nothing either way.
@@ -57,6 +60,35 @@ def validation_exit(attempt: Optional[int]) -> int:
     if attempt is None:
         return 1
     return RETRY_EXIT if attempt < FINAL_ATTEMPT else 1
+
+
+def _read_fresh_shape_facts(item) -> Tuple[Optional[str], int]:
+    """Read the target's current Project Status and complete child count."""
+    fresh_items = funnel.load_project_items_by_refs([item.ref])
+    if (not isinstance(fresh_items, list) or len(fresh_items) != 1
+            or getattr(fresh_items[0], "ref", None) != item.ref):
+        raise funnel.GitHubError(
+            "could not re-read {} from the Project before shape apply".format(
+                item.ref
+            )
+        )
+
+    fresh = fresh_items[0]
+    status = getattr(fresh, "status", None)
+    if status is not None and not isinstance(status, str):
+        raise funnel.GitHubError(
+            "could not read current Status for {} before shape apply".format(
+                item.ref
+            )
+        )
+    children_total = getattr(fresh, "children_total", None)
+    if (not isinstance(children_total, int)
+            or isinstance(children_total, bool) or children_total < 0):
+        raise funnel.GitHubError(
+            "could not read current sub-issue count for {} before shape "
+            "apply".format(item.ref)
+        )
+    return status, children_total
 
 
 #: The answer keys shape-apply accepts — exactly these, no extras. From
@@ -1238,8 +1270,8 @@ def apply_shape(items: list, now: datetime, ref: str,
     Renders the issue body from the answer fields, applies the
     self-approval rule mechanically, writes Shaped or Ready, and posts
     the self-approval record as a code-owned comment on a Ready
-    transition. Validation runs before the first write, so a malformed
-    answer leaves the idea untouched.
+    transition. Validation runs before the first write, and a fresh
+    Project read refuses a stale apply before it can overwrite the issue.
 
     The open-question record comes from the needs_nate fields rather than a
     Needs-section parse. A manually placed origin-override block is carried
@@ -1305,6 +1337,19 @@ def apply_shape(items: list, now: datetime, ref: str,
     blocked_by = blocked_by_values(pending_dependencies, item.repo)
     if blocked_by:
         command += ["--add-blocked-by", ",".join(blocked_by)]
+
+    # The packet and decision may be minutes old. Re-read immediately before
+    # the first issue mutation; a moved stage or newly added child makes this
+    # answer stale. Body-only edits deliberately do not block the apply.
+    fresh_status, fresh_children = _read_fresh_shape_facts(item)
+    if fresh_status != "Ideas" or fresh_children > 0:
+        status_label = fresh_status if fresh_status is not None else "missing"
+        print("{} ref={} fresh Status={} children={}".format(
+            SKIPPED_STALE_SHAPE_OUTCOME, item.ref, status_label,
+            fresh_children,
+        ))
+        return 0
+
     out = funnel._run_gh(command, capture_output=True, text=True)
     if out.returncode != 0:
         write_error = out.stderr.strip() or "gh issue edit failed"

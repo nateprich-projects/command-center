@@ -741,3 +741,57 @@ def test_the_split_pr_scan_keeps_the_newest_row_first(monkeypatch):
     # The open row still derives its verdict from its own tail.
     open_row = next(row for row in rows if row["state"] == "OPEN")
     assert open_row["verdict"]["verdict"] == "approved"
+
+
+def test_a_pr_merged_between_the_two_reads_is_kept_once_as_merged():
+    """The split introduces a race the single all-states read could not have.
+
+    The open read runs first; if a PR merges before the history read, both
+    return it. One snapshot must carry it once, as the later observation saw
+    it, or the merge gate reads a row that is already stale.
+    """
+    open_read = funnel.BatchedPRRead(
+        rows_by_repo={REPO: (
+            _pr_row(5, state="OPEN", created_at="2026-09-05T00:00:00Z"),
+        )},
+        branch_refs_by_repo={REPO: {"{}#5".format(REPO)}},
+        pr_truncated_by_repo={REPO: False},
+        branches_truncated_by_repo={REPO: False},
+    )
+    history = funnel.BatchedPRRead(
+        rows_by_repo={REPO: (
+            _pr_row(5, state="MERGED", created_at="2026-09-05T00:00:00Z"),
+            _pr_row(4, state="MERGED", created_at="2026-09-04T00:00:00Z"),
+        )},
+        branch_refs_by_repo={},
+        pr_truncated_by_repo={REPO: False},
+        branches_truncated_by_repo={},
+    )
+
+    merged = funnel._merge_batched_pr_reads(open_read, history)
+
+    rows = merged.rows_by_repo[REPO]
+    assert [(row["number"], row["state"]) for row in rows] == [
+        (5, "MERGED"), (4, "MERGED"),
+    ]
+    # Branch refs and their truncation flag come from the open read alone.
+    assert merged.branch_refs_by_repo[REPO] == {"{}#5".format(REPO)}
+    assert merged.branches_truncated_by_repo[REPO] is False
+
+
+def test_either_read_hitting_its_bound_leaves_pr_absence_unestablished():
+    """A truncated history must not read as a complete scan (#968)."""
+    def read(truncated):
+        return funnel.BatchedPRRead(
+            rows_by_repo={REPO: ()},
+            branch_refs_by_repo={REPO: set()},
+            pr_truncated_by_repo={REPO: truncated},
+            branches_truncated_by_repo={REPO: False},
+        )
+
+    assert funnel._merge_batched_pr_reads(
+        read(False), read(True)).pr_truncated_by_repo[REPO] is True
+    assert funnel._merge_batched_pr_reads(
+        read(True), read(False)).pr_truncated_by_repo[REPO] is True
+    assert funnel._merge_batched_pr_reads(
+        read(False), read(False)).pr_truncated_by_repo[REPO] is False

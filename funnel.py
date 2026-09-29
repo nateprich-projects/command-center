@@ -17345,8 +17345,24 @@ def _merge_batched_pr_reads(
     repos = sorted(set(open_read.rows_by_repo) | set(history.rows_by_repo))
     rows_by_repo: Dict[str, Tuple[Dict[str, object], ...]] = {}
     for repo in repos:
-        rows = list(open_read.rows_by_repo.get(repo, ()))
-        rows.extend(history.rows_by_repo.get(repo, ()))
+        # A PR merged between the two reads is returned by both, once open and
+        # once merged. The history read happens second, so its row is the later
+        # observation and wins; a row with no number cannot be paired and is
+        # kept as it is.
+        by_number: Dict[object, Dict[str, object]] = {}
+        rows: List[Dict[str, object]] = []
+        for row in list(open_read.rows_by_repo.get(repo, ())) + list(
+            history.rows_by_repo.get(repo, ())
+        ):
+            number = row.get("number")
+            if number is None:
+                rows.append(row)
+                continue
+            if number in by_number:
+                rows[rows.index(by_number[number])] = row
+            else:
+                rows.append(row)
+            by_number[number] = row
         rows.sort(
             key=lambda row: str(row.get("createdAt") or ""), reverse=True
         )

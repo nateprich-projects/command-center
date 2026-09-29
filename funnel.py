@@ -334,15 +334,31 @@ WIP_LIMIT = 4
 STAGES = ["Ideas", "Shaped", "Ready", "Building", "Done", "Parked"]
 
 #: The ladder, best-first. Only finite classes may preempt in-flight work.
-LADDER = ["Investigate", "Broken", "Maintenance", "Improve", "New", "Replace"]
+#: Bug is a latent defect: found by reading, review or tests, with no observed
+#: occurrence. It ranks below Replace and never preempts, so latent finds no
+#: longer ride Broken's preemption past every other class (#1832, #1845).
+LADDER = [
+    "Investigate", "Broken", "Maintenance", "Improve", "New", "Replace", "Bug",
+]
 
 #: The finite classes. `plan.md`: "Broken and Maintenance preempt in-flight
 #: work — and this is only safe because both are finite. The governing rule:
 #: only classes that are finite may preempt." `startable()` ranks these ahead
 #: of in-flight work of the unbounded classes (#435). The WIP-cap preemption in
 #: `claim_ticket()` stays Broken-only: Maintenance may preempt ranking, not the
-#: cap (`test_maintenance_does_not_preempt_the_limit`).
+#: cap (`test_maintenance_does_not_preempt_the_limit`). Bug is deliberately
+#: absent: reading and review keep finding latent defects, so the class is
+#: unbounded, and an unbounded class with preemption starves everything below
+#: it (#1832).
 PREEMPTING_CLASSES = frozenset({"Broken", "Maintenance"})
+
+#: Bugs' share of ticket starts, as (Bugs, starts): two in every eight, one in
+#: four (#1832, #1846). Nate, 2026-09-28: "broken continues as a finite class,
+#: and then bugs get a lane." The share counts starts across every lane, never
+#: running lanes or elapsed time: not every lane runs at once, so a lane that
+#: sees no Bug in flight has learned nothing about whether Bugs have had their
+#: turn. See ``bug_share_due`` and ``next_ticket``.
+BUG_SHARE = (2, 8)
 
 #: Repo tiers for the engineers' queue (Nate, 2026-09-25): 1 is the tooling
 #: that keeps everything else running, 2 has real-world impact, and every
@@ -364,10 +380,18 @@ PREEMPTING = {"Broken", "Maintenance"}
 
 #: Existing-work classes and finite investigations may take the unattended
 #: shaping path. Origin remains an independent condition: class describes the
-#: work, not who raised it.
+#: work, not who raised it. Bug is existing work too: a latent defect in
+#: something already shipped (#1845).
 SELF_APPROVABLE_CLASSES = frozenset(
-    {"Investigate", "Broken", "Maintenance", "Improve"}
+    {"Investigate", "Broken", "Maintenance", "Improve", "Bug"}
 )
+
+#: The defect classes, for measurement only. Broken is an observed failure
+#: and Bug a latent one; ordering keeps them apart, but a fix of either is a
+#: defect fix. Latent finds were classed Broken until #1832 split them out,
+#: so the upkeep share and the fix-on-fix join count both, or those series
+#: would drop at the split (#1845).
+DEFECT_CLASSES = frozenset({"Broken", "Bug"})
 
 #: Which stages can wait on a human, and the question each one asks.
 GATES = {
@@ -535,6 +559,19 @@ NEEDS_DECISION_RE = re.compile(
 #: reason in prose, not a condition the funnel can clear, so readers show it
 #: and ``stranded_items`` flags the block until a parseable one replaces it.
 DECLINED_PREFIX = "**Declined:**"
+
+#: Broken is observed, not latent (#1832). A Broken capture carries its
+#: evidence on this line in the issue body, and `promote` posts it as a comment
+#: when a Bug happens (#1847): a run or heartbeat id, a CI run, a log line, a
+#: wedge, or Nate's report. The issue is where Nate reads the proof, so it
+#: lives there rather than in a new store. Nothing parses it yet; anyone can
+#: comment on a public repo, so a reader of these comments must filter them
+#: with `trusted_comment` (#1788).
+OBSERVED_PREFIX = "**Observed:** "
+
+#: What a Broken capture Nate raised records when it is given no `--observed`.
+#: His report is the observation, so his captures do not need the flag (#1847).
+OBSERVED_NATE_REPORT = "Nate's report."
 
 #: A satisfied block is recorded before its label is removed. The structured
 #: payload makes a partial failure idempotent: the next run can retry the label
@@ -2656,6 +2693,58 @@ def queue_classes(
     }
 
 
+def _preempts(
+    ref: str, by_ref: Dict[str, Item], descendants: Mapping[str, Set[str]]
+) -> bool:
+    """Whether a ticket is finite work, which goes ahead of in-flight work.
+
+    Membership, not a rank threshold: a class added above Broken in LADDER
+    (#130's Investigate) must not acquire preemption rights by position.
+    plan.md grants them only to the finite classes named in
+    PREEMPTING_CLASSES; a ticket that blocks one preempts with it. Shared by
+    ``startable`` and ``next_ticket``'s Bug share, so both read one predicate.
+    """
+    return any(
+        effective_class(by_ref[related], by_ref) in PREEMPTING_CLASSES
+        for related in {ref} | set(descendants[ref])
+    )
+
+
+def _effective_tier(
+    ref: str, by_ref: Dict[str, Item], descendants: Mapping[str, Set[str]]
+) -> int:
+    """The repo tier a ticket ranks with.
+
+    A ticket that blocks higher-tier work takes that tier, as it takes the
+    class: otherwise tier-1 work would wait on its own prerequisite. Shared
+    by ``startable`` and the Bugs' turn in ``next_ticket`` (#1877), so both
+    read one rule.
+    """
+    return min(
+        repo_tier(by_ref[related].repo)
+        for related in {ref} | set(descendants[ref])
+    )
+
+
+def _pinned_ancestor(item: Item, by_ref: Mapping[str, Item]) -> bool:
+    """Whether the project this ticket belongs to is pinned.
+
+    A pin is Nate's explicit ordering call, and until 2026-09-12 it reached
+    only his decision queue: a pinned project's ticket sat 18th behind older
+    Broken work while he asked why (#673). It now outranks the ladder's
+    default order. It orders and nothing more -- the WIP-cap preemption
+    stays with the finite classes, and a pin never unblocks or unlocks.
+    """
+    seen: Set[str] = set()
+    current: Optional[Item] = item
+    while current is not None and current.ref not in seen:
+        if current.pinned:
+            return True
+        seen.add(current.ref)
+        current = by_ref.get(current.parent or "")
+    return False
+
+
 def startable(
     items: Sequence[Item],
     awaiting_review: Optional[Set[str]] = None,
@@ -2701,23 +2790,9 @@ def startable(
     # A ticket that blocks higher-tier work takes that tier, as it takes the
     # class above: otherwise tier-1 work would wait on its own prerequisite.
     effective_tier = {
-        ref: min(
-            repo_tier(by_ref[related].repo)
-            for related in {ref} | descendants[ref]
-        )
-        for ref in by_ref
+        ref: _effective_tier(ref, by_ref, descendants) for ref in by_ref
     }
-    # Membership, not a rank threshold: a class added above Broken in LADDER
-    # (#130's Investigate) must not acquire preemption rights by position.
-    # plan.md grants them only to the finite classes named in
-    # PREEMPTING_CLASSES; a ticket that blocks one preempts with it.
-    preempting = {
-        ref: any(
-            effective_class(by_ref[related], by_ref) in PREEMPTING_CLASSES
-            for related in {ref} | descendants[ref]
-        )
-        for ref in by_ref
-    }
+    preempting = {ref: _preempts(ref, by_ref, descendants) for ref in by_ref}
 
     def eligible(item: Item) -> bool:
         if not _startable_without_repo_readiness(
@@ -2742,22 +2817,7 @@ def startable(
         return (parent.status if parent else item.status) == "Building"
 
     def pinned_ancestor(item: Item) -> bool:
-        """Whether the project this ticket belongs to is pinned.
-
-        A pin is Nate's explicit ordering call, and until 2026-09-12 it reached
-        only his decision queue: a pinned project's ticket sat 18th behind older
-        Broken work while he asked why (#673). It now outranks the ladder's
-        default order. It orders and nothing more -- the WIP-cap preemption
-        stays with the finite classes, and a pin never unblocks or unlocks.
-        """
-        seen: Set[str] = set()
-        current: Optional[Item] = item
-        while current is not None and current.ref not in seen:
-            if current.pinned:
-                return True
-            seen.add(current.ref)
-            current = by_ref.get(current.parent or "")
-        return False
+        return _pinned_ancestor(item, by_ref)
 
     def key(item: Item):
         since = question_since(item) or datetime.max.replace(tzinfo=timezone.utc)
@@ -3239,17 +3299,88 @@ def checks_still_running(checks: Sequence[dict]) -> bool:
 
 _LINE_LEADING_MARKER_RE = re.compile(r"(?m)^[ \t]*<!-- command-center-")
 
+#: Every line break ``str.splitlines`` honours, with the blanks around it.
+_COMMENT_LINE_BREAK_RE = re.compile(
+    r"\s*[\n\r\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029]\s*")
+
+
+def inert_comment_text(text: object) -> str:
+    """Model text made safe to write outside a JSON block in a comment (#1798).
+
+    A runner comment is the owner's own, so the author filter (#1787, #1788)
+    trusts all of it, the model's words it echoes included: a blocking or
+    unsure item, a decline reason, a question. A blocking reason once carried
+    a line-leading ``<!-- command-center-review -->`` and a JSON block, and
+    the owner's rejection read as an approval (#1797). Line breaks collapse to
+    one space, so the text never begins a line or opens a fence, and ``<!--``
+    becomes ``&lt;!--``, so it holds no marker even mid-line. GitHub renders
+    the entity as ``<!--``, so a reader still sees every word. One pass is
+    enough: neither replacement can put a ``<!--`` together.
+
+    Text inside a JSON block needs none of this: ``json.dumps`` escapes the
+    line breaks, and a marker quoted there is content (#1688).
+    """
+    cleaned = _COMMENT_LINE_BREAK_RE.sub(
+        " ", "" if text is None else str(text)).strip()
+    return cleaned.replace("<!--", "&lt;!--")
+
+
+def _marked_json_block_at(
+    body: str, marker: str, marker_at: int,
+) -> Optional[Tuple[Dict, str]]:
+    """The JSON block the ``marker`` occurrence at ``marker_at`` owns, if any.
+
+    It owns only the first fenced JSON block (or an immediately following
+    bare object for compatibility with early markers) before another Command
+    Center marker. A comment may carry both a review verdict and provenance,
+    and parsing from one marker to the last closing brace would join those
+    two objects and make the review gate silently lose a valid verdict.
+    """
+    rest = body[marker_at + len(marker):]
+    # Only a marker that begins a line starts another block. A reviewer
+    # model that quotes an earlier verdict puts marker text inside its
+    # own JSON strings, and cutting there lost every such verdict (#1688).
+    next_marker = _LINE_LEADING_MARKER_RE.search(rest)
+    if next_marker:
+        rest = rest[:next_marker.start()]
+
+    fenced = re.search(
+        r"```json[ \t]*\r?\n(.*?)\r?\n```", rest, flags=re.DOTALL
+    )
+    if fenced:
+        raw = fenced.group(1)
+        try:
+            found = json.loads(raw)
+        except (TypeError, ValueError):
+            return None
+        if isinstance(found, dict):
+            end = marker_at + len(marker) + fenced.end()
+            return found, body[marker_at:end]
+        return None
+
+    leading = len(rest) - len(rest.lstrip())
+    raw = rest.lstrip()
+    if not raw.startswith("{"):
+        return None
+    try:
+        found, end = json.JSONDecoder().raw_decode(raw)
+    except (TypeError, ValueError):
+        return None
+    if isinstance(found, dict):
+        block_end = marker_at + len(marker) + leading + end
+        return found, body[marker_at:block_end]
+    return None
+
 
 def _marked_json_blocks(body: str, marker: str) -> List[Tuple[Dict, str]]:
     """Return parseable JSON blocks owned by ``marker``, newest first.
 
-    A comment may carry both a review verdict and provenance. Parsing from one
-    marker to the last closing brace would join those two objects and make the
-    review gate silently lose a valid verdict. Each marker occurrence therefore
-    owns only the first fenced JSON block (or an immediately following bare
-    object for compatibility with early markers) before another Command Center
-    marker. A quoted marker can precede the real block, so occurrences are tried
-    from last to first and malformed occurrences are skipped.
+    Each occurrence owns what ``_marked_json_block_at`` says. A quoted marker
+    can precede the real block, so occurrences are tried from last to first
+    and malformed occurrences are skipped. Last is the runner's position for
+    a trailer such as provenance, which ``append_provenance`` writes after
+    any model text; a marker the runner writes at the top of its comment is
+    read with ``_first_marked_json`` instead (#1798).
     """
     if not isinstance(body, str):
         return []
@@ -3259,40 +3390,33 @@ def _marked_json_blocks(body: str, marker: str) -> List[Tuple[Dict, str]]:
     ]
     blocks = []
     for marker_at in reversed(marker_positions):
-        rest = body[marker_at + len(marker):]
-        # Only a marker that begins a line starts another block. A reviewer
-        # model that quotes an earlier verdict puts marker text inside its
-        # own JSON strings, and cutting there lost every such verdict (#1688).
-        next_marker = _LINE_LEADING_MARKER_RE.search(rest)
-        if next_marker:
-            rest = rest[:next_marker.start()]
-
-        fenced = re.search(
-            r"```json[ \t]*\r?\n(.*?)\r?\n```", rest, flags=re.DOTALL
-        )
-        if fenced:
-            raw = fenced.group(1)
-            try:
-                found = json.loads(raw)
-            except (TypeError, ValueError):
-                continue
-            if isinstance(found, dict):
-                end = marker_at + len(marker) + fenced.end()
-                blocks.append((found, body[marker_at:end]))
-            continue
-
-        leading = len(rest) - len(rest.lstrip())
-        raw = rest.lstrip()
-        if not raw.startswith("{"):
-            continue
-        try:
-            found, end = json.JSONDecoder().raw_decode(raw)
-        except (TypeError, ValueError):
-            continue
-        if isinstance(found, dict):
-            block_end = marker_at + len(marker) + leading + end
-            blocks.append((found, body[marker_at:block_end]))
+        found = _marked_json_block_at(body, marker, marker_at)
+        if found is not None:
+            blocks.append(found)
     return blocks
+
+
+def _first_marked_json(
+    body: str, marker: str, *, column_zero_only: bool = False,
+) -> Optional[Dict]:
+    """Read the block owned by the first line-leading ``marker`` (#1798).
+
+    A runner comment starts with its marker, before any model text, so the
+    first line-leading occurrence is the runner's own. A marker quoted
+    mid-line, as a verdict quoting an earlier one puts it inside its JSON
+    strings, is content (#1688) and never a start. ``column_zero_only`` also
+    rejects indentation and quote prefixes. There is no fallback to a later
+    occurrence: if the runner's block cannot be read, the comment carries no
+    record.
+    """
+    if not isinstance(body, str):
+        return None
+    line_start = r"(?m)^" if column_zero_only else r"(?m)^[ \t]*"
+    first = re.search(line_start + "(" + re.escape(marker) + ")", body)
+    if first is None:
+        return None
+    found = _marked_json_block_at(body, marker, first.start(1))
+    return found[0] if found is not None else None
 
 
 def _marked_json(body: str, marker: str) -> Optional[Dict]:
@@ -3319,8 +3443,12 @@ def parse_self_approval(body: str) -> Optional[str]:
 
 
 def parse_verdict(body: str) -> Optional[Dict]:
-    """The verdict carried by one comment, or None if it is not one."""
-    return _marked_json(body, REVIEW_MARKER)
+    """The verdict carried by one comment, or None if it is not one.
+
+    Read from the comment's first line-leading review marker, where
+    ``_write_verdict`` puts it (#1798).
+    """
+    return _first_marked_json(body, REVIEW_MARKER)
 
 
 def comment_author(row: object) -> Optional[str]:
@@ -3940,7 +4068,9 @@ def parse_satisfied_block_comment(body: str) -> Optional[Dict[str, object]]:
     the ordinary provenance marker says an agent, rather than Nate, recorded
     the unattended action.
     """
-    found = _marked_json(body, SATISFIED_BLOCK_PREFIX)
+    found = _first_marked_json(
+        body, SATISFIED_BLOCK_PREFIX, column_zero_only=True
+    )
     provenance = parse_provenance(body)
     if found is None or provenance is None or provenance.get("voice") != "agent":
         return None
@@ -4443,6 +4573,144 @@ def awaiting_review(
     return blocked
 
 
+def recent_ticket_starts(
+    rows: Sequence[Mapping[str, object]],
+) -> List[Optional[str]]:
+    """The class of each of the last ``BUG_SHARE[1]`` ticket starts, oldest first.
+
+    A start is the binding ``begin`` writes when it issues a ticket (#497).
+    The rows are ``_backoff_rows()``'s, which reads every agent's heartbeat,
+    so a start counts whichever lane made it, and the one read serves the
+    backoff too. A run bound twice counts once, as ``heartbeat.bindings``
+    keeps its latest binding.
+
+    The class is the one ``begin`` recorded with the binding (#1846), not
+    one looked up now: a merged ticket, and the Bug project that closed
+    itself behind it, leave begin's view of the board long before the start
+    leaves the count. A binding written before that has no class and reads
+    as not a Bug, which it was not, as Bug did not exist before #1845.
+
+    Fewer starts than the window return what exists; no history is an
+    empty list, and ``bug_share_due`` counts what it is given.
+    """
+    import heartbeat
+
+    starts = sorted(
+        (
+            binding for binding in heartbeat.bindings(list(rows)).values()
+            if binding.get("do") == "ticket"
+        ),
+        key=lambda binding: binding.get("ts") or 0,
+    )
+    return [binding.get("class") for binding in starts[-BUG_SHARE[1]:]]
+
+
+def bug_share_due(recent_starts: Sequence[Optional[str]]) -> bool:
+    """Whether the next ticket start is the Bugs' turn (#1846).
+
+    ``recent_starts`` is ``recent_ticket_starts``'s answer, oldest first.
+    Counting the start being decided, no run of the latest starts, up to the
+    window, may hold more than its share of Bugs rounded up: with two in
+    eight, one in any four and two in any eight. A lane with Bugs and other
+    work both waiting therefore gets a steady three to one, from an empty
+    history or any other.
+
+    Why not the plain count "fewer than two of the last eight": that is
+    satisfied by two Bugs together, so a single lane got Bug, Bug and seven
+    others, four Bugs in twelve starts instead of three. The window is also
+    what corrects a burst: two lanes that took Bugs at the same moment hold
+    every further Bug back until one of theirs has left the last eight.
+
+    A short history counts what exists, and an empty one makes the Bugs due.
+    """
+    share, window = BUG_SHARE
+    newest_first = [klass == "Bug" for klass in reversed(list(recent_starts))]
+    return all(
+        1 + sum(newest_first[:length - 1]) <= -(-length * share // window)
+        for length in range(1, window + 1)
+    )
+
+
+def _bugs_turn_order(
+    item: Item, by_ref: Dict[str, Item], descendants: Mapping[str, Set[str]]
+):
+    """Which Bug goes first: the highest repo tier, then the ticket created
+    first, then by repo and number (#1877).
+
+    Nate, 2026-09-28: "Tier, then oldest." The tier is the one ``startable()``
+    ranks by, so a Bug ticket that blocks a tier-1 Bug goes with that tier.
+    """
+    return (
+        _effective_tier(item.ref, by_ref, descendants),
+        item.created_at or datetime.max.replace(tzinfo=timezone.utc),
+        item.repo,
+        item.number,
+    )
+
+
+def _with_the_bug_share(
+    items: Sequence[Item],
+    free: Sequence[Item],
+    recent_starts: Sequence[Optional[str]],
+) -> Item:
+    """The ticket a free slot takes, with Bugs held to their share (#1846).
+
+    ``free`` is ``startable()``'s order less live claims, and is never empty.
+
+    - Finite work goes first, unchanged: observed Broken, Maintenance, and
+      whatever blocks them.
+    - Then, on the Bugs' turn (``bug_share_due``), pinned work, and after it
+      the startable Bug in the highest repo tier, oldest within the tier
+      (#1877; Nate, 2026-09-28: "Pins win; Bugs finish" and "Tier, then
+      oldest"). A pinned Bug is pinned work, and takes the turn itself.
+    - Otherwise the ordinary order, less the Bugs it would put ahead of other
+      work: repo tier ranks above the ladder, so a tier-1 Bug would otherwise
+      go before a hobby repo's Improve on every pull.
+    - A Bug fills a pull that nothing else can, chosen as on the Bugs' turn.
+
+    Two Bugs keep their ordinary place, because each is a commitment already
+    made. A Bug project already Building finishes as any other does ("Passing
+    a gate is a commitment", plan.md), and the share counted its first start.
+    A pinned Bug is Nate's explicit ordering call (#673). The starts of both
+    count against the share like any other Bug's, so the next Bug the share
+    offers waits for them.
+
+    A Bug here is a ticket that ranks as Bug (``queue_classes``). A Bug
+    ticket that blocks higher work ranks, and goes, with that work, which
+    would otherwise wait on its own prerequisite.
+    """
+    by_ref = {item.ref: item for item in items}
+    descendants = dependency_descendants(items)
+    if _preempts(free[0].ref, by_ref, descendants):
+        return free[0]
+    ranked_as = queue_classes(items, descendants)
+    bugs = [item for item in free if ranked_as.get(item.ref) == "Bug"]
+    if not bugs:
+        return free[0]
+    first_bug = min(
+        bugs, key=lambda item: _bugs_turn_order(item, by_ref, descendants))
+    if bug_share_due(recent_starts):
+        # Pins lead ``free`` once finite work is out of the way, as
+        # ``startable()`` ranks them, so pinned work is startable exactly
+        # when the first free ticket is pinned. A pinned non-Bug's start is
+        # not a Bug's, so the Bugs' turn is still due on the next pull.
+        if _pinned_ancestor(free[0], by_ref):
+            return free[0]
+        return first_bug
+
+    def committed(item: Item) -> bool:
+        parent = by_ref.get(item.parent or "")
+        return (
+            (parent.status if parent else item.status) == "Building"
+            or _pinned_ancestor(item, by_ref)
+        )
+
+    for candidate in free:
+        if ranked_as.get(candidate.ref) != "Bug" or committed(candidate):
+            return candidate
+    return first_bug
+
+
 def next_ticket(items: Sequence[Item], now: datetime,
                 blocked: Optional[Set[str]] = None,
                 excluded: Optional[Set[str]] = None,
@@ -4452,6 +4720,7 @@ def next_ticket(items: Sequence[Item], now: datetime,
                     Dict[str, Optional[Dict[str, object]]]
                 ] = None,
                 backed_off: Optional[Mapping[str, object]] = None,
+                recent_starts: Optional[Sequence[Optional[str]]] = None,
                 ) -> Optional[Item]:
     """The single ticket the requesting agent should work, or None.
 
@@ -4459,6 +4728,10 @@ def next_ticket(items: Sequence[Item], now: datetime,
     ticket may start anyway; that is the one sanctioned preemption. `excluded`
     is a per-call filter for a caller that has already declined a candidate;
     it never changes the queue or persists any state.
+
+    Below the limit, Bugs get their share of starts (``_with_the_bug_share``).
+    ``recent_starts`` is ``recent_ticket_starts``'s answer, passed in like
+    ``backed_off`` so this stays pure over fixtures; None is an empty history.
     """
     excluded = excluded or frozenset()
     queue = [
@@ -4479,7 +4752,7 @@ def next_ticket(items: Sequence[Item], now: datetime,
     if not free:
         return None
     if not at_capacity(items, now, pr_facts=pr_facts):
-        return free[0]
+        return _with_the_bug_share(items, free, recent_starts or ())
 
     # At capacity. Only a Broken ticket may exceed it, and only when nothing
     # already in motion is Broken — preemption is for getting a fix moving, not
@@ -4507,6 +4780,9 @@ def next_ticket_for_tier(items: Sequence[Item], now: datetime,
                          ] = None,
                          backed_off: Optional[
                              Mapping[str, object]
+                         ] = None,
+                         recent_starts: Optional[
+                             Sequence[Optional[str]]
                          ] = None) -> Optional[Item]:
     """Return the first shared-order ticket belonging to ``tier``.
 
@@ -4514,7 +4790,7 @@ def next_ticket_for_tier(items: Sequence[Item], now: datetime,
     than by filtering its input first. The latter would hide other in-motion
     tickets from the WIP cap and could let a standard caller exceed it while
     walking past escalated work. Reusing ``next_ticket`` also keeps Broken
-    preemption and all other ordering rules in one place.
+    preemption, the Bug share and all other ordering rules in one place.
     """
     excluded = set(excluded or ())
     while True:
@@ -4524,6 +4800,7 @@ def next_ticket_for_tier(items: Sequence[Item], now: datetime,
             repo_readiness=repo_readiness,
             pr_facts=pr_facts,
             backed_off=backed_off,
+            recent_starts=recent_starts,
         )
         if ticket is None or tier is None:
             return ticket
@@ -4744,17 +5021,68 @@ def _dashboard_authoring_pr_agents() -> Dict[str, Set[str]]:
     return authored_by
 
 
+def _retired_merge_times(repo: str, numbers: Set[int]) -> Dict[int, datetime]:
+    """Read merge timestamps for only the retired PRs named by heartbeats."""
+    if not numbers:
+        return {}
+    try:
+        owner, name = repo.split("/", 1)
+    except ValueError:
+        raise GitHubError("invalid repository ref {}".format(repo))
+
+    aliases = {
+        number: "pr{}".format(index)
+        for index, number in enumerate(sorted(numbers))
+    }
+    selections = "\n".join(
+        "{}: pullRequest(number: {}) {{ mergedAt }}".format(alias, number)
+        for number, alias in aliases.items()
+    )
+    query = """query {{
+  rateLimit {{ cost remaining resetAt }}
+  repo0: repository(owner: {owner}, name: {name}) {{
+    {pull_requests}
+  }}
+}}""".format(
+        owner=json.dumps(owner),
+        name=json.dumps(name),
+        pull_requests=selections,
+    )
+    data = gh_graphql(query)
+    if not isinstance(data, dict):
+        raise GitHubError("retired PR response was not an object")
+    repository = data.get("repo0")
+    if not isinstance(repository, dict):
+        raise GitHubError(
+            "could not read repository {} in retired PR response".format(repo)
+        )
+
+    found: Dict[int, datetime] = {}
+    for number, alias in aliases.items():
+        row = repository.get(alias)
+        if row is None:
+            continue
+        if not isinstance(row, dict):
+            raise GitHubError("invalid retired pull-request row")
+        merged_at = _metric_time(row.get("mergedAt"))
+        if merged_at is None:
+            raise GitHubError(
+                "PR #{} has no parseable mergedAt".format(number)
+            )
+        found[number] = merged_at
+    return found
+
+
 def unattended_merges(now: datetime) -> List[Dict[str, object]]:
-    """Merges a reviewer made without Nate, read from every live agent's heartbeat.
+    """Merges a reviewer made without Nate, read from agent heartbeats.
 
     plan.md makes these a condition of unattended merging being allowed at all:
     they must appear in the brief as a record. Until 2026-09-10 this read only
     the retired Claude routine's spool, so every Muse merge since the review
-    handover was missing from the brief (#489). The reader set is the live
-    provider set -- ``heartbeat.PROVIDERS`` minus ``heartbeat.RETIRED_AGENTS`` --
-    the same pattern ``agent_health`` and ``working_tree_touched`` use, so the
-    next rotation cannot reintroduce the blind spot. Each record carries the
-    ``agent`` that merged, oldest first.
+    handover was missing from the brief (#489). A retired provider contributes
+    only merges inside the brief window whose GitHub ``mergedAt`` is at or
+    before that provider's retirement cutoff; its silence remains retired.
+    Each record carries the ``agent`` that merged, oldest first.
     """
     try:
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -4765,15 +5093,43 @@ def unattended_merges(now: datetime) -> List[Dict[str, object]]:
     cutoff = (now - MAINTENANCE_WINDOW).timestamp()
     found: List[Dict[str, object]] = []
     live_rows: List[Tuple[str, List[Dict[str, object]]]] = []
+    retired = getattr(heartbeat, "RETIRED_AGENTS", frozenset())
+    retirement_cutoffs = getattr(heartbeat, "RETIRED_AGENT_CUTOFFS", {})
     for agent in sorted(heartbeat.PROVIDERS):
-        if agent in heartbeat.RETIRED_AGENTS:
-            # A stopped schedule must not read as activity (#431).
-            continue
+        if agent in retired and agent not in retirement_cutoffs:
+            raise GitHubError(
+                "retirement cutoff is unavailable for retired agent {}".format(agent)
+            )
         try:
             rows = _brief_heartbeat_rows(agent)
         except Exception:
             continue
         live_rows.append((agent, rows))
+
+    retired_prs: Set[int] = set()
+    for agent, rows in live_rows:
+        if agent not in retired:
+            continue
+        for row in rows:
+            value = row.get("merged")
+            if (
+                row.get("phase") != "finish"
+                or isinstance(value, bool)
+                or not value
+                or (row.get("ts") or 0) < cutoff
+            ):
+                continue
+            try:
+                number = int(str(value).lstrip("#"))
+            except (TypeError, ValueError):
+                continue
+            # Older zcode finishes stored the merge count (0 or 1), not a PR
+            # number. This repository has no PR #1, so discard that sentinel.
+            if number > 1:
+                retired_prs.add(number)
+    retired_merge_times: Dict[int, datetime] = {}
+    if retired_prs:
+        retired_merge_times = _retired_merge_times(REPO, retired_prs)
 
     authored_by: Dict[str, Set[str]] = {}
     for _agent, rows in live_rows:
@@ -4782,11 +5138,32 @@ def unattended_merges(now: datetime) -> List[Dict[str, object]]:
 
     for agent, rows in live_rows:
         for row in rows:
-            if not row.get("merged") or (row.get("ts") or 0) < cutoff:
+            if not row.get("merged"):
                 continue
+            if agent in retired:
+                try:
+                    value = row["merged"]
+                    if isinstance(value, bool):
+                        continue
+                    number = int(str(value).lstrip("#"))
+                    if number <= 0:
+                        continue
+                    merged_at = retired_merge_times[number]
+                    retired_at = datetime.fromtimestamp(
+                        retirement_cutoffs[agent], timezone.utc
+                    )
+                except (KeyError, TypeError, ValueError, OverflowError):
+                    continue
+                if merged_at < now - MAINTENANCE_WINDOW or merged_at > retired_at:
+                    continue
+                at = merged_at
+            else:
+                if (row.get("ts") or 0) < cutoff:
+                    continue
+                at = datetime.fromtimestamp(row["ts"], timezone.utc)
             record = {
                 "pr": row.get("merged"),
-                "at": datetime.fromtimestamp(row["ts"], timezone.utc).isoformat(),
+                "at": at.isoformat(),
                 "note": row.get("note"),
                 "agent": agent,
             }
@@ -5177,10 +5554,14 @@ def maintenance_load(items: Iterable[Item], now: datetime) -> Dict[str, object]:
         and i.closed_at >= cutoff
         and i.state_reason != "NOT_PLANNED"
     ]
-    # The Execution metrics plan defines upkeep as these three project
-    # classes.  Keep this reporting definition separate from PREEMPTING,
+    # The Execution metrics plan defines upkeep as these project classes,
+    # with Bug counted beside Broken since #1832 split latent defects out of
+    # it (#1845).  Keep this reporting definition separate from PREEMPTING,
     # which controls ticket ordering and intentionally has different scope.
-    upkeep = [i for i in recent if i.klass in {"Broken", "Maintenance", "Investigate"}]
+    upkeep = [
+        i for i in recent
+        if i.klass in DEFECT_CLASSES | {"Maintenance", "Investigate"}
+    ]
 
     started_new = []
     for item in items:
@@ -5357,18 +5738,22 @@ def _regression_ticket_ref(body: Optional[str]) -> Optional[str]:
 def recorded_cause_regressions(
     items: Iterable[Item], now: datetime
 ) -> Dict[str, object]:
-    """Count recent Broken projects with an explicit cause record.
+    """Count recent defect projects with an explicit cause record.
 
     A capture marker is durable evidence on the project itself. A rejection
     marker is the regression issue created by ``funnel reject``; its Ticket
     line is joined to the loaded child ticket and then to that ticket's
     parent. Human prose elsewhere in an issue is deliberately ignored.
+
+    Defect means Broken or Bug (``DEFECT_CLASSES``, #1845). The keys keep
+    their ``broken_`` names because the metrics rows and fix_recurrence.py
+    read them.
     """
     rows = list(items)
     cutoff = now - MAINTENANCE_WINDOW
     projects = [
         item for item in rows
-        if item.parent is None and item.klass == "Broken"
+        if item.parent is None and item.klass in DEFECT_CLASSES
     ]
     recent_projects = [item for item in projects if _metric_recent(item, cutoff)]
     project_refs = {item.ref for item in recent_projects}
@@ -5414,9 +5799,9 @@ def recorded_cause_regressions(
         "window_days": MAINTENANCE_WINDOW.days,
         "broken_fix_tickets": broken_fix_tickets,
         "definition": (
-            "parent projects classified Broken with a created, status, or "
-            "closed event in the last 30 days and a capture caused_by marker "
-            "or a recent funnel reject regression record"
+            "parent projects classified Broken or Bug with a created, "
+            "status, or closed event in the last 30 days and a capture "
+            "caused_by marker or a recent funnel reject regression record"
         ),
         "status": "available",
         "available": True,
@@ -5434,8 +5819,8 @@ def _recent_merged_pr_rows(
 ) -> List[Dict[str, object]]:
     """Read merged PRs updated within the window using a light paged query.
 
-    The portfolio metric only needs the branch, the merge timestamps, and
-    the fields that say whether a PR is the funnel's own (#1794). Reusing
+    The portfolio metric needs the branch, merge timestamps, and fields that
+    show whether a PR is the funnel's own (#1794). Reusing
     ``ticket_pr_index`` would also request CI rollups and scan every PR state;
     the brief's 100-row bound can also hide valid merges. Merged PRs sort by
     ``updatedAt``, so the first row older than the cutoff proves that later
@@ -12476,7 +12861,11 @@ def _can_close_itself(item: Item) -> bool:
     if parse_analysis_marker(body) is not None:
         return False
 
-    if item.klass in {"Investigate", "Broken", "Maintenance"}:
+    # Bug closes itself exactly as Broken does (#1845). #987's final accept
+    # rule names the upkeep classes as SELF_APPROVABLE_CLASSES and lets every
+    # one but Improve close itself whoever raised it; Bug is a defect class,
+    # upkeep like Broken, so no Bug project waits at `Accept it?`.
+    if item.klass in {"Investigate", "Broken", "Maintenance", "Bug"}:
         return True
     if item.klass != "Improve":
         return False
@@ -12511,8 +12900,9 @@ def _closed_itself_item_json(
     for comment in reversed(comments):
         if not isinstance(comment, dict) or not trusted_comment(comment):
             continue
-        payload = _marked_json(
-            comment.get("body") or "", CLOSED_ITSELF_PREFIX
+        payload = _first_marked_json(
+            comment.get("body") or "", CLOSED_ITSELF_PREFIX,
+            column_zero_only=True,
         )
         if payload is None:
             continue
@@ -12533,7 +12923,12 @@ def _closed_itself_item_json(
 def closed_itself_json(
     items: Iterable[Item], now: datetime, brief_cache=None
 ) -> List[Dict[str, object]]:
-    """The brief's recent funnel-close records, newest first."""
+    """The brief's recent funnel-close records, newest first.
+
+    Candidates are rebuilt from the current project items on every call;
+    comments add details only for those candidates. A marker cannot retain a
+    row after the item stops meeting the current closed-project conditions.
+    """
     candidates = closed_itself_items(items, now)
     if not candidates:
         return []
@@ -13172,7 +13567,10 @@ def satisfied_block_refs(
     This mirrors ``_dead_dependency_refs`` over the already-loaded native and
     comment dependency facts. It never fetches a blocker: a reference must be
     present in ``by_ref`` before it can satisfy a block. A date condition is
-    represented as ``until YYYY-MM-DD`` in the returned condition list.
+    represented as ``until YYYY-MM-DD`` in the returned condition list. The
+    saved Satisfied-block marker is not an input here: clear eligibility is
+    derived from current block and blocker facts before the caller can use
+    that marker to suppress a duplicate record.
     """
     # ``block_reason`` is populated only when ``parse_block_comment`` found a
     # matching header. An empty reason is still a parsed comment; ``None`` is
@@ -13926,10 +14324,15 @@ def _backoff_rows() -> List[Dict[str, object]]:
 
 
 def _backed_off_work(
-    items: Sequence[Item], now: datetime
+    items: Sequence[Item], now: datetime,
+    rows: Optional[Sequence[Mapping[str, object]]] = None,
 ) -> Dict[str, Dict[str, object]]:
-    """Refs withheld by repeated failure, read from the heartbeat."""
-    return backoff_withheld(_backoff_rows(), now)
+    """Refs withheld by repeated failure, read from the heartbeat.
+
+    ``rows`` are heartbeat records the caller already read, so ``begin`` can
+    serve the backoff and the Bug share's start history from one read (#1846).
+    """
+    return backoff_withheld(_backoff_rows() if rows is None else rows, now)
 
 
 def cmd_next(
@@ -13990,6 +14393,7 @@ def cmd_next(
         repo_readiness=repo_readiness,
         pr_facts=pr_facts,
         backed_off=backed_off,
+        recent_starts=recent_ticket_starts(backoff_rows),
     )
 
     if ticket is None:
@@ -15588,13 +15992,42 @@ def _capture_item_add_is_transient(error: str) -> bool:
     return bool(re.search(r"\b(?:500|502|503|504)\b", lowered))
 
 
+def _capture_observed(origin: Optional[str], klass: Optional[str],
+                      observed: Optional[str]) -> Tuple[Optional[str],
+                                                        Optional[str]]:
+    """The evidence line a capture writes, or why it must refuse (#1847).
+
+    Returns ``(evidence, refusal)``. Broken preempts because it is finite, and
+    it stays finite only while it holds failures that happened (#1832), so an
+    agent's Broken capture must name what it saw. A capture Nate raised is his
+    report, which is itself the observation: it needs no flag, and records
+    that his report is the evidence. `main` and `cmd_capture` both ask this,
+    so the parser refuses before any GitHub read and the seam refuses too.
+    """
+    evidence = observed.strip() if isinstance(observed, str) else ""
+    if evidence:
+        return evidence, None
+    if klass != "Broken":
+        return None, None
+    if origin == "nate-relayed":
+        return OBSERVED_NATE_REPORT, None
+    return None, (
+        "capture --class Broken requires --observed <evidence>: a run or "
+        "heartbeat id, a CI run, a log line, a wedge, or Nate's report. A "
+        "defect found by reading, review or tests that has not happened is "
+        "--class Bug; a latent security or privacy exposure stays Broken, "
+        "with --observed naming the exposure."
+    )
+
+
 def cmd_capture(items: List[Item], now: datetime, title: str, note: Optional[str],
                 repo: Optional[str], run: Optional[str] = None,
                 agent: Optional[str] = None,
                 origin: Optional[str] = None,
                 klass: Optional[str] = None,
                 caused_by: Optional[Sequence[str]] = None,
-                voice: str = "agent") -> int:
+                voice: str = "agent",
+                observed: Optional[str] = None) -> int:
     """Capture an idea. Unbounded and guilt-free, by design."""
     if origin not in ORIGIN_VOICES:
         raise GitHubError(
@@ -15612,6 +16045,9 @@ def cmd_capture(items: List[Item], now: datetime, title: str, note: Optional[str
                 klass, ", ".join(LADDER)
             )
         )
+    evidence, refusal = _capture_observed(origin, klass, observed)
+    if refusal is not None:
+        raise GitHubError(refusal)
     caused_by_refs = []
     if caused_by is not None:
         caused_by_refs = [
@@ -15621,10 +16057,10 @@ def cmd_capture(items: List[Item], now: datetime, title: str, note: Optional[str
         if not caused_by_refs:
             raise GitHubError("--caused-by requires a non-empty PR or ticket reference")
     repo = capture_repo(repo, run, agent)
-    body = append_provenance(
-        note or "Captured from chat. Not yet thought through.", voice,
-        at=now, run=run, agent=agent,
-    )
+    text = note or "Captured from chat. Not yet thought through."
+    if evidence is not None:
+        text = "{}\n\n{}{}".format(text, OBSERVED_PREFIX, evidence)
+    body = append_provenance(text, voice, at=now, run=run, agent=agent)
     if caused_by_refs:
         body = append_caused_by(body, caused_by_refs, at=now)
     args = [
@@ -15671,6 +16107,59 @@ def cmd_capture(items: List[Item], now: datetime, title: str, note: Optional[str
         print("{}  → Ideas (needs-shaping) in {}".format(url, repo))
     else:
         raise GitHubError(_capture_item_add_error(add))
+    return 0
+
+
+def cmd_promote(items: List[Item], now: datetime, ref: str, observed: str,
+                run: Optional[str] = None,
+                agent: Optional[str] = None) -> int:
+    """Move a Bug that has now happened to Broken, with its evidence (#1847).
+
+    A Bug is latent and never preempts; once it is seen to happen it is an
+    observed failure, which is what Broken holds (#1832). The move takes the
+    same evidence a Broken capture does. The `**Observed:**` comment is
+    posted before the Class write, so a failed write leaves a Bug with its
+    evidence to retry from, never a Broken item without its proof.
+    """
+    evidence = observed.strip() if isinstance(observed, str) else ""
+    if not evidence:
+        raise GitHubError(
+            "promote requires --observed <evidence>: a run or heartbeat id, "
+            "a CI run, a log line, a wedge, or Nate's report"
+        )
+    item = find(items, ref)
+    if item.klass != "Bug":
+        raise GitHubError(
+            "promote moves a Bug to Broken; {} is Class {}".format(
+                item.ref, item.klass or "unset"
+            )
+        )
+    # Class on a closed issue orders nothing, so the failure would be recorded
+    # and never worked. A closed Bug that happens is a new Broken capture.
+    if item.state != "OPEN":
+        raise GitHubError(
+            "{} is closed; capture the failure as a new --class Broken item "
+            "with --caused-by {}".format(item.ref, item.ref)
+        )
+    comment = _run_gh(
+        ["gh", "issue", "comment", str(item.number), "--repo", item.repo,
+         "--body", append_provenance(
+             "{}{}\n\nPromoted from Bug to Broken: this latent defect has now "
+             "happened.".format(OBSERVED_PREFIX, evidence),
+             "agent", at=now, run=run, agent=agent)],
+        capture_output=True, text=True,
+    )
+    if comment.returncode != 0:
+        raise GitHubError(comment.stderr.strip())
+    gh_graphql(
+        SET_FIELD,
+        project=PROJECT_ID,
+        item=item.item_id,
+        field=CLASS_FIELD_ID,
+        option=_option_id(CLASS_FIELD_ID, "Broken"),
+    )
+    item.klass = "Broken"
+    print("{} → Broken (was Bug)".format(item.ref))
     return 0
 
 
@@ -17187,8 +17676,6 @@ def reconcile_orphaned_starts(
     by_ref = {item.ref: item for item in items}
     spools: Dict[str, List[Dict]] = {}
     for agent in sorted(heartbeat.PROVIDERS):
-        if agent in heartbeat.RETIRED_AGENTS:
-            continue
         try:
             spools[agent] = heartbeat.read(agent)
         except Exception:
@@ -17206,6 +17693,10 @@ def reconcile_orphaned_starts(
 
     candidates = []
     for agent, records in spools.items():
+        # Retired providers' finish records still establish historical merges,
+        # but their open starts must not enter the liveness reconciliation.
+        if agent in heartbeat.RETIRED_AGENTS:
+            continue
         bound = heartbeat.bindings(records)
         for start in heartbeat.open_starts(records):
             binding = bound.get(start.get("run"))
@@ -18046,13 +18537,18 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
             str(entry["ref"]) for entry in reconciled_merges
             if entry.get("result") == "error" and entry.get("ref")
         )
-        begin_backed_off = _backed_off_work(items, now)
+        # One heartbeat read serves the backoff and the Bug share's start
+        # history: each read costs seconds of the reply budget (#1846).
+        begin_rows = _backoff_rows()
+        begin_backed_off = _backed_off_work(items, now, rows=begin_rows)
+        begin_starts = recent_ticket_starts(begin_rows)
         ticket = next_ticket_for_tier(
             items, now, tier=tier, blocked=blocked,
             agent=agent,
             repo_readiness=repo_readiness,
             pr_facts=pr_facts,
             backed_off=begin_backed_off,
+            recent_starts=begin_starts,
         )
         recently_claimed: Set[str] = set()
         while ticket is not None:
@@ -18078,6 +18574,13 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
             # changing the shared ordering.
             ticket.in_motion_since = current_claim
             recently_claimed.add(ticket.ref)
+            # That begin's start may not have reached the heartbeat when this
+            # one read it. Count it, or lanes pulling together would each see
+            # the Bugs' turn and take a Bug apiece (#1846). If its binding did
+            # land first it counts twice here, which can hold a Bug back but
+            # never let one through.
+            begin_starts = list(begin_starts) + [effective_class(
+                ticket, {entry.ref: entry for entry in items})]
             ticket = next_ticket_for_tier(
                 items, now, tier=tier, blocked=blocked,
                 excluded=recently_claimed,
@@ -18085,6 +18588,7 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
                 repo_readiness=repo_readiness,
                 pr_facts=pr_facts,
                 backed_off=begin_backed_off,
+                recent_starts=begin_starts,
             )
         held = held_claims_before(
             items,
@@ -18403,11 +18907,16 @@ def _bind_run(agent: str, out: Dict[str, object]) -> None:
     out["bound"] = {"do": do, "work": str(subject)}
     if repo:
         out["bound"]["repo"] = str(repo)
+    fields: Dict[str, str] = {"repo": str(repo)} if repo else {}
+    if do == "ticket" and work.get("class"):
+        # The start carries its class, which the Bug share counts after the
+        # ticket has closed and left begin's view of the board (#1846).
+        fields["klass"] = str(work["class"])
     try:
         import heartbeat
 
         heartbeat.record_binding(agent, str(run), str(do), str(subject),
-                                 repo=str(repo) if repo else None)
+                                 **fields)
     except Exception:
         # Instrumentation must not gate the thing it instruments.
         pass
@@ -18635,7 +19144,10 @@ def _write_verdict(repo: str, pr: int, sha: str, verdict: str, ci: str,
     comment = "{}\n\n**Review: {}** (CI {})\n\n```json\n{}\n```".format(
         REVIEW_MARKER, verdict, ci, json.dumps(body, indent=2, sort_keys=True))
     if blocking:
-        comment += "\n\nBlocking:\n" + "\n".join("- " + b for b in blocking)
+        # The echo is the model's words outside the JSON, so each is made
+        # inert: one line, no ``<!--`` (#1798). The JSON keeps them exactly.
+        comment += "\n\nBlocking:\n" + "\n".join(
+            "- " + inert_comment_text(b) for b in blocking)
     comment = append_provenance(comment, "agent", run=run, agent=agent)
 
     out = _run_gh(
@@ -19799,8 +20311,11 @@ def _blocked_comment_body(blocked_on: Sequence[str], because: str) -> str:
 
 
 def _needs_decision_comment_body(question: str) -> str:
-    """Render the breakdown-question header owned by its parser."""
-    return "{} {}".format(NEEDS_DECISION_PREFIX, question)
+    """Render the breakdown-question header owned by its parser.
+
+    The question is a model's words, so it is made inert (#1798).
+    """
+    return "{} {}".format(NEEDS_DECISION_PREFIX, inert_comment_text(question))
 
 
 def _hold_reference(value: str) -> str:
@@ -20021,6 +20536,28 @@ def main(argv: Optional[Sequence[str]] = None, *,
         metavar="REF",
         help="earlier PR or ticket that caused this idea; repeat for more",
     )
+    capture.add_argument(
+        "--observed", default=None, metavar="EVIDENCE",
+        help="what shows it happened: a run or heartbeat id, CI run, log "
+             "line, wedge, or Nate's report; required for --class Broken "
+             "with --origin agent",
+    )
+    promote = sub.add_parser(
+        "promote", help="move a Bug that has happened to Broken, with evidence")
+    promote.add_argument("ref", help="issue number, owner/repo#number, or URL")
+    promote.add_argument(
+        "--observed", required=True, metavar="EVIDENCE",
+        help="what shows it happened: a run or heartbeat id, CI run, log "
+             "line, wedge, or Nate's report",
+    )
+    promote.add_argument(
+        "--run", default=None,
+        help="heartbeat run id; otherwise infer a unique open local start",
+    )
+    promote.add_argument(
+        "--agent", default=None,
+        help="agent that wrote the comment; otherwise read the heartbeat spool",
+    )
     claim = sub.add_parser("claim", help="take the single-in-motion lock on a ticket")
     claim.add_argument("ref", help="issue number, owner/repo#number, or URL")
     release = sub.add_parser("release", help="give up the lock on a ticket")
@@ -20219,6 +20756,10 @@ def main(argv: Optional[Sequence[str]] = None, *,
     if (args.command == "capture" and args.origin == "agent"
             and args.klass is None):
         parser.error("--class is required with --origin agent")
+    if args.command == "capture":
+        refusal = _capture_observed(args.origin, args.klass, args.observed)[1]
+        if refusal is not None:
+            parser.error(refusal)
 
     global _ACTIVE_HEARTBEAT_RUN, _ACTIVE_HEARTBEAT_AGENT
     _ACTIVE_HEARTBEAT_RUN = getattr(args, "run", None)
@@ -20524,7 +21065,11 @@ def main(argv: Optional[Sequence[str]] = None, *,
         if args.command == "capture":
             return cmd_capture(items, now, args.title, args.note, args.repo,
                                args.run, args.agent, args.origin, args.klass,
-                               args.caused_by, args.voice)
+                               args.caused_by, args.voice,
+                               observed=args.observed)
+        if args.command == "promote":
+            return cmd_promote(items, now, args.ref, args.observed,
+                               args.run, args.agent)
         if args.command == "begin":
             begin_kwargs = {
                 "repo_readiness": repo_readiness,

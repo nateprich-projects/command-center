@@ -608,6 +608,145 @@ def test_repo_row_fails_without_a_ticket():
     assert len(reasons) == 1 and reasons[0].startswith("repo-rules:")
 
 
+# -- row 9: the diff (#1801) ----------------------------------------------------
+
+TOO_LARGE = "diff too large to review: deliver the ticket in smaller slices"
+DIFF_HEAD = "diff --git a/big.py b/big.py\n"
+
+
+def diff_of(size, fill="+"):
+    """A diff of exactly ``size`` UTF-8 bytes when ``fill`` is one byte."""
+    return DIFF_HEAD + fill * (size - len(DIFF_HEAD))
+
+
+def files_diff(text, *omitted):
+    """A files-API diff that could not show ``omitted``, as #1800 builds it."""
+    diff = review.AssembledDiff(text)
+    diff.omitted_patches = len(omitted)
+    diff.omitted_paths = list(omitted)
+    return diff
+
+
+def test_diff_row_rejects_a_diff_over_150_kb_and_passes_one_at_it():
+    found = packet(diff=diff_of(153601))
+    assert found["precheck"] == {"pass": False, "reasons": [TOO_LARGE]}
+    found = packet(diff=diff_of(153600))
+    assert found["precheck"] == {"pass": True, "reasons": []}
+
+
+def test_diff_row_measures_bytes_not_characters():
+    """80,000 two-byte characters are 160,000 bytes: over the cap."""
+    found = packet(diff=DIFF_HEAD + "é" * 80000)
+    assert found["precheck"]["reasons"] == [TOO_LARGE]
+
+
+def test_diff_row_rejects_an_incomplete_diff_by_name():
+    text = ("diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n"
+            "@@ -1 +1 @@\n-x\n+y\n")
+    found = packet(diff=files_diff(text, "big.py", "docs/gen.md"))
+    assert found["diff_omitted_files"] == 2
+    assert found["precheck"] == {
+        "pass": False, "reasons": ["diff incomplete: big.py, docs/gen.md"]}
+
+
+def test_diff_row_names_ten_unshown_files_and_counts_the_rest():
+    names = ["f{}.py".format(index) for index in range(12)]
+    found = packet(diff=files_diff("", *names))
+    assert found["precheck"]["reasons"] == [
+        "diff incomplete: f0.py, f1.py, f2.py, f3.py, f4.py, f5.py, f6.py, "
+        "f7.py, f8.py, f9.py and 2 more"]
+
+
+def test_diff_row_counts_unshown_files_a_packet_did_not_name():
+    diff = review.AssembledDiff("")
+    diff.omitted_patches = 3
+    found = packet(diff=diff)
+    assert found["precheck"]["reasons"] == [
+        "diff incomplete: 3 changed text files not shown"]
+
+
+def test_diff_row_does_not_read_the_truncated_flag_as_incomplete():
+    """A files-API rebuild always sets ``diff_truncated`` (#1800).
+
+    The clipped-compare fallback sets it with nothing left out, so the
+    row keys on the omitted count alone.
+    """
+    found = packet(diff=files_diff("diff --git a/a.py b/a.py\n"))
+    assert found["diff_truncated"] is True
+    assert found["diff_omitted_files"] == 0
+    assert review.precheck_diff(found) == []
+    assert found["precheck"] == {"pass": True, "reasons": []}
+
+
+def test_diff_row_leaves_a_small_diff_unchanged():
+    diff = ("diff --git a/funnel.py b/funnel.py\n--- a/funnel.py\n"
+            "+++ b/funnel.py\n@@ -1 +1 @@\n-old\n+new\n")
+    found = packet(diff=diff)
+    assert review.precheck_diff(found) == []
+    assert found["precheck"] == {"pass": True, "reasons": []}
+    assert found["diff"] == diff
+    assert "diff_truncated" not in found
+    assert "diff_omitted_paths" not in found
+
+
+def test_diff_reasons_come_after_every_other_row():
+    view = pr_view(statusCheckRollup=[
+        {"name": "tests", "conclusion": "FAILURE", "status": "COMPLETED"}])
+    diff = files_diff(diff_of(160000), "gen.py")
+    reasons = packet(pr_view=view, diff=diff)["precheck"]["reasons"]
+    assert reasons == ["ci: CI not green (state red): tests", TOO_LARGE,
+                       "diff incomplete: gen.py"]
+
+
+def seed_comments(count, size, first_day):
+    return [{"author": {"login": "nateprich"},
+             "body": chr(ord("a") + index % 26) * size,
+             "createdAt": "2026-09-{:02d}T{:02d}:00:00Z".format(
+                 first_day + index // 24, index % 24)}
+            for index in range(count)]
+
+
+def test_large_context_is_trimmed_and_never_rejects():
+    """The stalled must-approve seed's shape: 232 KB, with a 13 KB diff.
+
+    command-center#1185's packet (#1783): 56 KB of plan.md, two closed
+    tickets whose comments ran to 29 KB and 49 KB, the branch ticket
+    carried twice, and one plan's comments under both. Only the diff is
+    measured, so it passes; the comments past each list's bound are
+    trimmed with the cut mark, newest kept.
+    """
+    parent = {"number": 1, "title": "the plan",
+              "comments": seed_comments(13, 1150, 1)}
+    branch = ticket(comments=seed_comments(19, 1500, 2), parent=parent)
+    sibling = ticket(ref=REPO + "#10", number=10,
+                     url="https://github.com/{}/issues/10".format(REPO),
+                     comments=seed_comments(30, 1650, 2), parent=parent)
+    plan_md = "p" * (56 * 1024)
+    diff = diff_of(13 * 1024)
+    untrimmed = len(json.dumps([plan_md, diff, branch, branch, sibling]))
+    assert 225 * 1024 < untrimmed < 240 * 1024
+
+    found = packet(ticket=branch, tickets=[branch, sibling],
+                   plan_md=plan_md, diff=diff)
+
+    assert found["precheck"] == {"pass": True, "reasons": []}
+    assert found["diff"] == diff
+    # 24,000 characters hold the newest 16 of 1,500 and the newest 14 of
+    # 1,650; the rest become the mark. The plan's 13 comments fit whole.
+    for shaped in (found["ticket"], found["tickets"][0]):
+        bodies = [row["body"] for row in shaped["comments"]]
+        assert len(bodies) == 19
+        assert bodies[:3] == ["…[truncated 1500 chars]"] * 3
+        assert all(len(body) == 1500 for body in bodies[3:])
+        assert [len(row["body"]) for row in shaped["parent"]["comments"]] \
+            == [1150] * 13
+    bodies = [row["body"] for row in found["tickets"][1]["comments"]]
+    assert len(bodies) == 30
+    assert bodies[:16] == ["…[truncated 1650 chars]"] * 16
+    assert all(len(body) == 1650 for body in bodies[16:])
+    assert found["plan_md"] == plan_md
+
+
 # -- the combined precheck ------------------------------------------------------
 
 def test_reasons_come_out_in_row_order():

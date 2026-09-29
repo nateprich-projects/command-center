@@ -220,6 +220,11 @@ PROVIDERS = {"claude": "anthropic", "codex": "openai", "zcode": "zai",
 #: the two together.
 ZAI_STANDARD_UNTIL = 1790514000
 
+# Keep each retirement instant beside the policy that makes the lane retired.
+# Readers may use it to retain historical work without treating silence after
+# the cutoff as an active lane.
+RETIRED_AGENT_CUTOFFS = {"zcode": ZAI_STANDARD_UNTIL}
+
 
 def retired_agents(now: Optional[float] = None) -> frozenset:
     """Agents whose schedules are stopped on purpose, as of ``now``.
@@ -239,7 +244,10 @@ def retired_agents(now: Optional[float] = None) -> frozenset:
     lane that stopped, not the pause working.
     """
     now = time.time() if now is None else now
-    return frozenset() if now < ZAI_STANDARD_UNTIL else frozenset({"zcode"})
+    return frozenset(
+        agent for agent, cutoff in RETIRED_AGENT_CUTOFFS.items()
+        if now >= cutoff
+    )
 
 
 #: Read once per process. Every reader is a short-lived command (a brief, a
@@ -585,7 +593,8 @@ def record_api_cost(agent: str, run: Optional[str], api_cost: Dict) -> str:
 
 
 def record_binding(agent: str, run: str, do: str, work: str,
-                   repo: Optional[str] = None) -> str:
+                   repo: Optional[str] = None,
+                   klass: Optional[str] = None) -> str:
     """Bind the work `funnel begin` issued to the run that received it (#497).
 
     Its own record, because the spool is append-only and the start record is
@@ -605,6 +614,11 @@ def record_binding(agent: str, run: str, do: str, work: str,
         # A ticket ref carries its repo; a review PR is a bare number, so the
         # repo travels beside it for anything that must write there (#668).
         record["repo"] = repo
+    if klass:
+        # A ticket's class when it started. The Bug share counts recent
+        # starts by it, and a merged ticket's Project row is gone from
+        # begin's view long before its start leaves the count (#1846).
+        record["class"] = klass
     kept = append(agent, record)
     _report(kept)
     return kept
@@ -1140,7 +1154,7 @@ def bindings(records: List[Dict]) -> Dict[str, Dict]:
     for rec in rows:
         found[rec["run"]] = {
             "do": rec.get("do"), "work": rec.get("work"), "ts": rec.get("ts"),
-            "repo": rec.get("repo"),
+            "repo": rec.get("repo"), "class": rec.get("class"),
         }
     return found
 

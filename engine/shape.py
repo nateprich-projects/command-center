@@ -103,8 +103,8 @@ NEEDS_FIELDS = (
 #: false-hold cases before they are recorded.
 AGENT_SELF_APPROVABLE_OUTPUT_REVIEW = {
     "scope": (
-        "For agent-origin Investigate, Broken, Maintenance, and Improve "
-        "work, ask Scope and priority only for a concrete unresolved "
+        "For agent-origin Investigate, Broken, Maintenance, Improve, and "
+        "Bug work, ask Scope and priority only for a concrete unresolved "
         "stakeholder tradeoff. Do not ask generic permission to implement "
         "the work."),
     "scheduling": (
@@ -771,7 +771,8 @@ def scan_escalation_comment(matches: Sequence[Dict[str, Optional[str]]],
     Each reason is listed with the plan line it matched, quoted, so the
     breakdown and the reviewer can see what raised the tier and judge it.
     The heading says the plan was not held only when it advanced: an open
-    question or the class can still hold it at Shaped.
+    question or the class can still hold it at Shaped. The quoted line is
+    the model's plan text, so it is made inert (#1798).
     """
     if status == "Ready":
         heading = "Escalation scan: review tier raised, plan not held."
@@ -789,7 +790,7 @@ def scan_escalation_comment(matches: Sequence[Dict[str, Optional[str]]],
         lines.append("- `{}`".format(entry["reason"]))
         line = entry.get("line")
         if isinstance(line, str) and line.strip():
-            lines.append("  > {}".format(line.strip()))
+            lines.append("  > {}".format(funnel.inert_comment_text(line)))
     return funnel.append_provenance(
         "\n".join(lines), "agent", at=at, run=run, agent=agent)
 

@@ -8,9 +8,9 @@
 // computed empty value remains empty.
 
 
-// Stages that open collapsed: finished and stopped work is reference, not
-// the working board.
-const COLLAPSED_STAGES = ["Parked", "Done"];
+// Stages that open collapsed: finished work is reference, not the working
+// board. Parked has its own tab, where it is the only group and opens.
+const COLLAPSED_STAGES = ["Done"];
 
 const STAGES = ["Ideas", "Shaped", "Ready", "Building", "Parked", "Done"];
 
@@ -44,6 +44,40 @@ function isRecord(value) {
 // the URL, so a reload or a shared link keeps it.
 let selectedRepo = null;
 let activeTab = "funnel";
+
+// The board's three tabs (Nate, 2026-09-28): Parked holds the Parked stage,
+// Bugs holds Class Bug projects in every other stage, and In Progress holds
+// the rest, Broken included. In Progress is the default and has no URL value.
+const BOARD_TABS = ["parked", "in-progress", "bugs"];
+let boardTab = "in-progress";
+
+function boardTabOf(stage, item) {
+  if (stage === "Parked") return "parked";
+  return item && item.class === "Bug" ? "bugs" : "in-progress";
+}
+
+// One tab's columns: every stage keeps its place and its producer order, and
+// holds only that tab's rows. Empty stages are skipped by the renderers.
+function tabColumns(columns, tab = boardTab) {
+  return columns.map((column) => {
+    const items = [];
+    for (const item of column.items || []) {
+      if (boardTabOf(column.stage, item) === tab) items.push(item);
+    }
+    return { ...column, items };
+  });
+}
+
+// Each tab's count is its open projects after the repository filter: Done is
+// history, and counting it would bury the work in progress under it.
+function boardTabCounts(columns, repo = selectedRepo) {
+  const counts = Object.fromEntries(BOARD_TABS.map((tab) => [tab, 0]));
+  for (const column of columns) {
+    if (column.stage === "Done") continue;
+    for (const item of visible(column.items, repo)) counts[boardTabOf(column.stage, item)] += 1;
+  }
+  return counts;
+}
 
 // The filter's key is the full owner/repo, read from the ref first: two
 // owners can hold a repository of the same name, and the board row's own
@@ -645,10 +679,21 @@ function projectRow(item) {
   return wrap;
 }
 
+function renderBoardTabs(columns) {
+  const counts = boardTabCounts(columns);
+  for (const button of document.querySelectorAll("#board-tabs [data-board-tab]")) {
+    const tab = button.dataset.boardTab;
+    button.setAttribute("aria-selected", String(tab === boardTab));
+    button.querySelector("[data-count]").textContent = String(counts[tab] ?? 0);
+  }
+}
+
 function renderBoard(board) {
   const container = document.querySelector("#board");
   container.replaceChildren();
-  const columns = boardColumns(board);
+  const allColumns = boardColumns(board);
+  renderBoardTabs(allColumns);
+  const columns = tabColumns(allColumns);
   const table = element("div", "table");
   table.append(headerRow());
   let rendered = 0;
@@ -682,8 +727,9 @@ function renderBoard(board) {
     });
   }
   if (!rendered) {
+    const label = { parked: "parked", "in-progress": "in progress", bugs: "in Bugs" }[boardTab];
     container.append(element("p", "empty", selectedRepo
-      ? `Nothing on the board for ${shortRepo(selectedRepo)}.` : "The board is empty."));
+      ? `Nothing ${label} for ${shortRepo(selectedRepo)}.` : `Nothing ${label}.`));
     return;
   }
   container.append(table);
@@ -838,6 +884,19 @@ function writeRepoToUrl(repo) {
   if (repo) url.searchParams.set("repo", repo);
   else url.searchParams.delete("repo");
   window.history.replaceState(null, "", url);
+}
+
+function boardTabFromUrl(href) {
+  const url = new URL(href, "https://funnel.nateprich.com");
+  const tab = url.searchParams.get("board");
+  return BOARD_TABS.includes(tab) ? tab : "in-progress";
+}
+
+function boardTabUrl(tab, href) {
+  const url = new URL(href, "https://funnel.nateprich.com");
+  if (tab === "in-progress" || !BOARD_TABS.includes(tab)) url.searchParams.delete("board");
+  else url.searchParams.set("board", tab);
+  return url.pathname + url.search + url.hash;
 }
 
 function tabFromUrl(href) {
@@ -1845,7 +1904,7 @@ function renderBudgetMetrics(series, container) {
   }
   appendBudgetGap(claude, root.D && root.D.D3 && root.D.D3.gap);
 
-  const cost = appendBudgetTile(container, "D4", "Cost per merged PR by lane");
+  const cost = appendBudgetTile(container, "D4", "Notional API cost per merged PR by lane");
   const costLeaves = metricLeaves(root.D && root.D.D4);
   let costShown = false;
   for (const item of costLeaves) {
@@ -1947,6 +2006,19 @@ function bindRepoFilter() {
   });
 }
 
+function bindBoardTabs() {
+  const tabs = document.querySelector("#board-tabs");
+  if (!tabs) return;
+  tabs.addEventListener("click", (event) => {
+    const button = event.target.closest && event.target.closest("[data-board-tab]");
+    if (!button) return;
+    boardTab = button.dataset.boardTab;
+    window.history.replaceState(null, "", boardTabUrl(boardTab, window.location.href));
+    if (lastSnapshot) renderBoard(lastSnapshot.board || {});
+    else renderBoardTabs([]);
+  });
+}
+
 // The page polls its own snapshot: a published snapshot is a KV read through
 // the Worker, so this costs no GitHub budget, and it re-renders only when the
 // producer's timestamp actually moved. Without it an open tab showed whatever
@@ -2039,14 +2111,17 @@ function startPolling() {
 
 if (typeof document !== "undefined") {
   selectedRepo = readRepoFromUrl();
+  boardTab = boardTabFromUrl(window.location.href);
   bindRepoFilter();
+  bindBoardTabs();
   bindViewNavigation();
   activateTab(tabFromUrl(window.location.href));
   startPolling();
 }
 
 export {
-  STAGES, age, boardColumns, failureState, museUsageText, nextOwner, ownerCell,
+  STAGES, age, boardColumns, boardTabCounts, boardTabFromUrl, boardTabUrl, tabColumns,
+  failureState, museUsageText, nextOwner, ownerCell,
   phoneState, pipState, projectBlocked, projectHold, holdChip, localTime,
   renderPhoneBoard, ticketHold, unblocksChip,
   repoLabels, repoOf, repoOptions, rowTier, shortRepo, visible,

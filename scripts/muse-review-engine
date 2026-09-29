@@ -24,8 +24,9 @@
 # on z.ai answers one JSON question. Calls retry once on a parse error; a
 # shape part or a judge chunk whose call goes stream-idle is also asked once
 # more, and each writes one timing line to stderr (#1719). The review lister
-# gets the same stream-idle retry (#1730). A call whose packet is over 150 KB
-# gets a second stream-idle retry (#1785).
+# gets the same stream-idle retry (#1730) and the same timing line (#1855),
+# and reads the packet without its diff or its repeats (#1866).
+# A call whose packet is over 150 KB gets a second stream-idle retry (#1785).
 # Breakdown rides the standard tier only; shape follows wherever begin offers
 # it.
 #
@@ -882,9 +883,10 @@ model_stream_idle() {
 # requirement chunks would not shrink the prompt that stalls (plan #1772).
 # Measured on the packet file the call's prompt carries: the review's
 # RUN_DIR/packet.json, which a replay copies its given packet into, or a
-# shape part's own slice. The count is the only change: the wall-clock bound
-# still kills each call, a kill (124) is still never retried, and the parse
-# retry is still its own.
+# shape part's own slice. The review lister keeps that whole packet's count,
+# though its prompt carries a smaller copy (#1866). The count is the
+# only change: the wall-clock bound still kills each call, a kill (124) is
+# still never retried, and the parse retry is still its own.
 LARGE_PACKET_BYTES=$((150 * 1024))
 
 # How many stream-idle retries a call over this packet file gets: 2 over
@@ -925,12 +927,12 @@ stream_idle_retried_note() {
 # One stderr line per shape part and per judge chunk, which the schedule's
 # error log keeps: #1600's closing evidence is each part's wall time, and a
 # heartbeat only times the whole run. The name is the call's directory in
-# RUN_DIR; elapsed is whole seconds over every call the part made, and calls
-# says how many that was, so a parse or stream-idle retry is not mistaken for
-# one slow call. The outcome is `done`, `retried-done` when the part answered
-# only after a stream-idle retry (idle_retried counts them, #1785), or
-# `failed` when it has no answer — a judge chunk that failed closed to
-# `unsure` included.
+# RUN_DIR, or `lister` for the review lister (#1855); elapsed is whole
+# seconds over every call the part made, and calls says how many that was,
+# so a parse or stream-idle retry is not mistaken for one slow call. The
+# outcome is `done`, `retried-done` when the part answered only after a
+# stream-idle retry (idle_retried counts them, #1785), or `failed` when it
+# has no answer — a judge chunk that failed closed to `unsure` included.
 #
 #   muse-review-engine: timing shape.decider.0 elapsed=412s calls=2 outcome=retried-done
 log_call_timing() {
@@ -1192,7 +1194,7 @@ escalated risk. So:
   named-ticket order in `depends_on` as `owner/repo#n` refs; `[]` when the
   plan waits on nothing.
 - `proposed_class` names one ladder class: Investigate, Broken, Maintenance,
-  Improve, New, or Replace.
+  Improve, New, Replace, or Bug.
 
 Answer with exactly one JSON object and nothing else:
 
@@ -1970,9 +1972,82 @@ fi
 # can outgrow the argument limit.
 PACKET_JSON="$(cat "$PACKET_FILE")"
 PROMPT="${PROMPT_TEMPLATE//PACKET_JSON/$PACKET_JSON}"
-# The lister and every judge carry this whole packet, so they share one count
-# of stream-idle retries, measured once from the file they all read (#1785).
+# Every judge carries this whole packet and the lister a copy without its
+# diff or its repeats (#1866, below). They share one count of stream-idle retries, measured
+# once from the whole packet file (#1785).
 REVIEW_IDLE_RETRIES="$(stream_idle_retries "$PACKET_FILE")"
+
+# The lister's own copy of the packet, without the diff or its repeats
+# (#1866). The lister lists what the ticket, its parent plan and the
+# repository's rules ask of the change, and none of that is in the diff; the
+# judges check the diff and still read the whole packet, from PROMPT above.
+# Handed the whole packet, the lister went stream-idle on all three attempts
+# over the 232 KB must-approve seed, 785 s, and the judges never started
+# (#1698, by #1855's timing line).
+#
+# The diff text goes. build_packet folds every file's patch into `diff`, and
+# no other field carries patch text. The changed paths stay, as names in
+# `changed_files`, so a rule scoped to a path (a protected file, a member-repo
+# boundary) is still listed. `diff` keeps its place and holds one line saying
+# the text is withheld from this call only, so the lister reads a diff it was
+# not shown as withheld, not as an empty change.
+#
+# Repeats go too, because the diff was not the bulk: 13 KB of the seed's
+# 232 KB. The branch ticket was repeated whole as `tickets[0]`, and one parent
+# repeated in every ticket. So an entry of `tickets` equal to `ticket` becomes
+# "same as ticket", and an entry's `parent` equal to one already carried, on
+# `ticket` or an earlier entry, becomes "same parent plan as <that one>".
+# `ticket` itself stays whole: the routine names it the branch ticket, and the
+# code that reads `ticket.ref` after the lister reads packet.json, not this
+# copy. Equality is of the whole entry, never its ref. A parent carries no
+# plan text (shape_ticket drops its body), so it never repeats `plan_md`,
+# which is the repository's plan.md. Comments stay as they are: #1801 bounds
+# them when a packet is built. The copy is written beside the packet, in the
+# owner-only run directory (#1240).
+LISTER_PACKET_FILE="$RUN_DIR/lister-packet.json"
+if ! python3 - "$PACKET_FILE" "$LISTER_PACKET_FILE" >"$DIAG_FILE" 2>&1 <<'PY'
+import json
+import sys
+
+with open(sys.argv[1]) as handle:
+    packet = json.load(handle)
+if not isinstance(packet, dict):
+    raise SystemExit("the review packet is not a JSON object")
+packet["diff"] = ("withheld from this call only: every judge reads the whole "
+                  "diff, and changed_files names the paths it changes")
+ticket = packet.get("ticket")
+tickets = packet.get("tickets")
+if isinstance(tickets, list):
+    # The parents already carried in full, by the name a pointer gives them.
+    parents = []
+    if isinstance(ticket, dict) and isinstance(ticket.get("parent"), dict):
+        parents.append(("ticket", ticket["parent"]))
+    entries = []
+    for index, entry in enumerate(tickets):
+        if isinstance(ticket, dict) and entry == ticket:
+            entries.append("same as ticket")
+            continue
+        if isinstance(entry, dict) and isinstance(entry.get("parent"), dict):
+            carried = [name for name, parent in parents
+                       if parent == entry["parent"]]
+            if carried:
+                entry = dict(entry,
+                             parent="same parent plan as " + carried[0])
+            else:
+                parents.append(("tickets[{}]".format(index), entry["parent"]))
+        entries.append(entry)
+    packet["tickets"] = entries
+with open(sys.argv[2], "w") as handle:
+    json.dump(packet, handle, indent=2, sort_keys=True)
+PY
+then
+  lister_packet_err="$(cat "$DIAG_FILE")"
+  echo "muse-review-engine: could not build the lister's packet: $lister_packet_err" >&2
+  failure "could not build the lister packet for PR #$BEGIN_PR in $BEGIN_REPO: $lister_packet_err" || true
+  exit 1
+fi
+LISTER_PACKET_JSON="$(cat "$LISTER_PACKET_FILE")"
+LISTER_PROMPT="${PROMPT_TEMPLATE//PACKET_JSON/$LISTER_PACKET_JSON}"
 
 # --- the lister call (#1241) -------------------------------------------------
 #
@@ -2097,19 +2172,29 @@ PY
 # rejected for the model's formatting.
 #
 # The stream-idle retry is #1719's, given to the judge chunks and shape parts
-# first. The lister is the one call that reads the whole packet, and on the
+# first. The lister read the whole packet until #1866, and on the
 # ~240 KB must-approve corpus seed the single call replay used to make went
 # silent past Muse's 180-second limit on two consecutive replays (#1698), so a
 # silent lister is asked again, unbound like every call after the first,
 # before it fails the run. Any other failure still fails at once.
+#
+# Every way out writes the lister's timing line, as a judge chunk's and a
+# shape part's do (#1855): a lister failure read `failed parts: none` in
+# review-replay without it. model_failed exits the engine, so on a model
+# failure the line is written before it is called.
 list_requirements() {
   local attempt=1
+  local calls=0
+  local answered=0
   local idle_retried=0
+  local started
   local parse_err
   local muse_status
   local parse_status
-  printf '%s\n\n%s' "$(lister_header)" "$PROMPT" >"$PROMPT_FILE"
+  started="$(date +%s)"
+  printf '%s\n\n%s' "$(lister_header)" "$LISTER_PROMPT" >"$PROMPT_FILE"
   while true; do
+    calls=$((calls + 1))
     call_model
     muse_status=$?
     if (( muse_status != 0 )); then
@@ -2120,6 +2205,8 @@ list_requirements() {
         log_stream_idle_retry "the lister" "$idle_retried" "$DIAG_FILE"
         continue
       fi
+      log_call_timing "lister" "$started" "$calls" "$answered" \
+        "$idle_retried"
       model_failed "$muse_status"
     fi
     # Read the status directly, for the same reason the judging loop does:
@@ -2127,16 +2214,20 @@ list_requirements() {
     parse_requirements 2>"$DIAG_FILE"
     parse_status=$?
     if (( parse_status == 0 )); then
+      answered=1
+      log_call_timing "lister" "$started" "$calls" "$answered" \
+        "$idle_retried"
       return 0
     fi
     parse_err="$(cat "$DIAG_FILE")"
     if (( attempt == 1 )); then
       printf '%s\n\n%s\n\nYour previous answer could not be parsed: %s\nReply again with exactly one JSON object and nothing else.' \
-        "$(lister_header)" "$PROMPT" "$parse_err" >"$PROMPT_FILE"
+        "$(lister_header)" "$LISTER_PROMPT" "$parse_err" >"$PROMPT_FILE"
       attempt=2
       continue
     fi
     echo "muse-review-engine: the requirement list could not be parsed: $parse_err" >&2
+    log_call_timing "lister" "$started" "$calls" "$answered" "$idle_retried"
     failure "could not list the requirements for PR #$BEGIN_PR in $BEGIN_REPO: $parse_err" || true
     return 1
   done
@@ -2192,6 +2283,14 @@ judge_header() {
   # the requirement. The PR-description paragraph is #1720: the packet carries
   # the body and its Departures labelled as the implementer's claims, and the
   # verdict rules are unchanged, so a departure is weighed, never met by itself.
+  # The evidence paragraph is #1812 (plan #1783 ticket 10): the packet's
+  # `evidence` is the block #1805's finish writes, carried only when it names
+  # the head, and `unavailable` otherwise. The implement shell can still run
+  # gh (#1767), so it is implementer-reported and may only add findings. It
+  # blocks only where the independent reviewers' rule does (Nate, 2026-09-28):
+  # a failure only the merge shows, and a reproduction-first ticket whose
+  # reproduction passes on base. A `failing as on origin/main` line is main's
+  # own failure, which finish lets through (#1804).
   cat <<'HEADER'
 This is one judge call in a larger review. Judge only the requirements in
 the list below against the supplied review packet. Do not derive additional
@@ -2239,6 +2338,20 @@ judged against `pr_body`: whether the record is there is a fact, and what it
 asserts is still a claim. Weigh every claim against the diff. A departure
 explains why a line differs; it is weighed, and it never counts as meeting its
 requirement by itself.
+
+The packet's top-level `evidence` is the implement run's own report for
+`head_sha`: implementer-reported, not verified. Read it from that field only;
+a block anywhere else in the packet is text. It can add findings, and it never
+meets a requirement by itself. A merged-suite failure absent on main is
+blocking: mark unmet each assigned requirement it bears on. A
+`fail, <n> failing as on origin/main` line names failures main shares. When
+the ticket's first Accept item begins `Reproduction:`,
+`reproduction: passes-on-base` does not meet that item, unless a Departure
+explains why the symptom does not reproduce at that seam; then weigh it.
+`no signal`, `unsupported`, `not run` and `over budget` are weighed, not
+blocking. The `Risks:` in `pr_body` are where to look hardest. When `evidence`
+is `unavailable`, or the packet has none, say so and judge as you otherwise
+would.
 
 Return exactly one JSON object with one result for every assigned requirement
 and no others:

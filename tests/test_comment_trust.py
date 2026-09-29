@@ -63,6 +63,7 @@ TEXT_PARSERS = frozenset({
     "funnel.py:parse_gates_answer",
     "funnel.py:parse_shape_risk_record",
     "engine/review.py:parse_run_evidence_comment",
+    "engine/review.py:split_evidence_block",
     "engine/implement.py:routed_for_closed_step",
     "outcomes.py:_provenance",
 })
@@ -125,6 +126,9 @@ BODY_READERS: Dict[str, str] = {
     "engine/shape.py:preview_decision": _PLAN_BODY,
     "engine/shape.py:apply_shape": _PLAN_BODY,
     "engine/breakdown.py:apply": _PLAN_BODY,
+    "engine/review.py:pr_body_section":
+        "a funnel PR's body (#1794), which only its author and collaborators "
+        "edit; its evidence block is implementer-reported (#1812)",
     "engine/migrate_canonical_fields.py:infer_values": _PLAN_BODY,
     "engine/migrate_canonical_fields.py:trim_routing_prose": _PLAN_BODY,
     ".github/scripts/watchdog.py:existing_issue":
@@ -150,6 +154,8 @@ WRITERS = frozenset({
     "funnel.py:_needs_decision_comment_body",
     "funnel.py:_write_verdict",
     "funnel.py:cmd_park",
+    "funnel.py:cmd_capture",
+    "funnel.py:cmd_promote",
     "decline_classifier.py:declined_review_routing_comment",
     "decline_classifier.py:declined_unsatisfiable_acceptance_comment",
     "decline_classifier.py:declined_pending_gate_answer_comment",
@@ -157,6 +163,7 @@ WRITERS = frozenset({
     "engine/implement.py:render_closed_step_route",
     "engine/implement.py:finish_declined",
     "engine/implement.py:close_declined_defer_note_proof",
+    "engine/implement.py:render_evidence_block",
 })
 
 TRUST_FILTERS = frozenset({"trusted_comment", "trusted_comments"})

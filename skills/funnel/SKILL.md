@@ -84,7 +84,7 @@ closes itself, since the unattended close ignores `blocked` (#1724).
 
 With Class unset, `approve --yes` adopts exactly one non-empty whole-line
 `Proposed class: <one ladder class>`, an exact match for `Investigate`,
-`Broken`, `Maintenance`, `Improve`, `New` or `Replace`, and records the
+`Broken`, `Maintenance`, `Improve`, `New`, `Replace` or `Bug`, and records the
 source line. Missing, malformed, fuzzy or multiple proposals stay unset;
 never infer a class from a title or body prose (Nate's rule, 2026-09-16,
 overridable by him). Adoption fills a field; it never

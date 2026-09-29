@@ -1264,7 +1264,8 @@ def test_begin_leaves_non_reconcilable_projects_untouched(
     ]
 
 
-@pytest.mark.parametrize("klass", ["Broken", "Investigate", "Maintenance"])
+@pytest.mark.parametrize(
+    "klass", ["Broken", "Investigate", "Maintenance", "Bug"])
 @pytest.mark.parametrize("origin", ["agent", "nate-direct", "nate-relayed"])
 def test_begin_reconciles_parented_upkeep_items_regardless_of_origin(
     monkeypatch, capsys, klass, origin
@@ -1785,7 +1786,7 @@ def test_codex_begin_binds_before_loading_the_implementation_packet(
     monkeypatch.setattr(
         heartbeat,
         "record_binding",
-        lambda agent, run, do, work, repo=None: (
+        lambda agent, run, do, work, repo=None, klass=None: (
             events.append(("bind", work)) or "pushed"
         ),
     )
@@ -2243,7 +2244,7 @@ def test_backed_off_work_is_not_an_empty_queue(monkeypatch, capsys):
     stuck."""
     events = _capture_events(monkeypatch)
     project, ticket = _ticket(40, 41)
-    monkeypatch.setattr(funnel, "_backed_off_work", lambda items, now: {
+    monkeypatch.setattr(funnel, "_backed_off_work", lambda items, now, **kw: {
         ticket.ref: {"ref": ticket.ref, "failures": 3,
                      "until": NOW + timedelta(hours=6),
                      "reason": "errored three times"}})
@@ -3429,7 +3430,7 @@ def test_begin_binds_the_ticket_it_issues_to_the_run(monkeypatch, capsys):
     bound = []
     monkeypatch.setattr(
         heartbeat, "record_binding",
-        lambda agent, run, do, work, repo=None: bound.append((agent, run, do, work)) or "pushed",
+        lambda agent, run, do, work, repo=None, klass=None: bound.append((agent, run, do, work)) or "pushed",
     )
     project, ticket = _ticket(7, 6)
     result, writes = _implementing_begin(monkeypatch, capsys, [project, ticket])
@@ -3451,6 +3452,85 @@ def test_a_stop_run_binds_nothing(monkeypatch, capsys):
 
     assert result["do"] == "stop"
     assert "bound" not in result and bound == []
+
+
+TOOLING = "nateprich-projects/command-center"
+HOBBY = "nateprich-projects/The-League"
+
+
+def _ready_ticket(repo, number, parent, klass):
+    """A Ready project with one ticket; ``_ticket``'s projects are Building."""
+    project = funnel.Item(
+        repo=repo, number=parent, title="Project {}".format(parent),
+        url="https://github.com/{}/issues/{}".format(repo, parent),
+        state="OPEN", status="Ready", klass=klass, origin="agent",
+        risk="standard", needs="none", children_total=1,
+    )
+    ticket = funnel.Item(
+        repo=repo, number=number, title="Ticket {}".format(number),
+        url="https://github.com/{}/issues/{}".format(repo, number),
+        state="OPEN", body="Risk: standard", origin="agent",
+        risk="standard", needs="none", parent=project.ref,
+        item_id="item-{}".format(number),
+    )
+    return [project, ticket]
+
+
+def test_begin_gives_the_bugs_their_turn_and_binds_the_class(
+        monkeypatch, capsys):
+    """With no Bug among the recent starts, the Bug the ladder puts last is
+    this start, and its binding carries the class the next begin counts
+    (#1846)."""
+    import heartbeat
+
+    bound = []
+    monkeypatch.setattr(
+        heartbeat, "record_binding",
+        lambda agent, run, do, work, repo=None, klass=None:
+        bound.append((work, klass)) or "pushed",
+    )
+    items = (_ready_ticket(HOBBY, 11, 10, "Bug")
+             + _ready_ticket(HOBBY, 21, 20, "Improve"))
+
+    result, _ = _implementing_begin(monkeypatch, capsys, items)
+
+    assert result["work"]["ref"] == HOBBY + "#11"
+    assert bound == [(HOBBY + "#11", "Bug")]
+
+
+def test_begin_counts_a_bug_another_lane_just_started(monkeypatch, capsys):
+    """The Saturday lane's Bug start is in its own heartbeat. Codex reads it
+    there, and a tier-1 Bug that repo tier would put first waits."""
+    import heartbeat
+
+    heartbeat._spool("claude", {
+        "run": "sat", "agent": "claude", "phase": "bind", "ts": 5,
+        "do": "ticket", "work": TOOLING + "#99", "class": "Bug",
+    })
+    items = (_ready_ticket(TOOLING, 11, 10, "Bug")
+             + _ready_ticket(HOBBY, 21, 20, "Improve"))
+
+    result, _ = _implementing_begin(monkeypatch, capsys, items)
+
+    assert result["work"]["ref"] == HOBBY + "#21"
+
+
+def test_begin_counts_a_bug_claimed_by_a_begin_running_beside_it(
+        monkeypatch, capsys):
+    """Two lanes pulling at once both see the Bugs' turn. The one that finds
+    its Bug claimed a moment ago counts that start, which its heartbeat read
+    could not yet hold, and takes other work rather than the next Bug."""
+    items = (_ready_ticket(TOOLING, 11, 10, "Bug")
+             + _ready_ticket(TOOLING, 13, 12, "Bug")
+             + _ready_ticket(HOBBY, 21, 20, "Improve"))
+
+    result, writes = _implementing_begin(
+        monkeypatch, capsys, items,
+        current_claims={TOOLING + "#11": NOW - timedelta(seconds=5)},
+    )
+
+    assert result["work"]["ref"] == HOBBY + "#21"
+    assert writes[0][0] == HOBBY + "#21"
 
 
 def _selecting_reconcile_begin(monkeypatch, capsys, items, rows, verdicts,
@@ -4022,7 +4102,7 @@ def test_claude_ticket_begin_carries_the_packet_and_claude_vendor_block(
 
     monkeypatch.setattr(
         heartbeat, "record_binding",
-        lambda agent, run, do, work, repo=None: events.append(("bind", work)),
+        lambda agent, run, do, work, repo=None, klass=None: events.append(("bind", work)),
     )
     monkeypatch.setattr(
         funnel,

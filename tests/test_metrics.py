@@ -604,6 +604,35 @@ def test_backfill_rejects_unparseable_boundaries():
     with pytest.raises(metrics.MetricsError, match="--until"):
         metrics._parse_backfill_boundary("not-a-time", "until")
 
+
+def test_backfill_snapshot_counts_bug_beside_broken_as_funnel_does():
+    """The hourly rebuild mirrors funnel.maintenance_load and
+    recorded_cause_regressions, which count Bug as a defect (#1845)."""
+    import funnel
+
+    start = NOW.replace(minute=0)
+    inside = start + timedelta(minutes=10)
+
+    def project(number, klass, **values):
+        return funnel.Item(
+            repo="nateprich-projects/command-center", number=number,
+            title="Project {}".format(number), url="", klass=klass,
+            created_at=inside, **values)
+
+    items = [
+        project(1, "Bug", state="CLOSED", status="Done", closed_at=inside),
+        project(2, "Broken", state="OPEN", status="Ready"),
+        project(3, "New", state="CLOSED", status="Done", closed_at=inside),
+    ]
+
+    brief = metrics._github_snapshot(
+        items, None, start, start + timedelta(hours=1), NOW)["brief"]
+
+    assert brief["maintenance_load"]["closed_in_window"] == 2
+    assert brief["maintenance_load"]["upkeep_projects"] == 1
+    assert brief["recorded_cause_regressions"]["broken_projects"] == 2
+
+
 def test_series_builds_daily_rollups_and_weighted_rate_windows(capsys):
     fixture = FIXTURES / "metrics_series.jsonl"
 

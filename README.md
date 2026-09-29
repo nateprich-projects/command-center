@@ -55,12 +55,17 @@ surviving. The heartbeat quota meter is not used as a cost proxy. The
 effective-dated rate table and notional dollar calculation are a separate
 consumer of these observations.
 
-`outcomes.py signals` computes cost per merged PR by observed lane, rework as
-attempts beyond the first per merged PR, and the intervention rate. It keeps the
-three signals separate, and reports `insufficient_data` or `partial` instead of
-turning missing observations into zero. Cost is read only from an already-priced
-`cost_usd`/`credits` observation; raw token counts are never treated as dollars.
-The same summary is included in the `outcome_signals` field of `funnel brief`.
+`outcomes.py signals` computes priced cost per merged PR by observed lane,
+rework as attempts beyond the first per merged PR, and the intervention rate.
+For joined implementation runs, `api_pricing.py` applies the effective-dated
+public rate rows in `model_rates.json` to all four token kinds and sums complete
+per-run estimates. These are notional API list prices, not subscription bills.
+OpenAI context/service tier and Anthropic cache TTL are absent from run records,
+so the table documents the pricing assumptions it uses. Missing tokens, model
+rates, or timestamps remain null, and signals report `insufficient_data` or
+`partial` rather than turning missing observations into zero. Existing explicit
+`cost_usd`/`credits` observations remain supported. The same summary is included
+in the `outcome_signals` field of `funnel brief`.
 
 `questions.py` is the sufficiency contract for the later proposal routine. Its
 registry is the allowlist of questions: each entry records its hypothesis, named

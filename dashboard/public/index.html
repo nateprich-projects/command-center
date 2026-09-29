@@ -39,7 +39,15 @@
       </section>
       <section class="panel" aria-labelledby="board-heading">
         <div class="panel-head">
-          <h2 id="board-heading">Projects</h2>
+          <h2 id="board-heading" class="visually-hidden">Projects</h2>
+          <div id="board-tabs" class="board-tabs" role="tablist" aria-label="Project views">
+            <button type="button" class="board-tab" role="tab" data-board-tab="parked"
+              aria-selected="false">Parked <span class="count" data-count></span></button>
+            <button type="button" class="board-tab" role="tab" data-board-tab="in-progress"
+              aria-selected="true">In Progress <span class="count" data-count></span></button>
+            <button type="button" class="board-tab" role="tab" data-board-tab="bugs"
+              aria-selected="false">Bugs <span class="count" data-count></span></button>
+          </div>
           <div class="legend" aria-label="Pip legend">
             <span class="legend-item"><i class="pip pip-open"></i>open or queued</span>
             <span class="legend-item"><i class="pip pip-submitted"></i>PR submitted</span>

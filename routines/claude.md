@@ -53,7 +53,7 @@ shows; anything else stays at `Shaped`, with the reason printed. A
 wording-scan hit alone raises `Risk` to `escalated` and posts its reasons,
 but does not hold the plan (#1679). **Shaped
 is not approval.** If the capture origin is `agent` and Class is unset,
-pass `--class <Broken|Maintenance|Improve|New|Replace>`; otherwise add a
+pass `--class <Broken|Maintenance|Improve|New|Replace|Bug>`; otherwise add a
 `Proposed class: <one ladder name>` line and no `--class`. When Nate
 explicitly authorises `approve --yes` while Class is unset, the
 command adopts one exact whole-line `Proposed class:` value before the
@@ -72,9 +72,11 @@ misbehaving run — evidence, not speculation), record it before finishing
 with `funnel capture`. Put the observed evidence in the note, choose its
 class at capture using `skills/shape`'s "Class it when you file it" rule,
 and say why. Agents class their own captures, never his existing issues.
+`Broken` refuses without `--observed`; a defect that has not happened is
+`Bug`, captured without it.
 
 ```bash
-python3 /Users/nateprich/.claude/command-center-run/funnel.py capture "<title>" --repo nateprich-projects/command-center --origin agent --class <Broken|Maintenance|Improve|New|Replace> --note "<evidence>"
+python3 /Users/nateprich/.claude/command-center-run/funnel.py capture "<title>" --repo nateprich-projects/command-center --origin agent --class <Broken|Maintenance|Improve|New|Replace|Bug> --note "<evidence>" --observed "<run or heartbeat id, CI run, log line, or wedge>"
 ```
 
 This is the sanctioned exception to the review rule to act only on the PR

@@ -299,51 +299,50 @@ def test_the_flat_ceiling_still_stops_whatever_the_projection(tmp_path, monkeypa
 
 # A literal, not read from the override: emptying the override to end it
 # early should fail the tests below, not the collection of this module.
-OVERRIDE_RESET = 1790553600.0  # 2026-09-28 00:00 UTC
+OVERRIDE_RESET = 1791158400.0  # 2026-10-05 00:00 UTC
 IN_OVERRIDE = OVERRIDE_RESET - 3 * 86400.0
 
 
-def test_the_override_names_the_window_resetting_sunday_2026_09_27():
-    """#1341: Sunday 17:00 PDT is Monday 00:00 UTC, on the provider's lattice."""
+def test_the_override_names_the_window_resetting_sunday_2026_10_04():
+    """#1842: Sunday 17:00 PDT is Monday 00:00 UTC, on the provider's lattice."""
     assert usage.MUSE_PACE_OVERRIDE["resets_at"] == OVERRIDE_RESET
     reset = datetime.datetime.fromtimestamp(
         OVERRIDE_RESET, datetime.timezone.utc)
-    assert (reset.year, reset.month, reset.day, reset.hour) == (2026, 9, 28, 0)
+    assert (reset.year, reset.month, reset.day, reset.hour) == (2026, 10, 5, 0)
     assert usage.muse_window_start(IN_OVERRIDE) + usage.SEVEN_DAY == OVERRIDE_RESET
 
 
 def test_the_override_prices_the_window_from_the_panel(tmp_path, monkeypatch):
-    """#1409: the panel read 86% while the meter held $120.91, so the same
-    spend reads 86% here. At the 72-hour rate recorded with it at 23:02 PDT,
-    $99.62 ($33.21 a day), the projection passes 100%, and is reported
-    rather than banded."""
+    """#1842: the panel read 3% while the meter held $42.58, so the same
+    spend reads 3% here, against a $1,419.33 cap. The 72-hour rate
+    recorded with it at 12:45 PDT was $77.28 ($25.76 a day), with 6.18
+    days left. Against the $200 cap that projected 101.21% and stopped
+    every lane."""
     reading, verdict, _ = _projected(
-        tmp_path, monkeypatch, spent=120.91, trailing=99.62, days_left=3.75,
+        tmp_path, monkeypatch, spent=42.58, trailing=77.28, days_left=6.18,
         at=IN_OVERRIDE)
     window = reading["windows"]["seven_day"]
-    assert reading["cap_dollars"] == pytest.approx(140.59)
-    assert window["cap_dollars"] == pytest.approx(140.59)
-    assert window["used_percent"] == pytest.approx(86.0, abs=0.01)
-    # 86 + 100 * $33.21/day * 3.75 days / $140.59: priced against the panel
-    # cap, not the $200 one, which would read 122.7.
-    assert window["projected_percent"] == pytest.approx(174.57, abs=0.05)
-    assert window["override"] == {"issue": 1341, "until": OVERRIDE_RESET}
+    assert reading["cap_dollars"] == pytest.approx(1419.33)
+    assert window["cap_dollars"] == pytest.approx(1419.33)
+    assert window["used_percent"] == pytest.approx(3.0, abs=0.01)
+    # 3 + 100 * $25.76/day * 6.18 days / $1,419.33 = 14.22.
+    assert window["projected_percent"] == pytest.approx(14.22, abs=0.05)
+    assert window["override"] == {"issue": 1842, "until": OVERRIDE_RESET}
 
     weekly = verdict["windows"][0]
     assert verdict["band"] == "ok"
     assert not verdict["over_pace"]
     assert weekly["allowed_percent"] == 100.0
-    assert weekly["reserve"] == pytest.approx(3.20)
-    assert weekly["runs_out_at"] is not None
-    assert weekly["override"]["issue"] == 1341
+    # $4.50 of $1,419.33.
+    assert weekly["reserve"] == pytest.approx(0.32)
+    assert weekly["override"]["issue"] == 1842
 
 
-@pytest.mark.parametrize("spent, over", [(136.05, False), (136.15, True)])
+@pytest.mark.parametrize("spent, over", [(1414.0, False), (1416.0, True)])
 def test_the_override_stops_at_100_less_one_session(tmp_path, monkeypatch,
                                                      spent, over):
-    """Used plus $4.50 of $140.59 (3.20%) against 100, strictly: $136.05
-    reads 96.77% and is admitted, $136.15 reads 96.84% and is not. The
-    spend is recent, so it falls after the reopening."""
+    """Used plus $4.50 of $1,419.33 (0.32%) against 100, strictly: $1,414
+    reads 99.62% and is admitted, $1,416 reads 99.77% and is not."""
     _, verdict, _ = _projected(
         tmp_path, monkeypatch, spent=spent, trailing=spent, days_left=2.0,
         at=IN_OVERRIDE)
@@ -351,14 +350,30 @@ def test_the_override_stops_at_100_less_one_session(tmp_path, monkeypatch,
     assert verdict["band"] == ("over" if over else "ok")
 
 
+#: The #1341 pairing as it stood when the provider reopened its window early.
+#: The live override no longer has `reopened_at` (#1842), so the mechanism is
+#: pinned against this stand-in rather than dropped.
+REOPENED_RESET = 1790553600.0  # 2026-09-28 00:00 UTC
 REOPENED = 1790311140.0  # 2026-09-25 04:39 UTC, Thursday 21:39 PDT
+REOPENED_OVERRIDE = {
+    "issue": 1341,
+    "resets_at": REOPENED_RESET,
+    "panel_used_percent": 86.0,
+    "meter_dollars": 120.91,
+    "ceiling_percent": 100.0,
+    "reopened_at": REOPENED,
+}
+
+
+def test_the_live_override_was_not_reopened():
+    assert "reopened_at" not in usage.MUSE_PACE_OVERRIDE
 
 
 def test_the_provider_reopened_the_window_on_thursday(tmp_path, monkeypatch):
     """At 21:39 PDT on 2026-09-24 the panel read 0% with $133.25 metered.
     From then the window counts only later spend; before it, nothing moves.
     The 72-hour rate still reaches back across the reopening."""
-    assert usage.MUSE_PACE_OVERRIDE["reopened_at"] == REOPENED
+    monkeypatch.setattr(usage, "MUSE_PACE_OVERRIDE", REOPENED_OVERRIDE)
     now = REOPENED + 6 * 3600.0
     records = [
         _muse_record(REOPENED - 3600.0, input_tokens=100_000_000,
@@ -371,11 +386,11 @@ def test_the_provider_reopened_the_window_on_thursday(tmp_path, monkeypatch):
     window = reading["windows"]["seven_day"]
     assert window["spent_dollars"] == pytest.approx(5.0)
     assert window["window_start"] == REOPENED
-    assert window["resets_at"] == OVERRIDE_RESET
+    assert window["resets_at"] == REOPENED_RESET
     assert window["cap_dollars"] == pytest.approx(140.59)
     assert window["used_percent"] == pytest.approx(3.56, abs=0.01)
     assert window["trailing_72h_dollars"] == pytest.approx(130.0)
-    assert window["override"] == {"issue": 1341, "until": OVERRIDE_RESET,
+    assert window["override"] == {"issue": 1341, "until": REOPENED_RESET,
                                   "reopened_at": REOPENED}
     assert not usage.pace(reading, now, provider="meta")["over_pace"]
 
@@ -412,10 +427,10 @@ def test_the_window_before_the_override_is_untouched(tmp_path, monkeypatch):
 
 
 def test_begin_runs_on_the_reading_that_stopped_it_tight(tmp_path, monkeypatch):
-    """#1341 through `begin`'s own preflight. The 21:32 PDT reading on
-    2026-09-22 — $89.38 in the window, all of it in the last 72 hours, 4.8
-    days left — stopped every lane as `tight` at 116% projected. Under the
-    override it passes; the same reading a window later stops again."""
+    """The override through `begin`'s own preflight. The 21:32 PDT reading
+    on 2026-09-22 — $89.38 in the window, all of it in the last 72 hours,
+    4.8 days left — stopped every lane as `tight` at 116% projected. Under
+    the override it passes; the same reading a window later stops again."""
     import funnel
 
     monkeypatch.setattr(funnel, "_start_begin_heartbeat",

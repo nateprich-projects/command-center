@@ -33,7 +33,7 @@ def eligible(klass, origin, override=None, needs_nate=False, escalated=False):
 
 
 @pytest.mark.parametrize("origin", ["nate-direct", "nate-relayed"])
-@pytest.mark.parametrize("klass", ["Broken", "Maintenance", "Improve"])
+@pytest.mark.parametrize("klass", ["Broken", "Maintenance", "Improve", "Bug"])
 def test_nate_raised_existing_work_still_requires_nate(klass, origin):
     assert eligible(klass, origin) is False
 
@@ -44,6 +44,8 @@ def test_nate_raised_existing_work_still_requires_nate(klass, origin):
         ("Broken", True),
         ("Maintenance", True),
         ("Improve", True),
+        # A latent defect in shipped work is existing work too (#1845).
+        ("Bug", True),
         ("New", False),
         ("Replace", False),
         (None, False),

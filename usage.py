@@ -347,13 +347,24 @@ MUSE_WEEKLY_RESERVE = round(
 #: override still lapses at the Sunday reset: whether the provider's window
 #: now runs to Sunday or to next Thursday is what that Sunday's panel
 #: reading settles. _(Nate, 2026-09-24: "Update it tonight".)_
+#:
+#: **The #1341 override lapsed at that Sunday reset, and the brake closed on
+#: a pricing gap (#1842).** The window resetting 2026-10-05 00:00 UTC opened
+#: with this meter pricing muse-spark-1.3-contributor at the standard card:
+#: $42.42 at standard against $3.09 at its own card. At 12:45 PDT on Monday
+#: 2026-09-28 it read $42.58, 21.29% of the $200 cap, and projected 101.21%,
+#: so every Muse lane and review-replay stopped. The panel read 3%. This
+#: pairing takes the panel's figure, as every pairing does. The pricing-model
+#: update is separate work, and this override lapses at the reset whether or
+#: not that has landed. _(Nate, 2026-09-28: "please turn off the Muse brake
+#: for now. Muse is showing 3% on the website, we just haven't updated the
+#: pricing model yet so the brake is activating incorrectly.")_
 MUSE_PACE_OVERRIDE = {
-    "issue": 1341,
-    "resets_at": 1790553600.0,  # 2026-09-28 00:00 UTC, Sunday 17:00 PDT
-    "panel_used_percent": 86.0,
-    "meter_dollars": 120.91,
+    "issue": 1842,
+    "resets_at": 1791158400.0,  # 2026-10-05 00:00 UTC, Sunday 17:00 PDT
+    "panel_used_percent": 3.0,
+    "meter_dollars": 42.58,
     "ceiling_percent": 100.0,
-    "reopened_at": 1790311140.0,  # 2026-09-25 04:39 UTC, Thursday 21:39 PDT
 }
 
 

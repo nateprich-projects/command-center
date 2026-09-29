@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 import pathlib
@@ -28,6 +29,7 @@ import shutil
 import signal
 import subprocess
 import sys
+from collections import Counter
 from datetime import datetime, timezone
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 from urllib.parse import urlsplit
@@ -80,6 +82,26 @@ class SupersededRunError(ImplementError):
         self.ref = ref
         self.reason = reason
         super().__init__("superseded {}: {}".format(ref, reason))
+
+
+class MergedSuiteError(ImplementError):
+    """The suite fails on the merge with origin/main where main does not.
+
+    Its text is shaped like pytest's (``FAILED <id>`` lines and a counts
+    line), so the failure note and ticket comment read it as they read a
+    head-only run (#1804).
+    """
+
+
+class MergeConflictError(ImplementError):
+    """The ticket's work does not merge with origin/main (#1804)."""
+
+    def __init__(self, base: str, paths: Sequence[str]):
+        # Kept apart from the message so a member-repo finish note can count
+        # them without naming them (#1796).
+        self.paths = list(paths)
+        super().__init__("merge with origin/main {} conflicts: {}".format(
+            base[:12], ", ".join(self.paths)))
 
 
 
@@ -944,13 +966,15 @@ def pinned_interpreter(root: pathlib.Path) -> str:
 
 
 def run_tests(root: pathlib.Path,
-              commands: Optional[Sequence[Sequence[str]]] = None
+              commands: Optional[Sequence[Sequence[str]]] = None, *,
+              timeout: Optional[float] = None
               ) -> Tuple[List[str], Optional[str]]:
     """Run the checkout's tests without writing Python bytecode.
 
     Returns the rendered commands and the test-command source, which is
     None when the caller injected explicit commands or no test slot was
-    resolved.
+    resolved. ``timeout`` lowers each command's bound, for a caller with a
+    budget of its own (the finish's reproduction run, #1805).
     """
     if commands is not None:
         selected = list(commands)
@@ -977,14 +1001,154 @@ def run_tests(root: pathlib.Path,
         # Mac has no bare `python` on PATH (#890), so run the chosen one.
         if argv and argv[0] in ("python", "python3"):
             argv[0] = python
+        bound = (COMPILE_COMMAND_TIMEOUT_SECONDS
+                 if _is_compile_command(argv)
+                 else TEST_COMMAND_TIMEOUT_SECONDS)
         _run(
             argv, cwd=root, env=env,
-            timeout=(COMPILE_COMMAND_TIMEOUT_SECONDS
-                     if _is_compile_command(argv)
-                     else TEST_COMMAND_TIMEOUT_SECONDS),
+            timeout=bound if timeout is None else min(bound, timeout),
         )
         rendered.append(shlex.join(argv))
     return rendered, source
+
+
+def _review_evidence():
+    """``scripts/review_evidence.py`` (#1802), loaded when a finish needs it.
+
+    ``scripts/`` is not a package, and the script imports this module, so
+    it cannot be imported at the top of this one.
+    """
+    path = (pathlib.Path(__file__).resolve().parent.parent
+            / "scripts" / "review_evidence.py")
+    spec = importlib.util.spec_from_file_location("review_evidence", str(path))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _merged_failure(record: dict) -> MergedSuiteError:
+    """The error for a merged run that fails where main does not.
+
+    It names the command that stopped the plan and the failing ids: those
+    main does not share, or every id when the base could not be compared
+    (another runner, or a pytest run that stopped early). The counts line
+    counts only failures main does not share, which is what fails the
+    finish.
+    """
+    failed = [entry["command"] for entry in record["commands"]
+              if entry["result"] == "fail"]
+    lines = ["{} failed on the merge with origin/main {}".format(
+        failed[-1] if failed else "the test command", record["base"][:12])]
+    lines.extend("FAILED {}".format(node_id) for node_id in
+                 record["new_failures"] or record["failing"])
+    if record["new_failures"]:
+        lines.append("{} failed".format(len(record["new_failures"])))
+    return MergedSuiteError("\n".join(lines))
+
+
+def _run_finish_tests(root: pathlib.Path,
+                      commands: Optional[Sequence[Sequence[str]]] = None
+                      ) -> Tuple[List[str], Optional[str], Optional[str],
+                                 Optional[dict]]:
+    """Run the finish's suite on the work merged with current main (#1804).
+
+    A head passing its own suite says nothing about the merge it becomes:
+    another PR can land on main meanwhile, and a clash shows only on the
+    merge (#1742). So this fetches origin/main and runs
+    ``review_evidence.merged_suite`` instead of the head-only run: the
+    checkout's HEAD merged into main in a temporary worktree beside the
+    checkout, which for a Codex run is its ``codex-runs/`` directory. The
+    worktree is removed on every path, and it is outside the checkout, so
+    nothing in it can reach ``_commit_if_needed``.
+
+    The merge takes the committed HEAD, and that is the tree this finish
+    commits: ``_checkpoint_work`` has already committed every path
+    ``_commit_if_needed`` would stage, and nothing runs between the two.
+
+    Only a failure main does not share fails the finish
+    (``MergedSuiteError``); a conflict raises ``MergeConflictError``. Where
+    no merge can be made (``ReviewEvidenceError``: no origin/main, a
+    worktree git refuses, no test command on the merge), the head-only run
+    runs as it always has. Explicit ``commands`` are a caller's choice and
+    run on the head: the merged suite resolves the repository's own plan.
+
+    Returns the commands run, the test-command source, a phrase for the
+    finish note when they ran on the merge, and the merged suite's record
+    for the PR's evidence block (#1805); both are None on the head alone.
+    """
+    if commands is not None:
+        tests, source = run_tests(root, commands)
+        return tests, source, None, None
+    # A failed fetch leaves origin/main where this clone last saw it, which
+    # is still a merge worth testing; the record names the base it used.
+    _run(["git", "fetch", "origin",
+          "+refs/heads/main:refs/remotes/origin/main"],
+         cwd=root, check=False, timeout=REMOTE_GIT_TIMEOUT_SECONDS)
+    try:
+        evidence = _review_evidence()
+    except OSError:
+        evidence = None
+    record = None
+    if evidence is not None:
+        try:
+            record = evidence.merged_suite(
+                root, "origin/main", work_dir=root.parent)
+        except (evidence.ReviewEvidenceError, OSError):
+            record = None
+    if record is None:
+        tests, source = run_tests(root, None)
+        return tests, source, None, None
+    if record["result"] == "conflict":
+        raise MergeConflictError(record["base"], record["conflicts"])
+    if record["blocking"]:
+        raise _merged_failure(record)
+    tested = "tested on the merge with origin/main"
+    if record["result"] == "fail":
+        # Every failure is main's own: it does not fail the finish, but the
+        # note says the suite was not green (AGENTS.md, "Verification").
+        tested += " ({} failing as on origin/main)".format(
+            len(record["failing"]))
+    return ([entry["command"] for entry in record["commands"]],
+            record["test_source"], tested, record)
+
+
+#: How long a finish gives the classification of the PR's added tests on
+#: origin/main, after the merged suite (#1805, plan #1783 ticket 5). It
+#: took 3.7s on this repository (#1829); the budget keeps a slow member
+#: suite from doubling a finish, and over it the block says so.
+REPRODUCTION_BUDGET_SECONDS = 4 * 60
+
+#: The stand-in record when no classification ran: the merge could not be
+#: made or tested, or ``reproduction`` itself failed. Its line is the
+#: block's only word on it, so no error text reaches the PR body.
+_REPRODUCTION_NOT_RUN = {"reproduction": "not run",
+                         "line": "reproduction: not run", "tests": []}
+
+
+def _run_reproduction(root: pathlib.Path,
+                      merged: Optional[dict]) -> dict:
+    """Classify the PR's added tests on the merged suite's base (#1805).
+
+    ``review_evidence.reproduction`` runs the tests the branch adds or
+    changes on the base the merged suite used, within
+    ``REPRODUCTION_BUDGET_SECONDS``, and says red, passes-on-base, no
+    signal, unsupported or over budget. It runs only after a merged suite:
+    where none could be made, the base could not be worked in either.
+    Evidence is recorded, never a reason to fail a finish, so this never
+    raises; a failure is ``reproduction: not run``.
+    """
+    if merged is None:
+        return dict(_REPRODUCTION_NOT_RUN)
+    try:
+        evidence = _review_evidence()
+    except OSError:
+        return dict(_REPRODUCTION_NOT_RUN)
+    try:
+        return evidence.reproduction(
+            root, merged["base"], work_dir=root.parent,
+            budget=REPRODUCTION_BUDGET_SECONDS)
+    except (evidence.ReviewEvidenceError, ImplementError, OSError):
+        return dict(_REPRODUCTION_NOT_RUN)
 
 
 _GITHUB_REMOTE_RE = re.compile(
@@ -1013,10 +1177,104 @@ def resolve_checkout_repo(root: pathlib.Path, explicit: Optional[str]) -> str:
     return repo
 
 
+#: The runner-written evidence block that ends every finished PR's body
+#: (#1805, plan #1783 ticket 5). The review packet carries it when its
+#: ``sha`` is the head under review (#1812). Only the runner writes these
+#: markers: ``render_pr_body`` strips them from everything else in the
+#: body, the model's summary, departures and risks among it, so a model
+#: cannot forge a block. Each finish re-renders the whole body, so a
+#: continued PR's block is always the latest push's. The format, one line
+#: each and in this order:
+#:
+#:   <!-- command-center-evidence -->
+#:   Evidence, written by the runner:
+#:   - sha: <the 40-hex commit this finish pushed, after any merge the
+#:     push added>
+#:   - merged suite: pass on origin/main <12-hex>
+#:     | fail, <n> failing as on origin/main <12-hex>
+#:     | not run (the head's own suite passed)
+#:   - reproduction: red | passes-on-base | no signal | unsupported
+#:     | over budget | not run
+#:   - added tests: <n> red, <n> passes-on-base, <n> no signal
+#:   - <outcome>: <node id>    (command-center only, at most
+#:     MAX_EVIDENCE_TEST_IDS, then "- (+<n> more)")
+#:   <!-- /command-center-evidence -->
+#:
+#: Every other repository's block carries the counts and no node id, as
+#: its notes do (#1796).
+EVIDENCE_MARKER = "<!-- command-center-evidence -->"
+EVIDENCE_END_MARKER = "<!-- /command-center-evidence -->"
+
+#: How many added tests a command-center block names; the rest are counted.
+#: It keeps the block well inside the review packet's 8 KB (#1812).
+MAX_EVIDENCE_TEST_IDS = 30
+
+#: Either marker, however spaced or cased, so a near-miss cannot pass for
+#: one with a looser reader.
+_EVIDENCE_MARKER_RE = re.compile(
+    r"<!--\s*/?\s*command-center-evidence\s*-->", re.IGNORECASE)
+
+
+def _strip_evidence_markers(text: str) -> str:
+    """``text`` without either marker, repeated until none is left, so a
+    marker split around another cannot close up into one (#1805)."""
+    while True:
+        stripped = _EVIDENCE_MARKER_RE.sub("", text)
+        if stripped == text:
+            return text
+        text = stripped
+
+
+def render_evidence_block(*, sha: str, merged: Optional[dict],
+                          reproduction: dict, repo: str) -> str:
+    """The runner's evidence block for a PR body (``EVIDENCE_MARKER``).
+
+    ``sha`` is the commit the finish pushed, ``merged`` the merged suite's
+    record (None when the head's suite ran alone) and ``reproduction`` the
+    added-test classification's (#1805).
+    """
+    if merged is None:
+        suite = "not run (the head's own suite passed)"
+    elif merged["result"] == "pass":
+        suite = "pass on origin/main {}".format(merged["base"][:12])
+    else:
+        # A PR opens past a failing merge only when main fails the same way.
+        suite = "fail, {} failing as on origin/main {}".format(
+            len(merged["failing"]), merged["base"][:12])
+    tests = reproduction.get("tests") or []
+    counts = Counter(test["outcome"] for test in tests)
+    lines = [
+        EVIDENCE_MARKER,
+        "Evidence, written by the runner:",
+        "- sha: {}".format(sha),
+        "- merged suite: {}".format(suite),
+        "- {}".format(reproduction["line"]),
+        "- added tests: {} red, {} passes-on-base, {} no signal".format(
+            counts["red"], counts["passes-on-base"], counts["no signal"]),
+    ]
+    if _is_public_repo(repo):
+        shown = tests[:MAX_EVIDENCE_TEST_IDS]
+        for test in shown:
+            # A node id holds a path the branch chose; it must not carry
+            # a marker, or a line break that would start a line of its own.
+            node_id = " ".join(_strip_evidence_markers(test["id"]).split())
+            lines.append("- {}: {}".format(test["outcome"], node_id[:200]))
+        if len(tests) > len(shown):
+            lines.append("- (+{} more)".format(len(tests) - len(shown)))
+    lines.append(EVIDENCE_END_MARKER)
+    return "\n".join(lines) + "\n"
+
+
 def render_pr_body(ticket: dict, answer: dict, *, continued: bool,
                    tests: Sequence[str],
-                   test_source: Optional[str] = None) -> str:
-    """Render the stable PR template from the model's structured answer."""
+                   test_source: Optional[str] = None,
+                   evidence: Optional[str] = None) -> str:
+    """Render the stable PR template from the model's structured answer.
+
+    ``evidence`` is the runner's block (``render_evidence_block``), which
+    ends the body (#1805). Marker text is stripped from everything before
+    it, so the runner's block is the only one.
+    """
     parent = ticket.get("parent") or {}
     parent_number = parent.get("number")
     lines = []
@@ -1060,7 +1318,12 @@ def render_pr_body(ticket: dict, answer: dict, *, continued: bool,
             "Test command source:",
             test_source,
         ])
-    return "\n".join(lines) + "\n"
+    # Every line so far is the model's answer or text the branch can shape
+    # (a CI step's name), none of it the runner's block (#1805).
+    body = _strip_evidence_markers("\n".join(lines) + "\n")
+    if evidence is not None:
+        body += "\n" + evidence
+    return body
 
 
 def _remote_branch_exists(root: pathlib.Path, branch: str) -> bool:
@@ -1942,9 +2205,13 @@ def add_declined_prerequisite_edge(repo: str, number: int, prerequisite: str,
 def close_declined_defer_note_proof(
         repo: str, number: int, reason: str, *, run: str, agent: str,
         cwd: pathlib.Path) -> None:
-    """Close an explicitly accepted defer-note proof as completed."""
+    """Close an explicitly accepted defer-note proof as completed.
+
+    The reason is the model's words, so it is made inert (#1798).
+    """
     comment = funnel.append_provenance(
-        "{} {}".format(funnel.DECLINED_PREFIX, reason), "agent",
+        "{} {}".format(funnel.DECLINED_PREFIX,
+                       funnel.inert_comment_text(reason)), "agent",
         at=datetime.now(timezone.utc), run=run, agent=agent,
     )
     proc = funnel._run_gh(
@@ -2231,7 +2498,9 @@ def _failure_comment(exc: ImplementError, kept: str = "") -> str:
 
     The failing test ids, pytest's counts line and, when pytest named no
     test, the first line of the output: what the note carried before. The
-    next run reads it in its packet's issue thread.
+    next run reads it in its packet's issue thread. The branch prints that
+    output, so the free-text lines are made inert (#1798); an id is one
+    ``\\S+`` token, which no marker fits.
     """
     text = str(exc)
     ids = _failed_test_ids(text)
@@ -2253,9 +2522,10 @@ def _failure_comment(exc: ImplementError, kept: str = "") -> str:
         lines.append("")
     elif counts is None:
         lines.extend(["First line of the output:", "", "```text",
-                      _first_output_line(text), "```", ""])
+                      funnel.inert_comment_text(_first_output_line(text)),
+                      "```", ""])
     if counts is not None:
-        lines.append("Counts: `{}`".format(counts))
+        lines.append("Counts: `{}`".format(funnel.inert_comment_text(counts)))
     if kept:
         lines.append("Work: {}".format(kept))
     return "\n".join(lines).rstrip() + "\n"
@@ -2288,6 +2558,22 @@ def _stray_note(exc: StrayFileError, *, repo: str) -> str:
     return _with_markers(str(exc), (
         "pre-PR stray-file check refused {} run-scratch path{}; "
         "names withheld".format(count, "" if count == 1 else "s")))
+
+
+def _conflict_note(exc: MergeConflictError, kept: str, *, repo: str) -> str:
+    """The note for work that does not merge with origin/main (#1804).
+
+    A member repo's note counts the conflicted paths without naming them
+    (#1796). Nothing goes to the ticket: merging origin/main, which the
+    next run must do anyway, shows them again.
+    """
+    note = "{} | {}".format(exc, kept)
+    if _is_public_repo(repo):
+        return note
+    count = len(exc.paths)
+    return _with_markers(note, (
+        "merge with origin/main conflicts in {} path{}, names withheld | "
+        "{}".format(count, "" if count == 1 else "s", _member_kept(kept))))
 
 
 def _note_test_source(source: str, *, repo: str) -> str:
@@ -2336,29 +2622,59 @@ def _push_ticket_branch(root: pathlib.Path, branch: str, *, ref: str,
 
 def _remove_codex_run_checkout(root: pathlib.Path, number: int,
                                agent: str) -> bool:
-    """Remove only this Codex ticket checkout under the runtime codex-runs/.
+    """Remove only this Codex ticket checkout under a runtime codex-runs/.
 
     The per-run clone is named ``ticket-<number>-<UTC timestamp>`` and is
     owner-only. Restrict removal to that exact direct child; finish-ticket also
     runs from session workspaces and other agents' checkouts, which must remain
     untouched.
+
+    Live runs clone into the heartbeat directory's ``codex-runs/``
+    (``heartbeat.SPOOL_DIR``), because that is the Codex sandbox's only
+    writable root. ``CLAUDE_DIR/codex-runs`` does not exist there, and while
+    it was the only root every live checkout was kept (#1856). Either root
+    counts, and one that is missing or a symlink is skipped rather than
+    fatal. The merged suite's temporary
+    worktrees also sit in the runs root (#1804), but one level down, under
+    ``review-evidence-*``, so no guard below can match them; they are
+    removed by review_evidence itself.
+
+    Call it only once this run has pushed the ticket branch. #1711 also
+    removed the checkout once a finish recorded work not kept, but that
+    checkout can hold the only copy of the work: a stray-file refusal, a
+    ``_keep_work`` failure before its push, a superseded run, a decline or
+    a human step. Those paths never ran live while the root went unmatched,
+    so matching it (#1856) would have started deleting that work. They leave
+    the directory for a later run or Nate to recover: a leaked directory is
+    the safe failure, lost work is not.
     """
     if agent != "codex":
         return False
     checkout = pathlib.Path(root)
-    runs_root = pathlib.Path(funnel.CLAUDE_DIR) / "codex-runs"
-    if checkout.is_symlink() or runs_root.is_symlink():
+    if checkout.is_symlink():
         return False
     try:
-        runs_root = runs_root.resolve(strict=True)
         checkout = checkout.resolve(strict=True)
     except (OSError, RuntimeError):
         return False
+    import heartbeat
+    runs_root = None
+    for candidate in (pathlib.Path(funnel.CLAUDE_DIR) / "codex-runs",
+                      pathlib.Path(heartbeat.SPOOL_DIR) / "codex-runs"):
+        if candidate.is_symlink():
+            continue
+        try:
+            resolved = candidate.resolve(strict=True)
+        except (OSError, RuntimeError):
+            continue
+        if checkout.parent == resolved:
+            runs_root = resolved
+            break
     match = re.fullmatch(
         r"ticket-([1-9][0-9]*)-([0-9]{8}T[0-9]{12}Z)", checkout.name,
     )
     if (match is None or int(match.group(1)) != number
-            or checkout.parent != runs_root):
+            or runs_root is None):
         return False
     try:
         info = checkout.stat()
@@ -2388,10 +2704,10 @@ def _keep_work(root: pathlib.Path, number: int, branch: str, *, ref: str,
 
     Never opens a PR. Returns a short phrase for the heartbeat note. The same
     pre-PR scratch check applies here so a WIP branch cannot carry run debris.
-    The second result is true if the push path failed; that checkout is kept
-    for diagnosis.
+    The second result is true only once the branch is pushed, which is the
+    only time the Codex checkout may be removed (#1856); every other result
+    keeps it, for diagnosis or because it holds the only copy of the work.
     """
-    push_attempted = False
     try:
         _require_current_claim(ref, run, agent)
         paths = _working_tree_paths(root)
@@ -2408,14 +2724,13 @@ def _keep_work(root: pathlib.Path, number: int, branch: str, *, ref: str,
                      timeout=LOCAL_GIT_TIMEOUT_SECONDS).stdout.strip()
         if not ahead.isdigit() or int(ahead) < 1:
             return "no work to keep", False
-        push_attempted = True
         _push_ticket_branch(root, branch, ref=ref, run=run, agent=agent)
-        return "work kept on {}".format(branch), False
+        return "work kept on {}".format(branch), True
     except SupersededRunError:
         raise
     except ImplementError as exc:
         first = str(exc).splitlines()[0] if str(exc) else "unknown error"
-        return "work NOT kept: {}".format(first[:120]), push_attempted
+        return "work NOT kept: {}".format(first[:120]), False
 
 
 def _checkpoint_work(root: pathlib.Path, number: int, branch: str, *,
@@ -2462,7 +2777,7 @@ def _recover_answer_error(
     release_effect = release or (
         lambda target: release_claim(target, run=run, agent=agent)
     )
-    kept, push_failed = _keep_work(
+    kept, pushed = _keep_work(
         context["root"], context["number"], context["branch"],
         ref=ref, run=run, agent=agent, reason="answer unreadable",
     )
@@ -2475,7 +2790,7 @@ def _recover_answer_error(
         note = _with_markers(note, "answer error: {} | {}".format(
             first[:200], _member_kept(kept)))
     heartbeat_finish(agent, run, "errored", note, ref)
-    if not push_failed:
+    if pushed:
         _remove_codex_run_checkout(context["root"], context["number"], agent)
     return True
 
@@ -2493,6 +2808,10 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
                 comment_effect: Callable[..., None] = post_agent_comment,
                 extra_note: Optional[str] = None) -> dict:
     """Perform every happy-path effect and return the resulting PR identity.
+
+    The suite runs on the work merged with current origin/main where a merge
+    can be made (#1804, ``_run_finish_tests``): a failure main does not
+    share, or a conflict, finishes ``errored`` like any failing test.
 
     A member repository's notes withhold its content (#1796): a failing
     test's ids go to the ticket through ``comment_effect`` instead.
@@ -2513,14 +2832,18 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
             ref=ref, run=run, agent=agent,
         )
         phase = "tests"
-        tests, test_source = run_tests(context["root"], test_commands)
+        tests, test_source, tested, merged = _run_finish_tests(
+            context["root"], test_commands)
+        reproduced = _run_reproduction(context["root"], merged)
     except SupersededRunError:
         raise
     except StrayFileError as exc:
         release_effect(ref)
         heartbeat_finish(
             agent, run, "errored", _stray_note(exc, repo=resolved), ref)
-        _remove_codex_run_checkout(context["root"], context["number"], agent)
+        # The note asks for the scratch to be removed and the work
+        # re-staged, and the work may be pushed nowhere: keep the checkout
+        # (#1856).
         raise
     except CommandTimeoutError as exc:
         _record_command_timeout(
@@ -2534,14 +2857,19 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
     except ImplementError as exc:
         # A failed checkpoint or test must not strand the run. Retry saving
         # remaining work without opening a PR, then finish errored so the next
-        # run continues the branch instead of starting again from main.
-        kept, push_failed = _keep_work(
+        # run continues the branch instead of starting again from main. A
+        # conflict with main finishes the same way, so the backoff bounds a
+        # ticket that keeps conflicting (#1804).
+        conflict = isinstance(exc, MergeConflictError)
+        kept, pushed = _keep_work(
             context["root"], context["number"], context["branch"],
             ref=ref, run=run, agent=agent,
-            reason=("tests failed" if phase == "tests" else "checkpoint retry"),
+            reason=("merge conflict with origin/main" if conflict else
+                    "tests failed" if phase == "tests" else
+                    "checkpoint retry"),
         )
         posted = None
-        if phase == "tests" and not _is_public_repo(resolved):
+        if phase == "tests" and not conflict and not _is_public_repo(resolved):
             # The ids leave the public note, so they go to the ticket, and
             # before the release: the run that claims it next reads them in
             # its packet (#1796). A failed post must not strand the run.
@@ -2554,14 +2882,20 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
             except (funnel.GitHubError, OSError, subprocess.SubprocessError):
                 posted = False
         release_effect(ref)
-        note = (
-            _failure_note(exc, kept, repo=resolved) if phase == "tests" else
-            _checkpoint_note(exc, kept, repo=resolved)
-        )
+        if conflict:
+            note = _conflict_note(exc, kept, repo=resolved)
+        elif phase == "tests":
+            note = _failure_note(exc, kept, repo=resolved)
+            if isinstance(exc, MergedSuiteError):
+                # This module's words, so a member note keeps them too: the
+                # next run must merge main to see the failure.
+                note += " | on the merge with origin/main"
+        else:
+            note = _checkpoint_note(exc, kept, repo=resolved)
         if posted is False:
             note += " | failing tests NOT posted to the ticket"
         heartbeat_finish(agent, run, "errored", note, ref)
-        if not push_failed:
+        if pushed:
             _remove_codex_run_checkout(
                 context["root"], context["number"], agent)
         raise
@@ -2585,9 +2919,8 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
                 ", ".join(evidence))
             if extra_note:
                 note += "; " + extra_note.strip()
+            # Nothing was pushed, so the checkout stays (#1856).
             heartbeat_finish(agent, run, "done", note, ref)
-            _remove_codex_run_checkout(
-                context["root"], context["number"], agent)
             return {"number": context["number"], "url": ticket["url"],
                     "closed": True}
         # Re-read immediately before pushing so a ticket branch never carries
@@ -2597,6 +2930,10 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
             context["root"], context["branch"],
             ref=ref, run=run, agent=agent,
         )
+        # The evidence block is keyed to this, the commit the PR's head now
+        # is, after any merge the push added (#1805).
+        pushed = _run(["git", "rev-parse", "HEAD"], cwd=context["root"],
+                      timeout=LOCAL_GIT_TIMEOUT_SECONDS).stdout.strip()
         # Recheck before the PR effect in case the merge or push surfaced
         # another scratch file.
         _check_no_run_scratch(context["root"])
@@ -2606,7 +2943,9 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
         release_effect(ref)
         heartbeat_finish(
             agent, run, "errored", _stray_note(exc, repo=resolved), ref)
-        _remove_codex_run_checkout(context["root"], context["number"], agent)
+        # The note asks for the scratch to be removed and the work
+        # re-staged, and the work may be pushed nowhere: keep the checkout
+        # (#1856).
         raise
     except CommandTimeoutError as exc:
         _record_command_timeout(
@@ -2617,14 +2956,22 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
             _remove_codex_run_checkout(
                 context["root"], context["number"], agent)
         raise
-    body = render_pr_body(ticket, answer, continued=continued, tests=tests,
-                         test_source=test_source)
+    body = render_pr_body(
+        ticket, answer, continued=continued, tests=tests,
+        test_source=test_source,
+        evidence=render_evidence_block(
+            sha=pushed, merged=merged, reproduction=reproduced,
+            repo=resolved))
     pr = pr_effect(resolved, context, ticket, body)
     release_effect(ref)
     note = "PR #{}".format(pr["number"])
     if test_source is not None:
         note += " (tests: {})".format(
             _note_test_source(test_source, repo=resolved))
+    if tested:
+        # Absent when the head ran alone, so a lane that can never merge
+        # shows in the heartbeat rather than passing silently (#1804).
+        note += "; " + tested
     if extra_note:
         note += "; " + extra_note.strip()
     heartbeat_finish(agent, run, "done", note, ref)
@@ -2654,7 +3001,8 @@ def finish_blocked_on_human(
     """File the human step, block the ticket, release, and finish. No PR.
 
     No test run, commit, or push happens here: the finish records the
-    implementation as not kept, then removes this run's Codex checkout.
+    implementation as not kept and leaves this run's Codex checkout, which
+    may hold the only copy of it (#1856; #1711 removed it).
     A failure after the sub-issue exists names it, so the retry starts
     from GitHub's truth rather than filing a second one.
 
@@ -2715,7 +3063,6 @@ def finish_blocked_on_human(
     if extra_note:
         note += "; " + extra_note.strip()
     heartbeat_finish(agent, run, "skipped-human-step", note, ref)
-    _remove_codex_run_checkout(context["root"], context["number"], agent)
     return {"ticket": ref,
             "human_step": {"number": created["number"],
                            "ref": created["ref"],
@@ -2818,7 +3165,6 @@ def finish_declined(
         if extra_note:
             note += "; " + extra_note.strip()
         heartbeat_finish(agent, run, "done", note, ref)
-        _remove_codex_run_checkout(context["root"], context["number"], agent)
         return {"ticket": ref, "declined": reason}
     accept_conflict_routed = (
         decline_class == "accept-body-conflict" and decline_target is not None
@@ -2864,7 +3210,10 @@ def finish_declined(
         # a blocked ticket in the silent Needs=agent lane.
         human_needs_effect(ticket["url"], ref)
         block_effect(resolved, context["number"], cwd=context["root"])
-    declined_comment = "{} {}".format(funnel.DECLINED_PREFIX, reason)
+    # The reason is the model's words: one line with no ``<!--``, so it can
+    # never form a runner marker in the owner's comment (#1798).
+    declined_comment = "{} {}".format(
+        funnel.DECLINED_PREFIX, funnel.inert_comment_text(reason))
     if prerequisite_evidence is not None:
         declined_comment += "\n\n" + prerequisite_evidence
     comment_effect(resolved, context["number"], declined_comment,
@@ -2960,7 +3309,6 @@ def finish_declined(
     if extra_note:
         note += "; " + extra_note.strip()
     heartbeat_finish(agent, run, "skipped-blocked", note, ref)
-    _remove_codex_run_checkout(context["root"], context["number"], agent)
     return {"ticket": ref, "declined": reason}
 
 
@@ -2983,7 +3331,11 @@ def dry_run_main() -> int:
 
 def _record_superseded_finish(args: argparse.Namespace, ref: str,
                               reason: str) -> int:
-    """Finish a refused run without releasing, committing, or pushing work."""
+    """Finish a refused run without releasing, committing, or pushing work.
+
+    The checkout stays: this run keeps none of its work, so the checkout
+    may hold the only copy (#1856).
+    """
     if not args.run:
         print("finish-ticket: cannot record superseded finish without --run",
               file=sys.stderr)
@@ -2996,14 +3348,6 @@ def _record_superseded_finish(args: argparse.Namespace, ref: str,
         print("finish-ticket: {}; heartbeat finish failed: {}".format(
             note, exc), file=sys.stderr)
         return 1
-    try:
-        context = checkout_context()
-    except ImplementError:
-        context = None
-    if context is not None:
-        _remove_codex_run_checkout(
-            context["root"], context["number"], args.agent,
-        )
     print(json.dumps({
         "ticket": ref, "superseded": True, "work_kept": False,
     }, sort_keys=True))

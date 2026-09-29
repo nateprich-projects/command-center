@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+import agent_health  # noqa: E402
 import funnel  # noqa: E402
 import heartbeat  # noqa: E402
 from agent_health import assess  # noqa: E402
@@ -25,6 +26,18 @@ NO_DIFF_FINISH = (
     pathlib.Path(__file__).parent / "fixtures" /
     "no_diff_done_finish.json"
 )
+
+
+def test_recorded_xcode_license_refusal_is_one_named_infrastructure_stop():
+    stderr = (
+        "You have not agreed to the Xcode license agreements. "
+        "Please run 'sudo xcodebuild -license' from within a Terminal "
+        "window to review and agree to the Xcode and Apple SDKs license.\n"
+    )
+
+    assert agent_health.xcode_license_stop(stderr) == (
+        "Xcode license agreement not accepted"
+    )
 
 
 def _silence_fixture():

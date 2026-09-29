@@ -9208,6 +9208,14 @@ def check_block_conditions(
     return Check("block conditions", not broken, "\n".join(findings), "")
 
 
+def check_xcode_license_stop(stderr: Optional[str]) -> Optional[Check]:
+    """Build the single named doctor alert for Apple's license refusal."""
+    name = agent_health_module.xcode_license_stop(stderr)
+    if name is None:
+        return None
+    return Check(name, False, "matched failed job stderr", "")
+
+
 def doctor_checks(claude_dir: Optional[os.PathLike] = None,
                   checkout_root: Optional[os.PathLike] = None,
                   usage_cache: Optional[os.PathLike] = None,
@@ -9355,7 +9363,7 @@ def render_checks(checks: Iterable[Check]) -> None:
             print(line)
 
 
-def cmd_doctor() -> int:
+def cmd_doctor(failed_job_stderr: Optional[str] = None) -> int:
     project_item_pages = None
     project_item_count = None
     try:
@@ -9404,6 +9412,9 @@ def cmd_doctor() -> int:
             checks = doctor_checks(
                 items=items, merged_pr_facts=merged_facts
             )
+    license_stop = check_xcode_license_stop(failed_job_stderr)
+    if license_stop is not None:
+        checks.append(license_stop)
     checks.append(check_project_pagination(
         project_item_count, project_item_pages
     ))
@@ -20633,8 +20644,13 @@ def main(argv: Optional[Sequence[str]] = None, *,
         help="newest published brief snapshot, without running a live brief",
     )
     sub.add_parser("ideas", help="captured ideas, flagged ones first")
-    sub.add_parser(
+    doctor = sub.add_parser(
         "doctor", help="check the local install and report actionable failures")
+    doctor.add_argument(
+        "--failed-job-stderr-stdin", action="store_true",
+        help=("read combined failed-job stderr from stdin for "
+              "infrastructure-stop checks"),
+    )
     main_ci = sub.add_parser(
         "main-ci",
         help="each member repo's red main, as an infrastructure stop or a "
@@ -20954,7 +20970,10 @@ def main(argv: Optional[Sequence[str]] = None, *,
         return 0
 
     if args.command == "doctor":
-        return cmd_doctor()
+        failed_job_stderr = (
+            sys.stdin.read() if args.failed_job_stderr_stdin else None
+        )
+        return cmd_doctor(failed_job_stderr)
     # The published snapshot is a local read by design: runners and routines
     # must get it without a Project load, which is the slow read this
     # command exists to avoid.

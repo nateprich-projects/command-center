@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import pathlib
@@ -117,6 +118,38 @@ def test_all_local_checks_pass_and_discover_every_skill(tmp_path, monkeypatch):
     ]
     assert all(check.ok for check in checks)
     assert "3 links" in checks[0].found
+
+
+def test_funnel_doctor_reports_one_named_license_stop_from_stderr(
+        monkeypatch, capsys):
+    stderr = (
+        "You have not agreed to the Xcode license agreements. "
+        "Please run 'sudo xcodebuild -license' from within a Terminal "
+        "window to review and agree to the Xcode and Apple SDKs license.\n"
+    )
+    monkeypatch.setattr(funnel, "load_items", lambda: [])
+    monkeypatch.setattr(funnel, "project_item_load_measurement", lambda: (0, 0))
+    monkeypatch.setattr(funnel, "merged_pr_facts", lambda items: None)
+    monkeypatch.setattr(
+        funnel, "doctor_checks",
+        lambda items=None, merged_pr_facts=None: [],
+    )
+    monkeypatch.setattr(
+        funnel, "check_project_pagination",
+        lambda *args: funnel.Check("Project pagination", True, "", ""),
+    )
+    monkeypatch.setattr(
+        funnel, "check_api_usage",
+        lambda: funnel.Check("API usage", True, "", ""),
+    )
+    monkeypatch.setattr(funnel.sys, "stdin", io.StringIO(stderr + stderr))
+
+    assert funnel.main(["doctor", "--failed-job-stderr-stdin"]) == 1
+
+    output = capsys.readouterr().out
+    assert output.count("Xcode license agreement not accepted") == 1
+    assert "matched failed job stderr" in output
+    assert "sudo xcodebuild" not in output
 
 
 @pytest.mark.parametrize("kind", ["missing", "real file", "outside", "dangling"])

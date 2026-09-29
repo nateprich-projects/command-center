@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import datetime
 import os
+import re
 import statistics
 from typing import Dict, List, Optional, Tuple
 
@@ -48,6 +49,29 @@ WEEK = 7 * 86400
 #: rather than a week, so the alarm clears soon after the fix.
 CONFIG_DRIFT_OUTCOME = "config-drift"
 CONFIG_DRIFT_WINDOW = 86400
+
+# An Xcode license refusal is a machine-level stop shared by every job that
+# invokes Apple's /usr/bin developer-tool shims. Keep one stable name so the
+# doctor and Actions watchdog raise the same operational alert.
+XCODE_LICENSE_STOP_NAME = "Xcode license agreement not accepted"
+_XCODE_LICENSE_REFUSAL = re.compile(
+    r"you have not agreed to the xcode license agreements", re.IGNORECASE
+)
+
+
+def xcode_license_stop(stderr: object) -> Optional[str]:
+    """Return the one named infrastructure stop for Apple's refusal stderr.
+
+    Match only the recorded Xcode refusal phrase. Collapsing whitespace allows
+    the phrase to span wrapped log lines without treating other tool failures
+    as this stop. The stderr itself is never returned or persisted.
+    """
+    if not isinstance(stderr, str):
+        return None
+    normalized = " ".join(stderr.split())
+    if _XCODE_LICENSE_REFUSAL.search(normalized):
+        return XCODE_LICENSE_STOP_NAME
+    return None
 
 #: The provider hold the Muse lanes write when a window is spent. The same file
 #: the runners check (`scripts/muse-quota-hold.sh`), read here so the watchdog

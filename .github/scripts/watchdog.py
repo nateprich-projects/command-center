@@ -20,6 +20,8 @@ different fixes:
   refusal repeats on every run until someone fixes the automation.
 - **Unreadable.** A heartbeat file the watchdog could not read. Reading it as
   empty would pass an agent it cannot see as one that never ran (#1335).
+- **Named infrastructure stop.** Failed-job stderr can identify an Xcode
+  license refusal even when the stopped job could not write a heartbeat.
 
 Deliberately *not* reported: any `skipped-*` outcome and `nothing-to-do`. Those
 are the system working, and paging on them would train the alert to be ignored.
@@ -27,6 +29,7 @@ are the system working, and paging on them would train the alert to be ignored.
 
 from __future__ import annotations
 
+import argparse
 import base64
 from datetime import datetime, timezone
 import json
@@ -353,7 +356,7 @@ def existing_issue() -> Dict:
     return {}
 
 
-def main() -> int:
+def main(failed_job_stderr: Optional[str] = None) -> int:
     now = time.time()
     problems = []
     for agent in sorted(heartbeat.PROVIDERS):
@@ -369,6 +372,10 @@ def main() -> int:
         info = note(agent, rows, now)
         if info:
             print("note: " + info)
+
+    license_stop = _agent_health.xcode_license_stop(failed_job_stderr)
+    if license_stop is not None:
+        problems.append(license_stop)
 
     open_issue = existing_issue()
 
@@ -391,7 +398,8 @@ def main() -> int:
         + ["", "Healthy outcomes — any `skipped-*` result or `nothing-to-do` — "
            "are not reported here by design. This issue is only raised for "
               "silence, dying runs, repeated errors, a stale runtime "
-              "checkout, config drift, or an unreadable heartbeat.",
+           "checkout, config drift, an unreadable heartbeat, or a named "
+           "infrastructure stop.",
            "", "It closes itself once the heartbeats recover."]
     )
 
@@ -417,4 +425,14 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument(
+        "--failed-job-stderr-stdin", action="store_true",
+        help=("read combined failed-job stderr from stdin for "
+              "infrastructure-stop checks"),
+    )
+    args = parser.parse_args()
+    failed_job_stderr = (
+        sys.stdin.read() if args.failed_job_stderr_stdin else None
+    )
+    sys.exit(main(failed_job_stderr))

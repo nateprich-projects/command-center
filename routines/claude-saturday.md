@@ -85,7 +85,7 @@ local checkout, and go back to step 1. Never force-push.
 6. Write exactly one structured answer to a file outside the checkout:
    - success: `{"done":true,"summary":"...","departures":[]}`; for a no-diff
      ticket add the `evidence` list of GitHub URLs its Accept names; optional
-     `risks`: where review should look hardest
+     `"risks":["..."]`, where review should look hardest
    - a required action you cannot take in this run:
      `{"blocked_on_human":{"reason":"...","action":"..."}}`, where `reason` is
      `a Claude Code environment` for work an interactive Claude Code session on

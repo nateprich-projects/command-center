@@ -1232,6 +1232,9 @@ def resolve_checkout_repo(root: pathlib.Path, explicit: Optional[str]) -> str:
 #:   - added tests: <n> red, <n> passes-on-base, <n> no signal
 #:   - <outcome>: <node id>    (command-center only, at most
 #:     MAX_EVIDENCE_TEST_IDS, then "- (+<n> more)")
+#:   - rewrites prior fix: #<ticket> (<path>:<function>)
+#:     (at most MAX_EVIDENCE_PRIOR_FIXES, then "- (+<n> more prior fixes)")
+#:   - prior fix scan: not run    (only when its bounded scan was unavailable)
 #:   <!-- /command-center-evidence -->
 #:
 #: Every other repository's block carries the counts and no node id, as
@@ -1242,6 +1245,9 @@ EVIDENCE_END_MARKER = "<!-- /command-center-evidence -->"
 #: How many added tests a command-center block names; the rest are counted.
 #: It keeps the block well inside the review packet's 8 KB (#1812).
 MAX_EVIDENCE_TEST_IDS = 30
+
+#: How many prior fixes a command-center block names; the rest are counted.
+MAX_EVIDENCE_PRIOR_FIXES = 30
 
 #: Either marker, however spaced or cased, so a near-miss cannot pass for
 #: one with a looser reader.
@@ -1260,12 +1266,16 @@ def _strip_evidence_markers(text: str) -> str:
 
 
 def render_evidence_block(*, sha: str, merged: Optional[dict],
-                          reproduction: dict, repo: str) -> str:
+                          reproduction: dict, repo: str,
+                          prior_fixes: Optional[
+                              Sequence[Tuple[int, str, Optional[str]]]
+                          ] = ()) -> str:
     """The runner's evidence block for a PR body (``EVIDENCE_MARKER``).
 
     ``sha`` is the commit the finish pushed, ``merged`` the merged suite's
     record (None when the head's suite ran alone) and ``reproduction`` the
-    added-test classification's (#1805).
+    added-test classification's (#1805). ``prior_fixes`` is the bounded
+    prior-fix scan's result; None means it could not run.
     """
     if merged is None:
         suite = "not run (the head's own suite passed)"
@@ -1295,8 +1305,42 @@ def render_evidence_block(*, sha: str, merged: Optional[dict],
             lines.append("- {}: {}".format(test["outcome"], node_id[:200]))
         if len(tests) > len(shown):
             lines.append("- (+{} more)".format(len(tests) - len(shown)))
+    if prior_fixes is None:
+        lines.append("- prior fix scan: not run")
+    else:
+        found = sorted(set(prior_fixes),
+                       key=lambda row: (row[0], row[1], row[2] or ""))
+        for ticket_number, path, function in found[:MAX_EVIDENCE_PRIOR_FIXES]:
+            # Git paths and hunk headers are branch-controlled input; keep
+            # each runner-owned evidence item on one line and marker-free.
+            safe_path = " ".join(
+                _strip_evidence_markers(str(path)).split())[:200]
+            safe_function = " ".join(
+                _strip_evidence_markers(str(function or "<unknown>")).split())[:120]
+            lines.append("- rewrites prior fix: #{} ({}:{})".format(
+                ticket_number, safe_path, safe_function))
+        if len(found) > MAX_EVIDENCE_PRIOR_FIXES:
+            lines.append("- (+{} more prior fixes)".format(
+                len(found) - MAX_EVIDENCE_PRIOR_FIXES))
     lines.append(EVIDENCE_END_MARKER)
     return "\n".join(lines) + "\n"
+
+
+def _prior_fix_evidence(
+        root: pathlib.Path, base: Optional[str], head: str
+) -> Optional[List[Tuple[int, str, Optional[str]]]]:
+    """Run the optional prior-fix scan without making a finish depend on it."""
+    if not base:
+        return None
+    try:
+        import fix_recurrence
+
+        return fix_recurrence.prior_fixes_touched(root, base, head)
+    except Exception:
+        # Like reproduction evidence, this names confirmed results when
+        # available and never turns an evidence-reader failure into a failed
+        # ticket finish.
+        return None
 
 
 def render_pr_body(ticket: dict, answer: dict, *, continued: bool,
@@ -3009,12 +3053,16 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
             _remove_codex_run_checkout(
                 context["root"], context["number"], agent)
         raise
+    prior_base = (
+        merged.get("base") if isinstance(merged, dict) else "origin/main"
+    ) or "origin/main"
+    prior_fixes = _prior_fix_evidence(context["root"], prior_base, pushed)
     body = render_pr_body(
         ticket, answer, continued=continued, tests=tests,
         test_source=test_source,
         evidence=render_evidence_block(
             sha=pushed, merged=merged, reproduction=reproduced,
-            repo=resolved))
+            repo=resolved, prior_fixes=prior_fixes))
     pr = pr_effect(resolved, context, ticket, body)
     release_effect(ref)
     note = "PR #{}".format(pr["number"])

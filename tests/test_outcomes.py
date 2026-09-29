@@ -1494,6 +1494,36 @@ def _run(agent="codex", run="run-1", usage=True):
     } if usage else None}
 
 
+def test_reproduction_heals_old_stored_ref_from_current_derivation_and_finish():
+    old_repo = "nateprich-projects/FF-Weekly-Start-Sit"
+    current_repo = "nateprich-projects/Fantasy-GM"
+    old_ref = old_repo + "#42"
+    current_ref = current_repo + "#42"
+    old_ticket = outcomes.derive_outcome(
+        ticket(42, repo=old_repo), now=NOW
+    )
+    heartbeat = {
+        "codex": _heartbeat_rows(
+            ticket_ref=old_ref, run="rename-run-42"
+        )
+    }
+
+    finished_runs = outcomes._ticket_runs(old_ref, heartbeat)
+    fresh = outcomes.derive_outcome(
+        ticket(42, repo=current_repo),
+        now=NOW,
+        run_observations=finished_runs,
+    )
+    combined, healed = outcomes._heal_empty_runs([old_ticket], [fresh])
+
+    assert finished_runs[0]["run"] == "rename-run-42"
+    assert fresh["ticket"] == current_ref
+    assert combined == [old_ticket, fresh]
+    assert healed == [fresh]
+    assert old_ticket["ticket"] == old_ref
+    assert fresh["runs"][0]["run"] == "rename-run-42"
+
+
 def test_reproduction_heals_current_key_from_old_repo_heartbeat_binding():
     old_repo = "nateprich-projects/FF-Weekly-Start-Sit"
     current_repo = "nateprich-projects/Fantasy-GM"

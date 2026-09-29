@@ -1610,19 +1610,58 @@ def _heal_empty_runs(
     was. There is deliberately no date cutoff: ``muse.jsonl`` had already
     outgrown the inline read when Muse implemented (2026-09-18 to 09-22), so
     its runs were never read at all (#1655).
+
+    Renamed refs join through the same alias as stored reads and heartbeat
+    bindings. Keep an old-keyed row as history; when it has no current-key
+    twin, add the healed current-key record alongside it. If a current twin
+    already exists, heal only that row.
     """
     fresh_by_ticket: Dict[str, Mapping[str, object]] = {}
     for row in derived:
         if isinstance(row, Mapping) and isinstance(row.get("ticket"), str):
-            fresh_by_ticket.setdefault(row["ticket"], row)
+            ticket_ref = row["ticket"]
+            canonical_ref = _canonical_ticket_ref(ticket_ref)
+            current = fresh_by_ticket.get(canonical_ref)
+            if current is None or ticket_ref == canonical_ref:
+                fresh_by_ticket[canonical_ref] = row
+
+    current_refs = set()
+    for row in existing:
+        ticket_ref = row.get("ticket")
+        if isinstance(ticket_ref, str):
+            canonical_ref = _canonical_ticket_ref(ticket_ref)
+            if ticket_ref == canonical_ref:
+                current_refs.add(canonical_ref)
+
     combined: List[Dict[str, object]] = []
     healed: List[Dict[str, object]] = []
+    materialized_refs = set(current_refs)
     for row in existing:
-        fresh = fresh_by_ticket.get(row.get("ticket"))
+        ticket_ref = row.get("ticket")
+        if not isinstance(ticket_ref, str):
+            combined.append(dict(row))
+            continue
+        canonical_ref = _canonical_ticket_ref(ticket_ref)
+        fresh = fresh_by_ticket.get(canonical_ref)
+
+        # The raw old-key row remains the rename trail when a current twin
+        # exists. Its current twin is the sole record that can be healed.
+        if ticket_ref != canonical_ref and canonical_ref in current_refs:
+            combined.append(dict(row))
+            continue
+
         if fresh is not None and _runs_empty(row) and _has_runs(fresh):
             replacement = dict(fresh)
-            combined.append(replacement)
-            healed.append(replacement)
+            replacement["ticket"] = canonical_ref
+            if ticket_ref == canonical_ref:
+                combined.append(replacement)
+                healed.append(replacement)
+            else:
+                combined.append(dict(row))
+                if canonical_ref not in materialized_refs:
+                    combined.append(replacement)
+                    healed.append(replacement)
+                    materialized_refs.add(canonical_ref)
         else:
             combined.append(dict(row))
     return combined, healed

@@ -5091,6 +5091,7 @@ def test_every_finish_ends_the_pr_body_with_the_evidence_block(
         "- red: tests/test_calc.py::test_half_of_three\n"
         "- passes-on-base: tests/test_calc.py::test_double_two\n"
         "- no signal: tests/test_calc.py::test_triple\n"
+        "- prior fix scan: not run\n"
         "<!-- /command-center-evidence -->\n"
     ).format(remote_tip(remote), main_sha[:12])
     first_sha = remote_tip(remote)
@@ -5115,6 +5116,7 @@ def test_every_finish_ends_the_pr_body_with_the_evidence_block(
         "- passes-on-base: tests/test_calc.py::test_double_two\n"
         "- no signal: tests/test_calc.py::test_triple\n"
         "- red: tests/test_calc.py::test_half_of_five\n"
+        "- prior fix scan: not run\n"
         "<!-- /command-center-evidence -->\n"
     ).format(remote_tip(remote), main_sha[:12])
     assert body.count(implement.EVIDENCE_MARKER) == 1
@@ -5163,6 +5165,7 @@ def test_a_member_repo_block_carries_counts_only(tmp_path, monkeypatch):
         "- merged suite: pass on origin/main {}\n"
         "- reproduction: red\n"
         "- added tests: 1 red, 1 passes-on-base, 1 no signal\n"
+        "- prior fix scan: not run\n"
         "<!-- /command-center-evidence -->\n"
     ).format(remote_tip(remote), main_sha[:12])
     for name in ("test_half_of_three", "test_double_two", "test_triple"):
@@ -5201,6 +5204,7 @@ def test_an_over_budget_reproduction_is_recorded_and_the_pr_opens(
         "- merged suite: pass on origin/main {}\n"
         "- reproduction: over budget\n"
         "- added tests: 0 red, 0 passes-on-base, 0 no signal\n"
+        "- prior fix scan: not run\n"
         "<!-- /command-center-evidence -->\n"
     ).format(remote_tip(remote), main_sha[:12])
     # The stopped run's worktree went with it.
@@ -5231,6 +5235,7 @@ def test_the_block_counts_failures_main_already_has(tmp_path, monkeypatch):
         "- merged suite: fail, 1 failing as on origin/main {}\n"
         "- reproduction: no signal\n"
         "- added tests: 0 red, 0 passes-on-base, 0 no signal\n"
+        "- prior fix scan: not run\n"
         "<!-- /command-center-evidence -->\n"
     ).format(remote_tip(remote), main_sha[:12])
 
@@ -5252,6 +5257,7 @@ def test_where_no_merge_can_be_made_the_block_says_nothing_ran(
         "- merged suite: not run (the head's own suite passed)\n"
         "- reproduction: not run\n"
         "- added tests: 0 red, 0 passes-on-base, 0 no signal\n"
+        "- prior fix scan: not run\n"
         "<!-- /command-center-evidence -->\n"
     ).format(remote_tip(remote))
 
@@ -5286,6 +5292,7 @@ def test_a_reproduction_that_fails_is_recorded_and_the_pr_opens(
         "- merged suite: pass on origin/main {}\n"
         "- reproduction: not run\n"
         "- added tests: 0 red, 0 passes-on-base, 0 no signal\n"
+        "- prior fix scan: not run\n"
         "<!-- /command-center-evidence -->\n"
     ).format(remote_tip(remote), main_sha[:12])
     assert "worktree add failed" not in body
@@ -5340,3 +5347,32 @@ def test_render_pr_body_strips_forged_markers_from_the_model_text():
         "- added tests: 0 red, 0 passes-on-base, 0 no signal\n"
         "<!-- /command-center-evidence -->\n"
     )
+
+
+def test_render_evidence_block_names_prior_fix_rewrites():
+    block = implement.render_evidence_block(
+        sha="a" * 40, merged=None,
+        reproduction={"line": "reproduction: not run", "tests": []},
+        repo=PUBLIC_REPO,
+        prior_fixes=[(42, "engine/implement.py", "finish_done")],
+    )
+
+    assert "- rewrites prior fix: #42 (engine/implement.py:finish_done)\n" in block
+
+
+def test_unavailable_prior_fix_scan_is_explicit_and_best_effort(
+        monkeypatch, tmp_path):
+    import fix_recurrence
+
+    def fail(*_args):
+        raise fix_recurrence.RecurrenceError("scan unavailable")
+
+    monkeypatch.setattr(fix_recurrence, "prior_fixes_touched", fail)
+    assert implement._prior_fix_evidence(tmp_path, "base", "head") is None
+
+    block = implement.render_evidence_block(
+        sha="a" * 40, merged=None,
+        reproduction={"line": "reproduction: not run", "tests": []},
+        repo=PUBLIC_REPO, prior_fixes=None,
+    )
+    assert "- prior fix scan: not run\n" in block

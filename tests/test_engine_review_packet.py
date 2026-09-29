@@ -1580,12 +1580,13 @@ def test_packet_marks_an_unreadable_parent_plan_instead_of_empty_premises():
     }]
 
 
-def test_review_checklist_probes_inferred_premises_against_live_evidence():
+def test_review_checklist_treats_premises_as_context_only():
+    # #1966: premise probes are out of review scope (Nate, 2026-09-28); the
+    # ticket's own first verification step checks them.
     text = (ROOT / "routines" / "muse-review.md").read_text()
     assert "plan_premises" in text
-    assert "labelled `inferred`" in text
-    assert "live" in text and "evidence" in text
-    assert "Do not\nre-derive it from plan prose" in text
+    assert "do not probe premises" in text
+    assert "labelled `inferred` against live" not in text
 
 
 def test_a_ticket_without_a_comments_list_gets_an_empty_one():

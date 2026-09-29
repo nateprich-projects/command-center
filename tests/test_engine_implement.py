@@ -2162,6 +2162,28 @@ def test_declined_answer_returns_the_trimmed_reason(tmp_path):
     }
 
 
+NATE_REASONS = (
+    "an app UI with no API",
+    "entering a credential",
+    "an account or billing setting",
+    "physical access to a machine",
+)
+
+
+def test_blocked_reasons_are_nates_four_and_the_session_one():
+    """Written out by hand, not read from the code, so a reason added or
+    dropped in one place fails here (#1901)."""
+    assert set(implement.BLOCKED_ON_HUMAN_REASONS) == set(NATE_REASONS) | {
+        "a Claude Code environment"}
+    assert implement.HUMAN_STEP_NEEDS == {
+        "an app UI with no API": "human",
+        "entering a credential": "human",
+        "an account or billing setting": "human",
+        "physical access to a machine": "human",
+        "a Claude Code environment": "claude-code-environment",
+    }
+
+
 @pytest.mark.parametrize("reason", implement.BLOCKED_ON_HUMAN_REASONS)
 def test_human_step_body_carries_the_reason_as_prose(reason):
     body = implement.render_human_step_body(
@@ -2171,7 +2193,10 @@ def test_human_step_body_carries_the_reason_as_prose(reason):
     assert "Human step: {}".format(reason) in body.splitlines()
     assert body.startswith("Part of #7; discovered while implementing #42.")
     assert "Risk:" not in body
-    assert body.rstrip().endswith("Action Nate must perform: Approve the OAuth app.")
+    who = ("a Claude Code session on the Mac mini"
+           if reason == "a Claude Code environment" else "Nate")
+    assert body.rstrip().endswith(
+        "Action {} must perform: Approve the OAuth app.".format(who))
     assert implement.render_human_step_title("Approve the OAuth app") == (
         "Human step: Approve the OAuth app"
     )
@@ -2249,6 +2274,62 @@ def test_finish_blocked_on_human_files_blocks_comments_and_finishes(
     assert "ticket/42" not in refs
     dirty = run_git("status", "--porcelain", cwd=clone).stdout.strip()
     assert "halfway.txt" in dirty
+
+
+@pytest.mark.parametrize("reason,needs", [
+    ("an app UI with no API", "human"),
+    ("entering a credential", "human"),
+    ("an account or billing setting", "human"),
+    ("physical access to a machine", "human"),
+    ("a Claude Code environment", "claude-code-environment"),
+])
+def test_finish_blocked_on_human_files_the_step_for_its_reason(
+        tmp_path, monkeypatch, reason, needs):
+    """Nate's four reasons file Needs=human; a step a Claude Code session can
+    do files Needs=claude-code-environment, so it is not put on Nate (#1901).
+    The default needs writers run; only the Project writes are stubbed."""
+    from engine import breakdown as breakdown_engine
+
+    _, clone = make_clone(tmp_path)
+    monkeypatch.setattr(implement, "fetch_ticket", lambda repo, number: ticket(number))
+    fields = []
+    monkeypatch.setattr(
+        breakdown_engine, "add_to_project", lambda url: "step-item-id")
+    monkeypatch.setattr(
+        funnel, "write_project_select",
+        lambda item_id, field, value, ref: fields.append(
+            (item_id, field, value, ref)))
+    monkeypatch.setattr(
+        breakdown_engine, "write_needs",
+        lambda item_id, value, ref: fields.append(
+            (item_id, "Needs", value, ref)))
+    bodies = []
+
+    def create(repo, parent, title, body, **kwargs):
+        bodies.append(body)
+        return {"number": 43, "ref": "{}#43".format(repo),
+                "url": "https://github.com/{}/issues/43".format(repo)}
+
+    implement.finish_blocked_on_human(
+        blocked(reason=reason, action="Kickstart the job")["blocked_on_human"],
+        run="run-42", repo=REPO, cwd=clone,
+        release=lambda ref: None,
+        heartbeat_finish=lambda *args: None,
+        create_effect=create,
+        block_effect=lambda *args, **kwargs: None,
+        comment_effect=lambda *args, **kwargs: None,
+        sub_issues_effect=lambda repo, number: [],
+    )
+
+    assert fields == [
+        ("step-item-id", "Origin", "agent", REPO + "#43"),
+        ("step-item-id", "Risk", "standard", REPO + "#43"),
+        ("step-item-id", "Needs", needs, REPO + "#43"),
+    ]
+    body, = bodies
+    actor = "Nate" if needs == "human" else (
+        "a Claude Code session on the Mac mini")
+    assert "Action {} must perform: Kickstart the job.".format(actor) in body
 
 
 def test_finish_blocked_on_human_requires_a_parent(tmp_path, monkeypatch):

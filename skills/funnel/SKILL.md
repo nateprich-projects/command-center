@@ -65,7 +65,11 @@ Full per-section wording lives in code; render through it:
 python3 /Users/nateprich/.claude/command-center/funnel_render.py
 ```
 
-Offer the top `launch` command. Do not run it.
+Check the top item's Needs first. If it is in `human_steps` (Needs `human`),
+it needs his own hands: say what he must do, and do not offer to work it.
+Otherwise offer to work the top item yourself, in this session or as a
+background task, and start once he says yes. Never hand him a terminal
+`launch` line to run.
 
 ## Answering a gate
 

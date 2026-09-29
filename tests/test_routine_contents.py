@@ -139,3 +139,19 @@ def test_implement_routines_ask_for_tests_that_catch_the_defect(routine):
     assert ("run the affected test files while working; `finish-ticket` runs "
             "the full suite" in normalized)
     assert "optional `risks`: where review should look hardest" in normalized
+
+
+@pytest.mark.parametrize(
+    "routine", ("muse-implement", "codex-work", "claude-saturday"))
+def test_implement_routines_list_every_blocked_reason_the_code_accepts(routine):
+    """The implementer prompts name exactly the reasons `finish-ticket`
+    validates, the session one included, so a lane can file a step for a
+    Claude Code session rather than for Nate (#1901)."""
+    from engine import implement
+
+    body = (ROOT / "routines" / (routine + ".md")).read_text(encoding="utf-8")
+    normalized = " ".join(body.split())
+
+    for reason in implement.BLOCKED_ON_HUMAN_REASONS:
+        assert "`{}`".format(reason) in normalized, reason
+    assert "<allowlisted reason>" not in normalized

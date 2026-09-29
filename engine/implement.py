@@ -107,17 +107,29 @@ class MergeConflictError(ImplementError):
 
 
 
-#: The blocked_on_human reason enum: the four specific human capabilities
-#: from the implement answer schema (#794). These are prose in the created
-#: sub-issue for Nate to read; the machine signal is Needs=human on the
-#: Project field, written alongside. Kept here (not in funnel) because only
-#: this job validates the implement answer.
+#: The blocked_on_human reason enum from the implement answer schema (#794):
+#: four capabilities only Nate has, and one a Claude Code session on the Mac
+#: mini has (#1901). These are prose in the created sub-issue; the machine
+#: signal is the Needs Project field written alongside, which
+#: ``HUMAN_STEP_NEEDS`` maps each reason to. Kept here (not in funnel) because
+#: only this job validates the implement answer.
+CLAUDE_CODE_ENVIRONMENT_REASON = "a Claude Code environment"
+
 BLOCKED_ON_HUMAN_REASONS = (
     "an app UI with no API",
     "entering a credential",
     "an account or billing setting",
     "physical access to a machine",
+    CLAUDE_CODE_ENVIRONMENT_REASON,
 )
+
+#: The Needs value each blocked reason files its step with. A step a Claude
+#: Code session can do goes to a session, not to Nate (#1901).
+HUMAN_STEP_NEEDS = {
+    reason: ("claude-code-environment"
+             if reason == CLAUDE_CODE_ENVIRONMENT_REASON else "human")
+    for reason in BLOCKED_ON_HUMAN_REASONS
+}
 
 
 def fetch_ticket(repo: str, number: int) -> dict:
@@ -1735,19 +1747,23 @@ def render_human_step_body(*, parent_number: int, ticket_number: int,
 
     The ``Human step: <reason>`` line is prose for Nate to read, not a
     marker: the body scanner is deleted (#826) and the machine signal is
-    Needs=human on the Project field, written alongside by
-    ``finish_blocked_on_human``.
+    the Needs Project field, written alongside by ``finish_blocked_on_human``.
+    A step a Claude Code session can do names the session as its actor,
+    not Nate (#1901).
     """
     doing = action.rstrip()
     if not doing.endswith("."):
         doing += "."
+    who = ("a Claude Code session on the Mac mini"
+           if HUMAN_STEP_NEEDS.get(reason) == "claude-code-environment"
+           else "Nate")
     return "\n".join([
         "Part of #{}; discovered while implementing #{}.".format(
             parent_number, ticket_number),
         "",
         "Human step: {}".format(reason),
         "",
-        "Action Nate must perform: {}".format(doing),
+        "Action {} must perform: {}".format(who, doing),
         "",
     ])
 
@@ -1792,21 +1808,27 @@ def create_human_step_issue(repo: str, parent_number: int, title: str,
     return {"number": number, "ref": "{}#{}".format(repo, number), "url": url}
 
 
-def write_human_step_needs(url: str, ref: str) -> None:
+def write_human_step_needs(url: str, ref: str, needs: str = "human") -> None:
     """Set canonical routing fields on a new human-step sub-issue.
 
     The sub-issue joins the parent's Project automatically with its fields
     blank; ``gh project item-add`` answers its row id whether fresh or
     already present (as breakdown's ``add_to_project`` does), then one
     mutation sets the field. Without this the new ticket would read as
-    unset and miss the human_steps section (#826).
+    unset and miss the human_steps section (#826). ``needs`` is ``human``
+    for Nate's steps and ``claude-code-environment`` for a session's (#1901).
     """
     from engine import breakdown as breakdown_engine
 
     item_id = breakdown_engine.add_to_project(url)
     funnel.write_project_select(item_id, "Origin", "agent", ref)
     funnel.write_project_select(item_id, "Risk", "standard", ref)
-    breakdown_engine.write_needs(item_id, "human", ref)
+    breakdown_engine.write_needs(item_id, needs, ref)
+
+
+def write_session_step_needs(url: str, ref: str) -> None:
+    """Route a new step to a Claude Code session on the Mac mini (#1901)."""
+    write_human_step_needs(url, ref, needs="claude-code-environment")
 
 
 def write_declined_needs(url: str, ref: str) -> None:
@@ -3019,6 +3041,8 @@ def finish_blocked_on_human(
         block_effect: Callable[..., None] = mark_ticket_blocked,
         comment_effect: Callable[..., None] = post_agent_comment,
         needs_effect: Callable[[str, str], None] = write_human_step_needs,
+        session_needs_effect: Callable[[str, str], None]
+        = write_session_step_needs,
         sub_issues_effect: Callable[[str, int], List[Dict[str, object]]]
         = read_parent_sub_issues,
         comments_effect: Callable[[str, int], List[str]]
@@ -3035,7 +3059,9 @@ def finish_blocked_on_human(
     implementation as not kept and leaves this run's Codex checkout, which
     may hold the only copy of it (#1856; #1711 removed it).
     A failure after the sub-issue exists names it, so the retry starts
-    from GitHub's truth rather than filing a second one.
+    from GitHub's truth rather than filing a second one. The step's Needs
+    follows its reason: ``session_needs_effect`` for a step a Claude Code
+    session can do, ``needs_effect`` for Nate's (#1901).
 
     A human step Nate closed as not planned for this ticket is his answer
     that no step will happen, so nothing is filed again (#1726): the ticket
@@ -3076,8 +3102,12 @@ def finish_blocked_on_human(
         reason=blocked["reason"], action=blocked["action"])
     created = create_effect(
         resolved, parent_number, title, body, cwd=context["root"])
+    step_needs = HUMAN_STEP_NEEDS[blocked["reason"]]
     try:
-        needs_effect(created["url"], created["ref"])
+        if step_needs == "claude-code-environment":
+            session_needs_effect(created["url"], created["ref"])
+        else:
+            needs_effect(created["url"], created["ref"])
         block_effect(resolved, context["number"],
                      blocked_by=created["number"], cwd=context["root"])
         comment_effect(

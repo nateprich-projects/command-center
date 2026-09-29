@@ -37,8 +37,10 @@ root — one JSON object and nothing else in the file:
 - success: `{"done":true,"summary":"...","departures":[]}`
 - a required action you cannot perform:
   `{"blocked_on_human":{"reason":"...","action":"..."}}`, where `reason` is
-  exactly one of `an app UI with no API`, `entering a credential`, `an
-  account or billing setting`, `physical access to a machine`
+  exactly one of `a Claude Code environment` (work a Claude Code session on
+  the Mac mini can do outside this checkout, filed for a session rather than
+  Nate), or Nate's own `an app UI with no API`, `entering a credential`,
+  `an account or billing setting`, `physical access to a machine`
 - an unlanded named prerequisite, before any change: `{"declined":"..."}`
 
 `summary` says what you changed. `departures` names everything the ticket

@@ -249,8 +249,13 @@ def test_every_work_routine_captures_observed_defects_before_finishing():
 
 
 def test_active_work_routines_pass_origin_and_class_to_capture():
+    """The routine's capture line passes `--observed`, which a Broken capture
+    requires (#1847), and offers Bug for a find that has not happened."""
     offenders = []
-    expected = "--origin agent --class <Broken|Maintenance|Improve|New|Replace>"
+    expected = (
+        "--origin agent --class <Broken|Maintenance|Improve|New|Replace|Bug> "
+        "--note \"<evidence>\" --observed \""
+    )
     for filename in AGENT_CAPTURE_ROUTINES:
         body = " ".join(
             (ROOT / "routines" / filename).read_text(encoding="utf-8").split()
@@ -271,3 +276,19 @@ def test_shape_skill_pins_plan_section_names():
         "skills/shape/SKILL.md must keep the plan section names stable; missing: {}"
         .format(", ".join(missing))
     )
+
+
+def test_shape_skill_capture_rule_keeps_security_exposures_broken():
+    """The class rule the capture routines point at says Broken needs
+    `--observed`, names `promote`, and keeps a latent security or privacy
+    exposure in Broken with `--observed` naming it (#1847)."""
+    skill = " ".join(
+        (ROOT / "skills" / "shape" / "SKILL.md").read_text().split())
+    for phrase in (
+        "an agent's `capture --class Broken` refuses without "
+        "`--observed <evidence>`",
+        "`funnel promote <n> --observed <evidence>` moves it to `Broken`",
+        "A latent security or privacy exposure stays `Broken`, with "
+        "`--observed` naming the exposure",
+    ):
+        assert phrase in skill, phrase

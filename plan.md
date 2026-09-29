@@ -72,6 +72,15 @@ consistently:
   and no risk the shaper declares advance to `Ready`; a wording-scan hit alone raises
   `Risk` to `escalated` and posts its reasons but does not stop them (#1679, Nate
   2026-09-27); the other combinations stop at `Shaped`.
+- **The funnel watch answers two questions itself, not Nate.** Every `Unblock?` and
+  `Unblock or park?` item, except one waiting on his hands (Needs `human`, which he
+  also sees as a blocked human step); and `Is the plan good?` on an agent-origin plan
+  of Class Broken or Bug, except one whose `## Needs Nate` section still holds an
+  Exposure or Preference question. `funnel.py brief` lists them under `watch_gates`,
+  outside `items` and `total_needing_nate`, through the one predicate
+  `watch_owns_gate`; `gate_question` still asks them, so lanes and sweeps read what
+  they read before. _(Nate, 2026-09-28, relayed from an interactive session; #1891:
+  "please ensure these stop showing up as needing my review.")_
 - **"Accept it?" remains the human gate** for work whose class and origin make its
   completion a Nate decision. Whether the thing is worth keeping is not checkable,
   and no agent may decide it.

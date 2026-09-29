@@ -468,11 +468,14 @@ SHAPE_APPLY_STUB = (
     "if validate_only:\n"
     "    print(json.dumps({'status': status, 'reason': reason, 'answer': data}, sort_keys=True))\n"
     "    raise SystemExit(0)\n"
+    "ref = '{}#{}'.format(flag('--repo'), args[0])\n"
+    "if os.environ.get('APPLY_STALE_SHAPE', ''):\n"
+    "    print('run outcome: skipped-stale-shape ref={} fresh Status=Shaped children=2'.format(ref))\n"
+    "    raise SystemExit(0)\n"
     "if os.environ.get('APPLY_REFUSE', ''):\n"
     "    sys.stderr.write('shape-apply: idea {} is not in the Project\\n'.format(args[0]))\n"
     "    raise SystemExit(1)\n"
     "(root / 'applied.marker').write_text('applied')\n"
-    "ref = '{}#{}'.format(flag('--repo'), args[0])\n"
     "print('{0} \\u2192 {1}\\nhttps://github.com/{2}/issues/{3}'.format(ref, status, flag('--repo'), args[0]))\n"
     "if status == 'Ready':\n"
     "    print('advanced to Ready: {}'.format(reason))\n"
@@ -2492,6 +2495,22 @@ def test_a_shape_is_applied_and_finished_done(tmp_path):
         "finish --agent muse --run engine-run --outcome done "
         "--note shaped {}: Ready (self-approved: agent idea, finite "
         "class, no open questions) --shape-status Ready\n".format(SHAPE_REF)
+    )
+
+
+def test_a_stale_shape_is_recorded_without_shape_status(tmp_path):
+    proc, repo = _stubbed_runner(
+        tmp_path, _issue_begin("shape"), _issue_packet("shape"),
+        answers=(_framer_answer(),),
+        extra_env={"APPLY_STALE_SHAPE": "1"})
+
+    assert proc.returncode == 0, proc.stderr
+    assert len(_apply_calls(repo)) == 1
+    assert not (repo / "applied.marker").exists()
+    assert _heartbeat_without_muse_call_record(repo) == (
+        "finish --agent muse --run engine-run "
+        "--outcome skipped-stale-shape --note skipped stale shape: "
+        "ref={} fresh Status=Shaped children=2\n".format(SHAPE_REF)
     )
 
 

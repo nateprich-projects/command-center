@@ -3562,6 +3562,10 @@ def test_finish_declined_routes_a_clearable_unblock_through_the_watch(
         effects["agent"].append((url, ref))
         blocked_item.needs = "agent"
 
+    def record_decline_comment(*args, **kwargs):
+        effects["comments"].append((args, kwargs))
+        blocked_item.decline_reason = reason
+
     implement.finish_declined(
         reason,
         run="run-42",
@@ -3570,8 +3574,7 @@ def test_finish_declined_routes_a_clearable_unblock_through_the_watch(
         release=effects["released"].append,
         heartbeat_finish=lambda *args: effects["finished"].append(args),
         block_effect=record_block,
-        comment_effect=lambda *args, **kwargs: effects["comments"].append(
-            (args, kwargs)),
+        comment_effect=record_decline_comment,
         needs_effect=lambda *args: pytest.fail(
             "an unhandled decline must use the decline writer"),
         declined_needs_effect=record_declined_needs,

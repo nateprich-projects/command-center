@@ -5,7 +5,8 @@ park?``) except one waiting on his hands, and ``Is the plan good?`` on an
 agent-origin Broken or Bug plan except one still holding an Exposure or
 Preference question, are the funnel watch's to answer. They leave the brief's
 ``items`` and ``total_needing_nate`` and appear under ``watch_gates``;
-``gate_question`` itself does not change.
+``gate_question`` stays shared with other readers, with lane declines surfaced
+even when their Needs field is ``agent``.
 """
 
 from __future__ import annotations
@@ -138,59 +139,50 @@ def test_a_blocked_human_step_stays_with_nate(capsys):
 
 def test_a_declined_unblock_is_watch_owned_but_human_step_stays(capsys):
     project = building_project()
-    declined = silent_blocked_ticket(number=1902, needs="agent")
-    declined.decline_reason = "the prerequisite has not landed"
-    human_step = silent_blocked_ticket(number=1654, needs="human")
+    # These mirror #1902 and #1653: blocked, Needs=human, Declined marker.
+    declined_1902 = silent_blocked_ticket(number=1902, needs="human")
+    declined_1902.decline_reason = "the prerequisite has not landed"
+    declined_1653 = silent_blocked_ticket(number=1653, needs="human")
+    declined_1653.decline_reason = "the prerequisite has not landed"
+    # #1926 is the live Human-step control; a synthetic shape is sufficient.
+    human_step = silent_blocked_ticket(number=1926, needs="human")
 
-    brief = brief_for([project, declined, human_step], capsys)
+    brief = brief_for(
+        [project, declined_1902, declined_1653, human_step], capsys
+    )
 
     assert brief["total_needing_nate"] == 1
-    assert [row["ref"] for row in brief["watch_gates"]] == [declined.ref]
+    assert {row["ref"] for row in brief["watch_gates"]} == {
+        declined_1902.ref,
+        declined_1653.ref,
+    }
     assert [row["ref"] for row in brief["items"]] == [human_step.ref]
 
 
 def test_watch_ownership_keeps_human_steps_with_nate():
     project = building_project()
-    declined = silent_blocked_ticket(number=1902, needs="agent")
-    declined.decline_reason = "the prerequisite has not landed"
-    human_step = silent_blocked_ticket(number=1654, needs="human")
+    declined_1902 = silent_blocked_ticket(number=1902, needs="human")
+    declined_1902.decline_reason = "the prerequisite has not landed"
+    declined_1653 = silent_blocked_ticket(number=1653, needs="human")
+    declined_1653.decline_reason = "the prerequisite has not landed"
+    human_step = silent_blocked_ticket(number=1926, needs="human")
 
-    assert funnel.gate_question(declined) == "Unblock?"
-    assert routed(declined, project)
+    assert funnel.gate_question(declined_1902) == "Unblock?"
+    assert routed(declined_1902, project)
+    assert funnel.gate_question(declined_1653) == "Unblock?"
+    assert routed(declined_1653, project)
     assert not routed(human_step, project)
 
 
-def test_declined_unblock_needs_reconcile_to_the_current_block_state(
-    monkeypatch,
-):
-    still_blocked = silent_blocked_ticket(number=1902, needs="human")
-    still_blocked.item_id = "project-item-1902"
-    still_blocked.decline_reason = "the prerequisite has not landed"
-    already_unblocked = silent_blocked_ticket(number=1653, needs="human")
-    already_unblocked.labels = []
-    already_unblocked.item_id = "project-item-1653"
-    already_unblocked.decline_reason = "the prerequisite has not landed"
-    human_step = silent_blocked_ticket(number=1654, needs="human")
-    human_step.item_id = "project-item-1654"
-    writes = []
-    monkeypatch.setattr(
-        funnel, "write_project_select",
-        lambda *args: writes.append(args),
-    )
+def test_agent_owned_blocks_only_surface_when_declined():
+    declined = silent_blocked_ticket(number=1902, needs="agent")
+    declined.decline_reason = "the prerequisite has not landed"
+    ordinary = silent_blocked_ticket(number=1903, needs="agent")
 
-    reconciled = funnel.reconcile_declined_unblock_needs(
-        [still_blocked, already_unblocked, human_step]
-    )
-
-    assert reconciled == [
-        {"ref": still_blocked.ref, "from": "human", "to": "agent"},
-        {"ref": already_unblocked.ref, "from": "human", "to": "none"},
-    ]
-    assert writes == [
-        ("project-item-1902", "Needs", "agent", still_blocked.ref),
-        ("project-item-1653", "Needs", "none", already_unblocked.ref),
-    ]
-    assert human_step.needs == "human"
+    assert funnel.gate_question(declined) == "Unblock?"
+    assert routed(declined)
+    assert funnel.gate_question(ordinary) is None
+    assert not routed(ordinary)
 
 
 def test_agent_broken_plan_with_only_a_scope_question_leaves(capsys):
@@ -352,11 +344,13 @@ def test_queue_keeps_declined_unblock_outside_waiting_on_nate(
     monkeypatch.setattr(funnel, "awaiting_review", lambda items, **kw: [])
     monkeypatch.setattr(funnel, "_backoff_rows", lambda: [])
     project = building_project()
-    declined = silent_blocked_ticket(number=1902, needs="agent")
-    declined.decline_reason = "the prerequisite has not landed"
-    human_step = silent_blocked_ticket(number=1653, needs="human")
+    declined_1902 = silent_blocked_ticket(number=1902, needs="human")
+    declined_1902.decline_reason = "the prerequisite has not landed"
+    declined_1653 = silent_blocked_ticket(number=1653, needs="human")
+    declined_1653.decline_reason = "the prerequisite has not landed"
+    human_step = silent_blocked_ticket(number=1926, needs="human")
 
-    funnel.cmd_queue([project, declined, human_step], NOW)
+    funnel.cmd_queue([project, declined_1902, declined_1653, human_step], NOW)
     out = capsys.readouterr().out
 
     nate_section, watch_and_rest = out.split(
@@ -365,6 +359,8 @@ def test_queue_keeps_declined_unblock_outside_waiting_on_nate(
     watch_section = watch_and_rest.split("Startable", 1)[0]
     assert "Waiting on Nate (1)" in nate_section
     assert human_step.ref in nate_section
-    assert declined.ref not in nate_section
-    assert declined.ref in watch_section
+    assert declined_1902.ref not in nate_section
+    assert declined_1653.ref not in nate_section
+    assert declined_1902.ref in watch_section
+    assert declined_1653.ref in watch_section
     assert human_step.ref not in watch_section

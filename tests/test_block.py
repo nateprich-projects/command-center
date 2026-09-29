@@ -241,45 +241,6 @@ def test_passed_date_is_a_satisfied_condition_and_can_be_cleared(monkeypatch):
     assert calls[1][-2:] == ("--remove-label", "blocked")
 
 
-def test_clearing_a_declined_block_also_clears_its_needs(monkeypatch):
-    now = datetime(2026, 9, 29, 12, 0, tzinfo=timezone.utc)
-    item = comment_item()
-    item.parent = "owner/repo#40"
-    item.needs = "agent"
-    item.labels = ["blocked"]
-    item.block_reason = "The prerequisite has landed."
-    item.block_references = ["#77"]
-    item.decline_reason = "The prerequisite has not landed."
-    blocker = funnel.Item(
-        repo=item.repo, number=77, title="Prerequisite", url="",
-        state="CLOSED",
-    )
-    calls = []
-    needs_writes = []
-
-    def run(args, capture_output, text=True):
-        calls.append(tuple(args))
-        return SimpleNamespace(returncode=0, stdout="", stderr="")
-
-    monkeypatch.setattr(funnel.subprocess, "run", run)
-    monkeypatch.setattr(
-        funnel, "write_project_select",
-        lambda *args: needs_writes.append(args),
-    )
-
-    cleared = funnel.clear_satisfied_blocks(
-        [item, blocker], now, run="run-decline", agent="codex"
-    )
-
-    assert cleared[0]["ref"] == item.ref
-    assert needs_writes == [
-        (item.item_id, "Needs", "none", item.ref),
-    ]
-    assert item.needs == "none"
-    assert item.labels == []
-    assert calls[-1][-2:] == ("--remove-label", "blocked")
-
-
 def test_combined_date_and_issue_block_requires_both_conditions():
     blocked_until = date.today() - timedelta(days=1)
     parsed = funnel.parse_block_comment([
@@ -665,13 +626,11 @@ def test_ordinary_body_comments_are_not_validated_as_block_comments(monkeypatch)
     )
 
 
-def test_load_items_fetches_comments_for_open_blocked_and_human_items(monkeypatch):
-    def node(number, repo="owner/repo", state="OPEN", labels=None,
-             needs=None):
+def test_load_items_fetches_comments_only_for_open_blocked_items(monkeypatch):
+    def node(number, repo="owner/repo", state="OPEN", labels=None):
         return {
             "status": {"name": "Ready"},
             "class": {"name": "New"},
-            "needs": {"name": needs} if needs else None,
             "content": {
                 "number": number,
                 "title": "issue {}".format(number),
@@ -693,7 +652,6 @@ def test_load_items_fetches_comments_for_open_blocked_and_human_items(monkeypatc
         node(2),
         node(3, state="CLOSED", labels=["blocked"]),
         node(4, repo="outside/repo", labels=["blocked"]),
-        node(5, needs="human"),
     ]
     monkeypatch.setattr(funnel, "member_repos", lambda: ["owner/repo"])
     monkeypatch.setattr(
@@ -710,37 +668,25 @@ def test_load_items_fetches_comments_for_open_blocked_and_human_items(monkeypatc
 
     def gh_json(*args):
         calls.append(args)
-        body = (
-            "**Declined:** Previous Codex lane decline."
-            if args[3] == "5"
-            else "**Blocked on #84:** Wait for the decision."
-        )
         return {"comments": [
-            {"author": OWNER, "body": body},
+            {"author": OWNER, "body": "**Blocked on #84:** Wait for the decision."},
         ]}
 
     monkeypatch.setattr(funnel, "_gh_json", gh_json)
 
     items = funnel.load_items()
 
-    assert [item.number for item in items] == [1, 2, 3, 5]
-    assert calls == [
-        (
-            "gh", "issue", "view", "1", "--repo", "owner/repo",
-            "--json", "comments",
-        ),
-        (
-            "gh", "issue", "view", "5", "--repo", "owner/repo",
-            "--json", "comments",
-        ),
-    ]
+    assert [item.number for item in items] == [1, 2, 3]
+    assert calls == [(
+        "gh", "issue", "view", "1", "--repo", "owner/repo",
+        "--json", "comments",
+    )]
     blocked = items[0]
     assert blocked.block_references == ["#84"]
     assert blocked.block_reason == "Wait for the decision."
     assert blocked.needs_decision is None
     assert blocked.unparseable_block_comments == []
     assert blocked.block_comments_error is None
-    assert items[-1].decline_reason == "Previous Codex lane decline."
 
 
 def _dated_block_queue(blocked_until):

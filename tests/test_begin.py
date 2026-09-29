@@ -3838,8 +3838,12 @@ def _held_plan(number, body, *, risk="escalated", needs="human",
     if record is not None:
         body = "{}\n\n{}\n".format(
             body.rstrip("\n"), funnel.shape_risk_block(*record))
-    plan.body = body + "\n" + funnel.origin_block(
-        "agent", at=NOW, run="shape-run", agent="muse")
+    plan.body = "{}\n\n{}\n\n{}".format(
+        body.rstrip("\n"),
+        funnel.provenance_block(
+            "agent", at=NOW, run="shape-run", agent="muse"),
+        funnel.origin_block("agent", at=NOW, run="shape-run", agent="muse"),
+    )
     plan.risk = risk
     plan.needs = needs
     return plan
@@ -3889,8 +3893,10 @@ def test_sweep_treats_a_missing_declared_key_as_empty(monkeypatch, scan):
         "{}\n\n```json\n{}\n```".format(
             funnel.SHAPE_RISK_MARKER,
             json.dumps({"scan": scan}, indent=2, sort_keys=True)))
-    plan.body = "{}\n\n{}\n{}".format(
+    plan.body = "{}\n\n{}\n\n{}\n{}".format(
         "# Plan\n\nBuild the report.", missing_declared_record,
+        funnel.provenance_block(
+            "agent", at=NOW, run="shape-run", agent="muse"),
         funnel.origin_block("agent", at=NOW, run="shape-run", agent="muse"))
 
     advanced, writes, fields, comments = _sweep(monkeypatch, [plan])

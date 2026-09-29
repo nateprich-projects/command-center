@@ -17633,13 +17633,22 @@ def shape_risk_block(declared: Sequence[str], scan: Sequence[str]) -> str:
 
 
 def parse_shape_risk_record(body: str) -> Optional[Dict[str, List[str]]]:
-    """The runner's risk record, or ``None`` when absent or unreadable.
+    """The runner's risk record, or None when absent or unreadable.
 
-    The newest block wins, as for every runner record, so a marker the
-    shaper quoted in the narrative above cannot outrank the runner's own.
-    A record predating the declared field treats it as an empty list.
+    The runner writes this record immediately before its provenance trailer.
+    Only content before that trailer is runner-rendered; a later copied
+    origin-override record cannot outrank it. Older records without a
+    declared field continue to treat it as an empty list.
     """
-    found = _marked_json(body, SHAPE_RISK_MARKER)
+    if not isinstance(body, str):
+        return None
+    provenance = re.search(
+        r"(?m)^[ \t]*" + re.escape(PROVENANCE_MARKER) + r"[ \t]*\r?$",
+        body,
+    )
+    if provenance is None:
+        return None
+    found = _marked_json(body[:provenance.start()], SHAPE_RISK_MARKER)
     if found is None:
         return None
     declared = found.get("declared", [])

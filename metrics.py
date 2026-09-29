@@ -1118,14 +1118,17 @@ def derive_row(
         cost.get("reason") if isinstance(cost, Mapping) else None
     ) or signal_gap or "outcomes cost join is unavailable"
     if isinstance(cost, Mapping) and cost.get("status") == "partial":
-        cost_gap = "outcomes cost join is partial; some merged tickets lack priced usage"
+        cost_gap = "outcomes cost join is partial; some merged tickets or runs lack priced usage"
     metrics["D"]["D4"] = _fact(
         cost_lanes if cost_lanes else None,
         "brief.outcome_signals.signals.cost_per_merged_pr.by_lane",
         str(cost_gap),
     )
     if cost_lanes and isinstance(cost, Mapping) and cost.get("status") == "partial":
-        metrics["D"]["D4"]["gap"] = str(cost_gap)
+        metrics["D"]["D4"].update(
+            gap=str(cost_gap),
+            partial=True,
+        )
     api_by_agent: Dict[str, Dict] = {}
     resend_by_agent: Dict[str, Dict] = {}
     for agent in (rows_by_agent or {}):
@@ -2133,8 +2136,9 @@ def _flatten_series_row(row: Mapping[str, object]):
     def emit(path: Tuple[str, ...], kind: str, source: Optional[str],
              gap: Optional[str], value: object = _SERIES_MISSING,
              numerator: object = _SERIES_MISSING,
-             denominator: object = _SERIES_MISSING) -> None:
-        valid = not bool(gap)
+             denominator: object = _SERIES_MISSING,
+             partial: bool = False) -> None:
+        valid = not bool(gap) or partial
         if kind in ("rate", "weighted_mean"):
             top = _series_number(numerator, signed=(kind == "weighted_mean"))
             bottom = _series_number(denominator)
@@ -2163,7 +2167,8 @@ def _flatten_series_row(row: Mapping[str, object]):
         }
 
     def walk(value: object, path: Tuple[str, ...], source: Optional[str] = None,
-             inherited_gap: Optional[str] = None) -> None:
+             inherited_gap: Optional[str] = None,
+             inherited_partial: bool = False) -> None:
         if isinstance(value, Mapping):
             current_source = value.get("source")
             if not isinstance(current_source, str) or not current_source:
@@ -2171,41 +2176,51 @@ def _flatten_series_row(row: Mapping[str, object]):
             current_gap = value.get("gap")
             if not isinstance(current_gap, str) or not current_gap:
                 current_gap = inherited_gap
-            if len(path) == 2 and current_gap:
+            current_partial = value.get("partial") is True or inherited_partial
+            # D4 keeps priced lanes observable while preserving its gap note.
+            if len(path) == 2 and current_gap and not current_partial:
                 code_gaps.add(path)
 
             if "numerator" in value or "denominator" in value:
                 emit(path, "rate", current_source, current_gap,
                      numerator=value.get("numerator"),
-                     denominator=value.get("denominator"))
+                     denominator=value.get("denominator"),
+                     partial=current_partial)
                 return
             if "sum_seconds" in value and "count" in value:
                 emit(path, "weighted_mean", current_source, current_gap,
-                     numerator=value.get("sum_seconds"), denominator=value.get("count"))
+                     numerator=value.get("sum_seconds"),
+                     denominator=value.get("count"),
+                     partial=current_partial)
                 return
             if "sum" in value or "count" in value:
                 emit(path, "weighted_mean", current_source, current_gap,
-                     numerator=value.get("sum"), denominator=value.get("count"))
+                     numerator=value.get("sum"),
+                     denominator=value.get("count"),
+                     partial=current_partial)
                 return
             if "value" in value and ("source" in value or "gap" in value):
                 payload = value.get("value")
                 if payload is None:
                     emit(path, _series_kind(path), current_source,
-                         current_gap or "hourly value is unavailable")
+                         current_gap or "hourly value is unavailable",
+                         partial=current_partial)
                 else:
-                    walk(payload, path, current_source, current_gap)
+                    walk(payload, path, current_source, current_gap,
+                         current_partial)
                 return
 
             children = [
                 (str(key), child) for key, child in value.items()
-                if key not in ("source", "gap")
+                if key not in ("source", "gap", "partial")
             ]
             if not children:
                 if current_gap:
                     emit(path, _series_kind(path), current_source, current_gap)
                 return
             for key, child in children:
-                walk(child, path + (key,), current_source, current_gap)
+                walk(child, path + (key,), current_source, current_gap,
+                     current_partial)
             return
 
         if isinstance(value, list):
@@ -2218,17 +2233,19 @@ def _flatten_series_row(row: Mapping[str, object]):
                     )
                     if identity is not None:
                         walk(child, path + (identity[0], str(identity[1])),
-                             source, inherited_gap)
+                             source, inherited_gap, inherited_partial)
                         continue
-                walk(child, path + (str(index),), source, inherited_gap)
+                walk(child, path + (str(index),), source, inherited_gap,
+                     inherited_partial)
             return
 
         if isinstance(value, str):
-            emit(path, "category", source, inherited_gap, value=value)
+            emit(path, "category", source, inherited_gap, value=value,
+                 partial=inherited_partial)
         else:
             emit(path, _series_kind(path), source,
                  inherited_gap or ("hourly value is unavailable" if value is None else None),
-                 value=value)
+                 value=value, partial=inherited_partial)
 
     for group, group_metrics in root.items():
         if not isinstance(group, str) or not isinstance(group_metrics, Mapping):
@@ -2248,7 +2265,7 @@ def _flatten_series_row(row: Mapping[str, object]):
 
 def _daily_series_leaf(path: Tuple[str, ...], kind: str,
                        hourly: Sequence[Tuple[Dict, set, set]]):
-    """Aggregate one leaf across a UTC day; any explicit gap fails closed."""
+    """Aggregate one UTC day; explicit gaps fail closed except partial data."""
     code = path[:2]
     values: List[object] = []
     numerators: List[float] = []

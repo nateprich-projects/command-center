@@ -17,6 +17,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 import metrics  # noqa: E402
+import outcomes  # noqa: E402
 
 
 FIXTURES = ROOT / "tests" / "fixtures"
@@ -125,6 +126,179 @@ def test_derive_row_covers_plan_metrics_and_preserves_rate_pairs():
     assert row["metrics"]["E"]["E2"]["opened_this_hour"]["value"] is None
     assert row["metrics"]["E"]["E2"]["opened_this_hour"]["gap"]
     assert row["metrics"]["F"]["F2"]["value"] == 1234
+
+
+def test_d4_uses_priced_run_usage_and_excludes_unpriced_runs():
+    token_kinds = (
+        "fresh_input_tokens",
+        "cache_read_input_tokens",
+        "cache_write_input_tokens",
+        "output_tokens",
+    )
+    rates = [
+        {
+            "provider": "openai",
+            "model": "gpt-test",
+            "token_kind": kind,
+            "usd_per_million_tokens": amount,
+            "effective_from": "2026-09-01T00:00:00Z",
+            "source_url": "https://example.test/pricing",
+            "recorded_at": "2026-09-22T00:00:00Z",
+        }
+        for kind, amount in zip(token_kinds, (1, 2, 3, 4))
+    ]
+    # Independent expected rate: (100*1 + 200*2 + 300*3 + 400*4) / 1M = $0.003.
+    run_fields = {
+        "agent": "codex",
+        "provider": "openai",
+        "model": "gpt-test",
+        "reasoning_effort": "high",
+        "started_at": "2026-09-23T04:10:00Z",
+    }
+    record = outcomes.derive_outcome(
+        {
+            "repo": "owner/repo",
+            "number": 42,
+            "title": "Ticket 42",
+            "closedAt": "2026-09-23T04:26:00Z",
+        },
+        prs=[{
+            "number": 7,
+            "state": "MERGED",
+            "mergedAt": "2026-09-23T04:26:00Z",
+            "headRefName": "ticket/42",
+        }],
+        run_observations=[
+            {
+                **run_fields,
+                "run": "priced-run",
+                "token_usage": {
+                    "fresh_input_tokens": 100,
+                    "cache_read_input_tokens": 200,
+                    "cache_write_input_tokens": 300,
+                    "output_tokens": 400,
+                },
+            },
+            {
+                **run_fields,
+                "run": "incomplete-run",
+                "model": "gpt-unpriced",
+                "token_usage": None,
+            },
+        ],
+        rate_rows=rates,
+        now=NOW,
+    )
+    assert outcomes._cost_observation({
+        "token_usage": record["runs"][0]["token_usage"],
+    }) is None
+    assert outcomes._cost_observation(record["runs"][0]) == (
+        pytest.approx(0.003), "USD"
+    )
+    missing_record = outcomes.derive_outcome(
+        {
+            "repo": "owner/repo",
+            "number": 43,
+            "title": "Ticket 43",
+            "closedAt": "2026-09-23T04:30:00Z",
+        },
+        prs=[{
+            "number": 8,
+            "state": "MERGED",
+            "mergedAt": "2026-09-23T04:30:00Z",
+            "headRefName": "ticket/43",
+        }],
+        run_observations=[{
+            **run_fields,
+            "run": "missing-run",
+            "token_usage": None,
+        }],
+        rate_rows=rates,
+        now=NOW,
+    )
+    snapshot = _json("metrics_snapshot.json")
+    signal_summary = outcomes.signal_summary([record, missing_record], now=NOW)
+    cost_signal = signal_summary["signals"]["cost_per_merged_pr"]
+    assert cost_signal["status"] == "partial"
+    assert cost_signal["sample_size"] == 1
+    assert cost_signal["merged_records"] == 2
+    assert cost_signal["missing_records"] == 2
+    assert cost_signal["by_lane"][0]["merged_prs"] == 1
+    assert cost_signal["by_lane"][0]["cost_per_merged_pr"] == pytest.approx(0.003)
+    snapshot["brief"]["outcome_signals"] = signal_summary
+
+    row = metrics.derive_row(
+        snapshot,
+        _inputs()[1],
+        _json("metrics_usage.json"),
+        [record, missing_record],
+        NOW,
+        _json("metrics_commits.json"),
+        1234,
+    )
+
+    d4 = row["metrics"]["D"]["D4"]
+    assert len(d4["value"]) == 1
+    assert d4["value"][0]["lane"] == "codex/gpt-test/high"
+    assert d4["value"][0]["unit"] == "USD"
+    assert d4["value"][0]["numerator"] == pytest.approx(0.003)
+    assert d4["value"][0]["denominator"] == 1
+    assert d4["gap"] == (
+        "outcomes cost join is partial; some merged tickets or runs lack priced usage"
+    )
+
+
+def test_d4_shared_cost_join_fills_execution_panel_for_representative_window():
+    """#1272 D4, made concrete by #1284's Panel D contract.
+
+    #1272 sources cost per merged PR by lane from outcomes.signal_summary;
+    #1284 requires missing token_usage to remain a labelled gap, not zero.
+    """
+    window = _jsonl("d4_representative_window.jsonl")
+    summary = outcomes.signal_summary(window, now=NOW)
+    cost = summary["signals"]["cost_per_merged_pr"]
+
+    assert cost["status"] == "partial"
+    assert cost["sample_size"] == 6
+    assert cost["merged_records"] == 7
+    assert cost["missing_records"] == 2
+    # Independent check for the seven-day fixture: $0.15 / 6 merged PRs.
+    assert cost["by_lane"] == [{
+        "lane": "codex/gpt-test/high",
+        "unit": "USD",
+        "merged_prs": 6,
+        "total_cost": 0.15,
+        "cost_per_merged_pr": 0.025,
+    }]
+    snapshot = _json("metrics_snapshot.json")
+    snapshot["brief"]["outcome_signals"] = summary
+    _, ledgers, usage, _, commits, lines = _inputs()
+    row = metrics.derive_row(
+        snapshot, ledgers, usage, window, NOW, commits, lines
+    )
+
+    d4 = row["metrics"]["D"]["D4"]
+    assert d4["source"] == "brief.outcome_signals.signals.cost_per_merged_pr.by_lane"
+    assert d4["value"] == [
+        {
+            "lane": lane["lane"],
+            "unit": lane["unit"],
+            "numerator": lane["total_cost"],
+            "denominator": lane["merged_prs"],
+            "source": "brief.outcome_signals.signals.cost_per_merged_pr.by_lane",
+        }
+        for lane in cost["by_lane"]
+    ]
+    # #1284 specifies a labelled gap when the panel's usage input is absent.
+    assert d4["gap"] == (
+        "outcomes cost join is partial; some merged tickets or runs lack priced usage"
+    )
+    series = metrics.series_from_rows([row], NOW)
+    lane = series["metrics"]["D"]["D4"]["lane"]["codex/gpt-test/high"]
+    assert lane["daily"][-1] == 0.025
+    assert lane["numerators"][-1] == 0.15
+    assert lane["denominators"][-1] == 6
+    assert lane["gap"] == d4["gap"]
 
 
 @pytest.mark.parametrize("estimated", [False, True])
@@ -338,6 +512,25 @@ def test_remeasure_recent_outcome_tiles_and_preserve_the_current_append():
         commits, lines, old_hour, current_now,
     ) = _stale_outcome_rows()
     previous = copy.deepcopy(stale_row)
+    previous_d4 = copy.deepcopy(stale_row["metrics"]["D"]["D4"])
+    assert previous_d4["value"] is None
+    fresh_outcomes.append({
+        "ticket": "owner/repo#43",
+        "derived_at": "2026-09-23T06:00:00Z",
+        "merged": True,
+        "merged_prs": [8],
+        "runs": [{
+            "agent": "codex",
+            "model": "gpt-test",
+            "reasoning_effort": "high",
+            "notional_api_cost": {
+                "value": 0.003,
+                "unit": "USD",
+                "basis": "notional_api_list_price",
+                "status": "priced",
+            },
+        }],
+    })
     expected = metrics.derive_row(
         snapshot, ledgers, usage, fresh_outcomes, current_now, commits, lines,
         hour_start=old_hour,
@@ -354,6 +547,8 @@ def test_remeasure_recent_outcome_tiles_and_preserve_the_current_append():
     assert refreshed[0]["metrics"]["A"]["A6"]["reopened_tickets"]["value"] is not None
     assert refreshed[0]["metrics"]["B"]["B1"]["numerator"] is not None
     assert refreshed[0]["metrics"]["C"]["C6"]["value"] is not None
+    assert refreshed[0]["metrics"]["D"]["D4"] == previous_d4
+    assert refreshed[0]["metrics"]["D"]["D4"]["value"] is None
     assert _without_outcome_tiles(refreshed[0]) == _without_outcome_tiles(previous)
     assert refreshed[1] == current_row
 

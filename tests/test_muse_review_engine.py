@@ -479,11 +479,14 @@ SHAPE_APPLY_STUB = (
     "if validate_only:\n"
     "    print(json.dumps({'status': status, 'reason': reason, 'answer': data}, sort_keys=True))\n"
     "    raise SystemExit(0)\n"
+    "ref = '{}#{}'.format(flag('--repo'), args[0])\n"
+    "if os.environ.get('APPLY_STALE_SHAPE', ''):\n"
+    "    print('run outcome: skipped-stale-shape ref={} fresh Status=Shaped children=2'.format(ref))\n"
+    "    raise SystemExit(0)\n"
     "if os.environ.get('APPLY_REFUSE', ''):\n"
     "    sys.stderr.write('shape-apply: idea {} is not in the Project\\n'.format(args[0]))\n"
     "    raise SystemExit(1)\n"
     "(root / 'applied.marker').write_text('applied')\n"
-    "ref = '{}#{}'.format(flag('--repo'), args[0])\n"
     "print('{0} \\u2192 {1}\\nhttps://github.com/{2}/issues/{3}'.format(ref, status, flag('--repo'), args[0]))\n"
     "if status == 'Ready':\n"
     "    print('advanced to Ready: {}'.format(reason))\n"
@@ -2618,6 +2621,22 @@ def test_a_shape_is_applied_and_finished_done(tmp_path):
     )
 
 
+def test_a_stale_shape_is_recorded_without_shape_status(tmp_path):
+    proc, repo = _stubbed_runner(
+        tmp_path, _issue_begin("shape"), _issue_packet("shape"),
+        answers=(_framer_answer(),),
+        extra_env={"APPLY_STALE_SHAPE": "1"})
+
+    assert proc.returncode == 0, proc.stderr
+    assert len(_apply_calls(repo)) == 1
+    assert not (repo / "applied.marker").exists()
+    assert _heartbeat_without_muse_call_record(repo) == (
+        "finish --agent muse --run engine-run "
+        "--outcome skipped-stale-shape --note skipped stale shape: "
+        "ref={} fresh Status=Shaped children=2\n".format(SHAPE_REF)
+    )
+
+
 def test_a_breakdown_question_is_asked_not_created(tmp_path):
     proc, repo = _stubbed_runner(
         tmp_path, _issue_begin("breakdown"), _issue_packet("breakdown"),
@@ -3855,7 +3874,8 @@ def test_the_lister_asks_for_requirements_before_the_judge_is_asked(tmp_path):
     assert listed["head_sha"] == HEAD
     assert "PACKET_JSON" not in lister
     assert "has `deferred_answer`" in lister
-    assert "Do not emit a live-evidence" in lister
+    assert "Never list a requirement\nthat probes a `plan_premises` entry" \
+        in lister
     assert "ticket.deferred_acceptance" in lister
     assert "exact `deferred_clause`" in lister
     assert "exact `checkable_line` as an ordinary acceptance" in lister
@@ -3902,7 +3922,7 @@ def test_the_lister_asks_for_requirements_before_the_judge_is_asked(tmp_path):
     assert "For a labeling-error requirement" in judge
     assert "mark the requirement `unmet`" in judge
     assert "never defer it" in judge
-    assert "without `deferred_answer` still follows the normal" in judge
+    assert "No other premise is a requirement" in judge
     assert "inspect the entry's" in judge
 
 
@@ -4000,11 +4020,18 @@ def test_measured_forward_pointer_is_rejected_as_a_labeling_error(tmp_path):
     ]
 
 
-def test_a_missing_checkable_inferred_premise_still_rejects(tmp_path):
-    requirement = (
+def test_a_premise_probe_is_dropped_before_the_judges(tmp_path):
+    """#1966: premise probes are out of review scope (Nate, 2026-09-28).
+
+    Before, an unresolved probe of an inferred premise read unsure and
+    rejected the PR; now the runner drops it after the lister and the judges
+    see only the ticket's own requirement.
+    """
+    probe = (
         "Probe the inferred premise 'the missing setting is enabled' using "
         "its evidence pointer #1700; unresolved evidence remains unsure."
     )
+    do_line = "thing.py prints the thing the ticket asks for"
     plan_premises = [{
         "parent_ref": "owner/repo#1",
         "ticket_refs": ["owner/repo#6"],
@@ -4017,16 +4044,18 @@ def test_a_missing_checkable_inferred_premise_still_rejects(tmp_path):
     }]
     proc, repo = _stubbed_runner(
         tmp_path, _begin(), _packet(plan_premises=plan_premises),
-        answers=_review_answers(_judge_answer(
-            requirement, status="unsure",
-            evidence="the packet contains no evidence for #1700")))
+        answers=(_requirements_answer(probe, do_line),
+                 _judge_answer(do_line)))
 
     assert proc.returncode == 0, proc.stderr
     lister = (repo / "muse.prompt.1").read_text()
-    assert "leave it `unsure` when a required record is unavailable" in lister
+    assert "leave it `unsure` when a required record is unavailable" \
+        not in lister
+    judge = (repo / "muse.prompt.2").read_text()
+    assert probe not in judge
     applied = json.loads((repo / "apply.answer").read_text())
-    assert applied["verdict"] == "rejected"
-    assert any("requirement unsure:" in row for row in applied["blocking"])
+    assert applied["verdict"] == "approved"
+    assert [row["requirement"] for row in applied["requirements"]] == [do_line]
 
 
 def test_the_pr_body_reaches_the_lister_and_judge_as_the_implementers_claims(

@@ -1,0 +1,94 @@
+{
+  "source": "Lister requirements recorded as blocking on nateprich-projects/command-center PR #1941 (ticket #1937, plan #1769) by the Muse lane's 2026-09-29 13:32Z and 15:02Z verdicts; premises parsed from #1769's plan body the same day (#1966).",
+  "parent_ref": "nateprich-projects/command-center#1769",
+  "ticket_ref": "nateprich-projects/command-center#1937",
+  "premises": [
+    {
+      "claim": "apply_shape copies the origin-override block from the old body to the very end after the runner-owned shape-risk record",
+      "evidence": "nateprich-projects/command-center#1769 idea para (1) citing PR #1740 review; workspace search found no file",
+      "label": "inferred"
+    },
+    {
+      "claim": "parse_shape_risk_record takes the last parseable shape-risk record as authoritative",
+      "evidence": "nateprich-projects/command-center#1769 idea para (1) citing PR #1740 review; workspace search found no file",
+      "label": "inferred"
+    },
+    {
+      "claim": "a planted shape-risk record with an empty declared list in the copied block outranks the runner record",
+      "evidence": "nateprich-projects/command-center#1769 idea para (1) citing PR #1740 review; workspace search found no file",
+      "label": "inferred"
+    },
+    {
+      "claim": "with an unclosed fence in the new plan a typed credentials risk bypasses the prose rationale and releases after the Gates answer",
+      "evidence": "nateprich-projects/command-center#1769 idea para (1) probe_d C1/C2; workspace search found no file",
+      "label": "inferred"
+    },
+    {
+      "claim": "the sweep releases a hand-set escalated Risk on a Shaped plan with declared and scan both empty to Ready",
+      "evidence": "nateprich-projects/command-center#1769 idea para (2); workspace search found no file",
+      "label": "inferred"
+    },
+    {
+      "claim": "base behavior held hand-escalated empty-record plans instead of releasing them",
+      "evidence": "nateprich-projects/command-center#1769 idea para (2); workspace search found no file",
+      "label": "inferred"
+    },
+    {
+      "claim": "a shape-risk record with no declared key is possible and lacks coverage with mutant D6 surviving",
+      "evidence": "nateprich-projects/command-center#1769 idea suspected-fix line; workspace search found no file",
+      "label": "inferred"
+    }
+  ],
+  "verdicts": [
+    {
+      "head_sha": "7f55a27f4cc38458de6c65a48ced51dcc8b56620",
+      "reviewed_at": "2026-09-29T13:32:53.781129+00:00",
+      "requirements": [
+        "Record file paths, copy order (override block after runner record), and current last-parseable-wins plus unclosed-fence release behavior",
+        "Prevent a plan quoting an empty shape-risk record plus a provenance block followed by an unclosed fence from releasing a credentials risk to Ready, by holding when the body has more than one shape-risk marker or by reading only the record directly before the runner's provenance block",
+        "Add the quoted empty shape-risk record plus provenance block followed by unclosed fence reproduction as a regression test",
+        "Add a test that kills the cut-at-last-provenance mutant",
+        "Probe inferred premise 'apply_shape copies the origin-override block from the old body to the very end after the runner-owned shape-risk record' via exact evidence pointer 'nateprich-projects/command-center#1769 idea para (1) citing PR #1740 review; workspace search found no file'",
+        "Probe inferred premise 'parse_shape_risk_record takes the last parseable shape-risk record as authoritative' via exact evidence pointer 'nateprich-projects/command-center#1769 idea para (1) citing PR #1740 review; workspace search found no file'",
+        "Probe inferred premise 'a planted shape-risk record with an empty declared list in the copied block outranks the runner record' via exact evidence pointer 'nateprich-projects/command-center#1769 idea para (1) citing PR #1740 review; workspace search found no file'",
+        "Probe inferred premise 'with an unclosed fence in the new plan a typed credentials risk bypasses the prose rationale and releases after the Gates answer' via exact evidence pointer 'nateprich-projects/command-center#1769 idea para (1) probe_d C1/C2; workspace search found no file'",
+        "Probe inferred premise 'the sweep releases a hand-set escalated Risk on a Shaped plan with declared and scan both empty to Ready' via exact evidence pointer 'nateprich-projects/command-center#1769 idea para (2); workspace search found no file'",
+        "Probe inferred premise 'base behavior held hand-escalated empty-record plans instead of releasing them' via exact evidence pointer 'nateprich-projects/command-center#1769 idea para (2); workspace search found no file'",
+        "Probe inferred premise 'a shape-risk record with no declared key is possible and lacks coverage with mutant D6 surviving' via exact evidence pointer 'nateprich-projects/command-center#1769 idea suspected-fix line; workspace search found no file'",
+        "A wording-scan hit alone raises Risk to escalated and posts its reasons but does not stop the plan",
+        "An agent-origin plan with Needs: none and no declared risk advances to Ready",
+        "Needs: human, a risk the shaper declares, or Origin: Nate stops at Shaped",
+        "An agent may never write Ready to bypass an open question or a declared risk"
+      ],
+      "expected_kept": [
+        "Record file paths, copy order (override block after runner record), and current last-parseable-wins plus unclosed-fence release behavior",
+        "Prevent a plan quoting an empty shape-risk record plus a provenance block followed by an unclosed fence from releasing a credentials risk to Ready, by holding when the body has more than one shape-risk marker or by reading only the record directly before the runner's provenance block",
+        "Add the quoted empty shape-risk record plus provenance block followed by unclosed fence reproduction as a regression test",
+        "Add a test that kills the cut-at-last-provenance mutant",
+        "A wording-scan hit alone raises Risk to escalated and posts its reasons but does not stop the plan",
+        "An agent-origin plan with Needs: none and no declared risk advances to Ready",
+        "Needs: human, a risk the shaper declares, or Origin: Nate stops at Shaped",
+        "An agent may never write Ready to bypass an open question or a declared risk"
+      ]
+    },
+    {
+      "head_sha": "e197813aad5b062cddd01e7eff74a17756bfc905",
+      "reviewed_at": "2026-09-29T15:02:40.446684+00:00",
+      "requirements": [
+        "An agent-origin plan with Needs: none and no declared risk advances to Ready",
+        "A wording-scan hit alone raises Risk to escalated and posts its reasons but does not stop the plan",
+        "Probe inferred premise 'apply_shape copies the origin-override block from the old body to the very end after the runner-owned shape-risk record' via exact evidence pointer 'nateprich-projects/command-center#1769 idea para (1) citing PR #1740 review; workspace search found no file' against live packet evidence",
+        "Probe inferred premise 'parse_shape_risk_record takes the last parseable shape-risk record as authoritative' via exact evidence pointer 'nateprich-projects/command-center#1769 idea para (1) citing PR #1740 review; workspace search found no file' against live packet evidence",
+        "Probe inferred premise 'a planted shape-risk record with an empty declared list in the copied block outranks the runner record' via exact evidence pointer 'nateprich-projects/command-center#1769 idea para (1) citing PR #1740 review; workspace search found no file' against live packet evidence",
+        "Probe inferred premise 'with an unclosed fence in the new plan a typed credentials risk bypasses the prose rationale and releases after the Gates answer' via exact evidence pointer 'nateprich-projects/command-center#1769 idea para (1) probe_d C1/C2; workspace search found no file' against live packet evidence",
+        "Probe inferred premise 'the sweep releases a hand-set escalated Risk on a Shaped plan with declared and scan both empty to Ready' via exact evidence pointer 'nateprich-projects/command-center#1769 idea para (2); workspace search found no file' against live packet evidence",
+        "Probe inferred premise 'base behavior held hand-escalated empty-record plans instead of releasing them' via exact evidence pointer 'nateprich-projects/command-center#1769 idea para (2); workspace search found no file' against live packet evidence",
+        "Probe inferred premise 'a shape-risk record with no declared key is possible and lacks coverage with mutant D6 surviving' via exact evidence pointer 'nateprich-projects/command-center#1769 idea suspected-fix line; workspace search found no file' against live packet evidence"
+      ],
+      "expected_kept": [
+        "An agent-origin plan with Needs: none and no declared risk advances to Ready",
+        "A wording-scan hit alone raises Risk to escalated and posts its reasons but does not stop the plan"
+      ]
+    }
+  ]
+}

@@ -95,6 +95,7 @@ OUTCOMES = [
     "skipped-provider-quota",  # the model provider refused: its usage window is spent
     "skipped-outside-window",  # Claude's Saturday-morning window is closed (#1557)
     "budget-exhausted",     # begin could not start after the GraphQL pool hit zero
+    "skipped-stale-shape",  # the apply-time Project read found a moved idea or children
     "errored",             # tried and failed
 ]
 

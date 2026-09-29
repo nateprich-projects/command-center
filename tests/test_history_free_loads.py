@@ -315,8 +315,15 @@ def _serve(monkeypatch, *, full, missing_refs=()):
         ])
         return items
 
+    ref_lookup_attempts = 0
+
     def load_project_items_by_refs(refs, **kwargs):
-        if full:
+        nonlocal ref_lookup_attempts
+        ref_lookup_attempts += 1
+        # Keep the old full-board fallback for shape-apply's initial lookup,
+        # but let its new pre-write freshness check use a real exact-ref read.
+        # A fresh read is part of the behavior under test in both modes.
+        if full and ref_lookup_attempts == 1:
             return None
         return REAL_LOAD_PROJECT_ITEMS_BY_REFS(refs, **kwargs)
 
@@ -447,7 +454,10 @@ def test_shape_apply_live_writes_are_identical_without_history(
     }.items())) in new.writes
     assert any(args[:4] == ("gh", "issue", "edit", str(IDEA))
                for args in new.argv)
-    assert new.ref_queries == [[REPO + "#{}".format(IDEA)]]
+    assert new.ref_queries == [
+        [REPO + "#{}".format(IDEA)],
+        [REPO + "#{}".format(IDEA)],
+    ]
 
 
 def test_shape_apply_reads_its_parent_by_ref(monkeypatch, capsys, tmp_path):

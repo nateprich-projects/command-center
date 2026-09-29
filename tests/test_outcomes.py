@@ -1494,6 +1494,110 @@ def _run(agent="codex", run="run-1", usage=True):
     } if usage else None}
 
 
+def test_reproduction_heals_old_stored_ref_from_current_derivation_and_finish():
+    old_repo = "nateprich-projects/FF-Weekly-Start-Sit"
+    current_repo = "nateprich-projects/Fantasy-GM"
+    old_ref = old_repo + "#42"
+    current_ref = current_repo + "#42"
+    old_ticket = outcomes.derive_outcome(
+        ticket(42, repo=old_repo), now=NOW
+    )
+    heartbeat = {
+        "codex": _heartbeat_rows(
+            ticket_ref=old_ref, run="rename-run-42"
+        )
+    }
+
+    finished_runs = outcomes._ticket_runs(old_ref, heartbeat)
+    fresh = outcomes.derive_outcome(
+        ticket(42, repo=current_repo),
+        now=NOW,
+        run_observations=finished_runs,
+    )
+    combined, healed = outcomes._heal_empty_runs([old_ticket], [fresh])
+
+    assert finished_runs[0]["run"] == "rename-run-42"
+    assert fresh["ticket"] == current_ref
+    assert combined == [old_ticket, fresh]
+    assert healed == [fresh]
+    assert old_ticket["ticket"] == old_ref
+    assert fresh["runs"][0]["run"] == "rename-run-42"
+
+
+def test_reproduction_heals_current_key_from_old_repo_heartbeat_binding():
+    old_repo = "nateprich-projects/FF-Weekly-Start-Sit"
+    current_repo = "nateprich-projects/Fantasy-GM"
+    old_ticket = outcomes.derive_outcome(
+        ticket(42, repo=old_repo), now=NOW
+    )
+    current_ticket = outcomes.derive_outcome(
+        ticket(42, repo=current_repo), now=NOW
+    )
+    heartbeat = {
+        "codex": _heartbeat_rows(
+            ticket_ref=old_repo + "#42", run="rename-run-42"
+        )
+    }
+
+    runs = outcomes._ticket_runs(current_repo + "#42", heartbeat)
+    fresh = outcomes.derive_outcome(
+        ticket(42, repo=current_repo), now=NOW, run_observations=runs
+    )
+    combined, healed = outcomes._heal_empty_runs(
+        [old_ticket, current_ticket], [fresh]
+    )
+
+    assert runs[0]["run"] == "rename-run-42"
+    assert combined == [old_ticket, fresh]
+    assert healed == [fresh]
+    assert old_ticket["runs"] == []
+    assert fresh["runs"][0]["run"] == "rename-run-42"
+
+
+def test_read_records_normalizes_alias_and_prefers_the_current_key(monkeypatch):
+    old_repo = "nateprich-projects/FF-Weekly-Start-Sit"
+    current_repo = "nateprich-projects/Fantasy-GM"
+    old = {"ticket": old_repo + "#42", "title": "old", "runs": []}
+    current = {
+        "ticket": current_repo + "#42", "title": "current", "runs": []
+    }
+    monkeypatch.setattr(
+        outcomes, "_read_remote", lambda repo, branch: ([old, current], "sha")
+    )
+
+    assert outcomes.read_records() == [current]
+
+    monkeypatch.setattr(
+        outcomes, "_read_remote", lambda repo, branch: ([old], "sha")
+    )
+    normalized_old = dict(old)
+    normalized_old["ticket"] = current_repo + "#42"
+    assert outcomes.read_records() == [normalized_old]
+
+
+def test_write_records_does_not_append_an_existing_current_key(monkeypatch):
+    old_repo = "nateprich-projects/FF-Weekly-Start-Sit"
+    current_repo = "nateprich-projects/Fantasy-GM"
+    stored = [
+        {"ticket": old_repo + "#42", "runs": []},
+        {"ticket": current_repo + "#42", "runs": []},
+    ]
+    fresh = {"ticket": current_repo + "#42", "runs": [{"run": "run-42"}]}
+    monkeypatch.setattr(
+        outcomes, "_read_remote", lambda repo, branch: (stored, "sha")
+    )
+    writes = []
+
+    def run(args, stdin=None):
+        writes.append(list(args))
+        return SimpleNamespace(returncode=0, stdout="{}", stderr="")
+
+    monkeypatch.setattr(outcomes, "_run_gh", run)
+
+    assert outcomes.write_records([fresh]) == (0, [])
+    assert writes == []
+
+
 def test_heal_replaces_only_empty_runs_records_whose_fresh_derivation_has_runs():
     empty_healable = _outcome(1, [])
     with_runs = _outcome(2, [_run(run="old")])
@@ -1628,3 +1732,30 @@ def test_derive_without_the_heal_flag_never_replaces_a_stored_record(
 
     assert outcomes.main(["derive", "--repo", REPO]) == 0
     assert not any("PUT" in call for call in calls)
+
+
+def test_reproduction_old_store_ref_is_normalized_before_exact_empty_run_heal(
+    monkeypatch,
+):
+    old_repo = "nateprich-projects/FF-Weekly-Start-Sit"
+    current_repo = "nateprich-projects/Fantasy-GM"
+    old_ticket = outcomes.derive_outcome(
+        ticket(43, repo=old_repo), now=NOW
+    )
+    fresh = outcomes.derive_outcome(
+        ticket(43, repo=current_repo),
+        now=NOW,
+        run_observations=[_run(run="finished-rename-run-43")],
+    )
+    monkeypatch.setattr(
+        outcomes, "_read_remote", lambda repo, branch: ([old_ticket], "sha")
+    )
+
+    stored = outcomes.read_records()
+    combined, healed = outcomes._heal_empty_runs(stored, [fresh])
+
+    assert [record["ticket"] for record in stored] == [
+        current_repo + "#43"
+    ]
+    assert healed == [fresh]
+    assert combined == [fresh]

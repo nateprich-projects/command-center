@@ -1261,11 +1261,14 @@ def test_watchdog_still_reports_genuinely_dying_runs():
     assert any("never finished" in p for p in found)
 
 
-def test_finish_accepts_skipped_api_reserve(monkeypatch):
-    """A GraphQL reserve decline is a refusal, not a failure (#273).
+@pytest.mark.parametrize("outcome", [
+    "skipped-api-reserve", "skipped-stale-shape",
+])
+def test_finish_accepts_named_skips(monkeypatch, outcome):
+    """A clean refusal is accepted and recorded as a skipped run.
 
-    Recording it as `errored` would make the watchdog alarm on the system
-    working correctly.
+    Recording either case as `errored` would make the watchdog alarm on the
+    system working correctly.
     """
     records = []
     monkeypatch.setattr(heartbeat, "read", lambda agent: [])
@@ -1281,9 +1284,9 @@ def test_finish_accepts_skipped_api_reserve(monkeypatch):
 
     assert heartbeat.main([
         "finish", "--agent", "codex", "--run", "run-id",
-        "--outcome", "skipped-api-reserve",
+        "--outcome", outcome,
     ]) == 0
-    assert records[0]["outcome"] == "skipped-api-reserve"
+    assert records[0]["outcome"] == outcome
 
 
 def test_the_reserve_decline_is_in_the_skipped_family():

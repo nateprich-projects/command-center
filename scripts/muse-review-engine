@@ -466,8 +466,13 @@ finish_done() {
   local review_result="${2:-}"
   local result_path="${3:-}"
   local merged_pr="${4:-}"
+  local outcome="done"
+  if [[ -n "$result_path" && "$JOB" == "shape" ]] \
+    && grep -q '^run outcome: skipped-stale-shape ' "$result_path"; then
+    outcome="skipped-stale-shape"
+  fi
   local -a finish_args=(
-    finish --agent "$AGENT" --run "$BEGIN_RUN" --outcome done --note "$note"
+    finish --agent "$AGENT" --run "$BEGIN_RUN" --outcome "$outcome" --note "$note"
   )
   if [[ -n "$result_path" && "$JOB" == "breakdown" ]]; then
     local ticket_count
@@ -511,8 +516,9 @@ PY
     fi
     finish_args+=(--ticket-count "$ticket_count" --needs-decision "$needs_decision")
   elif [[ -n "$result_path" && "$JOB" == "shape" ]]; then
-    local shape_status
-    if ! shape_status="$(python3 - "$result_path" <<'PY'
+    if [[ "$outcome" != "skipped-stale-shape" ]]; then
+      local shape_status
+      if ! shape_status="$(python3 - "$result_path" <<'PY'
 import sys
 
 status = ""
@@ -525,11 +531,12 @@ if status not in {"Shaped", "Ready"}:
     raise SystemExit("shape result has no Shaped or Ready status")
 print(status)
 PY
-)"; then
-      echo "muse-review-engine: could not read the live shape result" >&2
-      exit 1
+      )"; then
+        echo "muse-review-engine: could not read the live shape result" >&2
+        exit 1
+      fi
+      finish_args+=(--shape-status "$shape_status")
     fi
-    finish_args+=(--shape-status "$shape_status")
   fi
   if [[ "$review_result" == "approved" || "$review_result" == "rejected" ]]; then
     finish_args+=(--review-result "$review_result")
@@ -1049,6 +1056,12 @@ if job == "breakdown":
             ref, count, "" if count == 1 else "s"))
 else:
     lines = open(path).read().splitlines()
+    stale_prefix = "run outcome: skipped-stale-shape "
+    for line in lines:
+        if line.startswith(stale_prefix):
+            print("skipped stale shape: {}".format(
+                line[len(stale_prefix):]))
+            raise SystemExit(0)
     status = ""
     reason = ""
     for line in lines:
@@ -2188,9 +2201,9 @@ explains like any other, so its judge can weigh the departure.
 
 For a `plan_premises` entry labelled `inferred` that has `deferred_answer`,
 include a requirement that preserves its exact evidence pointer and says it is
-deferred until the named `reviewed_ticket` is complete. Do not emit a live-evidence
-probe requirement for that premise. An inferred entry without `deferred_answer`
-keeps the normal probe requirement; leave it `unsure` when a required record is unavailable.
+deferred until the named `reviewed_ticket` is complete. Never list a requirement
+that probes a `plan_premises` entry against evidence: the ticket's own first
+verification step checks premises, and a review weighs the ticket's Do and Accept.
 
 For a ticket acceptance line in `ticket.deferred_acceptance` (or the matching
 entry in `tickets`) that has `deferred_answer`, include a deferral requirement
@@ -2422,8 +2435,7 @@ labelled `inferred`, its `deferred_answer.evidence_pointer` exactly matches
 the entry's `evidence`, and `deferred_answer.reviewed_ticket` matches
 `ticket.ref`. If those fields match, the pointer is visibly deferred and its
 future evidence is not expected yet; mark that deferral requirement met, not
-unsure. An inferred entry without `deferred_answer` still follows the normal
-probe rule in the review question.
+unsure. No other premise is a requirement: the review never probes premises.
 
 For a deferred-ticket-acceptance requirement, inspect the matching ticket's
 `deferred_acceptance` entry and verify that its `line` is the exact acceptance

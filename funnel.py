@@ -3382,21 +3382,23 @@ def _marked_json_blocks(body: str, marker: str) -> List[Tuple[Dict, str]]:
     return blocks
 
 
-def _first_marked_json(body: str, marker: str) -> Optional[Dict]:
+def _first_marked_json(
+    body: str, marker: str, *, column_zero_only: bool = False,
+) -> Optional[Dict]:
     """Read the block owned by the first line-leading ``marker`` (#1798).
 
-    A verdict comment starts with its marker, before any model text, so the
-    first line-leading occurrence is the runner's own. Read from the last, a
-    blocking reason that carried a line-leading marker and a JSON block was
-    the verdict, and the owner's rejection read as an approval (#1797). A
-    marker quoted mid-line, as a verdict quoting an earlier one puts it inside
-    its JSON strings, is content (#1688) and never a start. There is no
-    fallback to a later occurrence: if the runner's block cannot be read, the
-    comment carries no verdict.
+    A runner comment starts with its marker, before any model text, so the
+    first line-leading occurrence is the runner's own. A marker quoted
+    mid-line, as a verdict quoting an earlier one puts it inside its JSON
+    strings, is content (#1688) and never a start. ``column_zero_only`` also
+    rejects indentation and quote prefixes. There is no fallback to a later
+    occurrence: if the runner's block cannot be read, the comment carries no
+    record.
     """
     if not isinstance(body, str):
         return None
-    first = re.search(r"(?m)^[ \t]*(" + re.escape(marker) + ")", body)
+    line_start = r"(?m)^" if column_zero_only else r"(?m)^[ \t]*"
+    first = re.search(line_start + "(" + re.escape(marker) + ")", body)
     if first is None:
         return None
     found = _marked_json_block_at(body, marker, first.start(1))
@@ -4052,7 +4054,9 @@ def parse_satisfied_block_comment(body: str) -> Optional[Dict[str, object]]:
     the ordinary provenance marker says an agent, rather than Nate, recorded
     the unattended action.
     """
-    found = _marked_json(body, SATISFIED_BLOCK_PREFIX)
+    found = _first_marked_json(
+        body, SATISFIED_BLOCK_PREFIX, column_zero_only=True
+    )
     provenance = parse_provenance(body)
     if found is None or provenance is None or provenance.get("voice") != "agent":
         return None
@@ -12746,8 +12750,9 @@ def _closed_itself_item_json(
     for comment in reversed(comments):
         if not isinstance(comment, dict) or not trusted_comment(comment):
             continue
-        payload = _marked_json(
-            comment.get("body") or "", CLOSED_ITSELF_PREFIX
+        payload = _first_marked_json(
+            comment.get("body") or "", CLOSED_ITSELF_PREFIX,
+            column_zero_only=True,
         )
         if payload is None:
             continue

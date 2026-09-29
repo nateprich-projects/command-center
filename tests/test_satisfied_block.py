@@ -219,6 +219,22 @@ def test_fully_satisfied_blocks_are_recorded_then_cleared(
     assert waiting.blocked_cleared_at == NOW
 
 
+def test_satisfied_block_marker_must_start_a_runner_comment_line():
+    record = funnel.satisfied_block_comment(
+        ["owner/repo#77"], NOW, run="run-1874", agent="codex",
+    )
+
+    assert funnel.parse_satisfied_block_comment(record) == {
+        "conditions": ["owner/repo#77"],
+        "found_closed_at": "2026-09-09T16:00:00Z",
+    }
+    assert funnel.parse_satisfied_block_comment(
+        "Cleaned breakdown question: " + record
+    ) is None
+    for prefix in (" ", "\t", "> "):
+        assert funnel.parse_satisfied_block_comment(prefix + record) is None
+
+
 def test_every_failed_conjunction_part_reports_but_never_clears(monkeypatch):
     empty = issue(
         270, comment="**Blocked:** waiting for Nate to provision the token."

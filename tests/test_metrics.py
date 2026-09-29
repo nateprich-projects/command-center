@@ -248,7 +248,7 @@ def test_d4_uses_priced_run_usage_and_excludes_unpriced_runs():
 
 
 def test_d4_shared_cost_join_fills_execution_panel_for_representative_window():
-    """#1272's D4 panel reads the shared per-lane outcomes cost join."""
+    """#1284's Panel D contract: D4 by lane from outcomes.signal_summary."""
     window = _jsonl("d4_representative_window.jsonl")
     summary = outcomes.signal_summary(window, now=NOW)
     cost = summary["signals"]["cost_per_merged_pr"]
@@ -274,13 +274,18 @@ def test_d4_shared_cost_join_fills_execution_panel_for_representative_window():
     )
 
     d4 = row["metrics"]["D"]["D4"]
-    assert d4["value"] == [{
-        "lane": "codex/gpt-test/high",
-        "unit": "USD",
-        "numerator": 0.15,
-        "denominator": 6,
-        "source": "brief.outcome_signals.signals.cost_per_merged_pr.by_lane",
-    }]
+    assert d4["source"] == "brief.outcome_signals.signals.cost_per_merged_pr.by_lane"
+    assert d4["value"] == [
+        {
+            "lane": lane["lane"],
+            "unit": lane["unit"],
+            "numerator": lane["total_cost"],
+            "denominator": lane["merged_prs"],
+            "source": "brief.outcome_signals.signals.cost_per_merged_pr.by_lane",
+        }
+        for lane in cost["by_lane"]
+    ]
+    # #1284 specifies a labelled gap when the panel's usage input is absent.
     assert d4["gap"] == (
         "outcomes cost join is partial; some merged tickets or runs lack priced usage"
     )

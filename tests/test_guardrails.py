@@ -292,3 +292,35 @@ def test_shape_skill_capture_rule_keeps_security_exposures_broken():
         "`--observed` naming the exposure",
     ):
         assert phrase in skill, phrase
+
+
+def test_shape_skill_defines_bug_and_asks_broken_plans_for_the_smallest_fix():
+    """The class rule shaping and capture read offers Bug, tells it from
+    Broken by whether the failure happened, keeps Nate's smallest-fix rule
+    for a Broken plan, and leaves every reclassification to Nate but the
+    two #1832 gives agents (#1848)."""
+    skill = " ".join(
+        (ROOT / "skills" / "shape" / "SKILL.md").read_text().split())
+    for phrase in (
+        "`Investigate`, `Broken`, `Maintenance`, `Improve`, `New`, "
+        "`Replace`, `Bug` — and say why",
+        "`Bug` is a latent defect: found by reading, review or tests, with no "
+        "observed occurrence. It never preempts;",
+        "Tell the two apart by whether the failure has happened, not by how "
+        "bad it would be",
+        "unless it is the security or privacy exposure above",
+        "A `Broken` plan fixes the observed failure with the smallest change.",
+        "becomes separate `Bug` or `Improve` ideas linked back, not more "
+        "tickets in the same plan.",
+        "**Still his:** the class on anything *he* raises, and any "
+        "reclassification but the two #1832 gives agents: `funnel promote` "
+        "on a `Bug` that has happened, with its evidence, and the one-time "
+        "#1849 re-sort he authorised on 2026-09-28. Otherwise propose, do "
+        "not set.",
+    ):
+        assert phrase in skill, phrase
+    # The scheduling rule names every agent-origin class the engine applies
+    # it to: SELF_APPROVABLE_CLASSES, which gained Bug in #1845.
+    assert ("For an **agent-origin** `Investigate`, `Broken`, `Maintenance`, "
+            "`Improve`, or `Bug` plan" in skill)
+    assert "in the five classes above" in skill

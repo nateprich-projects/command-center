@@ -79,8 +79,8 @@ all are null.
 
 ### Scheduling is the project manager's decision
 
-For an **agent-origin** `Investigate`, `Broken`, `Maintenance`, or `Improve`
-plan, timing, priority, and sequencing are project-manager decisions. Never
+For an **agent-origin** `Investigate`, `Broken`, `Maintenance`, `Improve`, or
+`Bug` plan, timing, priority, and sequencing are project-manager decisions. Never
 emit a question solely about one of those decisions in `Needs Nate`; record the
 chosen ordering under **Decided by the agent**. A clear choice to wait for a
 named ticket belongs in `depends_on` as an `owner/repo#n` reference. If the
@@ -93,7 +93,7 @@ Keep Exposure, Gates, and Preference questions in `Needs Nate`. Under Scope,
 keep a concrete unresolved stakeholder tradeoff even if it mentions timing,
 and keep a question whose category is unclear. These are the countercases to
 the scheduling rule; classify by meaning, not keywords alone. Apply the rule
-only to agent-origin plans in the four classes above. Leave Nate-origin plans
+only to agent-origin plans in the five classes above. Leave Nate-origin plans
 and `New` and `Replace` classes untouched.
 
 The shared engine enforces this rule in `engine/shape.py`. Keep this mirror
@@ -123,7 +123,7 @@ inventing an answer is a defect.
 ## Class it when you file it
 
 Class a capture with the ladder names — `Investigate`, `Broken`,
-`Maintenance`, `Improve`, `New`, `Replace` — and say why; stated doubt beats
+`Maintenance`, `Improve`, `New`, `Replace`, `Bug` — and say why; stated doubt beats
 confident error. Choose the class for what the tickets will deliver: a study,
 measurement, documentation recording, or product research with no
 possible-defect question takes the class that fits its deliverable, never
@@ -138,7 +138,9 @@ recorded examples live in `tests/fixtures/investigate_shape_excerpts.json` and
 are exercised by `tests/test_engine_shape.py`. An `Investigate` plan delivers
 evidence, never the fix: follow-ups are new ideas, classed for the work and
 linked back. **Still his:** the class on anything *he* raises, and any
-reclassification. Propose, do not set.
+reclassification but the two #1832 gives agents: `funnel promote` on a `Bug`
+that has happened, with its evidence, and the one-time #1849 re-sort he
+authorised on 2026-09-28. Otherwise propose, do not set.
 
 `Broken` is observed (#1832): an agent's `capture --class Broken` refuses
 without `--observed <evidence>` (a run or heartbeat id, a CI run, a log line, a
@@ -150,3 +152,17 @@ security or privacy exposure stays `Broken`, with `--observed` naming the
 exposure: one that enables unauthorised read, write or execution, or sends
 private data outside its audience, such as a public-repo leak or an injection
 path.
+
+`Bug` is a latent defect: found by reading, review or tests, with no observed
+occurrence. It never preempts; it ranks last on the ladder and waits for its
+share of starts (#1846). Tell the two apart by whether the failure has
+happened, not by how bad it would be: a run, CI job, log line, wedge or report
+showing it makes it `Broken`; a path that could fail, a review finding, or a
+test written for a case nobody has hit is `Bug`, however likely it looks,
+unless it is the security or privacy exposure above. A defect you are not sure
+exists is `Investigate`.
+
+A `Broken` plan fixes the observed failure with the smallest change. Hardening
+beyond it, such as the same flaw on paths that have not failed, extra guards
+or a redesign of the area, becomes separate `Bug` or `Improve` ideas linked
+back, not more tickets in the same plan. _(Nate, 2026-09-28, #1832.)_

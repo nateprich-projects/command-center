@@ -1702,3 +1702,30 @@ def test_derive_without_the_heal_flag_never_replaces_a_stored_record(
 
     assert outcomes.main(["derive", "--repo", REPO]) == 0
     assert not any("PUT" in call for call in calls)
+
+
+def test_reproduction_old_store_ref_is_normalized_before_exact_empty_run_heal(
+    monkeypatch,
+):
+    old_repo = "nateprich-projects/FF-Weekly-Start-Sit"
+    current_repo = "nateprich-projects/Fantasy-GM"
+    old_ticket = outcomes.derive_outcome(
+        ticket(43, repo=old_repo), now=NOW
+    )
+    fresh = outcomes.derive_outcome(
+        ticket(43, repo=current_repo),
+        now=NOW,
+        run_observations=[_run(run="finished-rename-run-43")],
+    )
+    monkeypatch.setattr(
+        outcomes, "_read_remote", lambda repo, branch: ([old_ticket], "sha")
+    )
+
+    stored = outcomes.read_records()
+    combined, healed = outcomes._heal_empty_runs(stored, [fresh])
+
+    assert [record["ticket"] for record in stored] == [
+        current_repo + "#43"
+    ]
+    assert healed == [fresh]
+    assert combined == [fresh]

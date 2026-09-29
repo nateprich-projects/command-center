@@ -277,10 +277,19 @@ finite may preempt.**
 occurrence. It never preempts.** Broken is what was seen to fail. Reviews keep finding
 latent defects, so a Broken class that held them was unbounded, and preempting with it
 starved everything below (#1832). Bug ranks last on the ladder, below Replace, and
-takes no WIP exception. The rest of the ticket order applies to it as to every class:
-pins, tier and the Building commitment still rank above the ladder, and a Bug ticket
-that blocks finite work preempts with that work. #1832 also gives Bug one start in
-four (#1846, not yet built).
+takes no WIP exception. A Bug ticket that blocks other work ranks and goes with that
+work, and one that blocks finite work preempts with it.
+
+**Bugs get one start in four** (#1846), counted over the last eight ticket starts
+across every lane, never by what is running. On the Bugs' turn, finite work still goes
+first, then pinned work, then the startable Bug in the highest repo tier, oldest within
+the tier. _(Nate, 2026-09-28, #1877: "Pins win; Bugs finish" and "Tier, then
+oldest.")_ A pinned Bug is pinned work, so it takes the turn itself.
+_(agent rule, unconfirmed — advisory)_ Off their turn, a Ready Bug waits: tier does
+not lift it ahead of other work, and it fills only a pull nothing else can, chosen the
+same way. A Bug project already Building keeps its place, as does a pinned Bug, and
+their starts count against the share. The share applies where a lane pulls
+(`next_ticket`); the board's projected order does not yet run it forward (#1878).
 
 **Maintenance is defined tightly:** it is degrading, or it has a known date on which it
 stops working. Expiring certs, a sunsetting API, a CVE, a service that keeps dying, an

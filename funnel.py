@@ -2708,6 +2708,22 @@ def _preempts(
     )
 
 
+def _effective_tier(
+    ref: str, by_ref: Dict[str, Item], descendants: Mapping[str, Set[str]]
+) -> int:
+    """The repo tier a ticket ranks with.
+
+    A ticket that blocks higher-tier work takes that tier, as it takes the
+    class: otherwise tier-1 work would wait on its own prerequisite. Shared
+    by ``startable`` and the Bugs' turn in ``next_ticket`` (#1877), so both
+    read one rule.
+    """
+    return min(
+        repo_tier(by_ref[related].repo)
+        for related in {ref} | set(descendants[ref])
+    )
+
+
 def _pinned_ancestor(item: Item, by_ref: Mapping[str, Item]) -> bool:
     """Whether the project this ticket belongs to is pinned.
 
@@ -2772,11 +2788,7 @@ def startable(
     # A ticket that blocks higher-tier work takes that tier, as it takes the
     # class above: otherwise tier-1 work would wait on its own prerequisite.
     effective_tier = {
-        ref: min(
-            repo_tier(by_ref[related].repo)
-            for related in {ref} | descendants[ref]
-        )
-        for ref in by_ref
+        ref: _effective_tier(ref, by_ref, descendants) for ref in by_ref
     }
     preempting = {ref: _preempts(ref, by_ref, descendants) for ref in by_ref}
 
@@ -4613,9 +4625,17 @@ def bug_share_due(recent_starts: Sequence[Optional[str]]) -> bool:
     )
 
 
-def _oldest_first(item: Item):
-    """Age order for the Bug share: the ticket created first, then by number."""
+def _bugs_turn_order(
+    item: Item, by_ref: Dict[str, Item], descendants: Mapping[str, Set[str]]
+):
+    """Which Bug goes first: the highest repo tier, then the ticket created
+    first, then by repo and number (#1877).
+
+    Nate, 2026-09-28: "Tier, then oldest." The tier is the one ``startable()``
+    ranks by, so a Bug ticket that blocks a tier-1 Bug goes with that tier.
+    """
     return (
+        _effective_tier(item.ref, by_ref, descendants),
         item.created_at or datetime.max.replace(tzinfo=timezone.utc),
         item.repo,
         item.number,
@@ -4633,11 +4653,14 @@ def _with_the_bug_share(
 
     - Finite work goes first, unchanged: observed Broken, Maintenance, and
       whatever blocks them.
-    - Then, on the Bugs' turn (``bug_share_due``), the oldest startable Bug.
+    - Then, on the Bugs' turn (``bug_share_due``), pinned work, and after it
+      the startable Bug in the highest repo tier, oldest within the tier
+      (#1877; Nate, 2026-09-28: "Pins win; Bugs finish" and "Tier, then
+      oldest"). A pinned Bug is pinned work, and takes the turn itself.
     - Otherwise the ordinary order, less the Bugs it would put ahead of other
       work: repo tier ranks above the ladder, so a tier-1 Bug would otherwise
       go before a hobby repo's Improve on every pull.
-    - A Bug fills a pull that nothing else can.
+    - A Bug fills a pull that nothing else can, chosen as on the Bugs' turn.
 
     Two Bugs keep their ordinary place, because each is a commitment already
     made. A Bug project already Building finishes as any other does ("Passing
@@ -4658,9 +4681,16 @@ def _with_the_bug_share(
     bugs = [item for item in free if ranked_as.get(item.ref) == "Bug"]
     if not bugs:
         return free[0]
-    oldest = min(bugs, key=_oldest_first)
+    first_bug = min(
+        bugs, key=lambda item: _bugs_turn_order(item, by_ref, descendants))
     if bug_share_due(recent_starts):
-        return oldest
+        # Pins lead ``free`` once finite work is out of the way, as
+        # ``startable()`` ranks them, so pinned work is startable exactly
+        # when the first free ticket is pinned. A pinned non-Bug's start is
+        # not a Bug's, so the Bugs' turn is still due on the next pull.
+        if _pinned_ancestor(free[0], by_ref):
+            return free[0]
+        return first_bug
 
     def committed(item: Item) -> bool:
         parent = by_ref.get(item.parent or "")
@@ -4672,7 +4702,7 @@ def _with_the_bug_share(
     for candidate in free:
         if ranked_as.get(candidate.ref) != "Bug" or committed(candidate):
             return candidate
-    return oldest
+    return first_bug
 
 
 def next_ticket(items: Sequence[Item], now: datetime,

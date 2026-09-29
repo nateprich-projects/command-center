@@ -1753,17 +1753,53 @@ def test_apply_refuses_when_fresh_project_item_has_children(
 
 def test_fresh_shape_facts_read_the_exact_project_item(monkeypatch):
     item = idea(42)
-    fresh = idea(42, status="Shaped", children_total=3)
-    reads = []
+    calls = []
+    node = {
+        "id": "project-item-42",
+        "lock": None,
+        "status": {"name": "Shaped", "updatedAt": "2026-09-14T00:00:00Z"},
+        "class": {"name": "Improve"},
+        "origin": {"name": "agent"},
+        "risk": {"name": "standard"},
+        "pinned": None,
+        "needs": {"name": "none"},
+        "content": {
+            "number": 42,
+            "title": "Fresh target",
+            "url": item.url,
+            "body": item.body,
+            "state": "OPEN",
+            "stateReason": None,
+            "createdAt": "2026-09-01T00:00:00Z",
+            "closedAt": None,
+            "repository": {"nameWithOwner": REPO},
+            "labels": {"nodes": []},
+            "assignees": {"nodes": []},
+            "parent": None,
+            "subIssuesSummary": {"total": 3, "completed": 1},
+            "blockedBy": {"totalCount": 0, "nodes": []},
+        },
+    }
 
-    def load(refs):
-        reads.append(list(refs))
-        return [fresh]
+    def read_project(query, **variables):
+        calls.append((query, variables))
+        return {"user": {"projectV2": {
+            "r0": {
+                "nodes": [node],
+                "pageInfo": {"hasNextPage": False, "endCursor": None},
+            },
+        }}}
 
-    monkeypatch.setattr(funnel, "load_project_items_by_refs", load)
+    monkeypatch.setattr(funnel, "member_repos", lambda: [REPO])
+    monkeypatch.setattr(funnel, "gh_graphql", read_project)
 
     assert shape._read_fresh_shape_facts(item) == ("Shaped", 3)
-    assert reads == [[item.ref]]
+    (query, variables), = calls
+    assert variables == {"login": funnel.PROJECT_OWNER,
+                         "number": funnel.PROJECT_NUMBER}
+    assert 'query: "repo:owner/repo #42"' in query
+    assert 'fieldValueByName(name: "Status")' in query
+    assert "subIssuesSummary { total completed }" in query
 
 
 def test_fresh_shape_facts_fail_closed_when_the_project_read_misses(

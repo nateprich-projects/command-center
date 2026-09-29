@@ -31,8 +31,8 @@ break nothing the plan, `plan_md` or the repository's rules require?
 
 ## The conformance pass
 
-Walk each requirement against the diff, quoting it and citing the lines
-meeting it. A `Does not break:` row is met unless a diff line breaks it.
+Walk each requirement one at a time against the diff, quoting it and citing
+the lines meeting it. A `Does not break:` row is met unless a diff line breaks it.
 
 `plan_premises` is context: do not probe premises.
 

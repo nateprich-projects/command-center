@@ -2850,22 +2850,35 @@ def projected_pull_order(
     items: Sequence[Item], now: Optional[datetime] = None,
     paused: Collection[str] = (),
     finished: Collection[str] = (),
+    in_review: Collection[str] = (),
+    recent_starts: Sequence[Optional[str]] = (),
 ) -> List[str]:
-    """Every ticket's projected turn, found by running ``startable()`` forward.
+    """Every ticket's projected turn, found by running ``next_ticket`` forward.
 
-    This is the dashboard's order: "an accurate representation of what comes
-    next, not a string of contrived rules" (Nate, 2026-09-24). Each round
-    takes the ticket ``startable()`` ranks first, counts it done, and lifts
-    what that frees: a native edge on it, a labelled block whose every
-    condition has now cleared, and a project ref once all of that project's
-    tickets are done. A Ready project moves to Building on its first turn,
-    as ``claim`` would move it.
+    This is the dashboard's order, and ``funnel queue``'s: "an accurate
+    representation of what comes next, not a string of contrived rules"
+    (Nate, 2026-09-24). Each round takes the ticket ``next_ticket`` would
+    hand a lane, counts it done, and lifts what that frees: a native edge on
+    it, a labelled block whose every condition has now cleared, and a project
+    ref once all of that project's tickets are done. A Ready project moves to
+    Building on its first turn, as ``claim`` would move it.
 
-    Work already under way -- a PR in review, a human or Claude Code step --
-    queues with everything else under the same key, because it is being
-    taken now. What never becomes startable (a future date, a reason with no
-    reference, a blocker off the board, a missing Class) gets no turn and is
-    absent from the list. The items are copied; nothing is written.
+    The pick is ``next_ticket``'s own, so Bugs take the turns their share
+    gives them (#1878). Before this each round took ``startable()``'s first,
+    which knows nothing of the share: a hobby Bug showed last though every
+    fourth start takes one, and a tier-1 Bug showed first on pulls that pass
+    it over. ``recent_starts`` is ``recent_ticket_starts``'s answer, and each
+    turn that is a new start joins it with the class ``begin`` records.
+
+    Work already under way -- a claim, a PR in review (``in_review``), a
+    human or Claude Code step -- queues with everything else under the same
+    key, because it is being taken now. Its turn is not a new start: begin
+    counted a claim or a PR's ticket when it issued it, and never issues a
+    human or Claude Code step to the engineers, so counting its turn again
+    would hold the next Bug back three turns further than begin does. What
+    never becomes startable (a future date, a reason with no reference, a
+    blocker off the board, a missing Class) gets no turn and is absent from
+    the list. The items are copied; nothing is written.
 
     ``paused`` names tickets held by ``backoff_withheld`` after repeated
     failed runs. The engineers will not take them before the hold lifts, so
@@ -2879,9 +2892,17 @@ def projected_pull_order(
     """
     sim = [copy.copy(item) for item in items]
     by_ref = {item.ref: item for item in sim}
+    under_way = set(in_review)
     for item in sim:
         if item.needs in ("human", "claude-code-environment"):
             item.needs = "none"
+            under_way.add(item.ref)
+        if item.in_motion_since is not None:
+            # ``next_ticket`` passes over a claim, as a second lane must;
+            # here it takes its turn as work being taken now.
+            item.in_motion_since = None
+            under_way.add(item.ref)
+    history = list(recent_starts)
     done: Set[str] = set()
 
     def lift_blocks() -> None:
@@ -2919,15 +2940,19 @@ def projected_pull_order(
     waiting_on_nate = set(finished)
     lift_blocks()
     for _ in range(len(sim) + 2):
-        queue = startable(sim, awaiting_review=waiting_on_nate,
-                          backed_off=held)
-        if not queue and held:
+        # No claim is left on the copies, so the WIP cap never binds and
+        # this is the pick a free lane gets.
+        chosen = next_ticket(sim, now, blocked=waiting_on_nate,
+                             backed_off=held, recent_starts=history)
+        if chosen is None and held:
             held = {}
             continue
-        if not queue:
+        if chosen is None:
             break
-        order.append(queue[0].ref)
-        finish(queue[0])
+        order.append(chosen.ref)
+        if chosen.ref not in under_way:
+            history.append(effective_class(chosen, by_ref))
+        finish(chosen)
         lift_blocks()
     return order
 
@@ -12059,20 +12084,24 @@ def dashboard_board(
     pr_facts_known: Optional[bool] = None,
     authoring_pr_agents: Optional[Mapping[str, Iterable[str]]] = None,
     backed_off: Optional[Mapping[str, Mapping[str, object]]] = None,
+    recent_starts: Sequence[Optional[str]] = (),
 ) -> Dict[str, List[Dict[str, object]]]:
     """Build the ordered parent-project board for one already-loaded brief.
 
     The board is what comes next (Nate, 2026-09-24): ``projected_pull_order``
-    runs ``startable()`` forward, and projects and their open tickets follow
+    runs ``next_ticket`` forward, and projects and their open tickets follow
     their projected turns. Closed tickets sink to the bottom of their
     project. Work the projection never reaches follows in gate order, with
     anything that cannot move below what can. `Done` is newest-first. The
-    order is `startable()`'s throughout — this function never invents a rank.
+    order is the engineers' own throughout — this function never invents a
+    rank.
 
     ``backed_off`` is ``backoff_withheld``'s mapping, read from the local
     heartbeat by the caller. With the tickets finished by comments, these are
     the holds the engineers honour that the Project fields do not show, so
     the rows name them rather than a next step nobody will take.
+    ``recent_starts`` is ``recent_ticket_starts``'s answer from the same
+    read, so the projection gives Bugs the turns begin gives them (#1878).
     """
     rows = list(items)
     paused_rows = dict(backed_off or {})
@@ -12135,11 +12164,13 @@ def dashboard_board(
     try:
         # The board's order for work in motion: each ticket's projected turn.
         # Work finished by comments gets none, as no begin will take it (#1701).
+        # Work in review takes its turn but is not a new start (#1878).
         turn = {
             ref: index
             for index, ref in enumerate(
                 projected_pull_order(rows, now, paused=paused_rows,
-                                     finished=finished)
+                                     finished=finished, in_review=in_review,
+                                     recent_starts=recent_starts)
             )
         }
     except Exception:
@@ -14074,6 +14105,21 @@ def cmd_queue(
         items, awaiting_review=set(in_review) | set(finished),
         repo_readiness=repo_readiness,
     )
+    # Listed in their projected turns, the dashboard's order, so a Bug shows
+    # where begin takes it rather than where ``startable()`` alone ranks it
+    # (#1878). The heartbeat read gives the holds and the start history, as
+    # it does for ``next``.
+    heartbeat_rows = _backoff_rows()
+    turn = {
+        ref: index
+        for index, ref in enumerate(projected_pull_order(
+            items, now,
+            paused=_backed_off_work(items, now, rows=heartbeat_rows),
+            finished=finished, in_review=in_review,
+            recent_starts=recent_ticket_starts(heartbeat_rows),
+        ))
+    }
+    tickets.sort(key=lambda item: turn.get(item.ref, len(turn)))
 
     print("Waiting on Nate ({}), bottom-up:".format(len(decisions)))
     by_ref = {i.ref: i for i in items}
@@ -21150,12 +21196,19 @@ def main(argv: Optional[Sequence[str]] = None, *,
                         for fact in pr_facts.values()
                     ):
                         authoring_pr_agents = _dashboard_authoring_pr_agents()
+                    heartbeat_rows = _backoff_rows()
                     try:
                         # The same holds `cmd_next` honours, from the local
                         # heartbeat; the board is not worth failing over them.
-                        backed_off = backoff_withheld(_backoff_rows(), now)
+                        backed_off = backoff_withheld(heartbeat_rows, now)
                     except Exception:
                         backed_off = {}
+                    try:
+                        # And the start history it gives Bugs their share
+                        # from, out of the same read (#1878).
+                        recent_starts = recent_ticket_starts(heartbeat_rows)
+                    except Exception:
+                        recent_starts = []
                     write_dashboard_snapshot(
                         brief_payload,
                         dashboard_board(
@@ -21163,6 +21216,7 @@ def main(argv: Optional[Sequence[str]] = None, *,
                             pr_facts_known=not pr_facts_missing,
                             authoring_pr_agents=authoring_pr_agents,
                             backed_off=backed_off,
+                            recent_starts=recent_starts,
                         ),
                         generated_at,
                         usage={

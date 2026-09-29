@@ -285,11 +285,12 @@ across every lane, never by what is running. On the Bugs' turn, finite work stil
 first, then pinned work, then the startable Bug in the highest repo tier, oldest within
 the tier. _(Nate, 2026-09-28, #1877: "Pins win; Bugs finish" and "Tier, then
 oldest.")_ A pinned Bug is pinned work, so it takes the turn itself.
-_(agent rule, unconfirmed — advisory)_ Off their turn, a Ready Bug waits: tier does
+_(confirmed by Nate 2026-09-28, in session)_ Off their turn, a Ready Bug waits: tier does
 not lift it ahead of other work, and it fills only a pull nothing else can, chosen the
 same way. A Bug project already Building keeps its place, as does a pinned Bug, and
 their starts count against the share. The share applies where a lane pulls
-(`next_ticket`); the board's projected order does not yet run it forward (#1878).
+(`next_ticket`), and the board's projected order and `funnel queue` run that pick
+forward from the start history, so a Bug shows on the turn begin gives it (#1878).
 
 **Maintenance is defined tightly:** it is degrading, or it has a known date on which it
 stops working. Expiring certs, a sunsetting API, a CVE, a service that keeps dying, an

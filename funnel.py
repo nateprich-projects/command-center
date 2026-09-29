@@ -17637,11 +17637,12 @@ def parse_shape_risk_record(body: str) -> Optional[Dict[str, List[str]]]:
 
     The newest block wins, as for every runner record, so a marker the
     shaper quoted in the narrative above cannot outrank the runner's own.
+    A record predating the declared field treats it as an empty list.
     """
     found = _marked_json(body, SHAPE_RISK_MARKER)
     if found is None:
         return None
-    declared = found.get("declared")
+    declared = found.get("declared", [])
     scan = found.get("scan")
     if not (isinstance(declared, list)
             and all(isinstance(reason, str) for reason in declared)
@@ -17656,7 +17657,8 @@ def _shaped_risk_holds(item: Item, body: str) -> bool:
 
     Until #1721 an escalated Risk held a plan whoever set it. Now it is
     released only on the runner's own record that the decision declared no
-    risk, and only when no declaration shows in the prose either. A plan
+    risk and the wording scan found a risk, and only when no declaration
+    shows in the prose either. A plan
     with no record, shaped before #1721 or by hand, or an unreadable one,
     holds; so do unset or unknown Risk and a body the load did not carry.
     ``Needs: human`` keeps its own hold whatever the Risk: after #1721 the
@@ -17668,7 +17670,7 @@ def _shaped_risk_holds(item: Item, body: str) -> bool:
     if item.risk != "escalated" or not body.strip():
         return True
     record = parse_shape_risk_record(body)
-    if record is None or record["declared"]:
+    if record is None or record["declared"] or not record["scan"]:
         return True
     return bool(plan_declared_risks(body))
 

@@ -166,6 +166,46 @@ def test_successful_brief_spools_without_changing_stdout(
     assert snapshot["generated_at"] == json.loads(expected)["generated_at"]
 
 
+def test_the_spooled_board_shows_the_bug_turns_begin_takes(
+    monkeypatch, tmp_path, capsys
+):
+    """The brief reads the start history from the heartbeat read that gives
+    it the holds, and the board shows the order begin takes (#1878): a Bug
+    another lane just started holds the tier-1 Bug behind the hobby work
+    that repo tier alone would put after it."""
+    import heartbeat
+
+    heartbeat._spool("claude", {
+        "run": "sat", "agent": "claude", "phase": "bind", "ts": 5,
+        "do": "ticket", "work": "nateprich-projects/command-center#90",
+        "class": "Bug",
+    })
+    spool = tmp_path / "dashboard-spool"
+    monkeypatch.setenv(funnel.DASHBOARD_SPOOL_ENV, str(spool))
+    hobby = "nateprich-projects/The-League"
+    bug = _item(1, "Ready", klass="Bug", children_total=1)
+    improve = _item(3, "Ready", repo=hobby, klass="Improve",
+                    children_total=1)
+    items = [
+        bug, _item(2, None, klass=None, parent=bug.ref),
+        improve, _item(4, None, repo=hobby, klass=None, parent=improve.ref),
+    ]
+    monkeypatch.setattr(funnel, "load_items", lambda: items)
+    monkeypatch.setattr(funnel, "ticket_pr_facts", lambda _items: {})
+
+    def fake_cmd_brief(items, now, **kwargs):
+        print(_brief_output())
+        return 0
+
+    monkeypatch.setattr(funnel, "cmd_brief", fake_cmd_brief)
+
+    assert funnel.main(["brief"]) == 0
+    capsys.readouterr()
+    ready = next(column for column in _spooled(spool)["board"]["columns"]
+                 if column["stage"] == "Ready")
+    assert [row["ref"] for row in ready["items"]] == [improve.ref, bug.ref]
+
+
 def test_spool_write_failure_preserves_brief_output_and_exit_code(
     monkeypatch, tmp_path, capsys
 ):

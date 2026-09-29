@@ -159,6 +159,12 @@ def test_native_open_blocker_keeps_a_closed_named_block_unsatisfied():
         open_blockers=["#77"],
     )
     blocker = issue(77, state="CLOSED")
+    waiting.satisfied_block_record = funnel.parse_satisfied_block_comment(
+        funnel.satisfied_block_comment(
+            [blocker.ref], NOW, run="run-1874", agent="codex",
+        )
+    )
+    assert waiting.satisfied_block_record is not None
 
     assert funnel.satisfied_block_refs(
         waiting, {waiting.ref: waiting, blocker.ref: blocker}
@@ -217,6 +223,22 @@ def test_fully_satisfied_blocks_are_recorded_then_cleared(
     )
     assert not waiting.is_blocked
     assert waiting.blocked_cleared_at == NOW
+
+
+def test_satisfied_block_marker_must_start_a_runner_comment_line():
+    record = funnel.satisfied_block_comment(
+        ["owner/repo#77"], NOW, run="run-1874", agent="codex",
+    )
+
+    assert funnel.parse_satisfied_block_comment(record) == {
+        "conditions": ["owner/repo#77"],
+        "found_closed_at": "2026-09-09T16:00:00Z",
+    }
+    assert funnel.parse_satisfied_block_comment(
+        "Cleaned breakdown question: " + record
+    ) is None
+    for prefix in (" ", "\t", "> "):
+        assert funnel.parse_satisfied_block_comment(prefix + record) is None
 
 
 def test_every_failed_conjunction_part_reports_but_never_clears(monkeypatch):

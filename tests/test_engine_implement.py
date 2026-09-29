@@ -4601,7 +4601,9 @@ def test_timed_out_test_keeps_checkpointed_work_and_finishes(
 
         def communicate(self, input=None, timeout=None):
             self.timeout = timeout
-            raise subprocess.TimeoutExpired(self.command, timeout)
+            raise subprocess.TimeoutExpired(
+                self.command, timeout, output=b"stdout marker",
+                stderr=b"stderr marker")
 
         def kill(self):
             self.killed = True
@@ -4624,7 +4626,9 @@ def test_timed_out_test_keeps_checkpointed_work_and_finishes(
             lambda pid, sig: killed.append((pid, sig)),
         )
 
-    with pytest.raises(implement.CommandTimeoutError, match="make test timed out"):
+    with pytest.raises(
+            implement.CommandTimeoutError,
+            match="make test timed out") as raised:
         implement.finish_done(
             answer(), run="run-42", repo=REPO, cwd=clone,
             test_commands=[["make", "test"]],
@@ -4636,6 +4640,7 @@ def test_timed_out_test_keeps_checkpointed_work_and_finishes(
 
     (process,) = spawned
     assert process.timeout == implement.TEST_COMMAND_TIMEOUT_SECONDS
+    assert raised.value.captured_output == "stdout marker\nstderr marker"
     assert process.waited is False
     if implement.os.name == "posix":
         assert killed == [(process.pid, signal.SIGKILL)]
@@ -4754,7 +4759,8 @@ def worktree_calls(monkeypatch):
     return calls
 
 
-def _merged_finish(clone, monkeypatch, repo=PUBLIC_REPO):
+def _merged_finish(clone, monkeypatch, repo=PUBLIC_REPO, *,
+                   catch_unexpected=False):
     """Run finish_done on the repository's own test plan; return its effects.
 
     ``raised`` is the finish's error, or None when it opened its PR.
@@ -4779,6 +4785,10 @@ def _merged_finish(clone, monkeypatch, repo=PUBLIC_REPO):
                 effects["comments"].append(args),
         )
     except implement.ImplementError as exc:
+        effects["raised"] = exc
+    except Exception as exc:
+        if not catch_unexpected:
+            raise
         effects["raised"] = exc
     return effects
 
@@ -4813,6 +4823,66 @@ def test_a_merge_only_failure_fails_the_finish(tmp_path, monkeypatch):
     assert failed_in.parent.parent == clone.parent.resolve()
     assert run_git("--git-dir", str(remote), "show",
                    "ticket/42:calc.py").stdout == BROKEN_FOR_THREE
+
+
+@pytest.mark.parametrize("test_command", [
+    "make test",
+    "python3 -m pytest -q",
+])
+def test_a_merged_suite_timeout_is_unclassified_and_keeps_work(
+        tmp_path, monkeypatch, test_command):
+    remote, clone, main_sha, _ = make_merge_clone(
+        tmp_path, monkeypatch,
+        ancestor={"pyproject.toml": (
+                  '[project]\nname = "fixture"\n\n'
+                  '[tool.command-center]\ntest = "{}"\n'.format(
+                      test_command))},
+        main={"main.txt": "main\n"})
+    (clone / "kept.txt").write_text("checkpointed\n")
+    real_run = implement._run
+
+    def timeout_make_test(command, **kwargs):
+        if command == ["make", "test"] or "pytest" in command:
+            output = "No module named pytest\n" + "progress line\n" * 300
+            raise implement.CommandTimeoutError(
+                command, 1, captured_output=output)
+        return real_run(command, **kwargs)
+
+    monkeypatch.setattr(implement, "_run", timeout_make_test)
+    effects = _merged_finish(clone, monkeypatch)
+
+    assert isinstance(effects["raised"], implement.MergedSuiteError)
+    assert effects["prs"] == []
+    (finished,) = effects["finished"]
+    assert finished[2] == "errored"
+    first_line = finished[3].splitlines()[0]
+    assert first_line.startswith("tests timed out: ")
+    assert "timed out on the merge with origin/main {}".format(
+        main_sha[:12]) in first_line
+    assert "[output truncated;" in finished[3]
+    assert "no module named pytest" in finished[3].casefold()
+    assert heartbeat.classify_error(
+        finished[3], {"head": "0123456789ab"}) == "unclassified"
+    assert run_git("--git-dir", str(remote), "show",
+                   "ticket/42:kept.txt").stdout == "checkpointed\n"
+
+
+def test_member_timeout_failure_note_redacts_command_and_output():
+    failure = implement.MergedSuiteError(
+        "tests timed out: private-command timed out on the merge with "
+        "origin/main 0123456789ab\n"
+        "[output truncated; setup markers retained: no module named pytest]\n"
+        "private source path and contents")
+
+    note = implement._failure_note(
+        failure, "work kept on ticket/42", repo=REPO)
+
+    assert "private-command" not in note
+    assert "private source path" not in note
+    assert "no module named pytest" in note
+    assert "tests timed out:" in note
+    assert heartbeat.classify_error(
+        note, {"head": "0123456789ab"}) == "unclassified"
 
 
 def test_uncommitted_work_is_what_the_merge_tests(tmp_path, monkeypatch):
@@ -5289,6 +5359,61 @@ def test_a_reproduction_that_fails_is_recorded_and_the_pr_opens(
         "<!-- /command-center-evidence -->\n"
     ).format(remote_tip(remote), main_sha[:12])
     assert "worktree add failed" not in body
+
+
+def test_a_non_utf8_changed_python_file_finishes_with_reproduction_not_run(
+        tmp_path, monkeypatch):
+    _, clone, main_sha = make_evidence_clone(tmp_path, monkeypatch)
+    (clone / "calc.py").write_bytes(
+        b"# coding: latin-1\n" + FIXED_CALC.encode("ascii")
+        + b"\n# caf\xe9\n")
+
+    effects = _merged_finish(
+        clone, monkeypatch, catch_unexpected=True)
+
+    assert effects["raised"] is None
+    assert effects["released"] == [PUBLIC_REPO + "#42"]
+    assert effects["finished"][0][2] == "done"
+    (body,) = effects["prs"]
+    assert "- reproduction: not run\n" in evidence_block(body)
+    assert "- merged suite: pass on origin/main {}\n".format(
+        main_sha[:12]) in evidence_block(body)
+
+
+def test_a_rev_parse_timeout_finishes_with_reproduction_not_run(
+        tmp_path, monkeypatch):
+    _, clone, main_sha = make_evidence_clone(tmp_path, monkeypatch)
+    real_load = implement._review_evidence
+    loads = 0
+
+    def load():
+        nonlocal loads
+        module = real_load()
+        loads += 1
+        if loads == 2:
+            real_git = module._git
+
+            def timeout_on_rev_parse(cwd, *args, **kwargs):
+                if "rev-parse" in args:
+                    raise implement.CommandTimeoutError(
+                        ["git", *args], timeout=1)
+                return real_git(cwd, *args, **kwargs)
+
+            module._git = timeout_on_rev_parse
+        return module
+
+    monkeypatch.setattr(implement, "_review_evidence", load)
+
+    effects = _merged_finish(
+        clone, monkeypatch, catch_unexpected=True)
+
+    assert effects["raised"] is None
+    assert effects["released"] == [PUBLIC_REPO + "#42"]
+    assert effects["finished"][0][2] == "done"
+    (body,) = effects["prs"]
+    assert "- reproduction: not run\n" in evidence_block(body)
+    assert "- merged suite: pass on origin/main {}\n".format(
+        main_sha[:12]) in evidence_block(body)
 
 def test_render_pr_body_strips_forged_markers_from_the_model_text():
     forged = {

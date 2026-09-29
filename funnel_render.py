@@ -79,6 +79,11 @@ longer parked and therefore no longer appear here.
 Then `unattended_approvals`, newest first: issue, transition time, stated
 `basis`. A record to read at will, not a notification or review request.
 
+Then `connector_gate_answers`, newest first, for the last 30 days: issue,
+gate, verbatim `instruction`, and `provenance` (`voice`, `agent`, `run`).
+These are audit records; they do not add to `counts_by_gate` or
+`total_needing_nate`.
+
 Then `outcome_signals` as three independent named signals: cost per merged
 PR by lane with its unit, then rework and intervention rates with sample
 sizes. `insufficient_data` and `partial` are unknown: say what is missing,

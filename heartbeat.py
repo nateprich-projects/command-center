@@ -133,6 +133,7 @@ UNCLASSIFIED_ERROR_MARKERS = (
     "could not derive a test command",
     "no module named pytest",
     "requires python ",
+    "tests timed out:",
 )
 
 
@@ -149,6 +150,10 @@ def classify_error(note: Optional[str], runtime: Optional[Dict]) -> str:
         return "unclassified"
 
     normalized = note.casefold()
+    # A merged-suite timeout is not evidence of a regression, even if its
+    # captured output contains one of the classifier's other phrases.
+    if "tests timed out:" in normalized:
+        return "unclassified"
     if all(marker in normalized for marker in BEGIN_TIMEOUT_ERROR_MARKERS):
         return "begin-timeout"
     if any(marker in normalized for marker in FLOOR_ERROR_MARKERS):

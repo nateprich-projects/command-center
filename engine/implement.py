@@ -66,10 +66,12 @@ class StrayFileError(ImplementError):
 
 
 class CommandTimeoutError(ImplementError):
-    """A finish subprocess exceeded its bound and was abandoned."""
+    """A bounded finish subprocess was abandoned with partial output."""
 
-    def __init__(self, command: Sequence[str], timeout: float):
+    def __init__(self, command: Sequence[str], timeout: float,
+                 captured_output: str = ""):
         self.timeout_seconds = timeout
+        self.captured_output = captured_output
         self.finish_recorded = False
         super().__init__("{} timed out after {:g}s".format(
             _command_label(command), timeout))
@@ -537,9 +539,19 @@ def _run(command: Sequence[str], *, cwd: pathlib.Path,
     )
     try:
         stdout, stderr = proc.communicate(input=input_text, timeout=bound)
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as exc:
+        output = []
+        for part in (exc.output, exc.stderr):
+            if isinstance(part, bytes):
+                part = part.decode("utf-8", errors="replace")
+            elif part is not None:
+                part = str(part)
+            if part:
+                output.append(part)
         _abandon_child(proc)
-        raise CommandTimeoutError(command, bound) from None
+        raise CommandTimeoutError(
+            command, bound, captured_output="\n".join(output),
+        ) from None
     completed = subprocess.CompletedProcess(
         list(command), proc.returncode, stdout, stderr)
     if check and completed.returncode != 0:
@@ -1035,6 +1047,16 @@ def _merged_failure(record: dict) -> MergedSuiteError:
     counts only failures main does not share, which is what fails the
     finish.
     """
+    timed_out = [entry for entry in record["commands"]
+                 if entry.get("timed_out") is True]
+    if timed_out:
+        entry = timed_out[-1]
+        lines = ["tests timed out: {} timed out on the merge with "
+                 "origin/main {}".format(
+                     entry["command"], record["base"][:12])]
+        if entry.get("output"):
+            lines.append(entry["output"])
+        return MergedSuiteError("\n".join(lines))
     failed = [entry["command"] for entry in record["commands"]
               if entry["result"] == "fail"]
     lines = ["{} failed on the merge with origin/main {}".format(
@@ -1147,7 +1169,7 @@ def _run_reproduction(root: pathlib.Path,
         return evidence.reproduction(
             root, merged["base"], work_dir=root.parent,
             budget=REPRODUCTION_BUDGET_SECONDS)
-    except (evidence.ReviewEvidenceError, ImplementError, OSError):
+    except Exception:
         return dict(_REPRODUCTION_NOT_RUN)
 
 
@@ -2469,6 +2491,15 @@ def _failure_note(exc: ImplementError, kept: str = "", *, repo: str) -> str:
     ``_failure_comment``, where the next run's packet reads them.
     """
     text = str(exc)
+    if text.startswith("tests timed out:"):
+        public = _is_public_repo(repo)
+        if public:
+            note = text
+        else:
+            note = _with_markers(text, "tests timed out: merged suite")
+        if kept:
+            note += " | " + (_member_kept(kept) if not public else kept)
+        return note
     ids = _failed_test_ids(text)
     counts = _pytest_counts(text)
     parts = []

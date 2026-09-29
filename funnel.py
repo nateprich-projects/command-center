@@ -708,6 +708,8 @@ BRIEF_SECTION_BUDGETS = {
     "resend_ratio": 3.0,
     "unattended_merges": 3.0,
     "unattended_approvals": 49.0,
+    # Bounded issue-comment tails, shared with the adjacent approval record.
+    "connector_gate_answers": 49.0,
     "run_summary": 1.0,
     "agent_health": 1.0,
     "working_tree_touched": 1.0,
@@ -2850,22 +2852,35 @@ def projected_pull_order(
     items: Sequence[Item], now: Optional[datetime] = None,
     paused: Collection[str] = (),
     finished: Collection[str] = (),
+    in_review: Collection[str] = (),
+    recent_starts: Sequence[Optional[str]] = (),
 ) -> List[str]:
-    """Every ticket's projected turn, found by running ``startable()`` forward.
+    """Every ticket's projected turn, found by running ``next_ticket`` forward.
 
-    This is the dashboard's order: "an accurate representation of what comes
-    next, not a string of contrived rules" (Nate, 2026-09-24). Each round
-    takes the ticket ``startable()`` ranks first, counts it done, and lifts
-    what that frees: a native edge on it, a labelled block whose every
-    condition has now cleared, and a project ref once all of that project's
-    tickets are done. A Ready project moves to Building on its first turn,
-    as ``claim`` would move it.
+    This is the dashboard's order, and ``funnel queue``'s: "an accurate
+    representation of what comes next, not a string of contrived rules"
+    (Nate, 2026-09-24). Each round takes the ticket ``next_ticket`` would
+    hand a lane, counts it done, and lifts what that frees: a native edge on
+    it, a labelled block whose every condition has now cleared, and a project
+    ref once all of that project's tickets are done. A Ready project moves to
+    Building on its first turn, as ``claim`` would move it.
 
-    Work already under way -- a PR in review, a human or Claude Code step --
-    queues with everything else under the same key, because it is being
-    taken now. What never becomes startable (a future date, a reason with no
-    reference, a blocker off the board, a missing Class) gets no turn and is
-    absent from the list. The items are copied; nothing is written.
+    The pick is ``next_ticket``'s own, so Bugs take the turns their share
+    gives them (#1878). Before this each round took ``startable()``'s first,
+    which knows nothing of the share: a hobby Bug showed last though every
+    fourth start takes one, and a tier-1 Bug showed first on pulls that pass
+    it over. ``recent_starts`` is ``recent_ticket_starts``'s answer, and each
+    turn that is a new start joins it with the class ``begin`` records.
+
+    Work already under way -- a claim, a PR in review (``in_review``), a
+    human or Claude Code step -- queues with everything else under the same
+    key, because it is being taken now. Its turn is not a new start: begin
+    counted a claim or a PR's ticket when it issued it, and never issues a
+    human or Claude Code step to the engineers, so counting its turn again
+    would hold the next Bug back three turns further than begin does. What
+    never becomes startable (a future date, a reason with no reference, a
+    blocker off the board, a missing Class) gets no turn and is absent from
+    the list. The items are copied; nothing is written.
 
     ``paused`` names tickets held by ``backoff_withheld`` after repeated
     failed runs. The engineers will not take them before the hold lifts, so
@@ -2879,9 +2894,17 @@ def projected_pull_order(
     """
     sim = [copy.copy(item) for item in items]
     by_ref = {item.ref: item for item in sim}
+    under_way = set(in_review)
     for item in sim:
         if item.needs in ("human", "claude-code-environment"):
             item.needs = "none"
+            under_way.add(item.ref)
+        if item.in_motion_since is not None:
+            # ``next_ticket`` passes over a claim, as a second lane must;
+            # here it takes its turn as work being taken now.
+            item.in_motion_since = None
+            under_way.add(item.ref)
+    history = list(recent_starts)
     done: Set[str] = set()
 
     def lift_blocks() -> None:
@@ -2919,15 +2942,19 @@ def projected_pull_order(
     waiting_on_nate = set(finished)
     lift_blocks()
     for _ in range(len(sim) + 2):
-        queue = startable(sim, awaiting_review=waiting_on_nate,
-                          backed_off=held)
-        if not queue and held:
+        # No claim is left on the copies, so the WIP cap never binds and
+        # this is the pick a free lane gets.
+        chosen = next_ticket(sim, now, blocked=waiting_on_nate,
+                             backed_off=held, recent_starts=history)
+        if chosen is None and held:
             held = {}
             continue
-        if not queue:
+        if chosen is None:
             break
-        order.append(queue[0].ref)
-        finish(queue[0])
+        order.append(chosen.ref)
+        if chosen.ref not in under_way:
+            history.append(effective_class(chosen, by_ref))
+        finish(chosen)
         lift_blocks()
     return order
 
@@ -3394,21 +3421,23 @@ def _marked_json_blocks(body: str, marker: str) -> List[Tuple[Dict, str]]:
     return blocks
 
 
-def _first_marked_json(body: str, marker: str) -> Optional[Dict]:
+def _first_marked_json(
+    body: str, marker: str, *, column_zero_only: bool = False,
+) -> Optional[Dict]:
     """Read the block owned by the first line-leading ``marker`` (#1798).
 
-    A verdict comment starts with its marker, before any model text, so the
-    first line-leading occurrence is the runner's own. Read from the last, a
-    blocking reason that carried a line-leading marker and a JSON block was
-    the verdict, and the owner's rejection read as an approval (#1797). A
-    marker quoted mid-line, as a verdict quoting an earlier one puts it inside
-    its JSON strings, is content (#1688) and never a start. There is no
-    fallback to a later occurrence: if the runner's block cannot be read, the
-    comment carries no verdict.
+    A runner comment starts with its marker, before any model text, so the
+    first line-leading occurrence is the runner's own. A marker quoted
+    mid-line, as a verdict quoting an earlier one puts it inside its JSON
+    strings, is content (#1688) and never a start. ``column_zero_only`` also
+    rejects indentation and quote prefixes. There is no fallback to a later
+    occurrence: if the runner's block cannot be read, the comment carries no
+    record.
     """
     if not isinstance(body, str):
         return None
-    first = re.search(r"(?m)^[ \t]*(" + re.escape(marker) + ")", body)
+    line_start = r"(?m)^" if column_zero_only else r"(?m)^[ \t]*"
+    first = re.search(line_start + "(" + re.escape(marker) + ")", body)
     if first is None:
         return None
     found = _marked_json_block_at(body, marker, first.start(1))
@@ -4064,7 +4093,9 @@ def parse_satisfied_block_comment(body: str) -> Optional[Dict[str, object]]:
     the ordinary provenance marker says an agent, rather than Nate, recorded
     the unattended action.
     """
-    found = _marked_json(body, SATISFIED_BLOCK_PREFIX)
+    found = _first_marked_json(
+        body, SATISFIED_BLOCK_PREFIX, column_zero_only=True
+    )
     provenance = parse_provenance(body)
     if found is None or provenance is None or provenance.get("voice") != "agent":
         return None
@@ -5278,6 +5309,124 @@ def unattended_approvals(
             })
 
     return sorted(found, key=lambda row: (row["at"], row["ref"]), reverse=True)
+
+
+def _connector_gate_candidate(item: Item, cutoff: datetime,
+                              now: datetime) -> bool:
+    """Return whether an item could hold a recent connector gate answer."""
+    # API status writes do not always emit a status event. Open Ready, Building,
+    # and Parked items can still carry a recent answer when history is stale.
+    if item.state == "OPEN" and item.status in ("Ready", "Building", "Parked"):
+        return True
+    if (item.status in ("Done", "Parked") and item.closed_at is not None
+            and cutoff <= item.closed_at <= now):
+        return True
+
+    # Retain recent transition history for items that have since moved on.
+    for event in item.status_events:
+        if not isinstance(event, dict):
+            continue
+        if event.get("status") not in ("Ready", "Done", "Parked"):
+            continue
+        raw_at = (
+            event.get("at") or event.get("created_at") or event.get("createdAt")
+        )
+        if isinstance(raw_at, datetime):
+            at = raw_at
+        elif isinstance(raw_at, str):
+            at = parse_time(raw_at)
+        else:
+            at = None
+        if at is not None and cutoff <= at <= now:
+            return True
+    return False
+
+
+def _connector_gate_verb(comment: object) -> Optional[str]:
+    """Identify a trusted connector gate comment by its visible body."""
+    if not trusted_comment(comment) or not isinstance(comment, Mapping):
+        return None
+    body = comment.get("body")
+    if not isinstance(body, str):
+        return None
+    visible = _visible_comment(body).strip()
+    match = re.fullmatch(
+        r"General-chat gate instruction received for `([^`]+)`\.", visible
+    )
+    if match is not None and match.group(1) in ANSWERS:
+        return match.group(1)
+    if parse_park_comment(body) is not None:
+        return "park"
+    return None
+
+
+def connector_gate_answers(
+    items: Iterable[Item], now: datetime, brief_cache=None
+) -> List[Dict[str, object]]:
+    """Recent connector gate answers with their verbatim instruction record.
+
+    The connector writes a provenance comment for approve, accept and park.
+    Status history narrows the bounded comment-tail reads to items on which
+    one of those actions could have completed. These records are audit context;
+    they are deliberately separate from gate counts.
+    """
+    cutoff = now - MAINTENANCE_WINDOW
+    candidates = [
+        item for item in items
+        if _connector_gate_candidate(item, cutoff, now)
+    ]
+    if not candidates:
+        return []
+
+    cache = brief_cache or _ACTIVE_BRIEF_CACHE.get() or BriefCache()
+    comments_by_ref = cache.comment_tails(candidates)
+    found: List[Tuple[datetime, str, Dict[str, object]]] = []
+    for item in candidates:
+        for comment in comments_by_ref.get(item.ref, []):
+            if not isinstance(comment, Mapping) or not trusted_comment(comment):
+                continue
+            body = comment.get("body")
+            if not isinstance(body, str):
+                continue
+            verb = _connector_gate_verb(comment)
+            if verb is None:
+                continue
+            provenance = parse_provenance(body)
+            if not isinstance(provenance, dict):
+                continue
+            instruction = provenance.get("instruction")
+            if (provenance.get("voice") != "nate-relayed"
+                    or not isinstance(instruction, str)
+                    or not instruction.strip()):
+                continue
+
+            created_at = comment.get("createdAt") or comment.get("created_at")
+            if isinstance(created_at, datetime):
+                at = created_at
+            elif isinstance(created_at, str):
+                at = parse_time(created_at)
+            else:
+                at = None
+            if at is None or not cutoff <= at <= now:
+                continue
+            record = {
+                "ref": item.ref,
+                "title": item.title,
+                "url": item.url,
+                "gate": verb,
+                "at": at.isoformat(),
+                "instruction": instruction,
+                "provenance": {
+                    "voice": provenance.get("voice"),
+                    "at": provenance.get("at"),
+                    "agent": provenance.get("agent"),
+                    "run": provenance.get("run"),
+                },
+            }
+            found.append((at, item.ref, record))
+
+    found.sort(key=lambda row: (row[0], row[1]), reverse=True)
+    return [record for _at, _ref, record in found]
 
 
 def agent_health(now: datetime) -> List[Dict[str, str]]:
@@ -12055,20 +12204,24 @@ def dashboard_board(
     pr_facts_known: Optional[bool] = None,
     authoring_pr_agents: Optional[Mapping[str, Iterable[str]]] = None,
     backed_off: Optional[Mapping[str, Mapping[str, object]]] = None,
+    recent_starts: Sequence[Optional[str]] = (),
 ) -> Dict[str, List[Dict[str, object]]]:
     """Build the ordered parent-project board for one already-loaded brief.
 
     The board is what comes next (Nate, 2026-09-24): ``projected_pull_order``
-    runs ``startable()`` forward, and projects and their open tickets follow
+    runs ``next_ticket`` forward, and projects and their open tickets follow
     their projected turns. Closed tickets sink to the bottom of their
     project. Work the projection never reaches follows in gate order, with
     anything that cannot move below what can. `Done` is newest-first. The
-    order is `startable()`'s throughout — this function never invents a rank.
+    order is the engineers' own throughout — this function never invents a
+    rank.
 
     ``backed_off`` is ``backoff_withheld``'s mapping, read from the local
     heartbeat by the caller. With the tickets finished by comments, these are
     the holds the engineers honour that the Project fields do not show, so
     the rows name them rather than a next step nobody will take.
+    ``recent_starts`` is ``recent_ticket_starts``'s answer from the same
+    read, so the projection gives Bugs the turns begin gives them (#1878).
     """
     rows = list(items)
     paused_rows = dict(backed_off or {})
@@ -12131,11 +12284,13 @@ def dashboard_board(
     try:
         # The board's order for work in motion: each ticket's projected turn.
         # Work finished by comments gets none, as no begin will take it (#1701).
+        # Work in review takes its turn but is not a new start (#1878).
         turn = {
             ref: index
             for index, ref in enumerate(
                 projected_pull_order(rows, now, paused=paused_rows,
-                                     finished=finished)
+                                     finished=finished, in_review=in_review,
+                                     recent_starts=recent_starts)
             )
         }
     except Exception:
@@ -12776,8 +12931,9 @@ def _closed_itself_item_json(
     for comment in reversed(comments):
         if not isinstance(comment, dict) or not trusted_comment(comment):
             continue
-        payload = _marked_json(
-            comment.get("body") or "", CLOSED_ITSELF_PREFIX
+        payload = _first_marked_json(
+            comment.get("body") or "", CLOSED_ITSELF_PREFIX,
+            column_zero_only=True,
         )
         if payload is None:
             continue
@@ -12798,7 +12954,12 @@ def _closed_itself_item_json(
 def closed_itself_json(
     items: Iterable[Item], now: datetime, brief_cache=None
 ) -> List[Dict[str, object]]:
-    """The brief's recent funnel-close records, newest first."""
+    """The brief's recent funnel-close records, newest first.
+
+    Candidates are rebuilt from the current project items on every call;
+    comments add details only for those candidates. A marker cannot retain a
+    row after the item stops meeting the current closed-project conditions.
+    """
     candidates = closed_itself_items(items, now)
     if not candidates:
         return []
@@ -13437,7 +13598,10 @@ def satisfied_block_refs(
     This mirrors ``_dead_dependency_refs`` over the already-loaded native and
     comment dependency facts. It never fetches a blocker: a reference must be
     present in ``by_ref`` before it can satisfy a block. A date condition is
-    represented as ``until YYYY-MM-DD`` in the returned condition list.
+    represented as ``until YYYY-MM-DD`` in the returned condition list. The
+    saved Satisfied-block marker is not an input here: clear eligibility is
+    derived from current block and blocker facts before the caller can use
+    that marker to suppress a duplicate record.
     """
     # ``block_reason`` is populated only when ``parse_block_comment`` found a
     # matching header. An empty reason is still a parsed comment; ``None`` is
@@ -14061,6 +14225,21 @@ def cmd_queue(
         items, awaiting_review=set(in_review) | set(finished),
         repo_readiness=repo_readiness,
     )
+    # Listed in their projected turns, the dashboard's order, so a Bug shows
+    # where begin takes it rather than where ``startable()`` alone ranks it
+    # (#1878). The heartbeat read gives the holds and the start history, as
+    # it does for ``next``.
+    heartbeat_rows = _backoff_rows()
+    turn = {
+        ref: index
+        for index, ref in enumerate(projected_pull_order(
+            items, now,
+            paused=_backed_off_work(items, now, rows=heartbeat_rows),
+            finished=finished, in_review=in_review,
+            recent_starts=recent_ticket_starts(heartbeat_rows),
+        ))
+    }
+    tickets.sort(key=lambda item: turn.get(item.ref, len(turn)))
 
     print("Waiting on Nate ({}), bottom-up:".format(len(decisions)))
     by_ref = {i.ref: i for i in items}
@@ -14648,6 +14827,10 @@ def cmd_brief(
             "unattended_approvals",
             lambda: unattended_approvals(items, now, brief_cache=cache),
         )
+        gate_answers = section(
+            "connector_gate_answers",
+            lambda: connector_gate_answers(items, now, brief_cache=cache),
+        )
         run_summary = section("run_summary", lambda: agent_run_summary(now))
         health = section("agent_health", lambda: agent_health(now))
         touched = section(
@@ -14767,6 +14950,7 @@ def cmd_brief(
             "resend_ratio": resend,
             "unattended_merges": merges,
             "unattended_approvals": approvals,
+            "connector_gate_answers": gate_answers,
             "run_summary": run_summary,
             "agent_health": health,
             "working_tree_touched": touched,
@@ -21137,12 +21321,19 @@ def main(argv: Optional[Sequence[str]] = None, *,
                         for fact in pr_facts.values()
                     ):
                         authoring_pr_agents = _dashboard_authoring_pr_agents()
+                    heartbeat_rows = _backoff_rows()
                     try:
                         # The same holds `cmd_next` honours, from the local
                         # heartbeat; the board is not worth failing over them.
-                        backed_off = backoff_withheld(_backoff_rows(), now)
+                        backed_off = backoff_withheld(heartbeat_rows, now)
                     except Exception:
                         backed_off = {}
+                    try:
+                        # And the start history it gives Bugs their share
+                        # from, out of the same read (#1878).
+                        recent_starts = recent_ticket_starts(heartbeat_rows)
+                    except Exception:
+                        recent_starts = []
                     write_dashboard_snapshot(
                         brief_payload,
                         dashboard_board(
@@ -21150,6 +21341,7 @@ def main(argv: Optional[Sequence[str]] = None, *,
                             pr_facts_known=not pr_facts_missing,
                             authoring_pr_agents=authoring_pr_agents,
                             backed_off=backed_off,
+                            recent_starts=recent_starts,
                         ),
                         generated_at,
                         usage={

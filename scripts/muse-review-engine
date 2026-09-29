@@ -466,8 +466,13 @@ finish_done() {
   local review_result="${2:-}"
   local result_path="${3:-}"
   local merged_pr="${4:-}"
+  local outcome="done"
+  if [[ -n "$result_path" && "$JOB" == "shape" ]] \
+    && grep -q '^run outcome: skipped-stale-shape ' "$result_path"; then
+    outcome="skipped-stale-shape"
+  fi
   local -a finish_args=(
-    finish --agent "$AGENT" --run "$BEGIN_RUN" --outcome done --note "$note"
+    finish --agent "$AGENT" --run "$BEGIN_RUN" --outcome "$outcome" --note "$note"
   )
   if [[ -n "$result_path" && "$JOB" == "breakdown" ]]; then
     local ticket_count
@@ -511,8 +516,9 @@ PY
     fi
     finish_args+=(--ticket-count "$ticket_count" --needs-decision "$needs_decision")
   elif [[ -n "$result_path" && "$JOB" == "shape" ]]; then
-    local shape_status
-    if ! shape_status="$(python3 - "$result_path" <<'PY'
+    if [[ "$outcome" != "skipped-stale-shape" ]]; then
+      local shape_status
+      if ! shape_status="$(python3 - "$result_path" <<'PY'
 import sys
 
 status = ""
@@ -525,11 +531,12 @@ if status not in {"Shaped", "Ready"}:
     raise SystemExit("shape result has no Shaped or Ready status")
 print(status)
 PY
-)"; then
-      echo "muse-review-engine: could not read the live shape result" >&2
-      exit 1
+      )"; then
+        echo "muse-review-engine: could not read the live shape result" >&2
+        exit 1
+      fi
+      finish_args+=(--shape-status "$shape_status")
     fi
-    finish_args+=(--shape-status "$shape_status")
   fi
   if [[ "$review_result" == "approved" || "$review_result" == "rejected" ]]; then
     finish_args+=(--review-result "$review_result")
@@ -1028,6 +1035,12 @@ if job == "breakdown":
             ref, count, "" if count == 1 else "s"))
 else:
     lines = open(path).read().splitlines()
+    stale_prefix = "run outcome: skipped-stale-shape "
+    for line in lines:
+        if line.startswith(stale_prefix):
+            print("skipped stale shape: {}".format(
+                line[len(stale_prefix):]))
+            raise SystemExit(0)
     status = ""
     reason = ""
     for line in lines:

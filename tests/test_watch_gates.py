@@ -185,6 +185,21 @@ def test_agent_owned_blocks_only_surface_when_declined():
     assert not routed(ordinary)
 
 
+def test_an_already_unblocked_item_with_cleared_needs_leaves_the_brief(
+    capsys,
+):
+    project = building_project()
+    ticket = silent_blocked_ticket(needs="none")
+    ticket.labels = []
+
+    brief = brief_for([project, ticket], capsys)
+
+    assert brief["total_needing_nate"] == 0
+    assert brief["items"] == []
+    assert brief["watch_gates"] == []
+
+
+
 def test_agent_broken_plan_with_only_a_scope_question_leaves(capsys):
     plan = shaped_plan(needs_lines=(
         "- Scope and priority: should this include the sibling's fix?",

@@ -13882,7 +13882,14 @@ def clear_satisfied_blocks(
                     )
                 )
 
-        if item.needs == "external-event":
+        # Older lane declines wrote Needs=human; clear that legacy value for
+        # declined ticket Unblocks while keeping human steps assigned to Nate.
+        declined_human_unblock = (
+            item.needs == "human"
+            and item.parent is not None
+            and item.decline_reason is not None
+        )
+        if item.needs == "external-event" or declined_human_unblock:
             if not item.item_id:
                 raise GitHubError("{} is not in the Project".format(item.ref))
             write_project_select(item.item_id, "Needs", "none", item.ref)

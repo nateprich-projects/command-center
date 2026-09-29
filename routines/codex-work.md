@@ -49,8 +49,8 @@ Return exactly one structured answer. A no-diff success adds the non-empty
 `evidence` list of GitHub URLs its Accept names, each verified against this
 run's heartbeat start.
 
-- success: `{"done":true,"summary":"...","departures":[]}`; optional `risks`:
-  where review should look hardest
+- success: `{"done":true,"summary":"...","departures":[]}`; optional
+  `"risks":["..."]`, where review should look hardest
 - an action you cannot take:
   `{"blocked_on_human":{"reason":"...","action":"..."}}`, `reason` one of
   `a Claude Code environment` (Mac work a Claude session can do), or Nate's

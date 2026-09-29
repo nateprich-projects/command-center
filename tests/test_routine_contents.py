@@ -138,7 +138,10 @@ def test_implement_routines_ask_for_tests_that_catch_the_defect(routine):
             "and its own ticket" in normalized)
     assert ("run the affected test files while working; `finish-ticket` runs "
             "the full suite" in normalized)
-    assert "optional `risks`: where review should look hardest" in normalized
+    # Shown as JSON: a bare "risks" name let Codex answer with a string,
+    # which parse_answer rejects (#1976).
+    assert ('optional `"risks":["..."]`, where review should look hardest'
+            in normalized)
 
 
 @pytest.mark.parametrize(

@@ -120,6 +120,12 @@ def stub_gh(monkeypatch, item):
     """Stub the GitHub reads and writes apply_shape performs."""
     calls = []
 
+    monkeypatch.setattr(
+        shape, "_read_fresh_shape_facts",
+        lambda target: (target.status, target.children_total),
+        raising=False,
+    )
+
     def graphql(query, **variables):
         calls.append(("graphql", query, variables))
         if query == funnel.SET_FIELD:
@@ -1663,6 +1669,166 @@ def test_collect_rejects_an_unknown_idea():
 
 # -- applying an answer ------------------------------------------------------
 
+def test_apply_refuses_when_fresh_status_has_left_ideas(monkeypatch, capsys):
+    """Reproduction: a stale packet currently overwrites a moved item."""
+    item = idea(42)
+    fresh = idea(42, status="Shaped")
+    calls = stub_gh(monkeypatch, item)
+    reads = []
+    project_writes = []
+    status_writes = []
+    monkeypatch.setattr(
+        funnel, "write_project_select",
+        lambda item_id, field, value, ref:
+            project_writes.append((item_id, field, value, ref)),
+    )
+    monkeypatch.setattr(
+        funnel, "_write_status",
+        lambda target, status, now: status_writes.append((target.ref, status)),
+    )
+
+    def read_fresh(target):
+        reads.append(target.ref)
+        return fresh.status, fresh.children_total
+
+    monkeypatch.setattr(shape, "_read_fresh_shape_facts", read_fresh)
+
+    assert shape.apply_shape(
+        [item], NOW, item.ref, answer(),
+        run="shape-run", agent="muse") == 0
+
+    assert gh_calls(calls, "gh", "issue", "edit") == []
+    assert gh_calls(calls, "gh", "issue", "comment") == []
+    assert not [call for call in calls
+                if call[0] == "graphql" and call[1] == funnel.SET_FIELD]
+    assert project_writes == []
+    assert status_writes == []
+    assert reads == [item.ref]
+    assert (item.status, item.klass, item.risk, item.needs, item.labels) == (
+        "Ideas", "Improve", "standard", "none", ["needs-shaping"])
+    output = capsys.readouterr().out
+    assert "run outcome: skipped-stale-shape" in output
+    assert "fresh Status=Shaped" in output
+    assert "children=0" in output
+
+
+def test_apply_refuses_when_fresh_project_item_has_children(
+        monkeypatch, capsys):
+    item = idea(42)
+    fresh = idea(42, children_total=2)
+    calls = stub_gh(monkeypatch, item)
+    project_writes = []
+    status_writes = []
+    monkeypatch.setattr(
+        funnel, "write_project_select",
+        lambda item_id, field, value, ref:
+            project_writes.append((item_id, field, value, ref)),
+    )
+    monkeypatch.setattr(
+        funnel, "_write_status",
+        lambda target, status, now: status_writes.append((target.ref, status)),
+    )
+    monkeypatch.setattr(
+        shape, "_read_fresh_shape_facts",
+        lambda target: (fresh.status, fresh.children_total),
+    )
+
+    assert shape.apply_shape(
+        [item], NOW, item.ref, answer(),
+        run="shape-run", agent="muse") == 0
+
+    assert gh_calls(calls, "gh", "issue", "edit") == []
+    assert gh_calls(calls, "gh", "issue", "comment") == []
+    assert not [call for call in calls
+                if call[0] == "graphql" and call[1] == funnel.SET_FIELD]
+    assert project_writes == []
+    assert status_writes == []
+    assert (item.status, item.klass, item.risk, item.needs, item.labels) == (
+        "Ideas", "Improve", "standard", "none", ["needs-shaping"])
+    output = capsys.readouterr().out
+    assert "run outcome: skipped-stale-shape" in output
+    assert "fresh Status=Ideas" in output
+    assert "children=2" in output
+
+
+def test_fresh_shape_facts_read_the_exact_project_item(monkeypatch):
+    item = idea(42)
+    calls = []
+    node = {
+        "id": "project-item-42",
+        "lock": None,
+        "status": {"name": "Shaped", "updatedAt": "2026-09-14T00:00:00Z"},
+        "class": {"name": "Improve"},
+        "origin": {"name": "agent"},
+        "risk": {"name": "standard"},
+        "pinned": None,
+        "needs": {"name": "none"},
+        "content": {
+            "number": 42,
+            "title": "Fresh target",
+            "url": item.url,
+            "body": item.body,
+            "state": "OPEN",
+            "stateReason": None,
+            "createdAt": "2026-09-01T00:00:00Z",
+            "closedAt": None,
+            "repository": {"nameWithOwner": REPO},
+            "labels": {"nodes": []},
+            "assignees": {"nodes": []},
+            "parent": None,
+            "subIssuesSummary": {"total": 3, "completed": 1},
+            "blockedBy": {"totalCount": 0, "nodes": []},
+        },
+    }
+
+    def read_project(query, **variables):
+        calls.append((query, variables))
+        return {"user": {"projectV2": {
+            "r0": {
+                "nodes": [node],
+                "pageInfo": {"hasNextPage": False, "endCursor": None},
+            },
+        }}}
+
+    monkeypatch.setattr(funnel, "member_repos", lambda: [REPO])
+    monkeypatch.setattr(funnel, "gh_graphql", read_project)
+
+    assert shape._read_fresh_shape_facts(item) == ("Shaped", 3)
+    (query, variables), = calls
+    assert variables == {"login": funnel.PROJECT_OWNER,
+                         "number": funnel.PROJECT_NUMBER}
+    assert 'query: "repo:owner/repo #42"' in query
+    assert 'fieldValueByName(name: "Status")' in query
+    assert "subIssuesSummary { total completed }" in query
+
+
+def test_fresh_shape_facts_fail_closed_when_the_project_read_misses(
+        monkeypatch):
+    item = idea(42)
+    monkeypatch.setattr(funnel, "load_project_items_by_refs", lambda refs: None)
+
+    with pytest.raises(funnel.GitHubError, match="could not re-read"):
+        shape._read_fresh_shape_facts(item)
+
+
+def test_body_only_edit_in_fresh_project_read_still_applies(
+        monkeypatch):
+    item = idea(42)
+    fresh = idea(42, body="A concurrent body-only edit.")
+    calls = stub_gh(monkeypatch, item)
+    monkeypatch.setattr(
+        shape, "_read_fresh_shape_facts",
+        lambda target: (fresh.status, fresh.children_total),
+    )
+
+    assert shape.apply_shape(
+        [item], NOW, item.ref, answer(),
+        run="shape-run", agent="muse") == 0
+
+    assert len(gh_calls(calls, "gh", "issue", "edit")) == 2
+    assert item.status == "Ready"
+
+
 def test_apply_advances_an_all_clear_agent_plan_to_ready(
         monkeypatch, capsys):
     item = idea(42)
@@ -1877,6 +2043,8 @@ def test_apply_honours_and_carries_an_override_to_agents(
 
 def test_apply_reports_an_unconfirmed_status_without_marking(monkeypatch):
     item = idea(42)
+    monkeypatch.setattr(
+        shape, "_read_fresh_shape_facts", lambda target: ("Ideas", 0))
 
     def graphql(query, **variables):
         raise funnel.GitHubError("boom")

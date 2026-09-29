@@ -2226,15 +2226,52 @@ def _is_verified_premise_probe(requirement: str,
     return "evidence pointer: {}".format(evidence.casefold()) in parenthetical
 
 
+def _packet_premise_claims(packet: Dict) -> List[str]:
+    """Every plan premise claim the packet carries, casefolded."""
+    groups = packet.get("plan_premises")
+    if not isinstance(groups, list):
+        return []
+    claims: List[str] = []
+    for group in groups:
+        premises = group.get("premises") if isinstance(group, dict) else None
+        if not isinstance(premises, list):
+            continue
+        for premise in premises:
+            claim = premise.get("claim") if isinstance(premise, dict) else None
+            if isinstance(claim, str) and claim.strip():
+                claims.append(claim.strip().casefold())
+    return claims
+
+
+def _is_premise_probe(requirement: str, claims: Sequence[str]) -> bool:
+    """A lister row that probes a plan premise: it names one and quotes it.
+
+    The claim must stand as whole words, so a short claim such as ``CI``
+    cannot match inside ``decision``.
+    """
+    text = requirement.casefold()
+    return "premise" in text and any(
+        re.search(r"(?<!\w){}(?!\w)".format(re.escape(claim)), text)
+        for claim in claims)
+
+
 def normalize_plan_premise_requirements(
         packet: Dict, requirements: Sequence[str]) -> List[str]:
-    """Replace model probes with verified canonical premise/acceptance rows.
+    """Drop premise probes; add verified canonical premise/acceptance rows.
 
-    The runner verifies these fields itself, so a lister wording lapse cannot
-    turn a verified deferral into an unsure probe or hide a verified label
-    error behind one. A verified after-deploy acceptance clause is split from
-    its still-checkable remainder before both requirements are added.
+    A review weighs the ticket's Do and Accept; the ticket's own first
+    verification step checks the plan's premises, so a probe of one is never
+    a review requirement (Nate, 2026-09-28; #1966). The lister's probe
+    wording varies, so every row that names the word premise and quotes a
+    packet premise's claim goes, before the runner's own verified rows are
+    added. The runner verifies those itself, so a lister wording lapse cannot
+    hide a verified label error. A verified after-deploy acceptance clause is
+    split from its still-checkable remainder before both requirements are
+    added.
     """
+    claims = _packet_premise_claims(packet)
+    requirements = [requirement for requirement in requirements
+                    if not _is_premise_probe(requirement, claims)]
     deferred = _verified_deferred_premises(packet)
     deferred_acceptances = _verified_deferred_ticket_acceptances(packet)
     label_errors = _verified_label_error_premises(packet)

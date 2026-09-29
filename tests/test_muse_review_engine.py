@@ -468,11 +468,14 @@ SHAPE_APPLY_STUB = (
     "if validate_only:\n"
     "    print(json.dumps({'status': status, 'reason': reason, 'answer': data}, sort_keys=True))\n"
     "    raise SystemExit(0)\n"
+    "ref = '{}#{}'.format(flag('--repo'), args[0])\n"
+    "if os.environ.get('APPLY_STALE_SHAPE', ''):\n"
+    "    print('run outcome: skipped-stale-shape ref={} fresh Status=Shaped children=2'.format(ref))\n"
+    "    raise SystemExit(0)\n"
     "if os.environ.get('APPLY_REFUSE', ''):\n"
     "    sys.stderr.write('shape-apply: idea {} is not in the Project\\n'.format(args[0]))\n"
     "    raise SystemExit(1)\n"
     "(root / 'applied.marker').write_text('applied')\n"
-    "ref = '{}#{}'.format(flag('--repo'), args[0])\n"
     "print('{0} \\u2192 {1}\\nhttps://github.com/{2}/issues/{3}'.format(ref, status, flag('--repo'), args[0]))\n"
     "if status == 'Ready':\n"
     "    print('advanced to Ready: {}'.format(reason))\n"
@@ -928,7 +931,7 @@ def test_the_review_prompt_is_judgement_text_under_500_words():
     prompt = body.split("\n---\n", 1)[1]
     assert prompt.count("PACKET_JSON") == 1
     normalized = " ".join(prompt.split()).lower()
-    assert "does this diff do what the ticket and the plan say" in normalized
+    assert "does this diff do what its tickets ask" in normalized
     assert "avoid what the plan rejected" in normalized
     assert '"verdict": "approved" | "rejected"' in prompt
     assert "exactly one json object and nothing else" in normalized
@@ -1415,7 +1418,7 @@ def test_an_approval_is_applied_and_finished_done(tmp_path):
     # One lister call and one judge call for the default single requirement.
     assert _muse_calls(repo) == 2
     prompt = (repo / "muse.prompt.2").read_text()
-    assert "Does this diff do what the ticket and the plan say" in prompt
+    assert "Does this diff do what its tickets ask" in prompt
     assert "This is one judge call in a larger review" in prompt
     assert "the thing the ticket asks for" in prompt
     assert '"verdict"' not in prompt.split("The assigned requirements are:", 1)[0]
@@ -1635,6 +1638,26 @@ def test_later_capture_slot_allocation_failure_keeps_run_and_capture_count(
         (repo / "begin.session_id").read_text(), "muse-call-2",
     ]
     assert "using a run-local fallback" in proc.stderr
+
+
+def test_missing_meta_credentials_stops_before_writing_a_verdict(tmp_path):
+    """The 2026-09-28 auth diagnostic is an outage, not an unsure judgement."""
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), _packet(),
+        answers=_review_answers(_judge_answer()),
+        extra_env={
+            "MUSE_JUDGE_FAIL_IF": "thing.py prints the thing",
+            "MUSE_JUDGE_FAILURE": "missing meta credentials",
+        })
+
+    assert _apply_calls(repo) == []
+    assert proc.returncode == 1, proc.stderr
+    assert not (repo / "apply.answer").exists()
+    heartbeat = _heartbeat_without_muse_call_record(repo)
+    assert "--outcome errored" in heartbeat
+    assert "provider outage" in heartbeat
+    assert "--review-result rejected" not in heartbeat
+    assert "requirement unsure" not in heartbeat
 
 
 @pytest.mark.parametrize("failure_kind", ["failed", "timed out"])
@@ -2452,6 +2475,21 @@ def test_a_breakdown_is_applied_and_finished_done(tmp_path):
     )
 
 
+def test_a_breakdown_auth_failure_ends_as_provider_outage(tmp_path):
+    proc, repo = _stubbed_runner(
+        tmp_path, _issue_begin("breakdown"), _issue_packet("breakdown"),
+        extra_env={"MUSE_STATUS": "1",
+                   "MUSE_STDERR": "Missing META Credentials"})
+
+    assert proc.returncode == 1, proc.stderr
+    assert _muse_calls(repo) == 1
+    assert _apply_calls(repo) == []
+    heartbeat = _heartbeat(repo)
+    assert "--outcome errored" in heartbeat
+    assert "provider outage" in heartbeat
+    assert "recorded rejected" not in heartbeat
+
+
 def test_a_shape_is_applied_and_finished_done(tmp_path):
     """Shape on Muse (#1599): the framer, then one sibling check, one
     decider and the auditor, merged in code and applied once."""
@@ -2492,6 +2530,22 @@ def test_a_shape_is_applied_and_finished_done(tmp_path):
         "finish --agent muse --run engine-run --outcome done "
         "--note shaped {}: Ready (self-approved: agent idea, finite "
         "class, no open questions) --shape-status Ready\n".format(SHAPE_REF)
+    )
+
+
+def test_a_stale_shape_is_recorded_without_shape_status(tmp_path):
+    proc, repo = _stubbed_runner(
+        tmp_path, _issue_begin("shape"), _issue_packet("shape"),
+        answers=(_framer_answer(),),
+        extra_env={"APPLY_STALE_SHAPE": "1"})
+
+    assert proc.returncode == 0, proc.stderr
+    assert len(_apply_calls(repo)) == 1
+    assert not (repo / "applied.marker").exists()
+    assert _heartbeat_without_muse_call_record(repo) == (
+        "finish --agent muse --run engine-run "
+        "--outcome skipped-stale-shape --note skipped stale shape: "
+        "ref={} fresh Status=Shaped children=2\n".format(SHAPE_REF)
     )
 
 
@@ -2849,6 +2903,22 @@ def test_a_failed_or_timed_out_shape_part_applies_nothing(
     else:
         assert "shape sibling.0 was killed after 0 minutes" in heartbeat
     assert not (tmp_path / ".claude" / "command-center-muse-quota-hold").exists()
+
+
+def test_a_shape_part_auth_failure_ends_as_provider_outage(tmp_path):
+    proc, repo = _stubbed_runner(
+        tmp_path, _issue_begin("shape"), _issue_packet("shape"),
+        answers=(_framer_answer(),),
+        extra_env={"MUSE_SHAPE_FAIL_PART": "decider",
+                   "MUSE_SHAPE_FAILURE": "Missing META Credentials"})
+
+    assert proc.returncode == 1, proc.stderr
+    assert _muse_calls(repo) == 4
+    assert _apply_calls(repo) == []
+    heartbeat = _heartbeat(repo)
+    assert "--outcome errored" in heartbeat
+    assert "provider outage" in heartbeat
+    assert "requirement unsure" not in heartbeat
 
 
 def test_a_malformed_shape_part_retries_once_with_the_parse_error(tmp_path):
@@ -3716,7 +3786,8 @@ def test_the_lister_asks_for_requirements_before_the_judge_is_asked(tmp_path):
     assert listed["head_sha"] == HEAD
     assert "PACKET_JSON" not in lister
     assert "has `deferred_answer`" in lister
-    assert "Do not emit a live-evidence" in lister
+    assert "Never list a requirement\nthat probes a `plan_premises` entry" \
+        in lister
     assert "ticket.deferred_acceptance" in lister
     assert "exact `deferred_clause`" in lister
     assert "exact `checkable_line` as an ordinary acceptance" in lister
@@ -3734,7 +3805,7 @@ def test_the_lister_asks_for_requirements_before_the_judge_is_asked(tmp_path):
     # The lister framing does not survive; this call judges only its assigned
     # requirements, and the runner derives the verdict after all chunks.
     assert "This call is not the review" not in judge
-    assert "Does this diff do what the ticket and the plan say" in judge
+    assert "Does this diff do what its tickets ask" in judge
     assert "posted PR" in judge
     assert "packet's CI section first" in judge
     assert (
@@ -3763,7 +3834,7 @@ def test_the_lister_asks_for_requirements_before_the_judge_is_asked(tmp_path):
     assert "For a labeling-error requirement" in judge
     assert "mark the requirement `unmet`" in judge
     assert "never defer it" in judge
-    assert "without `deferred_answer` still follows the normal" in judge
+    assert "No other premise is a requirement" in judge
     assert "inspect the entry's" in judge
 
 
@@ -3861,11 +3932,18 @@ def test_measured_forward_pointer_is_rejected_as_a_labeling_error(tmp_path):
     ]
 
 
-def test_a_missing_checkable_inferred_premise_still_rejects(tmp_path):
-    requirement = (
+def test_a_premise_probe_is_dropped_before_the_judges(tmp_path):
+    """#1966: premise probes are out of review scope (Nate, 2026-09-28).
+
+    Before, an unresolved probe of an inferred premise read unsure and
+    rejected the PR; now the runner drops it after the lister and the judges
+    see only the ticket's own requirement.
+    """
+    probe = (
         "Probe the inferred premise 'the missing setting is enabled' using "
         "its evidence pointer #1700; unresolved evidence remains unsure."
     )
+    do_line = "thing.py prints the thing the ticket asks for"
     plan_premises = [{
         "parent_ref": "owner/repo#1",
         "ticket_refs": ["owner/repo#6"],
@@ -3878,16 +3956,18 @@ def test_a_missing_checkable_inferred_premise_still_rejects(tmp_path):
     }]
     proc, repo = _stubbed_runner(
         tmp_path, _begin(), _packet(plan_premises=plan_premises),
-        answers=_review_answers(_judge_answer(
-            requirement, status="unsure",
-            evidence="the packet contains no evidence for #1700")))
+        answers=(_requirements_answer(probe, do_line),
+                 _judge_answer(do_line)))
 
     assert proc.returncode == 0, proc.stderr
     lister = (repo / "muse.prompt.1").read_text()
-    assert "leave it `unsure` when a required record is unavailable" in lister
+    assert "leave it `unsure` when a required record is unavailable" \
+        not in lister
+    judge = (repo / "muse.prompt.2").read_text()
+    assert probe not in judge
     applied = json.loads((repo / "apply.answer").read_text())
-    assert applied["verdict"] == "rejected"
-    assert any("requirement unsure:" in row for row in applied["blocking"])
+    assert applied["verdict"] == "approved"
+    assert [row["requirement"] for row in applied["requirements"]] == [do_line]
 
 
 def test_the_pr_body_reaches_the_lister_and_judge_as_the_implementers_claims(
@@ -4124,6 +4204,19 @@ def test_a_lister_stream_idle_twice_fails_the_run(tmp_path):
     assert STREAM_IDLE in heartbeat
 
 
+def test_a_lister_auth_failure_matches_case_insensitively(tmp_path):
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), _packet(),
+        extra_env={"MUSE_LISTER_FAILURE": "MiSsInG MeTa CrEdEnTiAlS"})
+
+    assert proc.returncode == 1, proc.stderr
+    assert _muse_calls(repo) == 1
+    assert _apply_calls(repo) == []
+    heartbeat = _heartbeat(repo)
+    assert "--outcome errored" in heartbeat
+    assert "provider outage" in heartbeat
+
+
 def test_a_lister_failure_that_is_not_stream_idle_is_not_retried(tmp_path):
     proc, repo = _stubbed_runner(
         tmp_path, _begin(), _packet(),
@@ -4133,7 +4226,10 @@ def test_a_lister_failure_that_is_not_stream_idle_is_not_retried(tmp_path):
     assert proc.returncode == 1
     assert _muse_calls(repo) == 1
     assert "stream-idle" not in proc.stderr
-    assert "--outcome errored" in _heartbeat(repo)
+    heartbeat = _heartbeat(repo)
+    assert "--outcome errored" in heartbeat
+    assert "model stream error: connection reset by peer" in heartbeat
+    assert "provider outage" not in heartbeat
 
 
 def test_a_lister_malformed_then_idle_still_gets_its_idle_retry(tmp_path):
@@ -5122,6 +5218,20 @@ def test_a_replay_lister_failure_exits_non_zero_with_no_answer(
     assert "muse-review-engine: " in proc.stderr
     assert _forbidden(repo) == ""
     assert _run_dirs(tmp_path) == []
+
+
+def test_a_replay_of_recorded_muse_auth_stderr_writes_no_answer(tmp_path):
+    # The 2026-09-28 watch recorded this diagnostic on a refused judge.
+    proc, repo, answer_path = _replay_runner(
+        tmp_path, answers=_review_answers(_judge_answer()),
+        extra_env={"MUSE_JUDGE_FAIL_IF": "thing.py prints the thing",
+                   "MUSE_JUDGE_FAILURE": "missing meta credentials"})
+
+    assert proc.returncode == 1, proc.stderr
+    assert not answer_path.exists()
+    assert _apply_calls(repo) == []
+    assert "provider outage" in proc.stderr
+    assert _forbidden(repo) == ""
 
 
 def test_a_replay_lister_stream_idle_once_then_answers_succeeds(tmp_path):

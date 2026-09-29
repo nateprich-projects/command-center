@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import random
 import sys
 from datetime import datetime, timedelta, timezone
 
@@ -1531,16 +1532,101 @@ def test_a_bug_ticket_that_blocks_improve_work_goes_with_that_work():
     assert next_ticket(rows, NOW, recent_starts=["Bug"]).number == 2
 
 
-def test_the_bugs_turn_goes_to_the_oldest_bug_whatever_its_tier():
+def test_the_bugs_turn_goes_to_the_highest_tier_bug_then_the_oldest():
+    """Nate, 2026-09-28: "Tier, then oldest" (#1877). Worked by hand: the
+    tooling Bugs first, #60 before #4 as it is older, then the tier-2 Bug,
+    then the hobby Bug, though that one is the oldest of all. Age alone
+    would give 2, 8, 60, 4, and ``startable()``'s order 4, 60, 8, 2."""
     rows = [
-        tier_project(TOOLING, 1, "Ready", "Bug"),
-        tier_ticket(TOOLING, 2, 1, created_at=at(5)),
-        tier_project(HOBBY, 3, "Ready", "Bug"),
-        tier_ticket(HOBBY, 40, 3, created_at=at(20)),
+        tier_project(HOBBY, 1, "Ready", "Bug"),
+        tier_ticket(HOBBY, 2, 1, created_at=at(40)),
+        tier_project(TOOLING, 3, "Ready", "Bug"),
+        tier_ticket(TOOLING, 4, 3, created_at=at(5)),
+        tier_project(TOOLING, 5, "Ready", "Bug"),
+        tier_ticket(TOOLING, 60, 5, created_at=at(20)),
+        tier_project(IMPACT, 7, "Ready", "Bug"),
+        tier_ticket(IMPACT, 8, 7, created_at=at(30)),
+        tier_project(HOBBY, 9, "Ready", "Improve"), tier_ticket(HOBBY, 10, 9),
+    ]
+    assert [i.number for i in startable(rows)] == [4, 60, 8, 10, 2]
+    order = []
+    for _ in range(4):
+        chosen = next_ticket(rows, NOW, recent_starts=[])
+        order.append(chosen.number)
+        chosen.state = "CLOSED"
+
+    assert order == [60, 4, 8, 2]
+
+
+def test_a_bug_ticket_blocking_a_tier_1_bug_takes_that_tier_on_the_bugs_turn():
+    """The tier is ``startable()``'s: a hobby Bug ticket that a tooling Bug
+    waits on ranks in tier 1, so it goes before a newer tooling Bug, and
+    both go before an older hobby Bug that blocks nothing."""
+    rows = [
+        tier_project(HOBBY, 1, "Ready", "Bug"),
+        tier_ticket(HOBBY, 2, 1, created_at=at(20)),
+        tier_project(TOOLING, 3, "Ready", "Bug"),
+        tier_ticket(TOOLING, 4, 3, created_at=at(1),
+                    open_blockers=[HOBBY + "#2"]),
+        tier_project(TOOLING, 5, "Ready", "Bug"),
+        tier_ticket(TOOLING, 6, 5, created_at=at(5)),
+        tier_project(HOBBY, 7, "Ready", "Bug"),
+        tier_ticket(HOBBY, 8, 7, created_at=at(40)),
+    ]
+    assert next_ticket(rows, NOW, recent_starts=[]).number == 2
+
+
+def test_a_bug_filling_an_idle_pull_is_also_chosen_by_tier_then_age():
+    """Off the Bugs' turn with nothing else startable, the Bug that fills
+    the pull is the one the Bugs' turn would take."""
+    rows = [
+        tier_project(HOBBY, 1, "Ready", "Bug"),
+        tier_ticket(HOBBY, 2, 1, created_at=at(40)),
+        tier_project(TOOLING, 3, "Ready", "Bug"),
+        tier_ticket(TOOLING, 4, 3, created_at=at(5)),
+    ]
+    assert not funnel.bug_share_due(["Bug"])
+    assert next_ticket(rows, NOW, recent_starts=["Bug"]).number == 4
+
+
+def test_pinned_work_goes_before_the_bugs_turn():
+    """Nate, 2026-09-28: "Pins win" (#1877). The pinned hobby Improve goes
+    before a tier-1 Bug that has waited a month, while the Bugs' turn is
+    due; its starts are not Bugs, so the turn is still due once the pinned
+    project has nothing left to start."""
+    rows = [
+        tier_project(HOBBY, 1, "Ready", "Improve", pinned=True),
+        tier_ticket(HOBBY, 2, 1), tier_ticket(HOBBY, 3, 1),
+        tier_project(TOOLING, 4, "Ready", "Bug"),
+        tier_ticket(TOOLING, 5, 4, created_at=at(30)),
+        tier_project(TOOLING, 6, "Ready", "Improve"),
+        tier_ticket(TOOLING, 7, 6),
+    ]
+    assert funnel.bug_share_due([])
+    starts, order = [], []
+    for _ in range(4):
+        chosen = next_ticket(
+            rows, NOW, recent_starts=funnel.recent_ticket_starts(starts))
+        _started(rows, starts, chosen)
+        order.append(chosen.number)
+        chosen.state = "CLOSED"
+
+    assert order == [2, 3, 5, 7]
+
+
+def test_a_pinned_bug_takes_the_bugs_turn_before_a_higher_tier_one():
+    """A pin is pinned work whatever its class: on the Bugs' turn the pinned
+    hobby Bug goes, not the older tier-1 Bug. Taking the tier-1 Bug instead
+    would start the pinned one on the very next pull, which it keeps its
+    place for, and put two Bugs together."""
+    rows = [
+        tier_project(HOBBY, 1, "Ready", "Bug", pinned=True),
+        tier_ticket(HOBBY, 2, 1, created_at=at(1)),
+        tier_project(TOOLING, 3, "Ready", "Bug"),
+        tier_ticket(TOOLING, 4, 3, created_at=at(30)),
         tier_project(HOBBY, 5, "Ready", "Improve"), tier_ticket(HOBBY, 6, 5),
     ]
-    assert [i.number for i in startable(rows)] == [2, 6, 40]
-    assert next_ticket(rows, NOW, recent_starts=[]).number == 40
+    assert next_ticket(rows, NOW, recent_starts=[]).number == 2
 
 
 def test_the_start_history_reads_ticket_bindings_from_every_lane_in_order():
@@ -1605,6 +1691,78 @@ def test_next_cli_counts_another_lanes_bug_start_from_the_heartbeat(
 
     assert funnel.main(["next"]) == 0
     assert json.loads(capsys.readouterr().out)["ref"] == rows[3].ref
+
+
+# -- A board with no Bug pulls exactly as it did before #1877 ---------------
+
+BUG_FREE_PICKS = FIXTURE.parent / "bug_free_next_ticket.json"
+
+
+def _bug_free_board(seed):
+    """A seeded board with no Bug on it, and the lane and history pulling it.
+
+    Everything that feeds the pull is varied: pins, all three repo tiers,
+    Ready and Building projects of every other class, claims up to and past
+    the WIP limit, blockers across repositories (which carry tier and class
+    to their prerequisite), machine-local tickets, and a start history that
+    is often the Bugs' turn. Only a Bug is missing.
+    """
+    rng = random.Random(seed)
+    repos = [TOOLING, "nateprich-projects/workbench", IMPACT, HOBBY,
+             "nateprich-projects/AFL"]
+    classes = [klass for klass in funnel.LADDER if klass != "Bug"]
+    projects, tickets = [], []
+    number = 1
+    for _ in range(rng.randint(1, 6)):
+        repo, parent = rng.choice(repos), number
+        projects.append(tier_project(
+            repo, parent, rng.choice(["Ready", "Building"]),
+            rng.choice(classes), days=rng.randint(0, 30),
+            pinned=rng.random() < 0.2))
+        number += 1
+        for _ in range(rng.randint(1, 3)):
+            tickets.append(tier_ticket(
+                repo, number, parent, days=rng.randint(0, 30),
+                created_at=at(rng.randint(0, 60)),
+                in_motion_since=(claimed(rng.randint(1, 50))
+                                 if rng.random() < 0.25 else None),
+                needs=rng.choice(["none"] * 5 + ["claude-code-environment"]),
+            ))
+            number += 1
+    for dependent in tickets:
+        blocker = rng.choice(tickets)
+        if rng.random() < 0.2 and blocker is not dependent:
+            dependent.open_blockers = [blocker.ref]
+    history = [rng.choice(["Bug", "Improve", "New", "Broken", None])
+               for _ in range(rng.randint(0, 8))]
+    # #794 closed keeps the freeze inert. These tickets have no body, so it
+    # would withhold nothing, and an open freeze parses engine/review.py
+    # once for every ticket it checks.
+    owner_repo, owner_number = funnel.FREEZE_OWNER_REF.split("#")
+    freeze_owner = item(int(owner_number), "Done", "Improve",
+                        repo=owner_repo, state="CLOSED")
+    return (projects + tickets + [freeze_owner], history,
+            rng.choice(["codex", "claude"]))
+
+
+def _bug_free_picks(boards):
+    """The ticket number each seeded board's pull takes, or None."""
+    picks = []
+    for seed in range(boards):
+        rows, history, agent = _bug_free_board(seed)
+        assert all(row.klass != "Bug" for row in rows)
+        chosen = next_ticket(rows, NOW, agent=agent, recent_starts=history)
+        picks.append(chosen.number if chosen else None)
+    return picks
+
+
+def test_a_bug_free_board_pulls_exactly_as_it_did_before_the_bug_turn_order():
+    """#1877 changes only what a pull does with Bugs on the board. The picks
+    were recorded from origin/main at b2c619a60, before #1877, and each
+    board is pulled again now. A deliberate change to the ordinary order
+    re-records them with ``_bug_free_picks`` and says why in its PR."""
+    recorded = json.loads(BUG_FREE_PICKS.read_text())["picks"]
+    assert _bug_free_picks(len(recorded)) == recorded
 
 
 # -- The portfolio signal ---------------------------------------------------

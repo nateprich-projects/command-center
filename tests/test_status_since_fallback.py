@@ -109,3 +109,50 @@ def test_project_item_query_reads_the_status_write_time():
     status_selection = status_selection.split("}", 2)[0]
 
     assert "updatedAt" in status_selection
+
+
+def _stub_status_write(monkeypatch):
+    monkeypatch.setattr(funnel, "status_write_refusal", lambda item, status: None)
+    monkeypatch.setattr(funnel, "_option_id", lambda field, name: "opt")
+    monkeypatch.setattr(funnel, "gh_graphql", lambda *a, **k: {})
+    monkeypatch.setattr(funnel, "_status_write_confirmed", lambda *a: True)
+
+
+def test_a_status_write_then_hydrate_reads_the_write_not_the_loaded_time(
+    monkeypatch,
+):
+    """A session that writes Status and later hydrates never ages backwards."""
+    _stub_status_write(monkeypatch)
+    item = funnel._from_node(_node(status="Ready", timeline=False))
+    written_at = _at("2026-09-29T12:00:00Z")
+
+    assert funnel._write_status(item, "Building", written_at) is None
+    funnel._apply_item_detail_fields(
+        item,
+        {"timelineItems": {"nodes": []}},
+        include_children=False,
+    )
+
+    assert item.status == "Building"
+    assert item.status_since == written_at
+
+
+def test_a_reconciled_closed_item_does_not_keep_the_loaded_write_time(
+    monkeypatch,
+):
+    monkeypatch.setattr(funnel, "_option_id", lambda field, name: "opt")
+    monkeypatch.setattr(funnel, "gh_graphql", lambda *a, **k: {})
+    node = _node(status="Building", timeline=False)
+    node["content"]["state"] = "CLOSED"
+    node["content"]["stateReason"] = "NOT_PLANNED"
+    item = funnel._from_node(node)
+
+    funnel.reconcile_closed_items([item])
+    funnel._apply_item_detail_fields(
+        item,
+        {"timelineItems": {"nodes": []}},
+        include_children=False,
+    )
+
+    assert item.status == "Parked"
+    assert item.status_since > _at(UPDATED_AT)

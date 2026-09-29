@@ -15569,6 +15569,9 @@ def _write_status(item: Item, status: str, now: datetime) -> Optional[str]:
     previous = item.status
     item.status = status
     item.status_since = now
+    # GitHub just stamped the field too; a later hydrate in this session that
+    # finds no Status-change event falls back to this, not the loaded value.
+    item.status_updated_at = now
     if previous != status:
         item.status_events.append({
             "previous_status": previous,
@@ -19773,6 +19776,7 @@ def _close_auto_closeable_project(project: Item,
     # `begin` reloads these facts from GitHub, where the closed state is the
     # idempotence guard.
     project.status = "Done"
+    project.status_updated_at = datetime.now(timezone.utc)
     project.state = "CLOSED"
     project.state_reason = "COMPLETED"
     print("auto-closed {}".format(project.ref), file=sys.stderr)
@@ -19824,6 +19828,7 @@ def reconcile_closed_items(items: Sequence[Item]) -> List[str]:
                 option=_option_id(STATUS_FIELD_ID, target),
             )
             item.status = target
+            item.status_updated_at = datetime.now(timezone.utc)
             changed = True
 
         if "needs-shaping" in item.labels and item.status != "Ideas":

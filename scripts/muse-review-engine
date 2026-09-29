@@ -24,7 +24,8 @@
 # on z.ai answers one JSON question. Calls retry once on a parse error; a
 # shape part or a judge chunk whose call goes stream-idle is also asked once
 # more, and each writes one timing line to stderr (#1719). The review lister
-# gets the same stream-idle retry (#1730) and the same timing line (#1855).
+# gets the same stream-idle retry (#1730) and the same timing line (#1855),
+# and reads the packet without its diff (#1866).
 # A call whose packet is over 150 KB gets a second stream-idle retry (#1785).
 # Breakdown rides the standard tier only; shape follows wherever begin offers
 # it.
@@ -882,9 +883,10 @@ model_stream_idle() {
 # requirement chunks would not shrink the prompt that stalls (plan #1772).
 # Measured on the packet file the call's prompt carries: the review's
 # RUN_DIR/packet.json, which a replay copies its given packet into, or a
-# shape part's own slice. The count is the only change: the wall-clock bound
-# still kills each call, a kill (124) is still never retried, and the parse
-# retry is still its own.
+# shape part's own slice. The review lister keeps that whole packet's count,
+# though its prompt carries a copy without the diff (#1866). The count is the
+# only change: the wall-clock bound still kills each call, a kill (124) is
+# still never retried, and the parse retry is still its own.
 LARGE_PACKET_BYTES=$((150 * 1024))
 
 # How many stream-idle retries a call over this packet file gets: 2 over
@@ -1970,9 +1972,47 @@ fi
 # can outgrow the argument limit.
 PACKET_JSON="$(cat "$PACKET_FILE")"
 PROMPT="${PROMPT_TEMPLATE//PACKET_JSON/$PACKET_JSON}"
-# The lister and every judge carry this whole packet, so they share one count
-# of stream-idle retries, measured once from the file they all read (#1785).
+# Every judge carries this whole packet and the lister carries it less its
+# diff (#1866, below). They share one count of stream-idle retries, measured
+# once from the whole packet file (#1785).
 REVIEW_IDLE_RETRIES="$(stream_idle_retries "$PACKET_FILE")"
+
+# The lister's own copy of the packet, without the diff (#1866). The lister
+# lists what the ticket, its parent plan and the repository's rules ask of the
+# change, and none of that is in the diff; the judges check the diff and still
+# read it whole, from PROMPT above. Handed the whole packet, the lister went
+# stream-idle on all three attempts over the 232 KB must-approve seed, 785 s,
+# and the judges never started (#1698, by #1855's timing line).
+#
+# Only the diff text goes. build_packet folds every file's patch into `diff`,
+# and no other field carries patch text. The changed paths stay, as names in
+# `changed_files`, so a rule scoped to a path (a protected file, a member-repo
+# boundary) is still listed. `diff` keeps its place and holds one line saying
+# the text is withheld from this call only, so the lister reads a diff it was
+# not shown as withheld, not as an empty change. The copy is written beside
+# the packet, in the owner-only run directory (#1240).
+LISTER_PACKET_FILE="$RUN_DIR/lister-packet.json"
+if ! python3 - "$PACKET_FILE" "$LISTER_PACKET_FILE" >"$DIAG_FILE" 2>&1 <<'PY'
+import json
+import sys
+
+with open(sys.argv[1]) as handle:
+    packet = json.load(handle)
+if not isinstance(packet, dict):
+    raise SystemExit("the review packet is not a JSON object")
+packet["diff"] = ("withheld from this call only: every judge reads the whole "
+                  "diff, and changed_files names the paths it changes")
+with open(sys.argv[2], "w") as handle:
+    json.dump(packet, handle, indent=2, sort_keys=True)
+PY
+then
+  lister_packet_err="$(cat "$DIAG_FILE")"
+  echo "muse-review-engine: could not build the lister's packet: $lister_packet_err" >&2
+  failure "could not build the lister packet for PR #$BEGIN_PR in $BEGIN_REPO: $lister_packet_err" || true
+  exit 1
+fi
+LISTER_PACKET_JSON="$(cat "$LISTER_PACKET_FILE")"
+LISTER_PROMPT="${PROMPT_TEMPLATE//PACKET_JSON/$LISTER_PACKET_JSON}"
 
 # --- the lister call (#1241) -------------------------------------------------
 #
@@ -2097,7 +2137,7 @@ PY
 # rejected for the model's formatting.
 #
 # The stream-idle retry is #1719's, given to the judge chunks and shape parts
-# first. The lister is the one call that reads the whole packet, and on the
+# first. The lister read the whole packet until #1866, and on the
 # ~240 KB must-approve corpus seed the single call replay used to make went
 # silent past Muse's 180-second limit on two consecutive replays (#1698), so a
 # silent lister is asked again, unbound like every call after the first,
@@ -2117,7 +2157,7 @@ list_requirements() {
   local muse_status
   local parse_status
   started="$(date +%s)"
-  printf '%s\n\n%s' "$(lister_header)" "$PROMPT" >"$PROMPT_FILE"
+  printf '%s\n\n%s' "$(lister_header)" "$LISTER_PROMPT" >"$PROMPT_FILE"
   while true; do
     calls=$((calls + 1))
     call_model
@@ -2147,7 +2187,7 @@ list_requirements() {
     parse_err="$(cat "$DIAG_FILE")"
     if (( attempt == 1 )); then
       printf '%s\n\n%s\n\nYour previous answer could not be parsed: %s\nReply again with exactly one JSON object and nothing else.' \
-        "$(lister_header)" "$PROMPT" "$parse_err" >"$PROMPT_FILE"
+        "$(lister_header)" "$LISTER_PROMPT" "$parse_err" >"$PROMPT_FILE"
       attempt=2
       continue
     fi

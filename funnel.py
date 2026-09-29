@@ -41,8 +41,8 @@ import threading
 import time
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
-from typing import (IO, Any, Callable, Collection, Dict, Iterable, Iterator,
-                    List, Mapping, Optional, Sequence, Set, Tuple)
+from typing import (IO, Any, Callable, Collection, Dict, FrozenSet, Iterable,
+                    Iterator, List, Mapping, Optional, Sequence, Set, Tuple)
 
 import agent_health as agent_health_module
 from agent_health import assess as assess_agent_health
@@ -1170,6 +1170,82 @@ def awaiting_decision(items: Iterable[Item]) -> List[Item]:
     return sorted((i for i in rows if gate_question(i)), key=key)
 
 
+#: The questions the funnel watch answers itself (Nate, 2026-09-28, #1891):
+#: a silent block, and the plan question on agent-origin Broken and Bug work.
+WATCH_UNBLOCK_QUESTIONS = frozenset(("Unblock?", "Unblock or park?"))
+WATCH_PLAN_CLASSES = frozenset(("Broken", "Bug"))
+
+#: Needs Nate categories that keep an agent-origin Broken or Bug plan with
+#: Nate. Scope and gates questions the watch settles itself.
+NATE_ONLY_NEEDS_CATEGORIES = frozenset(("exposure", "preference"))
+
+
+def watch_owns_gate(
+    item: Item, question: Optional[str], by_ref: Dict[str, Item],
+) -> bool:
+    """Whether the funnel watch, not Nate, answers ``item``'s live question.
+
+    Nate's decision of 2026-09-28 (#1891): the watch answers every silent
+    block (``Unblock?`` and ``Unblock or park?``) except one waiting on his
+    hands (Needs ``human``, which he also sees as a blocked human step), and
+    ``Is the plan good?`` on an agent-origin plan of Class Broken or Bug
+    except one whose Needs Nate section still holds an Exposure or Preference
+    line. A plan body that was not loaded, or a Needs Nate section that
+    cannot be read, stays with Nate.
+
+    This routes the brief and queue only. ``gate_question`` is unchanged, so
+    lanes, the Shaped sweep, ``begin`` and the stranded report read exactly
+    what they read before.
+    """
+    if question in WATCH_UNBLOCK_QUESTIONS:
+        return item.needs != "human"
+    if question != GATES["Shaped"]:
+        return False
+    if item.origin != "agent":
+        return False
+    if effective_class(item, by_ref) not in WATCH_PLAN_CLASSES:
+        return False
+    if not isinstance(item.body, str):
+        return False
+    categories = open_needs_nate_categories(item.body)
+    if categories is None:
+        return False
+    return not (categories & NATE_ONLY_NEEDS_CATEGORIES)
+
+
+def split_decisions(
+    items: Iterable[Item],
+) -> Tuple[List[Item], List[Item]]:
+    """``awaiting_decision`` split into Nate's decisions and the watch's.
+
+    Both lists keep ``awaiting_decision``'s order; this only partitions it.
+    """
+    rows = list(items)
+    by_ref = {i.ref: i for i in rows}
+    nate: List[Item] = []
+    watch: List[Item] = []
+    for item in awaiting_decision(rows):
+        if watch_owns_gate(item, gate_question(item), by_ref):
+            watch.append(item)
+        else:
+            nate.append(item)
+    return nate, watch
+
+
+def watch_gate_json(
+    item: Item, now: datetime, by_ref: Dict[str, Item],
+) -> Dict[str, object]:
+    """One brief row for a question the funnel watch answers (#1891)."""
+    return {
+        "ref": item.ref,
+        "title": item.title,
+        "url": item.url,
+        "class": effective_class(item, by_ref),
+        "question": gate_question(item),
+        "waited": humanise(item.waited(now)),
+    }
+
+
 def parking_candidates(items: Iterable[Item]) -> List[Item]:
     """Open projects that have not reached ``Building``, oldest first.
 
@@ -1906,23 +1982,24 @@ def plan_escalation_matches(plan_body: str
     return found
 
 
-def plan_needs_nate(plan_body: str) -> bool:
-    """Whether rendered prose retains an unanswered Needs Nate question.
+def open_needs_nate_categories(plan_body: str) -> Optional[FrozenSet[str]]:
+    """The Needs Nate categories a plan body still holds open, or None.
 
-    Canonical routing reads the Project field. This reader is limited to the
-    sanctioned Gates-answer edit, where it decides whether another visible
-    question remains after replacing that one line. New plans omit null
-    categories and the whole section when all are null. Legacy all-clear
-    lines remain readable until migration prose has been trimmed.
+    Returns the open categories as lower-case names from ``exposure``,
+    ``gates``, ``scope`` and ``preference``; an empty set when the body has no
+    Needs Nate section or every line in it is answered. ``None`` means the
+    section cannot be read: more than one Needs heading, a line that is not a
+    category line, or a category repeated. Callers treat ``None`` as a
+    question that remains, so an unreadable section never hides one.
     """
     text = plan_body or ""
     headings = list(re.finditer(
         r"(?im)^##[ \t]+Needs[ \t]+(?:Nate|you)[ \t]*$", text
     ))
     if not headings:
-        return False
+        return frozenset()
     if len(headings) != 1:
-        return True
+        return None
 
     section_start = headings[0].end()
     section_boundary = re.search(
@@ -1945,20 +2022,35 @@ def plan_needs_nate(plan_body: str) -> bool:
             continue
         match = category_line.fullmatch(line)
         if match is None:
-            return True
+            return None
         category = match.group("category").casefold()
         category = "scope" if category.startswith("scope") else category
         if category in answers:
-            return True
+            return None
         answers[category] = match.group("answer").strip()
 
-    return any(
-        not (
+    return frozenset(
+        category for category, answer in answers.items()
+        if not (
             re.match(r"(?i)^nothing outstanding\b", answer)
             or re.match(r"(?i)^answered\b", answer)
         )
-        for answer in answers.values()
     )
+
+
+def plan_needs_nate(plan_body: str) -> bool:
+    """Whether rendered prose retains an unanswered Needs Nate question.
+
+    Canonical routing reads the Project field. This reader is limited to the
+    sanctioned Gates-answer edit, where it decides whether another visible
+    question remains after replacing that one line. New plans omit null
+    categories and the whole section when all are null. Legacy all-clear
+    lines remain readable until migration prose has been trimmed. The line
+    reading is ``open_needs_nate_categories``'s, which the brief also uses
+    to route plans between Nate and the funnel watch (#1894).
+    """
+    categories = open_needs_nate_categories(plan_body)
+    return categories is None or bool(categories)
 
 
 SHAPING_PLAN_STATUSES = frozenset(("Shaped", "Ready", "Building"))
@@ -14100,7 +14192,7 @@ def cmd_queue(
     # #165 as startable for two weeks while every begin refused it, and that
     # mismatch is what hid the wedge.
     finished = finished_by_comments_runs(items)
-    decisions = awaiting_decision(items)
+    decisions, watched = split_decisions(items)
     tickets = startable(
         items, awaiting_review=set(in_review) | set(finished),
         repo_readiness=repo_readiness,
@@ -14134,6 +14226,23 @@ def cmd_queue(
             gate_question(item),
         ),
     )
+
+    if watched:
+        # Questions the funnel watch answers itself (#1891): shown so they
+        # stay visible, never counted as waiting on Nate.
+        print("\nAnswered by the funnel watch, not Nate ({}):".format(
+            len(watched)))
+        _print_queue_section(
+            watched,
+            lambda item, prefix: "{}{:<10} {:<24} {:<34} {:<18} {}".format(
+                prefix,
+                item.status or "-",
+                class_display(item, by_ref),
+                item.ref,
+                humanise(item.waited(now)),
+                gate_question(item),
+            ),
+        )
 
     if pr_facts_unavailable is not None:
         # The brief's degraded convention, in the queue's voice: name the
@@ -14617,11 +14726,13 @@ def cmd_brief(
         return run_section(name, reader)
 
     def decision_payload():
-        decisions = awaiting_decision(items)
+        # Questions the funnel watch answers leave Nate's list and total and
+        # are shown as ``watch_gates`` instead (#1891).
+        decisions, watched = split_decisions(items)
         by_ref = {i.ref: i for i in items}
         return decisions, by_ref, [
             item_json(i, now, by_ref) for i in decisions
-        ]
+        ], [watch_gate_json(i, now, by_ref) for i in watched]
 
     try:
         decision_result = section("items", decision_payload)
@@ -14629,8 +14740,9 @@ def cmd_brief(
             decisions = None
             by_ref = None
             decision_rows = None
+            watch_rows = None
         else:
-            decisions, by_ref, decision_rows = decision_result
+            decisions, by_ref, decision_rows, watch_rows = decision_result
 
         counts = section(
             "counts_by_gate",
@@ -14731,8 +14843,9 @@ def cmd_brief(
             decisions = None
             by_ref = {i.ref: i for i in items}
             decision_rows = None
+            watch_rows = None
         else:
-            decisions, by_ref, decision_rows = decision_result
+            decisions, by_ref, decision_rows, watch_rows = decision_result
         pure_values.update({
             name: run_section(name, reader)
             for name, reader in deferred_pure.items()
@@ -14792,6 +14905,7 @@ def cmd_brief(
             ),
             "counts_by_gate": counts,
             "items": decision_rows,
+            "watch_gates": watch_rows,
             "parked": parked,
             "pending_wakes": pending_wakes,
             "closed_itself": closed_itself,

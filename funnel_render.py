@@ -32,6 +32,15 @@ section and its error before interpreting any other empty or null value. A
 missing `items` section means the Project could not be read; it is not
 evidence that nothing is waiting.
 
+Then `watch_gates`, whenever non-empty, as its own short list headed as
+answered by the funnel watch: for each, its `class`, `question`, the `title`
+as a link to `url`, and how long it has `waited`. The funnel watch answers
+these; not Nate's decision. Never fold them into the decision list or count
+them in `total_needing_nate`. Since 2026-09-28 (#1891) they are every
+`Unblock?` and `Unblock or park?` item not waiting on Nate's hands, and
+`Is the plan good?` on an agent-origin Broken or Bug plan with no open
+Exposure or Preference question.
+
 Then `working_tree_touched`, whenever non-empty, as its own short list. For
 each grouped HEAD transition show `before.head` to `after.head` and every
 `observers` entry as its `agent`/`run`; distinguish one observer from

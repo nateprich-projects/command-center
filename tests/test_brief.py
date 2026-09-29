@@ -875,7 +875,15 @@ def test_parked_items_stay_out_of_gate_counts_and_maintenance_load(monkeypatch, 
     without_parked = [item for item in items if item.status != "Parked"]
 
     assert brief["counts_by_gate"]["Parked"] == 0
-    assert brief["total_needing_nate"] == len(funnel.awaiting_decision(without_parked))
+    nate, watched = funnel.split_decisions(without_parked)
+    assert brief["total_needing_nate"] == len(nate)
+    # The two lists partition the queue: nothing is dropped (#1891).
+    assert len(nate) + len(watched) == len(
+        funnel.awaiting_decision(without_parked)
+    )
+    assert [row["ref"] for row in brief["watch_gates"]] == [
+        item.ref for item in watched
+    ]
     assert all(item["ref"] != "nateprich/beta#15" for item in brief["items"])
     assert brief["maintenance_load"] == funnel.maintenance_load(without_parked, NOW)
 

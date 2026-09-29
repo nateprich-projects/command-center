@@ -247,6 +247,51 @@ def test_d4_uses_priced_run_usage_and_excludes_unpriced_runs():
     )
 
 
+def test_d4_shared_cost_join_fills_execution_panel_for_representative_window():
+    """#1272's D4 panel reads the shared per-lane outcomes cost join."""
+    window = _jsonl("d4_representative_window.jsonl")
+    summary = outcomes.signal_summary(window, now=NOW)
+    cost = summary["signals"]["cost_per_merged_pr"]
+
+    assert cost["status"] == "partial"
+    assert cost["sample_size"] == 6
+    assert cost["merged_records"] == 7
+    assert cost["missing_records"] == 2
+    # Independent check for the seven-day fixture: $0.15 / 6 merged PRs.
+    assert cost["by_lane"] == [{
+        "lane": "codex/gpt-test/high",
+        "unit": "USD",
+        "merged_prs": 6,
+        "total_cost": 0.15,
+        "cost_per_merged_pr": 0.025,
+    }]
+
+    snapshot = _json("metrics_snapshot.json")
+    snapshot["brief"]["outcome_signals"] = summary
+    _, ledgers, usage, _, commits, lines = _inputs()
+    row = metrics.derive_row(
+        snapshot, ledgers, usage, window, NOW, commits, lines
+    )
+
+    d4 = row["metrics"]["D"]["D4"]
+    assert d4["value"] == [{
+        "lane": "codex/gpt-test/high",
+        "unit": "USD",
+        "numerator": 0.15,
+        "denominator": 6,
+        "source": "brief.outcome_signals.signals.cost_per_merged_pr.by_lane",
+    }]
+    assert d4["gap"] == (
+        "outcomes cost join is partial; some merged tickets or runs lack priced usage"
+    )
+    series = metrics.series_from_rows([row], NOW)
+    lane = series["metrics"]["D"]["D4"]["lane"]["codex/gpt-test/high"]
+    assert lane["daily"][-1] == 0.025
+    assert lane["numerators"][-1] == 0.15
+    assert lane["denominators"][-1] == 6
+    assert lane["gap"] == d4["gap"]
+
+
 @pytest.mark.parametrize("estimated", [False, True])
 def test_claude_estimated_flag_reaches_d3_metrics_series(estimated):
     snapshot, ledgers, usage, outcomes, commits, lines = _inputs()

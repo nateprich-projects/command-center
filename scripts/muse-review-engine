@@ -2092,9 +2092,10 @@ PROMPT="${PROMPT_TEMPLATE//PACKET_JSON/$PACKET_JSON}"
 REVIEW_IDLE_RETRIES="$(stream_idle_retries "$PACKET_FILE")"
 
 # The lister's own copy of the packet, without the diff or its repeats
-# (#1866). The lister lists what the ticket, its parent plan and the
-# repository's rules ask of the change, and none of that is in the diff; the
-# judges check the diff and still read the whole packet, from PROMPT above.
+# (#1866). The lister lists what the tickets ask of the change, and the plan
+# and repository rules only as `Does not break:` rows (#1973); none of that is
+# in the diff. The judges check the diff and still read the whole packet, from
+# PROMPT above.
 # Handed the whole packet, the lister went stream-idle on all three attempts
 # over the 232 KB must-approve seed, 785 s, and the judges never started
 # (#1698, by #1855's timing line).
@@ -2166,8 +2167,9 @@ LISTER_PROMPT="${PROMPT_TEMPLATE//PACKET_JSON/$LISTER_PACKET_JSON}"
 # --- the lister call (#1241) -------------------------------------------------
 #
 # One small question first: what does this diff have to do, and what must it
-# avoid? The answer is a flat list of requirements drawn from the ticket, its
-# parent plan and the repository's rules, and it judges nothing. #1242 splits
+# avoid? The answer is a flat list of requirements: the tickets' Do and Accept,
+# plus the plan's and repository's rules as `Does not break:` rows (#1973). It
+# judges nothing. #1242 splits
 # the judging into calls of at most three requirements each, and every one of
 # them reads this list rather than deriving its own — one canonical list is
 # what keeps two judges of the same PR asking the same questions.
@@ -2190,7 +2192,8 @@ whether the diff meets anything, and do not comment on its quality.
 List what this diff must do and what it must avoid. What it must do comes
 from the tickets it closes: their Do and Accept, as amended by Nate-voiced
 comments. `plan_md`, the parent plan and the repository's stated rules add
-only what the diff must not break or contradict: list such a rule as
+only what the diff must not break or contradict, including anything the plan
+rejected: list such a rule as
 "Does not break: <the rule>", and only where the diff touches the code or
 behaviour it governs. Never list a rule as something the diff must implement
 unless a ticket asks for it. One checkable claim per entry, in the words of

@@ -62,3 +62,16 @@ def test_the_routine_asks_for_ticket_work_and_unbroken_plan_rules():
     assert "A `Does not break:` row is met unless a diff line breaks it." \
         in prompt
     assert "Walk each ticket and plan requirement" not in prompt
+
+
+def test_the_lister_names_the_plans_rejected_options():
+    # #1980: a rejected option is the plan rule a diff most plausibly breaks.
+    lister = _flat(_heredoc("lister_header"))
+
+    assert ("must not break or contradict, including anything the plan "
+            "rejected") in lister
+
+
+def test_engine_comments_no_longer_describe_plan_sourced_must_do_work():
+    assert "what the ticket, its parent plan and the" not in ENGINE
+    assert "drawn from the ticket, its\n# parent plan" not in ENGINE

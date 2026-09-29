@@ -17665,7 +17665,11 @@ def _shaped_risk_holds(item: Item, body: str) -> bool:
     if item.risk != "escalated" or not body.strip():
         return True
     record = parse_shape_risk_record(body)
-    if record is None or record["declared"]:
+    if record is None:
+        return True
+    # Trust the runner's typed decision before parsing prose: an unclosed
+    # fence above the record can hide its rendered Risk rationale.
+    if record["declared"]:
         return True
     return bool(plan_declared_risks(body))
 

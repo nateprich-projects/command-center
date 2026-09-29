@@ -123,6 +123,7 @@ def stub_gh(monkeypatch, item):
     monkeypatch.setattr(
         shape, "_read_fresh_shape_facts",
         lambda target: (target.status, target.children_total),
+        raising=False,
     )
 
     def graphql(query, **variables):
@@ -1696,13 +1697,13 @@ def test_apply_refuses_when_fresh_status_has_left_ideas(monkeypatch, capsys):
         [item], NOW, item.ref, answer(),
         run="shape-run", agent="muse") == 0
 
-    assert reads == [item.ref]
     assert gh_calls(calls, "gh", "issue", "edit") == []
     assert gh_calls(calls, "gh", "issue", "comment") == []
     assert not [call for call in calls
                 if call[0] == "graphql" and call[1] == funnel.SET_FIELD]
     assert project_writes == []
     assert status_writes == []
+    assert reads == [item.ref]
     assert (item.status, item.klass, item.risk, item.needs, item.labels) == (
         "Ideas", "Improve", "standard", "none", ["needs-shaping"])
     output = capsys.readouterr().out

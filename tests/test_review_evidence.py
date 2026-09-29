@@ -386,6 +386,38 @@ def test_a_make_test_failure_on_the_merge_counts_without_a_base_rerun(
     assert record["base_rerun"] is None
 
 
+@pytest.mark.parametrize("test_command", [
+    "make test",
+    "python3 -m pytest -q",
+])
+def test_merged_suite_carries_bounded_timeout_output_and_setup_markers(
+        tmp_path, monkeypatch, test_command):
+    repo, base_sha, _ = make_repo(
+        tmp_path,
+        ancestor={"pyproject.toml": (
+            '[tool.command-center]\ntest = "{}"\n'.format(test_command))},
+        base={}, head={})
+    captured = "No module named pytest\n" + "progress line\n" * 300
+
+    def timeout_test_command(root, commands=None, timeout=None):
+        raise implement.CommandTimeoutError(
+            commands[0], 1, captured_output=captured)
+
+    monkeypatch.setattr(implement, "run_tests", timeout_test_command)
+    record = evidence(repo, base_sha, tmp_path)
+
+    (command,) = record["commands"]
+    assert command["timed_out"] is True
+    assert command["result"] == "fail"
+    assert command["output"].startswith("[output truncated;")
+    assert "setup markers retained: no module named pytest" in command[
+        "output"].casefold()
+    assert len(command["output"].split("\n", 1)[-1].encode()) <= 2048
+    assert "tests timed out:" not in command["output"].casefold()
+    assert record["blocking"] is True
+    assert record["failing"] == []
+
+
 @pytest.mark.parametrize("run", ["merged_suite", "reproduction"])
 def test_the_worktree_is_removed_when_the_run_raises(tmp_path, monkeypatch,
                                                      run):

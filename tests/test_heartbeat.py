@@ -505,6 +505,16 @@ def test_error_classification_fixture_fails_unmatched_notes_to_unclassified():
     ) == "unclassified"
 
 
+def test_merged_suite_timeout_stays_unclassified_with_mixed_output_markers():
+    note = (
+        "tests timed out: make test timed out on the merge with origin/main "
+        "0123456789ab\nrequest timed out; tests failed: test_example"
+    )
+
+    assert heartbeat.classify_error(
+        note, {"head": "0123456789ab"}) == "unclassified"
+
+
 def test_errored_finish_records_its_class_and_runtime_head(monkeypatch):
     records = []
     runtime = {"root": "/runtime/checkout", "head": "0123456789ab"}

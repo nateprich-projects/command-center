@@ -1663,6 +1663,25 @@ def _post_deploy_run_evidence_acceptance_parts(
                if part.strip()]
     deferred = [part for part in clauses
                 if _reviewed_ticket_deploy_signal(part, reviewed_ref)]
+    if not deferred:
+        # A phase's before/after Run evidence is itself a post-deploy pair:
+        # preserve the before half as checkable and carry only the after half
+        # through the same deferred-answer path. Keep this narrow to the
+        # phase wording; replay-harness before/after timings can be checked
+        # before deployment.
+        phase_pair = re.search(
+            r"\bphase\s+before\s+and\s+after\b", line, re.IGNORECASE)
+        if phase_pair is None:
+            return None
+        checkable_line = (line[:phase_pair.start()] + "phase before"
+                          + line[phase_pair.end():]).rstrip(" .;").strip()
+        deferred_clause = (line[:phase_pair.start()] + "phase after"
+                           + line[phase_pair.end():]).rstrip(" .;").strip()
+        if (not checkable_line
+                or re.search(r"\bafter\b", checkable_line, re.IGNORECASE)):
+            return None
+        return {"deferred_clause": deferred_clause,
+                "checkable_line": checkable_line}
     if len(deferred) != 1 or len(clauses) < 2:
         return None
     deferred_clause = deferred[0]
@@ -1917,21 +1936,24 @@ def _checkable_acceptance_requirement(acceptance: Dict[str, str]) -> str:
 
 def _is_verified_acceptance_artifact_requirement(
         requirement: str, acceptance: Dict[str, str]) -> bool:
-    """Match a combined lister row that the split requirements replace."""
-    text = requirement.casefold()
-    if not text.startswith("acceptance artifact:"):
-        return False
-    if "run evidence" not in text:
+    """Match only an artifact row containing this acceptance's text."""
+    prefix = "acceptance artifact:"
+    if not requirement.casefold().startswith(prefix):
         return False
     if requirement == _checkable_acceptance_requirement(acceptance):
         return False
-    if _reviewed_ticket_deploy_signal(text, acceptance["reviewed_ticket"]):
-        return True
-    source = acceptance["line"].casefold()
-    return ("before" in source and "after" in source
-            and "before" in text and "after" in text
-            and any(anchor in source and anchor in text
-                    for anchor in ("phase", "timing", "comment")))
+
+    def normalized(value: str) -> str:
+        value = re.sub(r"[`*]+", "", value).casefold()
+        value = re.sub(r"\s+", " ", value)
+        return value.strip(" .;:")
+
+    payload = normalized(requirement[len(prefix):])
+    return any(
+        target and target in payload
+        for target in (normalized(acceptance["line"]),
+                       normalized(acceptance["deferred_clause"]))
+    )
 
 
 def _is_verified_deferred_acceptance_requirement(

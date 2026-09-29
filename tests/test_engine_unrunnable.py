@@ -426,6 +426,42 @@ def test_rejected_1614_still_rejects_when_checkable_before_evidence_is_missing()
     assert answer["blocking"]
 
 
+def test_checkable_run_evidence_bullet_survives_an_adjacent_deferred_bullet():
+    fixture = json.loads((ROOT / "tests" / "fixtures" /
+                          "review_acceptance_two_run_evidence_lines.json"
+                          ).read_text())
+    packet = fixture["packet"]
+
+    review.annotate_unrunnable_premises(packet)
+    requirements = review.normalize_plan_premise_requirements(
+        packet, [fixture["rejected_requirement"],
+                 fixture["checkable_requirement"]])
+
+    assert fixture["expected_checkable_requirement"] in requirements
+    assert fixture["checkable_requirement"] in requirements
+    deferred_requirement = next(
+        requirement for requirement in requirements
+        if requirement.startswith("Defer the ticket acceptance clause "))
+    marked = review.mark_verified_premise_requirements(packet, [{
+        "requirement": fixture["expected_checkable_requirement"],
+        "status": "met",
+        "evidence": "the lane-log before timing is present",
+    }, {
+        "requirement": fixture["checkable_requirement"],
+        "status": "unsure",
+        "evidence": "the packet has no replay-harness Run evidence comment",
+    }, {
+        "requirement": deferred_requirement,
+        "status": "unsure",
+        "evidence": "the reviewed ticket has not deployed",
+    }])
+
+    answer = review.derive_judge_answer(requirements, marked)
+    assert answer["verdict"] == "rejected"
+    assert any(fixture["checkable_requirement"] in row
+               for row in answer["blocking"])
+
+
 @pytest.mark.parametrize(("deploy_phrase", "is_deferred"), [
     ("once this deploys", True),
     ("once #1606 deploys", True),
@@ -436,7 +472,7 @@ def test_acceptance_deferral_names_the_reviewed_ticket(
         deploy_phrase, is_deferred):
     fixture = rejected_1614_fixture()
     packet = fixture["packet"]
-    packet["ticket"]["body"] = packet["ticket"]["body"].replace(
+    packet["ticket"]["body"] = fixture["post_correction_body"].replace(
         "once this deploys", deploy_phrase)
 
     review.annotate_unrunnable_premises(packet)

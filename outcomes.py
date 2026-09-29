@@ -867,7 +867,7 @@ def _cost_observation(row: Mapping[str, object]) -> Optional[Tuple[float, str]]:
 def _cost_parts(
     row: Mapping[str, object],
 ) -> Optional[List[Tuple[float, str, str]]]:
-    """Return priced record/run costs, or None for an incomplete run roll-up."""
+    """Return known priced costs, omitting runs without a complete price."""
     runs = row.get("runs")
     if isinstance(runs, list) and runs and any(
         isinstance(run, Mapping) and "notional_api_cost" in run
@@ -879,7 +879,7 @@ def _cost_parts(
                 return None
             cost = _cost_observation(run)
             if cost is None:
-                return None
+                continue
             value, unit = cost
             parts.append((value, unit, _lane(run)))
         return parts
@@ -897,7 +897,7 @@ def _cost_parts(
             return None
         cost = _cost_observation(run)
         if cost is None:
-            return None
+            continue
         value, unit = cost
         parts.append((value, unit, _lane(run)))
     return parts
@@ -927,10 +927,28 @@ def _cost_signal(rows: Sequence[Mapping[str, object]]) -> Dict[str, object]:
             continue
         merged_records += 1
         parts = _cost_parts(row)
+        runs = row.get("runs")
+        run_costs_used = (
+            isinstance(runs, list)
+            and bool(runs)
+            and (
+                any(
+                    isinstance(run, Mapping) and "notional_api_cost" in run
+                    for run in runs
+                )
+                or _cost_observation(row) is None
+            )
+        )
+        incomplete_run = run_costs_used and any(
+            not isinstance(run, Mapping) or _cost_observation(run) is None
+            for run in runs
+        )
         if not parts:
             missing.append(row.get("ticket") or "record {}".format(index))
             continue
         priced_records += 1
+        if incomplete_run:
+            missing.append(row.get("ticket") or "record {}".format(index))
         per_record: Dict[Tuple[str, str], float] = {}
         for value, unit, lane in parts:
             key = (unit, lane)

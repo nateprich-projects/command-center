@@ -3923,6 +3923,9 @@ def test_sweep_releases_an_escalated_plan_whose_record_declares_none(
     stranded = _held_plan(305, fixture["body"], needs="none",
                           record=([], ["data-migration"]))
     assert funnel.plan_needs_nate(stranded.body) is False
+    assert funnel.parse_shape_risk_record(stranded.body) == {
+        "declared": [], "scan": ["data-migration"]}
+    assert funnel._shaped_risk_holds(stranded, stranded.body) is False
 
     advanced, writes, fields, comments = _sweep(monkeypatch, [stranded])
 
@@ -4011,6 +4014,8 @@ def test_sweep_keeps_needs_human_holding_whatever_the_risk(monkeypatch):
     assert funnel.plan_needs_nate(fixture["body"]) is False
     needs_human = _held_plan(314, fixture["body"],
                              record=([], ["data-migration"]))
+    assert funnel.parse_shape_risk_record(needs_human.body) == {
+        "declared": [], "scan": ["data-migration"]}
 
     advanced, writes, fields, comments = _sweep(monkeypatch, [needs_human])
 
@@ -4028,17 +4033,28 @@ def test_sweep_still_holds_what_the_risk_change_does_not_touch(monkeypatch):
     unloaded.body = None
     unknown_risk = _held_plan(311, fixture["body"], risk=None, needs="none",
                               record=empty)
-    nate_origin = _held_plan(312, fixture["body"], needs="none",
-                             record=empty)
-    nate_origin.origin = "Nate"
     standard_human = _held_plan(
         313, fixture["body"], risk="standard", needs="human")
 
     advanced, writes, fields, comments = _sweep(
-        monkeypatch,
-        [open_question, unloaded, unknown_risk, nate_origin, standard_human])
+        monkeypatch, [open_question, unloaded, unknown_risk, standard_human])
 
     assert (advanced, writes, fields, comments) == ([], [], [], [])
+
+
+def test_sweep_keeps_nate_origin_shaped_with_scan_only_record(monkeypatch):
+    fixture = SCAN_ONLY_HOLDS[0]
+    nate_origin = _held_plan(
+        312, fixture["body"], needs="none",
+        record=([], ["data-migration"]))
+    nate_origin.origin = "Nate"
+
+    assert funnel.parse_shape_risk_record(nate_origin.body) == {
+        "declared": [], "scan": ["data-migration"]}
+    advanced, writes, fields, comments = _sweep(monkeypatch, [nate_origin])
+
+    assert (advanced, writes, fields, comments) == ([], [], [], [])
+    assert (nate_origin.status, nate_origin.origin) == ("Shaped", "Nate")
 
 
 def test_plan_needs_nate_ignores_omitted_null_categories():

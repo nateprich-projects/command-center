@@ -13,7 +13,7 @@ import json
 import pathlib
 import stat
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -861,6 +861,9 @@ def test_shape_risk_record_ignores_copy_after_copied_origin_override():
         funnel.ORIGIN_OVERRIDE_MARKER,
         '```json\n{"target": "nate"}\n```',
         funnel.shape_risk_block([], ["credentials"]),
+        funnel.provenance_block(
+            "agent", at=NOW - timedelta(seconds=1),
+            run="copied-run", agent="muse"),
     ))
     body = "\n\n".join((runner_record, runner_provenance, copied_tail))
 
@@ -903,14 +906,23 @@ def _shape_answer_gates_and_sweep(monkeypatch, plan_markdown,
 
 
 def test_typed_risk_stays_held_after_gates_with_later_empty_copy(monkeypatch):
+    copied_origin_override = "\n\n".join((
+        funnel.ORIGIN_OVERRIDE_MARKER,
+        '```json\n{"target": "nate"}\n```',
+        funnel.shape_risk_block([], ["credentials"]),
+        funnel.provenance_block(
+            "agent", at=NOW - timedelta(seconds=1),
+            run="copied-run", agent="muse"),
+    ))
     item, advanced = _shape_answer_gates_and_sweep(
         monkeypatch, "# Plan\n\n```\nlog\n", REAL_CREDENTIALS,
-        planted_record=funnel.shape_risk_block([], []))
+        planted_record=copied_origin_override)
 
     assert advanced == []
     assert item.status == "Shaped"
     assert funnel.parse_shape_risk_record(item.body) == {
         "declared": ["credentials"], "scan": []}
+    assert funnel._shaped_risk_holds(item, item.body) is True
 
 
 def test_quoted_empty_risk_and_provenance_cannot_release_typed_risk(
@@ -2176,6 +2188,7 @@ def test_apply_advances_a_scan_only_plan_with_risk_escalated(
     assert "needs-shaping" not in item.labels
     assert funnel.parse_shape_risk_record(item.body) == {
         "declared": [], "scan": ["credentials"]}
+    assert funnel._shaped_risk_holds(item, item.body) is False
 
     comments = [call[1][-1]
                 for call in gh_calls(calls, "gh", "issue", "comment")]

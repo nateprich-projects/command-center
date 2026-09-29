@@ -140,7 +140,7 @@ def test_a_declined_unblock_is_watch_owned_but_human_step_stays(capsys):
     project = building_project()
     declined = silent_blocked_ticket(number=1902, needs="agent")
     declined.decline_reason = "the prerequisite has not landed"
-    human_step = silent_blocked_ticket(number=1653, needs="human")
+    human_step = silent_blocked_ticket(number=1654, needs="human")
 
     brief = brief_for([project, declined, human_step], capsys)
 
@@ -153,7 +153,7 @@ def test_watch_ownership_keeps_human_steps_with_nate():
     project = building_project()
     declined = silent_blocked_ticket(number=1902, needs="agent")
     declined.decline_reason = "the prerequisite has not landed"
-    human_step = silent_blocked_ticket(number=1653, needs="human")
+    human_step = silent_blocked_ticket(number=1654, needs="human")
 
     assert funnel.gate_question(declined) == "Unblock?"
     assert routed(declined, project)

@@ -396,19 +396,15 @@ def _building(number):
     return issue(number, status="Building", klass="Broken", children_total=2)
 
 
-def test_a_codex_decline_with_no_condition_is_stranded():
-    """FF#289 on 2026-09-24: label, Needs agent, a Declined comment."""
+def test_a_codex_decline_with_no_condition_has_a_watch_gate_not_a_strand():
+    """#289 is not stranded because its Unblock question is watch-owned."""
     parent = _building(60)
     declined = issue(61, parent="{}#60".format(REPO), labels=["blocked"],
                      needs="agent", decline_reason="prerequisite unlanded")
 
     rows = funnel.stranded_items([parent, declined], NOW)
 
-    assert [row["ref"] for row in rows] == ["{}#61".format(REPO)]
-    assert rows[0]["reason"] == (
-        "blocked with no condition that can clear it, and no one is asked "
-        "(Needs: agent)"
-    )
+    assert rows == []
 
 
 def test_a_reason_only_external_event_wait_without_a_spec_asks_nate():

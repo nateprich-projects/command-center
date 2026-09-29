@@ -1033,11 +1033,11 @@ def gate_question(item: Item) -> Optional[str]:
     if item.state != "OPEN":
         return None
     if item.is_blocked:
-        # A named condition is knowable work for the system, not a question for
-        # Nate. A silent block still needs his attention, but only a project
-        # can be parked; a ticket can only be unblocked. Needs ``agent`` owns
-        # the work after the block lifts; the watch still answers the unblock
-        # question unless the item is waiting on Nate's hands.
+        # A named condition is knowable work for the system, not an unblock
+        # question. A silent block still needs an Unblock question; only a
+        # project can also be parked. Needs ``agent`` owns the work after the
+        # block lifts, and the watch answers the question unless the item is
+        # waiting on Nate's hands.
         # A valid date condition is also machine-readable. Both future and
         # passed dates stay out of the question queue; the begin path clears a
         # passed condition before selecting work.
@@ -1199,9 +1199,10 @@ def watch_owns_gate(
     line. A plan body that was not loaded, or a Needs Nate section that
     cannot be read, stays with Nate.
 
-    This routes the brief and queue only. ``gate_question`` is unchanged, so
-    lanes, the Shaped sweep, ``begin`` and the stranded report read exactly
-    what they read before.
+    This partitions the shared gate question for the brief and queue. A
+    blocked item with Needs ``agent`` still has an Unblock question for the
+    watch; Needs ``human`` keeps that question with Nate. Other readers use
+    the same question predicate.
     """
     if question in WATCH_UNBLOCK_QUESTIONS:
         return item.needs != "human"
@@ -13650,10 +13651,10 @@ def unclearable_block(item: Item) -> bool:
     """Whether a blocked item has no condition that can lift it and no asker.
 
     ``clear_satisfied_blocks`` lifts a parsed reference, date, or matching
-    event record, and a native edge lifts itself. A well-formed event spec is
-    quiet; otherwise a blocked item asks the watch or Nate's unblock question.
-    The funnel watch supports ``claude-code-environment``. A block outside all
-    of those waits forever and is seen by no one (#1432).
+    event record, and a native edge lifts itself. When no machine condition
+    is attached, an Unblock question is still owned by the watch or Nate;
+    ``gate_question`` is the shared predicate for whether anyone is asked.
+    The funnel watch also supports ``claude-code-environment`` blocks.
     """
     if item.state != "OPEN" or not item.is_blocked:
         return False

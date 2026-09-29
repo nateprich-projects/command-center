@@ -12803,7 +12803,12 @@ def _closed_itself_item_json(
 def closed_itself_json(
     items: Iterable[Item], now: datetime, brief_cache=None
 ) -> List[Dict[str, object]]:
-    """The brief's recent funnel-close records, newest first."""
+    """The brief's recent funnel-close records, newest first.
+
+    Candidates are rebuilt from the current project items on every call;
+    comments add details only for those candidates. A marker cannot retain a
+    row after the item stops meeting the current closed-project conditions.
+    """
     candidates = closed_itself_items(items, now)
     if not candidates:
         return []
@@ -13442,7 +13447,10 @@ def satisfied_block_refs(
     This mirrors ``_dead_dependency_refs`` over the already-loaded native and
     comment dependency facts. It never fetches a blocker: a reference must be
     present in ``by_ref`` before it can satisfy a block. A date condition is
-    represented as ``until YYYY-MM-DD`` in the returned condition list.
+    represented as ``until YYYY-MM-DD`` in the returned condition list. The
+    saved Satisfied-block marker is not an input here: clear eligibility is
+    derived from current block and blocker facts before the caller can use
+    that marker to suppress a duplicate record.
     """
     # ``block_reason`` is populated only when ``parse_block_comment`` found a
     # matching header. An empty reason is still a parsed comment; ``None`` is

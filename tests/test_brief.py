@@ -595,6 +595,44 @@ def test_closed_itself_batch_is_bounded_and_cached_for_one_run(monkeypatch):
     assert len(calls) == 2
 
 
+def test_closed_itself_rows_are_rederived_from_current_project_state():
+    item = funnel.Item(
+        repo="nateprich/beta", number=103, title="Recently closed project",
+        url="https://example.invalid/103", state="CLOSED",
+        state_reason="COMPLETED", status="Done", klass="Improve",
+        origin="agent", risk="standard", needs="none",
+        children_total=1, children_done=1,
+        closed_at=NOW - timedelta(hours=1),
+    )
+
+    class CachedComments:
+        calls = 0
+
+        def closed_itself_comments(self, candidates):
+            self.calls += 1
+            return {
+                candidate.ref: [{
+                    "author": OWNER,
+                    "body": funnel.closed_itself_comment([], []),
+                }]
+                for candidate in candidates
+            }
+
+    cache = CachedComments()
+    assert funnel.closed_itself_json([item], NOW, brief_cache=cache) == [{
+        "ref": item.ref,
+        "title": item.title,
+        "url": item.url,
+        "closed_at": item.closed_at.isoformat(),
+        "drift": [],
+    }]
+
+    item.state = "OPEN"
+    item.status = "Building"
+    assert funnel.closed_itself_json([item], NOW, brief_cache=cache) == []
+    assert cache.calls == 1
+
+
 def test_closed_itself_candidates_follow_auto_close_eligibility_signal():
     def closed(number, **kwargs):
         return funnel.Item(

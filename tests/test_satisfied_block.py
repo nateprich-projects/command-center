@@ -159,6 +159,12 @@ def test_native_open_blocker_keeps_a_closed_named_block_unsatisfied():
         open_blockers=["#77"],
     )
     blocker = issue(77, state="CLOSED")
+    waiting.satisfied_block_record = funnel.parse_satisfied_block_comment(
+        funnel.satisfied_block_comment(
+            [blocker.ref], NOW, run="run-1874", agent="codex",
+        )
+    )
+    assert waiting.satisfied_block_record is not None
 
     assert funnel.satisfied_block_refs(
         waiting, {waiting.ref: waiting, blocker.ref: blocker}

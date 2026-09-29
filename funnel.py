@@ -352,6 +352,14 @@ LADDER = [
 #: it (#1832).
 PREEMPTING_CLASSES = frozenset({"Broken", "Maintenance"})
 
+#: Bugs' share of ticket starts, as (Bugs, starts): two in every eight, one in
+#: four (#1832, #1846). Nate, 2026-09-28: "broken continues as a finite class,
+#: and then bugs get a lane." The share counts starts across every lane, never
+#: running lanes or elapsed time: not every lane runs at once, so a lane that
+#: sees no Bug in flight has learned nothing about whether Bugs have had their
+#: turn. See ``bug_share_due`` and ``next_ticket``.
+BUG_SHARE = (2, 8)
+
 #: Repo tiers for the engineers' queue (Nate, 2026-09-25): 1 is the tooling
 #: that keeps everything else running, 2 has real-world impact, and every
 #: other member repo is a hobby at 3. Ranked below finite work and pins and
@@ -2670,6 +2678,42 @@ def queue_classes(
     }
 
 
+def _preempts(
+    ref: str, by_ref: Dict[str, Item], descendants: Mapping[str, Set[str]]
+) -> bool:
+    """Whether a ticket is finite work, which goes ahead of in-flight work.
+
+    Membership, not a rank threshold: a class added above Broken in LADDER
+    (#130's Investigate) must not acquire preemption rights by position.
+    plan.md grants them only to the finite classes named in
+    PREEMPTING_CLASSES; a ticket that blocks one preempts with it. Shared by
+    ``startable`` and ``next_ticket``'s Bug share, so both read one predicate.
+    """
+    return any(
+        effective_class(by_ref[related], by_ref) in PREEMPTING_CLASSES
+        for related in {ref} | set(descendants[ref])
+    )
+
+
+def _pinned_ancestor(item: Item, by_ref: Mapping[str, Item]) -> bool:
+    """Whether the project this ticket belongs to is pinned.
+
+    A pin is Nate's explicit ordering call, and until 2026-09-12 it reached
+    only his decision queue: a pinned project's ticket sat 18th behind older
+    Broken work while he asked why (#673). It now outranks the ladder's
+    default order. It orders and nothing more -- the WIP-cap preemption
+    stays with the finite classes, and a pin never unblocks or unlocks.
+    """
+    seen: Set[str] = set()
+    current: Optional[Item] = item
+    while current is not None and current.ref not in seen:
+        if current.pinned:
+            return True
+        seen.add(current.ref)
+        current = by_ref.get(current.parent or "")
+    return False
+
+
 def startable(
     items: Sequence[Item],
     awaiting_review: Optional[Set[str]] = None,
@@ -2721,17 +2765,7 @@ def startable(
         )
         for ref in by_ref
     }
-    # Membership, not a rank threshold: a class added above Broken in LADDER
-    # (#130's Investigate) must not acquire preemption rights by position.
-    # plan.md grants them only to the finite classes named in
-    # PREEMPTING_CLASSES; a ticket that blocks one preempts with it.
-    preempting = {
-        ref: any(
-            effective_class(by_ref[related], by_ref) in PREEMPTING_CLASSES
-            for related in {ref} | descendants[ref]
-        )
-        for ref in by_ref
-    }
+    preempting = {ref: _preempts(ref, by_ref, descendants) for ref in by_ref}
 
     def eligible(item: Item) -> bool:
         if not _startable_without_repo_readiness(
@@ -2756,22 +2790,7 @@ def startable(
         return (parent.status if parent else item.status) == "Building"
 
     def pinned_ancestor(item: Item) -> bool:
-        """Whether the project this ticket belongs to is pinned.
-
-        A pin is Nate's explicit ordering call, and until 2026-09-12 it reached
-        only his decision queue: a pinned project's ticket sat 18th behind older
-        Broken work while he asked why (#673). It now outranks the ladder's
-        default order. It orders and nothing more -- the WIP-cap preemption
-        stays with the finite classes, and a pin never unblocks or unlocks.
-        """
-        seen: Set[str] = set()
-        current: Optional[Item] = item
-        while current is not None and current.ref not in seen:
-            if current.pinned:
-                return True
-            seen.add(current.ref)
-            current = by_ref.get(current.parent or "")
-        return False
+        return _pinned_ancestor(item, by_ref)
 
     def key(item: Item):
         since = question_since(item) or datetime.max.replace(tzinfo=timezone.utc)
@@ -4523,6 +4542,126 @@ def awaiting_review(
     return blocked
 
 
+def recent_ticket_starts(
+    rows: Sequence[Mapping[str, object]],
+) -> List[Optional[str]]:
+    """The class of each of the last ``BUG_SHARE[1]`` ticket starts, oldest first.
+
+    A start is the binding ``begin`` writes when it issues a ticket (#497).
+    The rows are ``_backoff_rows()``'s, which reads every agent's heartbeat,
+    so a start counts whichever lane made it, and the one read serves the
+    backoff too. A run bound twice counts once, as ``heartbeat.bindings``
+    keeps its latest binding.
+
+    The class is the one ``begin`` recorded with the binding (#1846), not
+    one looked up now: a merged ticket, and the Bug project that closed
+    itself behind it, leave begin's view of the board long before the start
+    leaves the count. A binding written before that has no class and reads
+    as not a Bug, which it was not, as Bug did not exist before #1845.
+
+    Fewer starts than the window return what exists; no history is an
+    empty list, and ``bug_share_due`` counts what it is given.
+    """
+    import heartbeat
+
+    starts = sorted(
+        (
+            binding for binding in heartbeat.bindings(list(rows)).values()
+            if binding.get("do") == "ticket"
+        ),
+        key=lambda binding: binding.get("ts") or 0,
+    )
+    return [binding.get("class") for binding in starts[-BUG_SHARE[1]:]]
+
+
+def bug_share_due(recent_starts: Sequence[Optional[str]]) -> bool:
+    """Whether the next ticket start is the Bugs' turn (#1846).
+
+    ``recent_starts`` is ``recent_ticket_starts``'s answer, oldest first.
+    Counting the start being decided, no run of the latest starts, up to the
+    window, may hold more than its share of Bugs rounded up: with two in
+    eight, one in any four and two in any eight. A lane with Bugs and other
+    work both waiting therefore gets a steady three to one, from an empty
+    history or any other.
+
+    Why not the plain count "fewer than two of the last eight": that is
+    satisfied by two Bugs together, so a single lane got Bug, Bug and seven
+    others, four Bugs in twelve starts instead of three. The window is also
+    what corrects a burst: two lanes that took Bugs at the same moment hold
+    every further Bug back until one of theirs has left the last eight.
+
+    A short history counts what exists, and an empty one makes the Bugs due.
+    """
+    share, window = BUG_SHARE
+    newest_first = [klass == "Bug" for klass in reversed(list(recent_starts))]
+    return all(
+        1 + sum(newest_first[:length - 1]) <= -(-length * share // window)
+        for length in range(1, window + 1)
+    )
+
+
+def _oldest_first(item: Item):
+    """Age order for the Bug share: the ticket created first, then by number."""
+    return (
+        item.created_at or datetime.max.replace(tzinfo=timezone.utc),
+        item.repo,
+        item.number,
+    )
+
+
+def _with_the_bug_share(
+    items: Sequence[Item],
+    free: Sequence[Item],
+    recent_starts: Sequence[Optional[str]],
+) -> Item:
+    """The ticket a free slot takes, with Bugs held to their share (#1846).
+
+    ``free`` is ``startable()``'s order less live claims, and is never empty.
+
+    - Finite work goes first, unchanged: observed Broken, Maintenance, and
+      whatever blocks them.
+    - Then, on the Bugs' turn (``bug_share_due``), the oldest startable Bug.
+    - Otherwise the ordinary order, less the Bugs it would put ahead of other
+      work: repo tier ranks above the ladder, so a tier-1 Bug would otherwise
+      go before a hobby repo's Improve on every pull.
+    - A Bug fills a pull that nothing else can.
+
+    Two Bugs keep their ordinary place, because each is a commitment already
+    made. A Bug project already Building finishes as any other does ("Passing
+    a gate is a commitment", plan.md), and the share counted its first start.
+    A pinned Bug is Nate's explicit ordering call (#673). The starts of both
+    count against the share like any other Bug's, so the next Bug the share
+    offers waits for them.
+
+    A Bug here is a ticket that ranks as Bug (``queue_classes``). A Bug
+    ticket that blocks higher work ranks, and goes, with that work, which
+    would otherwise wait on its own prerequisite.
+    """
+    by_ref = {item.ref: item for item in items}
+    descendants = dependency_descendants(items)
+    if _preempts(free[0].ref, by_ref, descendants):
+        return free[0]
+    ranked_as = queue_classes(items, descendants)
+    bugs = [item for item in free if ranked_as.get(item.ref) == "Bug"]
+    if not bugs:
+        return free[0]
+    oldest = min(bugs, key=_oldest_first)
+    if bug_share_due(recent_starts):
+        return oldest
+
+    def committed(item: Item) -> bool:
+        parent = by_ref.get(item.parent or "")
+        return (
+            (parent.status if parent else item.status) == "Building"
+            or _pinned_ancestor(item, by_ref)
+        )
+
+    for candidate in free:
+        if ranked_as.get(candidate.ref) != "Bug" or committed(candidate):
+            return candidate
+    return oldest
+
+
 def next_ticket(items: Sequence[Item], now: datetime,
                 blocked: Optional[Set[str]] = None,
                 excluded: Optional[Set[str]] = None,
@@ -4532,6 +4671,7 @@ def next_ticket(items: Sequence[Item], now: datetime,
                     Dict[str, Optional[Dict[str, object]]]
                 ] = None,
                 backed_off: Optional[Mapping[str, object]] = None,
+                recent_starts: Optional[Sequence[Optional[str]]] = None,
                 ) -> Optional[Item]:
     """The single ticket the requesting agent should work, or None.
 
@@ -4539,6 +4679,10 @@ def next_ticket(items: Sequence[Item], now: datetime,
     ticket may start anyway; that is the one sanctioned preemption. `excluded`
     is a per-call filter for a caller that has already declined a candidate;
     it never changes the queue or persists any state.
+
+    Below the limit, Bugs get their share of starts (``_with_the_bug_share``).
+    ``recent_starts`` is ``recent_ticket_starts``'s answer, passed in like
+    ``backed_off`` so this stays pure over fixtures; None is an empty history.
     """
     excluded = excluded or frozenset()
     queue = [
@@ -4559,7 +4703,7 @@ def next_ticket(items: Sequence[Item], now: datetime,
     if not free:
         return None
     if not at_capacity(items, now, pr_facts=pr_facts):
-        return free[0]
+        return _with_the_bug_share(items, free, recent_starts or ())
 
     # At capacity. Only a Broken ticket may exceed it, and only when nothing
     # already in motion is Broken — preemption is for getting a fix moving, not
@@ -4587,6 +4731,9 @@ def next_ticket_for_tier(items: Sequence[Item], now: datetime,
                          ] = None,
                          backed_off: Optional[
                              Mapping[str, object]
+                         ] = None,
+                         recent_starts: Optional[
+                             Sequence[Optional[str]]
                          ] = None) -> Optional[Item]:
     """Return the first shared-order ticket belonging to ``tier``.
 
@@ -4594,7 +4741,7 @@ def next_ticket_for_tier(items: Sequence[Item], now: datetime,
     than by filtering its input first. The latter would hide other in-motion
     tickets from the WIP cap and could let a standard caller exceed it while
     walking past escalated work. Reusing ``next_ticket`` also keeps Broken
-    preemption and all other ordering rules in one place.
+    preemption, the Bug share and all other ordering rules in one place.
     """
     excluded = set(excluded or ())
     while True:
@@ -4604,6 +4751,7 @@ def next_ticket_for_tier(items: Sequence[Item], now: datetime,
             repo_readiness=repo_readiness,
             pr_facts=pr_facts,
             backed_off=backed_off,
+            recent_starts=recent_starts,
         )
         if ticket is None or tier is None:
             return ticket
@@ -14000,10 +14148,15 @@ def _backoff_rows() -> List[Dict[str, object]]:
 
 
 def _backed_off_work(
-    items: Sequence[Item], now: datetime
+    items: Sequence[Item], now: datetime,
+    rows: Optional[Sequence[Mapping[str, object]]] = None,
 ) -> Dict[str, Dict[str, object]]:
-    """Refs withheld by repeated failure, read from the heartbeat."""
-    return backoff_withheld(_backoff_rows(), now)
+    """Refs withheld by repeated failure, read from the heartbeat.
+
+    ``rows`` are heartbeat records the caller already read, so ``begin`` can
+    serve the backoff and the Bug share's start history from one read (#1846).
+    """
+    return backoff_withheld(_backoff_rows() if rows is None else rows, now)
 
 
 def cmd_next(
@@ -14064,6 +14217,7 @@ def cmd_next(
         repo_readiness=repo_readiness,
         pr_facts=pr_facts,
         backed_off=backed_off,
+        recent_starts=recent_ticket_starts(backoff_rows),
     )
 
     if ticket is None:
@@ -18117,13 +18271,18 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
             str(entry["ref"]) for entry in reconciled_merges
             if entry.get("result") == "error" and entry.get("ref")
         )
-        begin_backed_off = _backed_off_work(items, now)
+        # One heartbeat read serves the backoff and the Bug share's start
+        # history: each read costs seconds of the reply budget (#1846).
+        begin_rows = _backoff_rows()
+        begin_backed_off = _backed_off_work(items, now, rows=begin_rows)
+        begin_starts = recent_ticket_starts(begin_rows)
         ticket = next_ticket_for_tier(
             items, now, tier=tier, blocked=blocked,
             agent=agent,
             repo_readiness=repo_readiness,
             pr_facts=pr_facts,
             backed_off=begin_backed_off,
+            recent_starts=begin_starts,
         )
         recently_claimed: Set[str] = set()
         while ticket is not None:
@@ -18149,6 +18308,13 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
             # changing the shared ordering.
             ticket.in_motion_since = current_claim
             recently_claimed.add(ticket.ref)
+            # That begin's start may not have reached the heartbeat when this
+            # one read it. Count it, or lanes pulling together would each see
+            # the Bugs' turn and take a Bug apiece (#1846). If its binding did
+            # land first it counts twice here, which can hold a Bug back but
+            # never let one through.
+            begin_starts = list(begin_starts) + [effective_class(
+                ticket, {entry.ref: entry for entry in items})]
             ticket = next_ticket_for_tier(
                 items, now, tier=tier, blocked=blocked,
                 excluded=recently_claimed,
@@ -18156,6 +18322,7 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
                 repo_readiness=repo_readiness,
                 pr_facts=pr_facts,
                 backed_off=begin_backed_off,
+                recent_starts=begin_starts,
             )
         held = held_claims_before(
             items,
@@ -18474,11 +18641,16 @@ def _bind_run(agent: str, out: Dict[str, object]) -> None:
     out["bound"] = {"do": do, "work": str(subject)}
     if repo:
         out["bound"]["repo"] = str(repo)
+    fields: Dict[str, str] = {"repo": str(repo)} if repo else {}
+    if do == "ticket" and work.get("class"):
+        # The start carries its class, which the Bug share counts after the
+        # ticket has closed and left begin's view of the board (#1846).
+        fields["klass"] = str(work["class"])
     try:
         import heartbeat
 
         heartbeat.record_binding(agent, str(run), str(do), str(subject),
-                                 repo=str(repo) if repo else None)
+                                 **fields)
     except Exception:
         # Instrumentation must not gate the thing it instruments.
         pass

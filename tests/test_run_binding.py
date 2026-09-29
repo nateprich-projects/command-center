@@ -62,8 +62,34 @@ def test_record_binding_writes_its_own_phase(spool):
     assert record["phase"] == "bind"
     assert (record["run"], record["do"], record["work"]) == ("r1", "ticket", "o/r#9")
     assert heartbeat.bindings([record]) == {
-        "r1": {"do": "ticket", "work": "o/r#9", "ts": record["ts"], "repo": None},
+        "r1": {"do": "ticket", "work": "o/r#9", "ts": record["ts"], "repo": None,
+               "class": None},
     }
+
+
+def test_a_ticket_binding_keeps_the_class_it_started_with(spool):
+    """The Bug share counts starts by it after the ticket has closed (#1846)."""
+    heartbeat.record_binding("codex", "r1", "ticket", "o/r#9", klass="Bug")
+    (record,) = spool["appended"]
+    assert record["class"] == "Bug"
+    assert heartbeat.bindings([record])["r1"]["class"] == "Bug"
+
+
+def test_begin_binds_a_ticket_with_its_class_and_a_review_without(monkeypatch):
+    bound = []
+    monkeypatch.setattr(
+        heartbeat, "record_binding",
+        lambda agent, run, do, work, **fields: bound.append((do, fields))
+        or "spooled")
+    funnel._bind_run("codex", {"run": "r1", "do": "ticket",
+                               "work": {"ref": "o/r#9", "class": "Bug"}})
+    funnel._bind_run("codex", {"run": "r2", "do": "ticket",
+                               "work": {"ref": "o/r#8", "class": None}})
+    funnel._bind_run("muse", {"run": "r3", "do": "review",
+                              "work": {"pr": 96, "ref": "o/r#9",
+                                       "repo": "o/r", "class": "Bug"}})
+    assert bound == [("ticket", {"klass": "Bug"}), ("ticket", {}),
+                     ("review", {"repo": "o/r"})]
 
 
 def test_record_job_writes_run_scoped_schedule_identity(spool):

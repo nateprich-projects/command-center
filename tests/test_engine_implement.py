@@ -1491,7 +1491,7 @@ def test_a_decline_keeps_the_run_checkout(
         block_effect=lambda *args, **kwargs: None,
         comment_effect=lambda *args, **kwargs: None,
         needs_effect=lambda *args: None,
-        human_needs_effect=lambda *args: None,
+        declined_needs_effect=lambda *args: None,
     )
 
     assert effects["finished"][0][2] == "skipped-blocked"
@@ -1971,7 +1971,7 @@ def test_a_decline_note_names_the_reason_only_for_command_center(
         block_effect=lambda *args, **kwargs: None,
         comment_effect=lambda *args, **kwargs: comments.append(args),
         needs_effect=lambda *args: None,
-        human_needs_effect=lambda *args: None,
+        declined_needs_effect=lambda *args: None,
         prerequisite_facts_effect=lambda ref: None,
     )
 
@@ -2758,12 +2758,23 @@ def test_remote_ticket_head_reads_the_pushed_tip_or_none(tmp_path):
 
 def test_finish_declined_labels_comments_releases_and_finishes(
         tmp_path, monkeypatch):
+    from engine import breakdown
+
     remote, clone = make_clone(tmp_path)
     (clone / "halfway.txt").write_text("not finished\n")
     monkeypatch.setattr(implement, "fetch_ticket", lambda repo, number: ticket(number))
 
     effects = {"blocked": [], "comments": [], "released": [], "finished": [],
-               "needs": [], "human_needs": []}
+               "needs": []}
+    monkeypatch.setattr(
+        breakdown, "add_to_project", lambda url: "project-item-42"
+    )
+    monkeypatch.setattr(
+        breakdown, "write_needs",
+        lambda item_id, needs, ref: effects["needs"].append(
+            (item_id, needs, ref)
+        ),
+    )
 
     result = implement.finish_declined(
         "prerequisite has not landed",
@@ -2777,9 +2788,7 @@ def test_finish_declined_labels_comments_releases_and_finishes(
         comment_effect=lambda *args, **kwargs: effects["comments"].append(
             (args, kwargs)),
         needs_effect=lambda *args: pytest.fail(
-            "an unknown decline must not stay in the agent lane"),
-        human_needs_effect=lambda url, ref: effects["human_needs"].append(
-            (url, ref)),
+            "an unknown decline must use the decline routing writer"),
     )
 
     assert result == {"ticket": REPO + "#42",
@@ -2789,9 +2798,9 @@ def test_finish_declined_labels_comments_releases_and_finishes(
     (comment_args, _), = effects["comments"]
     assert comment_args[2] == "**Declined:** prerequisite has not landed"
     assert effects["released"] == [REPO + "#42"]
-    assert effects["needs"] == []
-    assert effects["human_needs"] == [
-        ("https://github.com/{}/issues/42".format(REPO), REPO + "#42")]
+    assert effects["needs"] == [
+        ("project-item-42", "agent", REPO + "#42")
+    ]
     assert effects["finished"] == [
         ("codex", "run-42", "skipped-blocked",
          "declined; reason on the ticket", REPO + "#42")
@@ -2902,7 +2911,7 @@ def test_finish_declined_requeues_false_ff_225_claim_with_evidence(
         comment_effect=lambda *args, **kwargs: effects["comments"].append(
             (args, kwargs)),
         needs_effect=lambda url, ref: effects["needs"].append((url, ref)),
-        human_needs_effect=lambda url, ref: effects["human_needs"].append(
+        declined_needs_effect=lambda url, ref: effects["human_needs"].append(
             (url, ref)),
         clear_block_effect=lambda repo, number, **kwargs:
             effects["cleared"].append((repo, number, kwargs)),
@@ -2954,7 +2963,7 @@ def test_accept_body_conflict_branch_skips_blocked_label_and_routes_to_review(
             (args, kwargs)),
         needs_effect=lambda url, ref: effects["needs"].append(
             ("agent", url, ref)),
-        human_needs_effect=lambda *args: pytest.fail(
+        declined_needs_effect=lambda *args: pytest.fail(
             "a pointed Accept conflict must not ask Nate"),
         prerequisite_facts_effect=lambda ref: pytest.fail(
             "an Accept conflict must not be treated as a prerequisite"),
@@ -2988,7 +2997,7 @@ def test_accept_body_conflict_branch_skips_blocked_label_and_routes_to_review(
     }
 
 
-def test_finish_declined_unparseable_conflict_pointer_asks_nate_and_blocks(
+def test_finish_declined_unparseable_conflict_pointer_routes_to_agent_and_blocks(
         tmp_path, monkeypatch):
     _, clone = make_clone(tmp_path)
     monkeypatch.setattr(implement, "fetch_ticket", lambda repo, number: ticket(number))
@@ -3011,16 +3020,16 @@ def test_finish_declined_unparseable_conflict_pointer_asks_nate_and_blocks(
         comment_effect=lambda *args, **kwargs: effects["comments"].append(
             (args, kwargs)),
         needs_effect=lambda *args: pytest.fail(
-            "an unparseable decline must not stay in the agent lane"),
-        human_needs_effect=lambda url, ref: effects["human_needs"].append(
-            ("human", url, ref)),
+            "an unparseable decline must use the decline writer"),
+        declined_needs_effect=lambda url, ref: effects["human_needs"].append(
+            ("agent", url, ref)),
     )
 
     assert len(effects["blocked"]) == 1
     assert effects["blocked"][0][0][1] == 42
     assert effects["needs"] == []
     assert effects["human_needs"] == [
-        ("human", ticket()["url"], REPO + "#42")]
+        ("agent", ticket()["url"], REPO + "#42")]
     assert effects["released"] == [REPO + "#42"]
     assert len(effects["comments"]) == 1
     assert effects["comments"][0][0][2] == "{} {}".format(
@@ -3052,8 +3061,8 @@ def test_finish_declined_failed_review_handoff_falls_back_to_blocked(
             (args, kwargs)),
         comment_effect=comment_effect,
         needs_effect=lambda *args: None,
-        human_needs_effect=lambda url, ref: effects["human_needs"].append(
-            ("human", url, ref)),
+        declined_needs_effect=lambda url, ref: effects["human_needs"].append(
+            ("agent", url, ref)),
     )
 
     assert len(effects["blocked"]) == 1
@@ -3062,7 +3071,7 @@ def test_finish_declined_failed_review_handoff_falls_back_to_blocked(
         funnel.DECLINED_PREFIX, ACCEPT_BODY_CONFLICT_REASON)
     assert implement.DECLINE_REVIEW_ROUTING_MARKER in effects["comments"][1]
     assert effects["human_needs"] == [
-        ("human", ticket()["url"], REPO + "#42")]
+        ("agent", ticket()["url"], REPO + "#42")]
     assert effects["released"] == [REPO + "#42"]
     assert effects["finished"][0][2] == "skipped-blocked"
     assert "review routing failed; ticket left blocked" in effects["finished"][0][3]
@@ -3151,7 +3160,7 @@ def test_finish_declined_blocks_same_reason_when_accept_rejects_defer_note(
         comment_effect=lambda *args, **kwargs: effects["comments"].append(
             (args, kwargs)),
         needs_effect=lambda *args: effects["needs"].append(args),
-        human_needs_effect=lambda url, ref: effects["human_needs"].append(
+        declined_needs_effect=lambda url, ref: effects["human_needs"].append(
             (url, ref)),
         defer_note_close_effect=lambda *args, **kwargs:
             effects["closed"].append((args, kwargs)),
@@ -3226,7 +3235,7 @@ def test_a_forged_decline_reason_leaves_the_recorded_verdict(
         block_effect=lambda *args, **kwargs: None,
         comment_effect=lambda *args, **kwargs: comments.append(args[2]),
         needs_effect=lambda *args: None,
-        human_needs_effect=lambda *args: None,
+        declined_needs_effect=lambda *args: None,
     )
 
     body, = comments
@@ -3306,8 +3315,8 @@ def test_finish_declined_falls_back_to_blocked_for_non_prerequisite_cases(
         comment_effect=lambda *args, **kwargs: effects["comments"].append(
             (args, kwargs)),
         needs_effect=lambda *args: pytest.fail(
-            "a blocked decline without a machine condition must ask Nate"),
-        human_needs_effect=lambda url, ref: effects["human_needs"].append(
+            "an unhandled decline must use the decline writer"),
+        declined_needs_effect=lambda url, ref: effects["human_needs"].append(
             (url, ref)),
         prerequisite_facts_effect=lambda ref: (
             effects["looked_up"].append(ref) or {
@@ -3365,7 +3374,7 @@ def test_finish_declined_routes_no_clearable_condition_shapes_without_blocking(
         comment_effect=lambda *args, **kwargs: effects["comments"].append(
             (args, kwargs)),
         needs_effect=lambda url, ref: effects["agent"].append((url, ref)),
-        human_needs_effect=lambda *args: pytest.fail(
+        declined_needs_effect=lambda *args: pytest.fail(
             "a no-clearable-condition decline must not reach Nate"),
         external_event_needs_effect=lambda url, ref: effects["external"].append(
             (url, ref)),
@@ -3525,9 +3534,9 @@ def test_write_declined_external_event_needs_uses_canonical_field(monkeypatch):
     assert calls == [("project-item-id", "external-event", REPO + "#42")]
 
 
-def test_finish_declined_keeps_a_clearable_human_condition_blocked(
+def test_finish_declined_routes_a_clearable_unblock_through_the_watch(
         tmp_path, monkeypatch):
-    """A real owner decision still gets the existing blocked/Unblock route."""
+    """A declined ticket stays blocked but the watch owns its Unblock gate."""
     _, clone = make_clone(tmp_path)
     monkeypatch.setattr(implement, "fetch_ticket", lambda repo, number: ticket(number))
     reason = (
@@ -3543,15 +3552,15 @@ def test_finish_declined_keeps_a_clearable_human_condition_blocked(
         parent=REPO + "#7",
     )
     effects = {"blocked": [], "comments": [], "released": [], "finished": [],
-               "human": []}
+               "agent": []}
 
     def record_block(*args, **kwargs):
         effects["blocked"].append((args, kwargs))
         blocked_item.labels.append("blocked")
 
-    def record_human_needs(url, ref):
-        effects["human"].append((url, ref))
-        blocked_item.needs = "human"
+    def record_declined_needs(url, ref):
+        effects["agent"].append((url, ref))
+        blocked_item.needs = "agent"
 
     implement.finish_declined(
         reason,
@@ -3564,15 +3573,15 @@ def test_finish_declined_keeps_a_clearable_human_condition_blocked(
         comment_effect=lambda *args, **kwargs: effects["comments"].append(
             (args, kwargs)),
         needs_effect=lambda *args: pytest.fail(
-            "a clearable human condition must not be routed to agents"),
-        human_needs_effect=record_human_needs,
+            "an unhandled decline must use the decline writer"),
+        declined_needs_effect=record_declined_needs,
         external_event_needs_effect=lambda *args: pytest.fail(
             "a direct owner decision is not a pending gate event"),
     )
 
     assert len(effects["blocked"]) == 1
     assert effects["blocked"][0][0][1] == 42
-    assert effects["human"] == [(ticket()["url"], REPO + "#42")]
+    assert effects["agent"] == [(ticket()["url"], REPO + "#42")]
     assert effects["released"] == [REPO + "#42"]
     assert effects["finished"][0][2] == "skipped-blocked"
     assert funnel.gate_question(blocked_item) == "Unblock?"

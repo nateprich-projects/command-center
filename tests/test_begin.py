@@ -898,6 +898,11 @@ def test_begin_reconcile_runs_before_codex_queue_lookup(monkeypatch, capsys):
     )
     monkeypatch.setattr(
         funnel,
+        "reconcile_declined_unblock_needs",
+        lambda *args: events.append("decline-needs") or [],
+    )
+    monkeypatch.setattr(
+        funnel,
         "clear_satisfied_blocks",
         lambda *args, **kwargs: events.append("clear") or [],
     )
@@ -914,7 +919,9 @@ def test_begin_reconcile_runs_before_codex_queue_lookup(monkeypatch, capsys):
 
     assert funnel.cmd_begin([project, ticket], NOW, "codex", "standard", False) == 0
     capsys.readouterr()
-    assert events == ["reconcile", "clear", "awaiting", "next"]
+    assert events == [
+        "reconcile", "decline-needs", "clear", "awaiting", "next"
+    ]
 
 
 def test_begin_reconcile_is_idempotent_when_the_pr_is_no_longer_open(

@@ -807,9 +807,9 @@ class Item:
     risk: Optional[str] = None  # "standard" | "escalated"
     pinned: bool = False
     # The row's Needs single-select. Tickets use it for work ownership;
-    # projects use it for decision routing. ``agent`` owns blocked work;
-    # ``external-event`` suppresses the unblock question only with a parsed
-    # event condition.
+    # projects use it for decision routing. ``agent`` owns work after a block
+    # lifts; ``external-event`` suppresses the unblock question only with a
+    # parsed event condition.
     needs: Optional[str] = None
     status_since: Optional[datetime] = None
     # When the Status field value was last written. ``status_since`` falls
@@ -1033,11 +1033,11 @@ def gate_question(item: Item) -> Optional[str]:
     if item.state != "OPEN":
         return None
     if item.is_blocked:
-        if item.needs == "agent":
-            return None
         # A named condition is knowable work for the system, not a question for
         # Nate. A silent block still needs his attention, but only a project
-        # can be parked; a ticket can only be unblocked.
+        # can be parked; a ticket can only be unblocked. Needs ``agent`` owns
+        # the work after the block lifts; the watch still answers the unblock
+        # question unless the item is waiting on Nate's hands.
         # A valid date condition is also machine-readable. Both future and
         # passed dates stay out of the question queue; the begin path clears a
         # passed condition before selecting work.
@@ -2206,6 +2206,37 @@ def clear_answered_decline_routes(
         item.needs = "none"
         cleared.append({"ref": item.ref, "gate_ref": gate_ref})
     return cleared
+
+
+def reconcile_declined_unblock_needs(
+    items: Sequence[Item],
+) -> List[Dict[str, str]]:
+    """Repair legacy routing on declined Unblocks from their current block.
+
+    The Declined comment identifies lane declines. A still-blocked ticket is
+    routed to the agent lane so the watch owns its unblock question; once the
+    block is gone, its stale Needs value is cleared. Human steps without a
+    Declined record keep their Needs value.
+    """
+    changed: List[Dict[str, str]] = []
+    for item in items:
+        if (
+            item.state != "OPEN"
+            or item.parent is None
+            or item.decline_reason is None
+            or item.needs not in ("human", "agent")
+        ):
+            continue
+        needs = "agent" if item.is_blocked else "none"
+        if item.needs == needs:
+            continue
+        if not item.item_id:
+            raise GitHubError("{} is not in the Project".format(item.ref))
+        previous = item.needs
+        write_project_select(item.item_id, "Needs", needs, item.ref)
+        item.needs = needs
+        changed.append({"ref": item.ref, "from": previous, "to": needs})
+    return changed
 
 
 def _startable_without_repo_readiness(
@@ -11249,7 +11280,7 @@ def _load_begin_items(
                 continue
             if item.state == "OPEN" and (
                 item.is_blocked
-                or item.needs in ("agent", "external-event")
+                or item.needs in ("agent", "external-event", "human")
             ):
                 comment_started = time.perf_counter()
                 try:
@@ -11395,7 +11426,7 @@ def _load_project_items_by_refs(refs: Sequence[str]) -> Dict[str, Item]:
                 continue
             if match.state == "OPEN" and (
                 match.is_blocked
-                or match.needs in ("agent", "external-event")
+                or match.needs in ("agent", "external-event", "human")
             ):
                 _load_block_comment(match)
             found[ref] = match
@@ -11638,7 +11669,7 @@ def load_items(
                     # do not restore a per-item dependency read in this loop.
                     if item.state == "OPEN" and (
                         item.is_blocked
-                        or item.needs in ("agent", "external-event")
+                        or item.needs in ("agent", "external-event", "human")
                     ):
                         comment_started = time.perf_counter()
                         try:
@@ -13619,12 +13650,10 @@ def unclearable_block(item: Item) -> bool:
     """Whether a blocked item has no condition that can lift it and no asker.
 
     ``clear_satisfied_blocks`` lifts a parsed reference, date, or matching
-    event record, and a native edge lifts itself. ``gate_question`` stays
-    silent for Needs ``agent`` and a well-formed event spec. Needs
-    ``external-event`` alone asks the existing unblock question. The funnel
-    watch supports ``claude-code-environment``. A block outside all of those
-    waits forever and is seen by no one: a Codex decline (Needs ``agent``, a
-    ``**Declined:**`` comment) lands here (#1432).
+    event record, and a native edge lifts itself. A well-formed event spec is
+    quiet; otherwise a blocked item asks the watch or Nate's unblock question.
+    The funnel watch supports ``claude-code-environment``. A block outside all
+    of those waits forever and is seen by no one (#1432).
     """
     if item.state != "OPEN" or not item.is_blocked:
         return False
@@ -13879,7 +13908,13 @@ def clear_satisfied_blocks(
                     )
                 )
 
-        if item.needs == "external-event":
+        if (
+            item.needs == "external-event"
+            or (
+                item.decline_reason is not None
+                and item.needs in ("human", "agent")
+            )
+        ):
             if not item.item_id:
                 raise GitHubError("{} is not in the Project".format(item.ref))
             write_project_select(item.item_id, "Needs", "none", item.ref)
@@ -18679,6 +18714,11 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
         out["reconcile_errors"] = reconcile_errors
 
     if begin_uses_ticket_path(agent, tier, caller_role):
+        reconciled_decline_needs = attempt_reconcile(
+            "declined_unblock_needs", reconcile_declined_unblock_needs, items
+        )
+        if reconciled_decline_needs:
+            out["reconciled_decline_needs"] = reconciled_decline_needs
         cleared = clear_satisfied_blocks(
             items, now, run=out.get("run"), agent=agent
         )

@@ -1847,12 +1847,12 @@ def write_declined_external_event_needs(url: str, ref: str) -> None:
     breakdown_engine.write_needs(item_id, "external-event", ref)
 
 
-def write_declined_human_needs(url: str, ref: str) -> None:
-    """Route an unhandled decline to Nate so its block cannot be stranded."""
+def write_declined_agent_needs(url: str, ref: str) -> None:
+    """Route an unhandled lane decline to the watch-owned agent lane."""
     from engine import breakdown as breakdown_engine
 
     item_id = breakdown_engine.add_to_project(url)
-    breakdown_engine.write_needs(item_id, "human", ref)
+    breakdown_engine.write_needs(item_id, "agent", ref)
 
 
 def mark_ticket_blocked(repo: str, number: int, *, blocked_by: Optional[int] = None,
@@ -3051,7 +3051,7 @@ def finish_blocked_on_human(
         = remote_ticket_head,
         route_needs_effect: Callable[[str, str], None] = write_declined_needs,
         human_needs_effect: Callable[[str, str], None]
-        = write_declined_human_needs,
+        = write_human_step_needs,
         extra_note: Optional[str] = None) -> dict:
     """File the human step, block the ticket, release, and finish. No PR.
 
@@ -3194,8 +3194,8 @@ def finish_declined(
         block_effect: Callable[..., None] = mark_ticket_blocked,
         comment_effect: Callable[..., None] = post_agent_comment,
         needs_effect: Callable[[str, str], None] = write_declined_needs,
-        human_needs_effect: Callable[[str, str], None]
-        = write_declined_human_needs,
+        declined_needs_effect: Callable[[str, str], None]
+        = write_declined_agent_needs,
         external_event_needs_effect: Callable[[str, str], None]
         = write_declined_external_event_needs,
         prerequisite_facts_effect: Callable[[str], Optional[Dict[str, object]]]
@@ -3267,9 +3267,9 @@ def finish_declined(
             and not unsatisfiable_acceptance_routed
             and not pending_gate_answer_routed):
         # Unknown declines and failed prerequisite handoffs have no machine-
-        # readable condition that can clear them. Ask Nate instead of leaving
-        # a blocked ticket in the silent Needs=agent lane.
-        human_needs_effect(ticket["url"], ref)
+        # readable condition that can clear them. Keep the ticket blocked and
+        # route its Unblock question through the funnel watch.
+        declined_needs_effect(ticket["url"], ref)
         block_effect(resolved, context["number"], cwd=context["root"])
     # The reason is the model's words: one line with no ``<!--``, so it can
     # never form a runner marker in the owner's comment (#1798).
@@ -3305,7 +3305,7 @@ def finish_declined(
             )
         except (funnel.GitHubError, OSError, subprocess.SubprocessError):
             # An unposted handoff must not leave a false unblocked ticket.
-            human_needs_effect(ticket["url"], ref)
+            declined_needs_effect(ticket["url"], ref)
             block_effect(resolved, context["number"], cwd=context["root"])
             routing_failed = True
     elif unsatisfiable_acceptance_routed or pending_gate_answer_routed:
@@ -3332,8 +3332,8 @@ def finish_declined(
         except (funnel.GitHubError, ImplementError, OSError,
                 subprocess.SubprocessError):
             # The route comment is the durable queue hold. If it cannot be
-            # recorded, put the ticket back in Nate's visible queue.
-            human_needs_effect(ticket["url"], ref)
+            # recorded, keep the ticket blocked for the watch to resolve.
+            declined_needs_effect(ticket["url"], ref)
             block_effect(resolved, context["number"], cwd=context["root"])
             routing_failed = True
     release_effect(ref)

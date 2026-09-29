@@ -4754,7 +4754,8 @@ def worktree_calls(monkeypatch):
     return calls
 
 
-def _merged_finish(clone, monkeypatch, repo=PUBLIC_REPO):
+def _merged_finish(clone, monkeypatch, repo=PUBLIC_REPO, *,
+                   catch_unexpected=False):
     """Run finish_done on the repository's own test plan; return its effects.
 
     ``raised`` is the finish's error, or None when it opened its PR.
@@ -4779,6 +4780,10 @@ def _merged_finish(clone, monkeypatch, repo=PUBLIC_REPO):
                 effects["comments"].append(args),
         )
     except implement.ImplementError as exc:
+        effects["raised"] = exc
+    except Exception as exc:
+        if not catch_unexpected:
+            raise
         effects["raised"] = exc
     return effects
 
@@ -5289,6 +5294,61 @@ def test_a_reproduction_that_fails_is_recorded_and_the_pr_opens(
         "<!-- /command-center-evidence -->\n"
     ).format(remote_tip(remote), main_sha[:12])
     assert "worktree add failed" not in body
+
+
+def test_a_non_utf8_changed_python_file_finishes_with_reproduction_not_run(
+        tmp_path, monkeypatch):
+    _, clone, main_sha = make_evidence_clone(tmp_path, monkeypatch)
+    (clone / "calc.py").write_bytes(
+        b"# coding: latin-1\n" + FIXED_CALC.encode("ascii")
+        + b"\n# caf\xe9\n")
+
+    effects = _merged_finish(
+        clone, monkeypatch, catch_unexpected=True)
+
+    assert effects["raised"] is None
+    assert effects["released"] == [PUBLIC_REPO + "#42"]
+    assert effects["finished"][0][2] == "done"
+    (body,) = effects["prs"]
+    assert "- reproduction: not run\n" in evidence_block(body)
+    assert "- merged suite: pass on origin/main {}\n".format(
+        main_sha[:12]) in evidence_block(body)
+
+
+def test_a_rev_parse_timeout_finishes_with_reproduction_not_run(
+        tmp_path, monkeypatch):
+    _, clone, main_sha = make_evidence_clone(tmp_path, monkeypatch)
+    real_load = implement._review_evidence
+    loads = 0
+
+    def load():
+        nonlocal loads
+        module = real_load()
+        loads += 1
+        if loads == 2:
+            real_git = module._git
+
+            def timeout_on_rev_parse(cwd, *args, **kwargs):
+                if "rev-parse" in args:
+                    raise implement.CommandTimeoutError(
+                        ["git", *args], timeout=1)
+                return real_git(cwd, *args, **kwargs)
+
+            module._git = timeout_on_rev_parse
+        return module
+
+    monkeypatch.setattr(implement, "_review_evidence", load)
+
+    effects = _merged_finish(
+        clone, monkeypatch, catch_unexpected=True)
+
+    assert effects["raised"] is None
+    assert effects["released"] == [PUBLIC_REPO + "#42"]
+    assert effects["finished"][0][2] == "done"
+    (body,) = effects["prs"]
+    assert "- reproduction: not run\n" in evidence_block(body)
+    assert "- merged suite: pass on origin/main {}\n".format(
+        main_sha[:12]) in evidence_block(body)
 
 def test_render_pr_body_strips_forged_markers_from_the_model_text():
     forged = {

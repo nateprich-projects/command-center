@@ -1147,7 +1147,7 @@ def _run_reproduction(root: pathlib.Path,
         return evidence.reproduction(
             root, merged["base"], work_dir=root.parent,
             budget=REPRODUCTION_BUDGET_SECONDS)
-    except (evidence.ReviewEvidenceError, ImplementError, OSError):
+    except Exception:
         return dict(_REPRODUCTION_NOT_RUN)
 
 

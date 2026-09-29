@@ -1118,7 +1118,7 @@ def derive_row(
         cost.get("reason") if isinstance(cost, Mapping) else None
     ) or signal_gap or "outcomes cost join is unavailable"
     if isinstance(cost, Mapping) and cost.get("status") == "partial":
-        cost_gap = "outcomes cost join is partial; some merged tickets lack priced usage"
+        cost_gap = "outcomes cost join is partial; some merged tickets or runs lack priced usage"
     metrics["D"]["D4"] = _fact(
         cost_lanes if cost_lanes else None,
         "brief.outcome_signals.signals.cost_per_merged_pr.by_lane",

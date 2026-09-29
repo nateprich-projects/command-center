@@ -3838,8 +3838,12 @@ def _held_plan(number, body, *, risk="escalated", needs="human",
     if record is not None:
         body = "{}\n\n{}\n".format(
             body.rstrip("\n"), funnel.shape_risk_block(*record))
-    plan.body = body + "\n" + funnel.origin_block(
-        "agent", at=NOW, run="shape-run", agent="muse")
+    plan.body = "{}\n\n{}\n\n{}".format(
+        body.rstrip("\n"),
+        funnel.provenance_block(
+            "agent", at=NOW, run="shape-run", agent="muse"),
+        funnel.origin_block("agent", at=NOW, run="shape-run", agent="muse"),
+    )
     plan.risk = risk
     plan.needs = needs
     return plan

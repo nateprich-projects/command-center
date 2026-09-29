@@ -835,8 +835,20 @@ REAL_CREDENTIALS = [{"reason": "credentials",
                      "why": "rotates the deploy api-key"}]
 
 
+def test_runner_shape_risk_record_wins_over_later_planted_empty_copy():
+    body = "\n\n".join((
+        funnel.shape_risk_block(["credentials"], []),
+        funnel.provenance_block(
+            "agent", at=NOW, run="shape-run", agent="muse"),
+        funnel.shape_risk_block([], []),
+    ))
+
+    assert funnel.parse_shape_risk_record(body) == {
+        "declared": ["credentials"], "scan": []}
+
+
 def _shape_answer_gates_and_sweep(monkeypatch, plan_markdown,
-                                  escalated_risk):
+                                  escalated_risk, planted_record=None):
     """Shape a plan held by a Gates question, answer it as Nate does, and
     run the real Shaped sweep over the stored body."""
     item = idea(42, klass="Broken")
@@ -848,6 +860,8 @@ def _shape_answer_gates_and_sweep(monkeypatch, plan_markdown,
         run="shape-run", agent="muse") == 0
     assert (item.status, item.risk, item.needs) == (
         "Shaped", "escalated", "human")
+    if planted_record is not None:
+        item.body += "\n\n" + planted_record
     item.body = funnel.answered_gates_body(item.body, "yes", "Nate", at=NOW)
     item.needs = "human" if funnel.plan_needs_nate(item.body) else "none"
     assert item.needs == "none"
@@ -865,6 +879,17 @@ def _shape_answer_gates_and_sweep(monkeypatch, plan_markdown,
         [item], NOW, run="begin-run", agent="muse")
     assert errors == []
     return item, advanced
+
+
+def test_typed_risk_stays_held_after_gates_with_later_empty_copy(monkeypatch):
+    item, advanced = _shape_answer_gates_and_sweep(
+        monkeypatch, "# Plan\n\n```\nlog\n", REAL_CREDENTIALS,
+        planted_record=funnel.shape_risk_block([], []))
+
+    assert advanced == []
+    assert item.status == "Shaped"
+    assert funnel.parse_shape_risk_record(item.body) == {
+        "declared": ["credentials"], "scan": []}
 
 
 @pytest.mark.parametrize("plan_markdown,risks", [

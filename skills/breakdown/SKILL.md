@@ -108,7 +108,12 @@ Keep capability separate from sizing: small can still be out of reach. Use
 the [capability boundary](../../AGENTS.md#capability-boundary) as the
 closed-world test. Difficulty or unfamiliarity never routes work away from
 agents. **One human action per human-step ticket**: split mixed tickets so
-agent work is not blocked inside a human wait.
+agent work is not blocked inside a human wait. The same holds for a
+hand-written bundle of Nate's steps, such as a checklist in one issue: it never
+mixes steps a Claude Code session on the Mac mini can take with steps only Nate
+can. File the session steps with Needs `claude-code-environment` and give Nate
+only what the boundary leaves him. "Physical access" means hands on hardware,
+not "runs on the Mac mini".
 
 ## When the plan will not decompose
 

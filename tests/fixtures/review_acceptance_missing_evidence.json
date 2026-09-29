@@ -1,0 +1,10 @@
+{
+  "rejected_requirement": "Acceptance artifact: a **Run evidence:** comment with the before timing from the lane logs must exist.",
+  "packet": {
+    "ticket": {
+      "ref": "owner/repo#6",
+      "number": 6,
+      "body": "Acceptance: a **Run evidence:** comment on this ticket with the before timing from the lane logs must exist.\n\nParent plan: owner/repo#1."
+    }
+  }
+}

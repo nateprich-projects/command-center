@@ -2110,6 +2110,16 @@ deferred until the named `reviewed_ticket` is complete. Do not emit a live-evide
 probe requirement for that premise. An inferred entry without `deferred_answer`
 keeps the normal probe requirement; leave it `unsure` when a required record is unavailable.
 
+For a ticket acceptance line in `ticket.deferred_acceptance` (or the matching
+entry in `tickets`) that has `deferred_answer`, include a deferral requirement
+preserving the exact `deferred_clause` and saying it is deferred until that
+ticket deploys. Keep the exact `checkable_line` as an ordinary acceptance
+artifact requirement; do not drop its before-deploy evidence because another
+clause is deferred. Keep any other checkable obligations from the same
+acceptance context, such as a same-ticket verification, as ordinary
+requirements. Never defer the whole acceptance line. A checkable acceptance
+line without a verified `deferred_answer` remains an ordinary requirement.
+
 For a `measured` or `documented` entry with verified `label_error`, include a
 requirement to reject it explicitly as a labeling error and preserve its exact
 evidence pointer. Do not defer that entry or leave it `unsure`: the packet has
@@ -2332,6 +2342,17 @@ the entry's `evidence`, and `deferred_answer.reviewed_ticket` matches
 future evidence is not expected yet; mark that deferral requirement met, not
 unsure. An inferred entry without `deferred_answer` still follows the normal
 probe rule in the review question.
+
+For a deferred-ticket-acceptance requirement, inspect the matching ticket's
+`deferred_acceptance` entry and verify that its `line` is the exact acceptance
+line, `deferred_clause` is the exact after-deploy clause,
+`deferred_answer.evidence_pointer` matches that clause, and
+`deferred_answer.reviewed_ticket` matches that ticket's `ref`. If those fields
+match, mark only the deferral requirement met, not unsure. Judge the entry's
+`checkable_line` as an ordinary acceptance requirement against the packet and
+diff, along with any other same-ticket verification requirement from that
+acceptance context. Any acceptance line without a matching deferral remains
+an ordinary requirement and must still be judged against the packet and diff.
 
 For a labeling-error requirement, verify that the matching packet entry is
 labelled `measured` or `documented`, its `label_error.evidence_pointer` exactly

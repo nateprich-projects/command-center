@@ -86,8 +86,13 @@ local checkout, and go back to step 1. Never force-push.
    - success: `{"done":true,"summary":"...","departures":[]}`; for a no-diff
      ticket add the `evidence` list of GitHub URLs its Accept names; optional
      `risks`: where review should look hardest
-   - a required unavailable human action:
-     `{"blocked_on_human":{"reason":"<allowlisted reason>","action":"..."}}`
+   - a required action you cannot take in this run:
+     `{"blocked_on_human":{"reason":"...","action":"..."}}`, where `reason` is
+     `a Claude Code environment` for work an interactive Claude Code session on
+     the Mac mini can do outside the checkout (a deploy, a live config edit, a
+     live run), or one of Nate's own: `an app UI with no API`,
+     `entering a credential`, `an account or billing setting`,
+     `physical access to a machine`
    - an unlanded named prerequisite before any change: `{"declined":"..."}`
 7. From the checkout, run
    `python3 /Users/nateprich/.claude/command-center-run/finish-ticket --agent claude --run <run> --answer-file <path>`.

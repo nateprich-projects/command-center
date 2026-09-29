@@ -1,22 +1,21 @@
 # Codex routine — one ticket per run
 
-Paste this into a **Codex Scheduled** task; its tier and schedule stay outside
-the prompt.
+Paste this into a **Codex Scheduled** task; tier and schedule live outside
+it.
 
 Configure the sandbox with write access only to Codex’s per-session directory
 and `~/.claude/command-center-heartbeat`. Give
 `/Users/nateprich/.claude/command-center-run` read-and-execute access only,
-except that its `codex-runs/` subtree is writable. The runtime root’s resolved
-target may go in sandbox configuration, nowhere else.
+except that its `codex-runs/` subtree is writable. Only sandbox
+configuration may name the runtime root’s resolved target.
 
-Never invoke the Codex CLI headlessly. The in-app schedule is the authorised
-surface.
+Never invoke the Codex CLI headlessly.
 
 ---
 
 Run `python3 /Users/nateprich/.claude/command-center-run/funnel.py begin --agent codex --tier standard` exactly once and follow the JSON it prints.
 `begin` can take several minutes. If the exec tool yields a timeout or partial
-output mid-run, keep reading that same exec session until the process exits.
+output, keep reading that same exec session until the process exits.
 Never treat that yield as a failure, and never invoke `begin` again.
 
 Work one ticket, then stop. When `do` is `stop`, finish the printed `run` with
@@ -26,8 +25,7 @@ the gate’s outcome (`over` is `skipped-over-pace`, `unknown` is
 
 When `do` is `ticket`, the ticket is already claimed. Treat `packet` as the
 implementation evidence: read its ticket, parent plan, current-head verdict,
-blocking list, and prior-run digest. Treat `vendor` as binding for sandbox scope
-and Command Center path spelling.
+blocking list, and prior-run digest. Treat `vendor` as binding.
 
 Clone `packet.repo` into a new owner-only (`0700`) directory under the runtime
 root’s `codex-runs/` subtree, named `ticket-<number>-<YYYYMMDDTHHMMSSffffffZ>`
@@ -39,7 +37,7 @@ checkout. `finish-ticket` removes it; if a push fails, it leaves the directory
 for diagnosis.
 
 Implement only what the ticket and plan require. Do not change project `Status`
-or `Class`, do not merge, and do not repair unrelated defects.
+or `Class`, merge, or repair unrelated defects.
 
 - Test at the ticket's named seams (else the public interface), one behaviour each.
 - A `Reproduction:` first Accept item: write that test first and see it fail.
@@ -48,19 +46,22 @@ or `Class`, do not merge, and do not repair unrelated defects.
 - Run the affected test files while working; `finish-ticket` runs the full suite.
 
 Return exactly one structured answer. A no-diff success adds the non-empty
-`evidence` list of GitHub URLs its Accept names (comment, rename event, closed PR
-or posted measurement), each verified against this run's heartbeat start.
+`evidence` list of GitHub URLs its Accept names, each verified against this
+run's heartbeat start.
 
 - success: `{"done":true,"summary":"...","departures":[]}`; optional `risks`:
   where review should look hardest
-- a required unavailable human action:
-  `{"blocked_on_human":{"reason":"<allowlisted reason>","action":"..."}}`
+- an action you cannot take:
+  `{"blocked_on_human":{"reason":"...","action":"..."}}`, `reason` one of
+  `a Claude Code environment` (Mac work a Claude session can do), or Nate's
+  `an app UI with no API`, `entering a credential`,
+  `an account or billing setting`, `physical access to a machine`
 - an unlanded named prerequisite before any change: `{"declined":"..."}`
 
-Write that answer to a file in the Codex session directory, outside the ticket
+Write it to a file in the Codex session directory, outside the ticket
 checkout. From the ticket checkout, run
 `python3 /Users/nateprich/.claude/command-center-run/funnel.py finish-ticket --run <run> --answer-file <path>`.
 The runner validates the answer, tests the checkout, commits and pushes, opens
 the PR or records the blocked/declined path, releases the claim, and finishes
-the heartbeat. Report any failure honestly and stop; do not simulate an effect
+the heartbeat. Report any failure honestly and stop; never simulate an effect
 the runner did not complete.

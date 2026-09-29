@@ -2276,6 +2276,21 @@ def test_the_breakdown_prompt_is_judgement_text_under_500_words():
                 protocol))
 
 
+def test_the_breakdown_prompt_keeps_nates_needs_list_open_and_whole():
+    """The prompt is the only capability boundary Muse sees at breakdown, so
+    Nate's list must read as examples, not a closed list, and must keep the
+    cases a session cannot do: new apps or tunnels, an app UI with no API,
+    and root code from any user-writable path (#1903 review)."""
+    prompt = ROUTINE_BREAKDOWN.read_text().split("\n---\n", 1)[1]
+    normalized = " ".join(prompt.split())
+    assert "`human` for Nate's acts, such as:" in normalized
+    assert "`human` only" not in normalized
+    for phrase in ("a new account, app or tunnel", "an app UI with no API",
+                   "root code from a user-writable path",
+                   "a GUI consent prompt", "hands on hardware"):
+        assert phrase in normalized, phrase
+
+
 def test_the_breakdown_prompt_asks_for_seams_a_reproduction_and_sequencing(
         tmp_path):
     """The prompt Muse is sent carries the ticket shape the implementer
@@ -3702,6 +3717,11 @@ def test_the_lister_asks_for_requirements_before_the_judge_is_asked(tmp_path):
     assert "PACKET_JSON" not in lister
     assert "has `deferred_answer`" in lister
     assert "Do not emit a live-evidence" in lister
+    assert "ticket.deferred_acceptance" in lister
+    assert "exact `deferred_clause`" in lister
+    assert "exact `checkable_line` as an ordinary acceptance" in lister
+    assert "such as a same-ticket verification" in lister
+    assert "Never defer the whole acceptance line" in lister
     assert "verified `label_error`" in lister
     assert "reject it explicitly as a" in lister
     assert "Do not defer that entry" in lister
@@ -3734,6 +3754,12 @@ def test_the_lister_asks_for_requirements_before_the_judge_is_asked(tmp_path):
     assert "Install nothing; leave the keeper unchanged" in judge
     assert "deferred-premise requirement" in judge
     assert "mark that deferral requirement met, not" in judge
+    assert "deferred-ticket-acceptance requirement" in judge
+    assert "`deferred_clause` is the exact after-deploy clause" in judge
+    assert "Judge the entry's" in judge
+    assert "`checkable_line` as an ordinary acceptance requirement" in judge
+    assert "same-ticket verification requirement from that" in judge
+    assert "Any acceptance line without a matching deferral" in judge
     assert "For a labeling-error requirement" in judge
     assert "mark the requirement `unmet`" in judge
     assert "never defer it" in judge

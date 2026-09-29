@@ -84,8 +84,13 @@ def test_skill_and_template_offer_to_work_the_top_item_in_session():
     itself rather than handing Nate a launch line to run (#1901)."""
     skill = " ".join(SKILL.read_text(encoding="utf-8").split())
     template = " ".join(funnel_render.render_template().split())
-    offer = ("Offer to work the top item yourself, in this session or as a "
-             "background task, and start once he says yes.")
+    offer = ("Otherwise offer to work the top item yourself, in this session "
+             "or as a background task, and start once he says yes.")
+    needs_first = ("Check the top item's Needs first. If it is in "
+                   "`human_steps` (Needs `human`), it needs his own hands: say "
+                   "what he must do, and do not offer to work it.")
     for text in (skill, template):
+        assert needs_first in text
         assert offer in text
+        assert text.index(needs_first) < text.index(offer)
         assert "Do not run it" not in text

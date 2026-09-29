@@ -1,7 +1,6 @@
-# Muse breakdown prompt: one judgement, no tools
+# Muse breakdown prompt
 
-Read at run time by `scripts/muse-review-engine`, which fills
-`PACKET_JSON`, asks with every tool disabled, and applies the answer.
+Filled and sent by `scripts/muse-review-engine`, tools off.
 
 ---
 
@@ -57,9 +56,10 @@ Reply with exactly one JSON object and nothing else (no prose, no fences):
 - `needs` is `none` for any-agent work; `claude-code-environment`
   for other work a Claude Code session on the Mac mini can do (live
   config, deploys, live runs, logs, `launchctl`, `sudo -n`, Keychain
-  reads, `osascript`); `human` only for Nate's acts: typing a
-  secret, a new account, a sign-in, a GUI consent prompt, billing,
-  root code from his home folder, a decision, hands on hardware. One
+  reads, `osascript`); `human` for Nate's acts, such as:
+  typing a secret, a new account, app or tunnel, a sign-in, a GUI
+  consent prompt, an app UI with no API, billing, root code from a
+  user-writable path, a decision, hands on hardware. One
   human action per ticket: split mixed work, session steps from his.
 - Ask `needs_decision` with no tickets when the plan leaves a
   decision undecided: tickets or the question, never both. Never

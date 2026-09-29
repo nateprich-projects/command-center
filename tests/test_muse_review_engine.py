@@ -2276,6 +2276,21 @@ def test_the_breakdown_prompt_is_judgement_text_under_500_words():
                 protocol))
 
 
+def test_the_breakdown_prompt_keeps_nates_needs_list_open_and_whole():
+    """The prompt is the only capability boundary Muse sees at breakdown, so
+    Nate's list must read as examples, not a closed list, and must keep the
+    cases a session cannot do: new apps or tunnels, an app UI with no API,
+    and root code from any user-writable path (#1903 review)."""
+    prompt = ROUTINE_BREAKDOWN.read_text().split("\n---\n", 1)[1]
+    normalized = " ".join(prompt.split())
+    assert "`human` for Nate's acts, such as:" in normalized
+    assert "`human` only" not in normalized
+    for phrase in ("a new account, app or tunnel", "an app UI with no API",
+                   "root code from a user-writable path",
+                   "a GUI consent prompt", "hands on hardware"):
+        assert phrase in normalized, phrase
+
+
 def test_the_breakdown_prompt_asks_for_seams_a_reproduction_and_sequencing(
         tmp_path):
     """The prompt Muse is sent carries the ticket shape the implementer

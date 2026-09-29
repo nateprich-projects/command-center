@@ -160,9 +160,11 @@ unknown, not healthy. Show `disposal` `finished_vs_abandoned` beside it with
 `done`, `parked`, `net_open_growth`, no targets. Three stale takeovers in a
 week means runs are dying; one is noise.
 
-Offer to work the top item yourself, in this session or as a background
-task, and start once he says yes. Never hand him a terminal `launch` line to
-run.
+Check the top item's Needs first. If it is in `human_steps` (Needs `human`),
+it needs his own hands: say what he must do, and do not offer to work it.
+Otherwise offer to work the top item yourself, in this session or as a
+background task, and start once he says yes. Never hand him a terminal
+`launch` line to run.
 """
 
 

@@ -1880,7 +1880,7 @@ def test_a_judge_parse_retry_alone_logs_two_calls_done(tmp_path):
 
 # -- a large packet gets a second stream-idle retry (#1785) --------------------
 # The must-approve seed's ~240 KB packet lost a judge after its one retry
-# (plan #1772), and every judge and the lister carry the whole packet. A call
+# (plan #1772), and every judge and the lister carried the whole packet. A call
 # whose packet file is over 150 KB is asked up to twice more; a smaller one
 # keeps its one retry. The parse retry stays its own either way.
 
@@ -3691,9 +3691,14 @@ def test_the_lister_asks_for_requirements_before_the_judge_is_asked(tmp_path):
     assert "This call is not the review" in lister
     assert "judge nothing" in lister.lower()
     assert '{"requirements": [' in lister
-    # It still carries the packet, because that is what it enumerates from.
-    assert "print('the thing')" in lister
-    assert '"head_sha": "{}"'.format(HEAD) in lister
+    # It still carries the packet, because that is what it enumerates from,
+    # less the diff the judges check (#1866): a small packet's lister reads
+    # the changed paths and a note where the diff was.
+    assert "print('the thing')" not in lister
+    listed = json.loads(_cached_packet_from_judge_prompt(lister))
+    assert listed["changed_files"] == ["thing.py"]
+    assert listed["diff"].startswith("withheld from this call only")
+    assert listed["head_sha"] == HEAD
     assert "PACKET_JSON" not in lister
     assert "has `deferred_answer`" in lister
     assert "Do not emit a live-evidence" in lister
@@ -3702,6 +3707,10 @@ def test_the_lister_asks_for_requirements_before_the_judge_is_asked(tmp_path):
     assert "Do not defer that entry" in lister
 
     judge = (repo / "muse.prompt.2").read_text()
+    # The lister's list is what the judge is asked, against the whole diff.
+    assert _assigned_requirements(judge) == \
+        ["thing.py prints the thing the ticket asks for"]
+    assert "print('the thing')" in judge
     # The lister framing does not survive; this call judges only its assigned
     # requirements, and the runner derives the verdict after all chunks.
     assert "This call is not the review" not in judge
@@ -4045,8 +4054,8 @@ def test_a_lister_call_past_the_bound_is_killed_like_any_other(tmp_path):
 
 
 # -- a stream-idle lister is asked once more (#1730) ---------------------------
-# The lister is the one call that reads the whole packet, and a single call
-# over the ~240 KB must-approve seed went stream-idle twice running (#1698).
+# The lister read the whole packet until #1866, and a single call over the
+# ~240 KB must-approve seed went stream-idle twice running (#1698).
 # It gets #1719's one retry: the same prompt, unbound, then the run fails.
 
 def test_a_lister_stream_idle_once_is_asked_again_and_reviewed(tmp_path):
@@ -4123,8 +4132,9 @@ def test_a_lister_malformed_then_idle_still_gets_its_idle_retry(tmp_path):
 
 
 # -- a large packet's lister gets a second stream-idle retry (#1785) -----------
-# The lister reads the same whole packet as the judges, so it takes the same
-# count: two retries over 150 KB. The small-packet tests above pin the one.
+# The lister takes the judges' count, measured from the whole packet though
+# its own copy leaves the diff out (#1866): two retries over 150 KB. The
+# small-packet tests above pin the one.
 
 def _lister_prompts(repo, count):
     return [(repo / "muse.prompt.{}".format(call)).read_text()
@@ -4227,6 +4237,211 @@ def test_a_large_packet_lister_idle_count_spans_its_parse_retry(tmp_path):
     assert PARSE_RETRY in (repo / "muse.prompt.3").read_text()
     assert _apply_calls(repo) == []
     assert "--outcome errored" in _heartbeat(repo)
+
+
+# -- the lister reads the packet without the diff (#1866) ----------------------
+# The lister lists what the ticket, its parent plan and the repository's rules
+# ask of the change; the judges check the diff. It was handed the whole
+# packet, diff included, and went stream-idle on all three attempts over the
+# 232 KB must-approve seed (#1698, #1855's timing line). Its copy keeps the
+# changed paths, so a rule scoped to a path is still listed, and the judges'
+# prompts are unchanged.
+
+#: The paths the large diff below changes, sorted as build_packet sorts them.
+LARGE_DIFF_PATHS = ["engine/alpha.py", "scripts/beta-runner",
+                    "tests/test_gamma.py"]
+
+#: On every added line of the large diff, and in no other packet field.
+DIFF_SENTINEL = "DIFF-SENTINEL"
+
+# The assertions below over 200 KB prompts are counts and booleans: pytest
+# explains a failed `in` or `==` between strings with a difflib diff, which
+# over texts this size runs for many minutes before it reports.
+
+
+def _large_diff(size):
+    """A unified diff of at least ``size`` bytes, one section per path in
+    LARGE_DIFF_PATHS, every added line carrying DIFF_SENTINEL."""
+    per_file = size // len(LARGE_DIFF_PATHS) + 1
+    sections = []
+    for path in LARGE_DIFF_PATHS:
+        section = ("diff --git a/{0} b/{0}\n--- a/{0}\n+++ b/{0}\n"
+                   "@@ -0,0 +1,9999 @@\n".format(path))
+        line = 0
+        while len(section) < per_file:
+            line += 1
+            section += "+{} {} line {}\n".format(DIFF_SENTINEL, path, line)
+        sections.append(section)
+    diff = "".join(sections)
+    assert len(diff.encode()) >= size
+    return diff
+
+
+def test_a_200_kb_diff_stays_out_of_the_lister_and_reaches_every_judge(
+        tmp_path):
+    """Reproduction (#1866): the lister's prompt carries none of a 200 KB
+    diff and lists the changed paths; the judges still read it whole."""
+    packet = _packet(diff=_large_diff(200 * 1024),
+                     changed_files=LARGE_DIFF_PATHS)
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), packet,
+        answers=_review_answers(_judge_answer()))
+
+    assert proc.returncode == 0, proc.stderr
+    assert _muse_calls(repo) == 2
+    lister = (repo / "muse.prompt.1").read_text()
+    assert lister.startswith("This call is not the review.")
+    # None of the diff: no added line, and no section header either.
+    assert lister.count(DIFF_SENTINEL) == 0
+    assert lister.count("diff --git") == 0
+    assert lister.count("@@ -0,0") == 0
+    listed = json.loads(_cached_packet_from_judge_prompt(lister))
+    # The changed paths, as names.
+    assert listed["changed_files"] == [
+        "engine/alpha.py", "scripts/beta-runner", "tests/test_gamma.py"]
+    # One line saying the diff is withheld from this call only, where the
+    # routine tells the model the diff is.
+    assert "withheld from this call only" in listed["diff"]
+    assert "\n" not in listed["diff"]
+    # Every other field as the judges get it: the lister still reads the
+    # ticket, the plan and the rules it lists from.
+    assert {key: value for key, value in listed.items() if key != "diff"} \
+        == {key: value for key, value in packet.items() if key != "diff"}
+
+    # The judge's prompt carries the packet file byte for byte, diff and all.
+    judge = (repo / "muse.prompt.2").read_text()
+    assert judge.startswith("This is one judge call in a larger review.")
+    judged = _cached_packet_from_judge_prompt(judge)
+    whole_packet = judged == (repo / "packet.json").read_text()
+    assert whole_packet
+    whole_diff = json.loads(judged)["diff"] == packet["diff"]
+    assert whole_diff
+    assert judge.count("withheld from this call only") == 0
+    assert json.loads((repo / "apply.answer").read_text())["verdict"] == \
+        "approved"
+
+
+def test_the_listers_parse_retry_is_asked_without_the_diff_too(tmp_path):
+    packet = _packet(diff=_large_diff(200 * 1024),
+                     changed_files=LARGE_DIFF_PATHS)
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), packet,
+        answers=("{not json", _requirements_answer(), _judge_answer()))
+
+    assert proc.returncode == 0, proc.stderr
+    assert _muse_calls(repo) == 3
+    retry = (repo / "muse.prompt.2").read_text()
+    assert retry.startswith("This call is not the review.")
+    assert retry.count(PARSE_RETRY) == 1
+    assert retry.count(DIFF_SENTINEL) == 0
+    assert json.loads(_cached_packet_from_judge_prompt(retry))[
+        "changed_files"] == LARGE_DIFF_PATHS
+    assert retry.count("withheld from this call only") == 1
+    assert (repo / "muse.prompt.3").read_text().count(DIFF_SENTINEL) > 0
+
+
+# The seed's diff was 13 KB of its 232 KB (#1866): the bulk was the branch
+# ticket repeated as `tickets[0]` and one parent repeated in every ticket. The
+# lister's copy keeps `ticket` whole, as the routine's "branch ticket", and
+# leaves a one-line pointer where a copy repeats one already in the packet.
+
+def _shaped_ticket(number, parent, body="Do the thing"):
+    """A ticket as build_packet's shape_ticket writes it."""
+    return {"ref": "owner/repo#{}".format(number), "number": number,
+            "title": "Ticket {}".format(number),
+            "url": "https://github.com/owner/repo/issues/{}".format(number),
+            "body": body, "risk": None, "parent": parent,
+            "comments": [{"author": "nateprich", "voice": "agent",
+                          "created_at": "2026-09-28T00:00:00Z",
+                          "body": "ticket {} comment".format(number)}]}
+
+
+def _shaped_parent(number):
+    return {"ref": "owner/repo#{}".format(number), "number": number,
+            "title": "Plan {}".format(number), "state": "OPEN",
+            "comments": [{"author": "nateprich", "voice": "nate-direct",
+                          "created_at": "2026-09-27T00:00:00Z",
+                          "body": "PARENT-{}-SENTINEL".format(number)}]}
+
+
+def _judge_prompt_is_the_routine_over_the_packet_file(repo, judge):
+    """The judge prompt's tail is the routine's prompt with the packet file
+    where PACKET_JSON stands, byte for byte: what the engine sent before
+    #1866. Everything after the routine's first `---` line, trailing
+    newlines dropped, as the engine reads it."""
+    routine = (repo / "routines" / "muse-review.md").read_text()
+    template = routine.split("\n---\n", 1)[1].rstrip("\n")
+    packet_text = (repo / "packet.json").read_text()
+    return judge.endswith(
+        "\n\n" + template.replace("PACKET_JSON", packet_text))
+
+
+def test_the_listers_copy_points_at_a_ticket_or_parent_it_already_carries(
+        tmp_path):
+    first_plan, second_plan = _shaped_parent(1), _shaped_parent(2)
+    branch = _shaped_ticket(6, first_plan)
+    packet = _packet(
+        ticket=branch,
+        tickets=[
+            branch,
+            _shaped_ticket(7, first_plan),
+            _shaped_ticket(8, second_plan),
+            _shaped_ticket(9, second_plan),
+        ])
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), packet,
+        answers=_review_answers(_judge_answer()))
+
+    assert proc.returncode == 0, proc.stderr
+    lister = (repo / "muse.prompt.1").read_text()
+    listed = json.loads(_cached_packet_from_judge_prompt(lister))
+    # The branch ticket in full, where the routine and the header name it.
+    assert listed["ticket"] == branch
+    assert listed["tickets"] == [
+        "same as ticket",
+        dict(_shaped_ticket(7, first_plan),
+             parent="same parent plan as ticket"),
+        _shaped_ticket(8, second_plan),
+        dict(_shaped_ticket(9, second_plan),
+             parent="same parent plan as tickets[2]"),
+    ]
+    # One full copy of each parent, and each ticket's own comments.
+    assert lister.count("PARENT-1-SENTINEL") == 1
+    assert lister.count("PARENT-2-SENTINEL") == 1
+    for number in (6, 7, 8, 9):
+        assert lister.count("ticket {} comment".format(number)) == 1
+
+    # The judges read the packet as it was sent before #1866.
+    judge = (repo / "muse.prompt.2").read_text()
+    assert _judge_prompt_is_the_routine_over_the_packet_file(repo, judge)
+    assert judge.count("PARENT-1-SENTINEL") == 3
+    assert json.loads(_cached_packet_from_judge_prompt(judge))["tickets"] \
+        == packet["tickets"]
+
+
+def test_a_ticket_unlike_every_entry_keeps_both_in_full(tmp_path):
+    # The same ref with another body is another copy, not a repeat: the
+    # comparison is the whole entry, never its name. Every parent differs too.
+    branch = _shaped_ticket(6, _shaped_parent(1))
+    packet = _packet(
+        ticket=branch,
+        tickets=[
+            _shaped_ticket(6, _shaped_parent(3), body="Do the thing, v2"),
+            _shaped_ticket(8, _shaped_parent(2)),
+        ])
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), packet,
+        answers=_review_answers(_judge_answer()))
+
+    assert proc.returncode == 0, proc.stderr
+    listed = json.loads(_cached_packet_from_judge_prompt(
+        (repo / "muse.prompt.1").read_text()))
+    # Nothing repeats, so the copy is the packet less its diff.
+    assert listed["diff"].startswith("withheld from this call only")
+    assert {key: value for key, value in listed.items() if key != "diff"} \
+        == {key: value for key, value in packet.items() if key != "diff"}
+    judge = (repo / "muse.prompt.2").read_text()
+    assert _judge_prompt_is_the_routine_over_the_packet_file(repo, judge)
 
 
 # -- the z.ai standard tier (Nate, 2026-09-23) ---------------------------------
@@ -4706,11 +4921,14 @@ def test_a_replay_runs_the_lister_and_judges_on_its_packet(tmp_path):
     judge = (repo / "muse.prompt.2").read_text()
     assert lister.startswith("This call is not the review.")
     assert judge.startswith("This is one judge call in a larger review.")
-    # Both ask with the given routine and carry the given packet.
+    # Both ask with the given routine and carry the given packet, the
+    # lister's without its diff, as on a lane (#1866).
     for prompt in (lister, judge):
         assert REPLAY_ROUTINE_MARK in prompt
-        assert "print('the thing')" in prompt
+        assert '"thing.py"' in prompt
         assert "PACKET_JSON" not in prompt
+    assert "print('the thing')" not in lister
+    assert "print('the thing')" in judge
     assert _assigned_requirements(judge) == \
         ["thing.py prints the thing the ticket asks for"]
     # Max, no tools, and no session id: a replay binds nothing to a

@@ -4302,6 +4302,110 @@ def test_the_listers_parse_retry_is_asked_without_the_diff_too(tmp_path):
     assert (repo / "muse.prompt.3").read_text().count(DIFF_SENTINEL) > 0
 
 
+# The seed's diff was 13 KB of its 232 KB (#1866): the bulk was the branch
+# ticket repeated as `tickets[0]` and one parent repeated in every ticket. The
+# lister's copy keeps `ticket` whole, as the routine's "branch ticket", and
+# leaves a one-line pointer where a copy repeats one already in the packet.
+
+def _shaped_ticket(number, parent, body="Do the thing"):
+    """A ticket as build_packet's shape_ticket writes it."""
+    return {"ref": "owner/repo#{}".format(number), "number": number,
+            "title": "Ticket {}".format(number),
+            "url": "https://github.com/owner/repo/issues/{}".format(number),
+            "body": body, "risk": None, "parent": parent,
+            "comments": [{"author": "nateprich", "voice": "agent",
+                          "created_at": "2026-09-28T00:00:00Z",
+                          "body": "ticket {} comment".format(number)}]}
+
+
+def _shaped_parent(number):
+    return {"ref": "owner/repo#{}".format(number), "number": number,
+            "title": "Plan {}".format(number), "state": "OPEN",
+            "comments": [{"author": "nateprich", "voice": "nate-direct",
+                          "created_at": "2026-09-27T00:00:00Z",
+                          "body": "PARENT-{}-SENTINEL".format(number)}]}
+
+
+def _judge_prompt_is_the_routine_over_the_packet_file(repo, judge):
+    """The judge prompt's tail is the routine's prompt with the packet file
+    where PACKET_JSON stands, byte for byte: what the engine sent before
+    #1866. Everything after the routine's first `---` line, trailing
+    newlines dropped, as the engine reads it."""
+    routine = (repo / "routines" / "muse-review.md").read_text()
+    template = routine.split("\n---\n", 1)[1].rstrip("\n")
+    packet_text = (repo / "packet.json").read_text()
+    return judge.endswith(
+        "\n\n" + template.replace("PACKET_JSON", packet_text))
+
+
+def test_the_listers_copy_points_at_a_ticket_or_parent_it_already_carries(
+        tmp_path):
+    first_plan, second_plan = _shaped_parent(1), _shaped_parent(2)
+    branch = _shaped_ticket(6, first_plan)
+    packet = _packet(
+        ticket=branch,
+        tickets=[
+            branch,
+            _shaped_ticket(7, first_plan),
+            _shaped_ticket(8, second_plan),
+            _shaped_ticket(9, second_plan),
+        ])
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), packet,
+        answers=_review_answers(_judge_answer()))
+
+    assert proc.returncode == 0, proc.stderr
+    lister = (repo / "muse.prompt.1").read_text()
+    listed = json.loads(_cached_packet_from_judge_prompt(lister))
+    # The branch ticket in full, where the routine and the header name it.
+    assert listed["ticket"] == branch
+    assert listed["tickets"] == [
+        "same as ticket",
+        dict(_shaped_ticket(7, first_plan),
+             parent="same parent plan as ticket"),
+        _shaped_ticket(8, second_plan),
+        dict(_shaped_ticket(9, second_plan),
+             parent="same parent plan as tickets[2]"),
+    ]
+    # One full copy of each parent, and each ticket's own comments.
+    assert lister.count("PARENT-1-SENTINEL") == 1
+    assert lister.count("PARENT-2-SENTINEL") == 1
+    for number in (6, 7, 8, 9):
+        assert lister.count("ticket {} comment".format(number)) == 1
+
+    # The judges read the packet as it was sent before #1866.
+    judge = (repo / "muse.prompt.2").read_text()
+    assert _judge_prompt_is_the_routine_over_the_packet_file(repo, judge)
+    assert judge.count("PARENT-1-SENTINEL") == 3
+    assert json.loads(_cached_packet_from_judge_prompt(judge))["tickets"] \
+        == packet["tickets"]
+
+
+def test_a_ticket_unlike_every_entry_keeps_both_in_full(tmp_path):
+    # The same ref with another body is another copy, not a repeat: the
+    # comparison is the whole entry, never its name. Every parent differs too.
+    branch = _shaped_ticket(6, _shaped_parent(1))
+    packet = _packet(
+        ticket=branch,
+        tickets=[
+            _shaped_ticket(6, _shaped_parent(3), body="Do the thing, v2"),
+            _shaped_ticket(8, _shaped_parent(2)),
+        ])
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), packet,
+        answers=_review_answers(_judge_answer()))
+
+    assert proc.returncode == 0, proc.stderr
+    listed = json.loads(_cached_packet_from_judge_prompt(
+        (repo / "muse.prompt.1").read_text()))
+    # Nothing repeats, so the copy is the packet less its diff.
+    assert listed["diff"].startswith("withheld from this call only")
+    assert {key: value for key, value in listed.items() if key != "diff"} \
+        == {key: value for key, value in packet.items() if key != "diff"}
+    judge = (repo / "muse.prompt.2").read_text()
+    assert _judge_prompt_is_the_routine_over_the_packet_file(repo, judge)
+
+
 # -- the z.ai standard tier (Nate, 2026-09-23) ---------------------------------
 #
 # Before heartbeat.ZAI_STANDARD_UNTIL (2026-09-27 06:00 PDT since #1694;

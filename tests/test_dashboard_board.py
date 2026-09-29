@@ -832,6 +832,31 @@ def test_a_paused_ticket_waits_until_the_available_work_has_had_its_turn():
     ] == [21, 11]
 
 
+def test_the_board_gives_bugs_the_turns_begin_gives_them():
+    """#1878: the projection runs ``next_ticket`` forward, Bug share and
+    all, from the start history the board is given. The tooling Bug in
+    review takes its turn without counting as a new start, so the
+    history's Bug holds the hobby Bug for three Improve starts, and no
+    more. ``startable()`` alone would put the hobby Bug last."""
+    tooling = "nateprich-projects/command-center"
+    running = project(repo=tooling, number=1, title="in review",
+                      klass="Bug", children_total=1)
+    items = [running, ticket(2, repo=tooling, parent=running.ref)]
+    for number, klass in ((3, "Improve"), (5, "Improve"), (7, "Improve"),
+                          (9, "Bug"), (11, "Improve")):
+        waiting = project(number=number, title="{} {}".format(klass, number),
+                          status="Ready", klass=klass, children_total=1)
+        items += [waiting, ticket(number + 1, parent=waiting.ref)]
+    facts = {tooling + "#2": {"state": "OPEN", "number": 70,
+                              "headRefOid": "a", "verdict": None}}
+
+    board = funnel.dashboard_board(items, NOW, pr_facts=facts,
+                                   recent_starts=["Bug"])
+    ready = next(c for c in board["columns"] if c["stage"] == "Ready")
+    assert _titles(ready["items"]) == [
+        "Improve 3", "Improve 5", "Improve 7", "Bug 9", "Improve 11"]
+
+
 def test_paused_and_finished_tickets_name_their_hold_not_a_false_owner():
     until = datetime(2026, 9, 26, 8, 9, 44, tzinfo=timezone.utc)
     a = project(number=2, title="paused", klass="Broken", children_total=1)

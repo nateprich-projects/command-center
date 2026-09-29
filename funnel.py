@@ -807,9 +807,9 @@ class Item:
     risk: Optional[str] = None  # "standard" | "escalated"
     pinned: bool = False
     # The row's Needs single-select. Tickets use it for work ownership;
-    # projects use it for decision routing. ``agent`` owns blocked work;
-    # ``external-event`` suppresses the unblock question only with a parsed
-    # event condition.
+    # projects use it for decision routing. ``agent`` owns work after a block
+    # lifts; ``external-event`` suppresses the unblock question only with a
+    # parsed event condition.
     needs: Optional[str] = None
     status_since: Optional[datetime] = None
     # When the Status field value was last written. ``status_since`` falls
@@ -1033,11 +1033,15 @@ def gate_question(item: Item) -> Optional[str]:
     if item.state != "OPEN":
         return None
     if item.is_blocked:
-        if item.needs == "agent":
+        # A lane decline still needs an Unblock gate even after its routing
+        # field changes to ``agent``. Ordinary agent-owned blocks stay quiet.
+        if item.needs == "agent" and item.decline_reason is None:
             return None
-        # A named condition is knowable work for the system, not a question for
-        # Nate. A silent block still needs his attention, but only a project
-        # can be parked; a ticket can only be unblocked.
+        # A named condition is knowable work for the system, not an unblock
+        # question. A silent block still needs an Unblock question; only a
+        # project can also be parked. Needs ``agent`` owns the work after the
+        # block lifts, and the watch answers a decline unless the item is
+        # waiting on Nate's hands.
         # A valid date condition is also machine-readable. Both future and
         # passed dates stay out of the question queue; the begin path clears a
         # passed condition before selecting work.
@@ -1199,12 +1203,13 @@ def watch_owns_gate(
     line. A plan body that was not loaded, or a Needs Nate section that
     cannot be read, stays with Nate.
 
-    This routes the brief and queue only. ``gate_question`` is unchanged, so
-    lanes, the Shaped sweep, ``begin`` and the stranded report read exactly
-    what they read before.
+    This partitions the shared gate question for the brief and queue. A
+    Declined marker distinguishes a legacy lane decline that still carries
+    Needs ``human`` from a hands-on step; new declines use Needs ``agent``.
+    Other readers use the same question predicate.
     """
     if question in WATCH_UNBLOCK_QUESTIONS:
-        return item.needs != "human"
+        return item.needs != "human" or item.decline_reason is not None
     if question != GATES["Shaped"]:
         return False
     if item.origin != "agent":
@@ -13619,12 +13624,10 @@ def unclearable_block(item: Item) -> bool:
     """Whether a blocked item has no condition that can lift it and no asker.
 
     ``clear_satisfied_blocks`` lifts a parsed reference, date, or matching
-    event record, and a native edge lifts itself. ``gate_question`` stays
-    silent for Needs ``agent`` and a well-formed event spec. Needs
-    ``external-event`` alone asks the existing unblock question. The funnel
-    watch supports ``claude-code-environment``. A block outside all of those
-    waits forever and is seen by no one: a Codex decline (Needs ``agent``, a
-    ``**Declined:**`` comment) lands here (#1432).
+    event record, and a native edge lifts itself. A lane decline with Needs
+    ``agent`` still gets an Unblock question for the watch; an ordinary
+    agent-owned block without that decline marker remains stranded. The
+    funnel watch also supports ``claude-code-environment`` blocks.
     """
     if item.state != "OPEN" or not item.is_blocked:
         return False

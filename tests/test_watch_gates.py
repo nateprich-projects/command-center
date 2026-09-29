@@ -5,7 +5,8 @@ park?``) except one waiting on his hands, and ``Is the plan good?`` on an
 agent-origin Broken or Bug plan except one still holding an Exposure or
 Preference question, are the funnel watch's to answer. They leave the brief's
 ``items`` and ``total_needing_nate`` and appear under ``watch_gates``;
-``gate_question`` itself does not change.
+``gate_question`` stays shared with other readers, with lane declines surfaced
+even when their Needs field is ``agent``.
 """
 
 from __future__ import annotations
@@ -136,6 +137,54 @@ def test_a_blocked_human_step_stays_with_nate(capsys):
     assert brief["watch_gates"] == []
 
 
+def test_a_declined_unblock_is_watch_owned_but_human_step_stays(capsys):
+    project = building_project()
+    # These mirror #1902 and #1653: blocked, Needs=human, Declined marker.
+    declined_1902 = silent_blocked_ticket(number=1902, needs="human")
+    declined_1902.decline_reason = "the prerequisite has not landed"
+    declined_1653 = silent_blocked_ticket(number=1653, needs="human")
+    declined_1653.decline_reason = "the prerequisite has not landed"
+    # #1926 is the live Human-step control; a synthetic shape is sufficient.
+    human_step = silent_blocked_ticket(number=1926, needs="human")
+
+    brief = brief_for(
+        [project, declined_1902, declined_1653, human_step], capsys
+    )
+
+    assert brief["total_needing_nate"] == 1
+    assert {row["ref"] for row in brief["watch_gates"]} == {
+        declined_1902.ref,
+        declined_1653.ref,
+    }
+    assert [row["ref"] for row in brief["items"]] == [human_step.ref]
+
+
+def test_watch_ownership_keeps_human_steps_with_nate():
+    project = building_project()
+    declined_1902 = silent_blocked_ticket(number=1902, needs="human")
+    declined_1902.decline_reason = "the prerequisite has not landed"
+    declined_1653 = silent_blocked_ticket(number=1653, needs="human")
+    declined_1653.decline_reason = "the prerequisite has not landed"
+    human_step = silent_blocked_ticket(number=1926, needs="human")
+
+    assert funnel.gate_question(declined_1902) == "Unblock?"
+    assert routed(declined_1902, project)
+    assert funnel.gate_question(declined_1653) == "Unblock?"
+    assert routed(declined_1653, project)
+    assert not routed(human_step, project)
+
+
+def test_agent_owned_blocks_only_surface_when_declined():
+    declined = silent_blocked_ticket(number=1902, needs="agent")
+    declined.decline_reason = "the prerequisite has not landed"
+    ordinary = silent_blocked_ticket(number=1903, needs="agent")
+
+    assert funnel.gate_question(declined) == "Unblock?"
+    assert routed(declined)
+    assert funnel.gate_question(ordinary) is None
+    assert not routed(ordinary)
+
+
 def test_an_already_unblocked_item_with_cleared_needs_leaves_the_brief(
     capsys,
 ):
@@ -148,6 +197,7 @@ def test_an_already_unblocked_item_with_cleared_needs_leaves_the_brief(
     assert brief["total_needing_nate"] == 0
     assert brief["items"] == []
     assert brief["watch_gates"] == []
+
 
 
 def test_agent_broken_plan_with_only_a_scope_question_leaves(capsys):
@@ -301,3 +351,31 @@ def test_queue_lists_watch_owned_items_apart_from_nates(monkeypatch, capsys):
     assert nate_plan.ref in nate_section
     assert plan.ref not in nate_section
     assert plan.ref in rest.split("Startable by", 1)[0]
+
+
+def test_queue_keeps_declined_unblock_outside_waiting_on_nate(
+    monkeypatch, capsys,
+):
+    monkeypatch.setattr(funnel, "awaiting_review", lambda items, **kw: [])
+    monkeypatch.setattr(funnel, "_backoff_rows", lambda: [])
+    project = building_project()
+    declined_1902 = silent_blocked_ticket(number=1902, needs="human")
+    declined_1902.decline_reason = "the prerequisite has not landed"
+    declined_1653 = silent_blocked_ticket(number=1653, needs="human")
+    declined_1653.decline_reason = "the prerequisite has not landed"
+    human_step = silent_blocked_ticket(number=1926, needs="human")
+
+    funnel.cmd_queue([project, declined_1902, declined_1653, human_step], NOW)
+    out = capsys.readouterr().out
+
+    nate_section, watch_and_rest = out.split(
+        "Answered by the funnel watch, not Nate", 1
+    )
+    watch_section = watch_and_rest.split("Startable", 1)[0]
+    assert "Waiting on Nate (1)" in nate_section
+    assert human_step.ref in nate_section
+    assert declined_1902.ref not in nate_section
+    assert declined_1653.ref not in nate_section
+    assert declined_1902.ref in watch_section
+    assert declined_1653.ref in watch_section
+    assert human_step.ref not in watch_section

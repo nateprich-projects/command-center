@@ -427,3 +427,79 @@ def test_metrics_derivation_runs_hourly_on_the_clock():
     assert args[2:] == ["derive"]
     assert plist["StartCalendarInterval"] == {"Minute": 22}
     assert "StartInterval" not in plist
+
+
+#: Every launchd job runs `/usr/bin/python3`, `/usr/bin/git` or a script that
+#: does. Those are xcrun shims: with no DEVELOPER_DIR they resolve through
+#: `xcode-select -p`, and when that is Xcode.app an Xcode update that needs its
+#: licence re-accepted stops every job until someone types `sudo xcodebuild
+#: -license` (#1762). Pinning DEVELOPER_DIR to the Command Line Tools routes
+#: the shims around Xcode.app, so its licence never gates a job (#1899).
+CLT_DEVELOPER_DIR = "/Library/Developer/CommandLineTools"
+#: The Remote Control listener is exempt: every interactive `claude rc` session
+#: it opens inherits its environment, and with the pin `xcodebuild` fails
+#: there ("requires Xcode"), so Nate could not build his Xcode projects from a
+#: remote session. It is a listener he drives, not an unattended job.
+PINNED_PLISTS = sorted(
+    path.name for path in (ROOT / "launchd").glob("*.plist")
+    if path.name != REMOTE_CONTROL_NAME
+)
+
+
+def _environment(path):
+    import plistlib
+
+    with path.open("rb") as handle:
+        return plistlib.load(handle).get("EnvironmentVariables") or {}
+
+
+@pytest.mark.parametrize("name", PINNED_PLISTS)
+def test_every_launchd_job_pins_the_command_line_tools(name):
+    """A new plist without the pin would be the one job an Xcode update stops."""
+    env = _environment(ROOT / "launchd" / name)
+    assert env.get("DEVELOPER_DIR") == CLT_DEVELOPER_DIR
+
+
+def test_the_installer_keeps_the_developer_dir_pin(tmp_path):
+    env = os.environ.copy()
+    env["HOME"] = str(tmp_path)
+    result = subprocess.run(
+        ["/bin/bash", str(ROOT / "scripts" / "install.sh")],
+        cwd=ROOT, env=env, capture_output=True, text=True, check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    for name in INSTALL_NAMES:
+        installed = tmp_path / "Library" / "LaunchAgents" / name
+        assert _environment(installed).get("DEVELOPER_DIR") == CLT_DEVELOPER_DIR
+
+
+@pytest.mark.skipif(
+    not (pathlib.Path(CLT_DEVELOPER_DIR) / "usr" / "bin" / "git").exists()
+    or not pathlib.Path("/usr/bin/xcrun").exists(),
+    reason="needs the Command Line Tools and xcrun (the schedule host)",
+)
+@pytest.mark.parametrize("tool", ["git", "python3"])
+def test_the_pinned_job_environment_resolves_tools_outside_xcode(tool):
+    """Run on the Mac: the job's own environment resolves each shim into the
+    Command Line Tools, never into Xcode.app, and the shim runs."""
+    env = dict(_environment(ROOT / "launchd" / KEEPER_NAME))
+    env.setdefault("HOME", os.environ.get("HOME", "/tmp"))
+    found = subprocess.run(
+        ["/usr/bin/xcrun", "--find", tool],
+        env=env, capture_output=True, text=True, check=False,
+    )
+    assert found.returncode == 0, found.stderr
+    assert found.stdout.strip().startswith(CLT_DEVELOPER_DIR + "/")
+    assert "Xcode.app" not in found.stdout
+    ran = subprocess.run(
+        ["/usr/bin/" + tool, "--version"],
+        env=env, capture_output=True, text=True, check=False,
+    )
+    assert ran.returncode == 0, ran.stderr
+
+
+def test_the_remote_control_listener_leaves_developer_dir_to_the_session():
+    """Its sessions are Nate's own, and they need full Xcode."""
+    env = _environment(ROOT / "launchd" / REMOTE_CONTROL_NAME)
+    assert "DEVELOPER_DIR" not in env

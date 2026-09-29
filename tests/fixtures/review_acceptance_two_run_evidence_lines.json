@@ -1,0 +1,13 @@
+{
+  "source_pr": 1614,
+  "rejected_requirement": "Acceptance artifact: a `**Run evidence:**` comment with phase before and after, from the lane logs' `begin_review_phase` markers (each marks its phase's start), must exist.",
+  "expected_checkable_requirement": "Acceptance artifact: a **Run evidence:** comment with phase before, from the lane logs' `begin_review_phase` markers (each marks its phase's start).",
+  "checkable_requirement": "Acceptance artifact: a **Run evidence:** comment with the before and after timings of the replay harness on the fixture boards.",
+  "packet": {
+    "ticket": {
+      "ref": "nateprich-projects/command-center#1606",
+      "number": 1606,
+      "body": "Ticket 1: review the lane and replay-harness evidence.\n\nAcceptance:\n- a **Run evidence:** comment with phase before and after, from the lane logs' `begin_review_phase` markers (each marks its phase's start).\n- a **Run evidence:** comment with the before and after timings of the replay harness on the fixture boards.\n\nParent plan: #1591."
+    }
+  }
+}

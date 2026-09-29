@@ -1,0 +1,12 @@
+{
+  "rejected_requirement": "Acceptance artifact: a **Run evidence:** comment on this ticket with the phase before and after timings, from the lane logs' `begin_review_phase` markers (each marks its phase's start); the after timing is posted on #1591 once this deploys, with #1610's run evidence.",
+  "missing_checkable_requirement": "Acceptance artifact: a **Run evidence:** comment on this ticket with the phase before timings, from the lane logs' `begin_review_phase` markers (each marks its phase's start).",
+  "missing_verification_requirement": "The before timing and the verification are posted on this ticket.",
+  "packet": {
+    "ticket": {
+      "ref": "nateprich-projects/command-center#1606",
+      "number": 1606,
+      "body": "Ticket 1: pass begin's shared PR snapshot to the orphaned-start reconcile.\n\nAcceptance: a **Run evidence:** comment on this ticket with the phase before and after timings, from the lane logs' `begin_review_phase` markers (each marks its phase's start); the after timing is posted on #1591 once this deploys, with #1610's run evidence.\n\nParent plan: #1591.\n\n**Acceptance corrected 2026-09-26 13:55 PDT (Claude in session):** an after-deploy timing cannot exist before this ticket's PR merges, so requiring it at review deadlocks the ticket (#1626). The before timing and the verification are posted on this ticket; the after timing moves to #1591."
+    }
+  }
+}

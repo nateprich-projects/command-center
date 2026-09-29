@@ -1,0 +1,25 @@
+{
+  "source_pr": 1614,
+  "source_head_sha": "de1d6604817f673f0288d134760b2b0ced1e9c7c",
+  "source_reviewed_at": "2026-09-26T20:43:33.444174+00:00",
+  "rejected_requirement": "Acceptance artifact: a `**Run evidence:**` comment with phase before and after, from the lane logs' `begin_review_phase` markers (each marks its phase's start), must exist.",
+  "expected_checkable_line": "a **Run evidence:** comment with phase before, from the lane logs' `begin_review_phase` markers (each marks its phase's start)",
+  "expected_checkable_requirement": "Acceptance artifact: a **Run evidence:** comment with phase before, from the lane logs' `begin_review_phase` markers (each marks its phase's start).",
+  "checkable_verification_requirement": "The before timing and the verification are posted on this ticket.",
+  "expected_deferred_clause": "a **Run evidence:** comment with phase after, from the lane logs' `begin_review_phase` markers (each marks its phase's start)",
+  "expected_deferred_answer": {
+    "status": "deferred",
+    "evidence_pointer": "a **Run evidence:** comment with phase after, from the lane logs' `begin_review_phase` markers (each marks its phase's start)",
+    "reviewed_ticket": "nateprich-projects/command-center#1606",
+    "reason": "ticket acceptance requires Run evidence after the reviewed ticket deploys"
+  },
+  "expected_deferred_requirement": "Defer the ticket acceptance clause 'a **Run evidence:** comment with phase after, from the lane logs' `begin_review_phase` markers (each marks its phase's start)' until ticket #1606 is deployed.",
+  "post_correction_body": "Acceptance: a **Run evidence:** comment on this ticket with the phase before and after timings, from the lane logs' `begin_review_phase` markers (each marks its phase's start); the after timing is posted on #1591 once this deploys, with #1610's run evidence.",
+  "packet": {
+    "ticket": {
+      "ref": "nateprich-projects/command-center#1606",
+      "number": 1606,
+      "body": "Ticket 1: pass begin's shared PR snapshot to the orphaned-start reconcile.\n\nOpen with a same-ticket verification of whether the time is `ticket_pr_facts` or `heartbeat.read`, then pass the snapshot begin already holds.\n\nAcceptance: a **Run evidence:** comment with phase before and after, from the lane logs' `begin_review_phase` markers (each marks its phase's start).\n\nParent plan: #1591."
+    }
+  }
+}

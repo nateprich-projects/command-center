@@ -12,13 +12,13 @@ packet alone; ask for nothing more.
 
 ## The question
 
-Does this diff do what the ticket and the plan say, and does it avoid what
-the plan rejected?
+Does this diff do what its tickets ask, avoid what the plan rejected, and
+break nothing the plan, `plan_md` or the repository's rules require?
 
 - `tickets` is the union of tickets the PR closes; `ticket`, its branch ticket. A change any ticket asks for is authorised.
 - `ticket.comments` and each `tickets` entry's comments (newest 30, oldest first) carry `voice`: `nate-direct` and `nate-relayed` amend the body; `agent` and `unknown` need diff evidence.
 - Check each `parent.comments` for Accept artifacts.
-- `plan_md` is design context; if `plan_md_missing`, judge against tickets alone.
+- `plan_md` and the plan bind only as rules the diff must not break; if `plan_md_missing`, judge against tickets alone.
 - `diff` and `changed_files` are the change at `head_sha`.
 - `pr_body` and `pr_departures` are the implementer's own claims: cite them, weigh them against the diff. Description records are read from `pr_body`. A departure never meets its requirement by itself.
 - `evidence`, the implement run's report at `head_sha`, adds findings, never meets a requirement by itself. A merged-suite failure absent on main is blocking. `reproduction: passes-on-base` does not meet a first Accept item beginning `Reproduction:` unless a Departure explains why that seam cannot show the symptom (then weigh it). `no signal`, `unsupported`, `not run` and `over budget` are weighed, not blocking. Look hardest at `pr_body`'s `Risks:`. If `unavailable`, say so; judge as usual.
@@ -31,11 +31,10 @@ the plan rejected?
 
 ## The conformance pass
 
-Walk each ticket and plan requirement one at a time against the diff;
-quote it, citing the lines meeting it.
+Walk each requirement one at a time against the diff, quoting it and citing
+the lines meeting it. A `Does not break:` row is met unless a diff line breaks it.
 
-`plan_premises` is context only: do not probe premises or judge them as
-requirements. The ticket's own first verification step checks them.
+`plan_premises` is context: do not probe premises.
 
 For count requirements (one, once, per day, exactly, at most), trace every
 effect call site's paths (success, traps, `finally`, hooks, retries), putting

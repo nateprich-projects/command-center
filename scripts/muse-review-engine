@@ -25,7 +25,8 @@
 # shape part or a judge chunk whose call goes stream-idle is also asked once
 # more, and each writes one timing line to stderr (#1719). The review lister
 # gets the same stream-idle retry (#1730) and the same timing line (#1855),
-# and reads the packet without its diff or its repeats (#1866).
+# reads the packet without its diff or its repeats (#1866), and on a max lane
+# asks Muse at high while the judges keep max (#1887).
 # A call whose packet is over 150 KB gets a second stream-idle retry (#1785).
 # Breakdown rides the standard tier only; shape follows wherever begin offers
 # it.
@@ -92,6 +93,23 @@ case "$EFFORT" in
   max|high) ;;
   *) echo "muse-review-engine: reasoning effort must be max or high, got '$EFFORT'" >&2; exit 1 ;;
 esac
+
+# The review lister's effort (#1887). At max the escalated lister went
+# stream-idle in 2 of 4 live reviews on 2026-09-28, once after #1866 had taken
+# the diff out of its copy (#1886). Listing what a ticket asks for is the easy
+# half of a review (#1233), so on a max lane the lister asks at high, the one
+# effort below max this runner takes; the judges, and every other call, keep
+# the lane's. Below max the lister keeps it too. Muse only: zai-exec takes no
+# effort.
+if [[ "$EFFORT" == "max" ]]; then
+  LISTER_EFFORT="high"
+else
+  LISTER_EFFORT="$EFFORT"
+fi
+# The effort call_model_files hands Muse. list_requirements shadows it with a
+# local set to LISTER_EFFORT, so its calls and their retries ask at that, and
+# bash's dynamic scope puts the lane's back when it returns.
+CALL_EFFORT="$EFFORT"
 
 # --- the replay entry (#1730) -------------------------------------------------
 #
@@ -708,8 +726,9 @@ call_model_files() {
       fi
     fi
     raw_answer_path="${answer_path}.muse-jsonl"
+    # CALL_EFFORT: the lane's effort, or the lister's inside it (#1887).
     "${muse_exec[@]}" \
-      --reasoning-effort "$EFFORT" \
+      --reasoning-effort "$CALL_EFFORT" \
       --disable-shell \
       --disable-write \
       --disable-web-tools \
@@ -2182,7 +2201,11 @@ PY
 # shape part's do (#1855): a lister failure read `failed parts: none` in
 # review-replay without it. model_failed exits the engine, so on a model
 # failure the line is written before it is called.
+#
+# Every call here, retries included, asks at LISTER_EFFORT: high on a max
+# lane (#1887). A local, so the judges after it ask at the lane's effort.
 list_requirements() {
+  local CALL_EFFORT="$LISTER_EFFORT"
   local attempt=1
   local calls=0
   local answered=0

@@ -4444,6 +4444,76 @@ def test_a_ticket_unlike_every_entry_keeps_both_in_full(tmp_path):
     assert _judge_prompt_is_the_routine_over_the_packet_file(repo, judge)
 
 
+# -- the lister asks at high on a max lane (#1887) -----------------------------
+# At max the escalated lister went stream-idle in 2 of 4 live reviews on
+# 2026-09-28, once after #1866's lean copy (#1886). Listing is the easy half
+# of a review (#1233), so on a max lane every lister call asks at high; the
+# judges keep the lane's effort. Below max nothing changes, and z.ai, which
+# takes no effort, is unchanged.
+
+def _lister_and_judge_efforts(tmp_path, lane):
+    """Each Muse call's --reasoning-effort, split by the prompt's header, over
+    every kind of lister call: the first, a parse retry, and a stream-idle
+    retry on each side of it (a large packet's two), then two judge chunks."""
+    four = ["requirement {}".format(i) for i in range(1, 5)]
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), _sized_packet(LARGE_PACKET_BYTES + 1),
+        args=("escalated", lane),
+        # Call 1 goes idle, call 2 is malformed, call 3 goes idle, call 4
+        # lists; calls 5 and 6 judge chunks of three and one.
+        answers=(_requirements_answer(), "{not json", _requirements_answer(),
+                 _requirements_answer(*four)),
+        extra_env={"MUSE_FAIL_CALLS": "1 3",
+                   "MUSE_FAIL_CALLS_FAILURE": STREAM_IDLE,
+                   "MUSE_DYNAMIC_JUDGES": "1"})
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads((repo / "apply.answer").read_text())["verdict"] == \
+        "approved"
+    efforts = {"lister": [], "judge": []}
+    for call in range(1, _muse_calls(repo) + 1):
+        prompt = (repo / "muse.prompt.{}".format(call)).read_text()
+        args = (repo / "muse.args.{}".format(call)).read_text().splitlines()
+        if prompt.startswith("This call is not the review."):
+            part = "lister"
+        else:
+            assert prompt.startswith(
+                "This is one judge call in a larger review.")
+            part = "judge"
+        efforts[part].append(args[args.index("--reasoning-effort") + 1])
+    return efforts
+
+
+def test_on_a_max_lane_every_lister_call_asks_at_high_and_judges_at_max(
+        tmp_path):
+    assert _lister_and_judge_efforts(tmp_path, "max") == {
+        "lister": ["high", "high", "high", "high"],
+        "judge": ["max", "max"],
+    }
+
+
+def test_below_max_the_lister_asks_at_the_lanes_effort(tmp_path):
+    # Not one step below whatever the lane runs at: high stays high.
+    assert _lister_and_judge_efforts(tmp_path, "high") == {
+        "lister": ["high", "high", "high", "high"],
+        "judge": ["high", "high"],
+    }
+
+
+def test_a_zai_lister_on_a_max_lane_asks_exactly_as_its_judge_does(tmp_path):
+    proc, repo = _zai_standard(
+        tmp_path, _begin(), _packet(),
+        answers=_review_answers(_judge_answer()))
+
+    assert proc.returncode == 0, proc.stderr
+    lister, judge = _model_argvs(repo)
+    assert "This call is not the review." in \
+        (repo / "muse.prompt.1").read_text()
+    # zai-exec takes the prompt and its own deadline and nothing else: no
+    # effort for the lister to lower (#1411).
+    assert lister[0::2] == judge[0::2] == ["--prompt-file", "--timeout"]
+    assert lister[3] == judge[3]
+
+
 # -- the z.ai standard tier (Nate, 2026-09-23) ---------------------------------
 #
 # Before heartbeat.ZAI_STANDARD_UNTIL (2026-09-27 06:00 PDT since #1694;
@@ -4931,11 +5001,11 @@ def test_a_replay_runs_the_lister_and_judges_on_its_packet(tmp_path):
     assert "print('the thing')" in judge
     assert _assigned_requirements(judge) == \
         ["thing.py prints the thing the ticket asks for"]
-    # Max, no tools, and no session id: a replay binds nothing to a
-    # heartbeat it never writes.
-    for call in (1, 2):
+    # The lane's efforts (the lister at high under max, #1887), no tools, and
+    # no session id: a replay binds nothing to a heartbeat it never writes.
+    for call, effort in ((1, "high"), (2, "max")):
         args = (repo / "muse.args.{}".format(call)).read_text().splitlines()
-        assert args[args.index("--reasoning-effort") + 1] == "max"
+        assert args[args.index("--reasoning-effort") + 1] == effort
         assert "--disable-shell" in args
         assert "--session-id" not in args
     assert json.loads(answer_path.read_text())["verdict"] == "approved"

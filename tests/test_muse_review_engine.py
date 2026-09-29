@@ -226,6 +226,8 @@ FUNNEL_STUB = (
     "    if command == 'session-server':\n"
     "        print('127.0.0.1:1:stub', flush=True)\n"
     "    elif command == 'begin':\n"
+    "        if os.environ.get('AUTH_RECOVERED_REQUIRED') == '1' and not (root / 'auth.recovered').exists():\n"
+    "            raise SystemExit('auth recovery was not recorded before begin')\n"
     "        (root / 'begin.session_id').write_text(os.environ.get('MUSE_SESSION_ID', ''))\n"
     "        (root / 'begin.zcode_session_id').write_text(os.environ.get('ZCODE_SESSION_ID', ''))\n"
     "        print((root / 'begin.json').read_text(), end='')\n"
@@ -242,8 +244,17 @@ FUNNEL_STUB = (
 )
 
 HEARTBEAT_STUB = (
-    "import pathlib, sys\n"
-    "with (pathlib.Path(__file__).parent / 'heartbeat.log').open('a') as fh:\n"
+    "import os, pathlib, sys\n"
+    "root = pathlib.Path(__file__).parent\n"
+    "command = sys.argv[1] if len(sys.argv) > 1 else ''\n"
+    "if command == 'muse-auth-state':\n"
+    "    (root / 'auth.state.calls').open('a').write('state\\n')\n"
+    "    print(os.environ.get('MUSE_AUTH_STATE', 'clear'))\n"
+    "    raise SystemExit(int(os.environ.get('MUSE_AUTH_STATE_STATUS', '0')))\n"
+    "if command == 'muse-auth-recovered':\n"
+    "    (root / 'auth.recovered').write_text('recorded')\n"
+    "    raise SystemExit(int(os.environ.get('MUSE_AUTH_RECOVERED_STATUS', '0')))\n"
+    "with (root / 'heartbeat.log').open('a') as fh:\n"
     "    fh.write(' '.join(sys.argv[1:]) + '\\n')\n"
 )
 
@@ -500,6 +511,10 @@ MUSE_STUB = (
     "  previous=\"$argument\"\n"
     "done\n"
     "cp \"$prompt_file\" \"$MUSE_PROMPT.$n\"\n"
+    "if grep -q '^AUTH_LOGIN_PROBE$' \"$prompt_file\"; then\n"
+    "  if [[ -n \"${MUSE_AUTH_PROBE_STDERR:-}\" ]]; then printf '%s' \"$MUSE_AUTH_PROBE_STDERR\" >&2; fi\n"
+    "  exit \"${MUSE_AUTH_PROBE_STATUS:-0}\"\n"
+    "fi\n"
     "judge_call=0\n"
     "if grep -q 'This is one judge call in a larger review' \"$prompt_file\"; then judge_call=1; fi\n"
     # #1599: which part of a split shape this call is, from the runner's
@@ -1658,6 +1673,79 @@ def test_missing_meta_credentials_stops_before_writing_a_verdict(tmp_path):
     assert "provider outage" in heartbeat
     assert "--review-result rejected" not in heartbeat
     assert "requirement unsure" not in heartbeat
+
+
+@pytest.mark.parametrize("args", [(), ("standard",)])
+def test_an_open_muse_auth_outage_parks_each_tier_before_begin(tmp_path, args):
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), _packet(), args=args,
+        extra_env={
+            "MUSE_AUTH_STATE": "parked",
+            "MUSE_AUTH_PROBE_STATUS": "1",
+            "MUSE_AUTH_PROBE_STDERR": "missing meta credentials",
+        })
+
+    assert proc.returncode == 0, proc.stderr
+    assert _muse_calls(repo) == 1
+    assert "AUTH_LOGIN_PROBE" in (repo / "muse.prompt.1").read_text()
+    funnel_calls = (repo / "funnel.calls").read_text().splitlines()
+    assert not any(call.startswith("begin ") for call in funnel_calls)
+    assert not (repo / "auth.recovered").exists()
+
+
+def test_an_unreadable_auth_state_does_not_launch_a_muse_lane(tmp_path):
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), _packet(),
+        extra_env={"MUSE_AUTH_STATE_STATUS": "2"})
+
+    assert proc.returncode == 1
+    assert "could not establish Muse auth outage state" in proc.stderr
+    assert _muse_calls(repo) == 0
+    assert not any(call.startswith("begin ") for call in
+                   (repo / "funnel.calls").read_text().splitlines())
+
+
+@pytest.mark.parametrize("args", [(), ("standard",)])
+def test_a_successful_auth_probe_is_recorded_before_the_lane_resumes(
+        tmp_path, args):
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), _packet(), args=args,
+        extra_env={
+            "MUSE_AUTH_STATE": "parked",
+            "MUSE_AUTH_PROBE_STATUS": "0",
+            "AUTH_RECOVERED_REQUIRED": "1",
+            "MUSE_ANSWER_2": _requirements_answer(),
+            "MUSE_ANSWER_3": _judge_answer(),
+        })
+
+    assert proc.returncode == 0, proc.stderr
+    assert _muse_calls(repo) == 3
+    assert (repo / "auth.recovered").exists()
+    assert any(call.startswith("begin ")
+               for call in (repo / "funnel.calls").read_text().splitlines())
+    probe_args = (repo / "muse.args.1").read_text().splitlines()
+    assert probe_args[0] == "exec"
+    assert probe_args[probe_args.index("--model") + 1] == "muse-spark-1.3"
+    assert "--disable-shell" in probe_args
+    assert "--disable-write" in probe_args
+    assert "--disable-web-tools" in probe_args
+    assert probe_args[probe_args.index("--max-model-steps") + 1] == "1"
+
+
+def test_a_probe_is_not_recovered_until_its_github_record_is_written(tmp_path):
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), _packet(),
+        extra_env={
+            "MUSE_AUTH_STATE": "parked",
+            "MUSE_AUTH_PROBE_STATUS": "0",
+            "MUSE_AUTH_RECOVERED_STATUS": "2",
+        })
+
+    assert proc.returncode == 0, proc.stderr
+    assert _muse_calls(repo) == 1
+    assert "GitHub did not record it" in proc.stderr
+    assert not any(call.startswith("begin ") for call in
+                   (repo / "funnel.calls").read_text().splitlines())
 
 
 @pytest.mark.parametrize("failure_kind", ["failed", "timed out"])
@@ -4230,6 +4318,7 @@ def test_a_lister_failure_that_is_not_stream_idle_is_not_retried(tmp_path):
     assert "--outcome errored" in heartbeat
     assert "model stream error: connection reset by peer" in heartbeat
     assert "provider outage" not in heartbeat
+    assert not (repo / "auth.recovered").exists()
 
 
 def test_a_lister_malformed_then_idle_still_gets_its_idle_retry(tmp_path):

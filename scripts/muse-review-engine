@@ -675,6 +675,7 @@ call_model_files() {
   local prompt_path="$1"
   local answer_path="$2"
   local diag_path="$3"
+  local max_model_steps="${4:-60}"
   local killed_marker
   local raw_answer_path=""
   local muse_capture_path=""
@@ -739,7 +740,7 @@ call_model_files() {
       --disable-shell \
       --disable-write \
       --disable-web-tools \
-      --max-model-steps 60 \
+      --max-model-steps "$max_model_steps" \
       --no-foreign-personal-context \
       --workspace "$WORKSPACE" \
       --prompt-file "$prompt_path" >"$raw_answer_path" 2>"$diag_path" &
@@ -1630,6 +1631,53 @@ if [[ "$BACKEND" == "muse" ]] \
   && MUSE_QUOTA_RESET="$(muse_quota_hold_until)"; then
   echo "muse-review-engine: parked until $MUSE_QUOTA_RESET — Muse's provider quota is exhausted" >&2
   quota_stop
+fi
+
+# Authentication parks are derived only from the durable heartbeat branch.
+# A successful minimal Muse call writes the recovery event there before any
+# lane claims work; a failed probe leaves the existing outage open.
+if [[ "$BACKEND" == "muse" ]] && (( ! REPLAY )); then
+  if ! MUSE_AUTH_STATE="$(python3 "$REPO/heartbeat.py" muse-auth-state)"; then
+    echo "muse-review-engine: could not establish Muse auth outage state; refusing to run" >&2
+    exit 1
+  fi
+  case "$MUSE_AUTH_STATE" in
+    clear)
+      ;;
+    parked)
+      echo "muse-review-engine: Muse auth outage is open; probing login recovery" >&2
+      AUTH_PROBE_PROMPT="$RUN_DIR/auth-probe-prompt.txt"
+      AUTH_PROBE_ANSWER="$RUN_DIR/auth-probe-answer.json"
+      AUTH_PROBE_DIAG="$RUN_DIR/auth-probe-diag.txt"
+      if ! printf 'AUTH_LOGIN_PROBE\nReply with exactly OK.\n' \
+        >"$AUTH_PROBE_PROMPT"; then
+        echo "muse-review-engine: could not prepare the Muse auth recovery probe" >&2
+        quota_stop
+      fi
+      MUSE_MODEL="$MUSE_FALLBACK_MODEL"
+      MUSE_EXEC=("$MUSE_BIN" exec --model "$MUSE_MODEL" --json)
+      MUSE_EXEC_UNBOUND=("$MUSE_BIN" exec --model "$MUSE_MODEL" --json)
+      AUTH_PROBE_STATUS=0
+      call_model_files "$AUTH_PROBE_PROMPT" "$AUTH_PROBE_ANSWER" \
+        "$AUTH_PROBE_DIAG" 1 || AUTH_PROBE_STATUS=$?
+      if (( AUTH_PROBE_STATUS != 0 )); then
+        if MUSE_QUOTA_RESET="$(muse_quota_record "$AUTH_PROBE_DIAG" "")"; then
+          muse_quota_skip
+        fi
+        echo "muse-review-engine: Muse auth outage remains parked; recovery probe failed (exit $AUTH_PROBE_STATUS)" >&2
+        quota_stop
+      fi
+      if ! python3 "$REPO/heartbeat.py" muse-auth-recovered; then
+        echo "muse-review-engine: recovery probe succeeded but GitHub did not record it; lane remains parked" >&2
+        quota_stop
+      fi
+      echo "muse-review-engine: Muse auth recovery is recorded; resuming the lane" >&2
+      ;;
+    *)
+      echo "muse-review-engine: heartbeat returned an unknown Muse auth state; refusing to run" >&2
+      exit 1
+      ;;
+  esac
 fi
 
 # Own the opening poll. Empty polls must not launch a model: `begin` has

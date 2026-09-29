@@ -1929,6 +1929,34 @@ def read_github_strict(agent: str, timeout: Optional[float] = None) -> List[Dict
     return _parse_records_strict(content)
 
 
+MUSE_AUTH_OUTAGE_NOTE = "Muse provider outage: missing meta credentials"
+
+
+def muse_auth_outage_open(records: List[Dict]) -> bool:
+    """Whether durable Muse records leave the authentication outage open.
+
+    The append-only order on GitHub is authoritative: the exact auth-outage
+    finish opens the park, and only a successful smoke probe closes it. Other
+    run failures and unsuccessful probes do not change the state.
+    """
+    open_outage = False
+    for record in records:
+        if not isinstance(record, dict) or record.get("agent") != "muse":
+            continue
+        if (
+            record.get("phase") == "finish"
+            and record.get("outcome") == "errored"
+            and record.get("note") == MUSE_AUTH_OUTAGE_NOTE
+        ):
+            open_outage = True
+        elif (
+            record.get("phase") == "auth_probe"
+            and record.get("result") == "success"
+        ):
+            open_outage = False
+    return open_outage
+
+
 def read(agent: str, timeout: Optional[float] = None) -> List[Dict]:
     """Every record this machine knows about — pushed and still spooled."""
     return read_github(agent, timeout=timeout) + _spooled(agent)
@@ -2160,11 +2188,42 @@ def main(argv=None) -> int:
     show = sub.add_parser("read", help="print an agent's records as JSON")
     show.add_argument("--agent", required=True, choices=sorted(PROVIDERS))
 
+    sub.add_parser(
+        "muse-auth-state",
+        help="read whether GitHub records leave Muse authentication parked",
+    )
+    sub.add_parser(
+        "muse-auth-recovered",
+        help="record a successful Muse authentication smoke probe",
+    )
+
     args = parser.parse_args(argv)
 
     try:
         if args.command == "read":
             print(json.dumps(read(args.agent), indent=2))
+            return 0
+
+        if args.command == "muse-auth-state":
+            records = read_github_strict("muse", timeout=10)
+            print("parked" if muse_auth_outage_open(records) else "clear")
+            return 0
+
+        if args.command == "muse-auth-recovered":
+            record = {
+                "agent": "muse",
+                "phase": "auth_probe",
+                "ts": int(time.time()),
+                "result": "success",
+            }
+            kept = append("muse", record)
+            _report(kept)
+            if kept != "pushed":
+                print(
+                    "heartbeat: successful Muse probe was not recorded on GitHub",
+                    file=sys.stderr,
+                )
+                return 2
             return 0
 
         if args.command == "start":

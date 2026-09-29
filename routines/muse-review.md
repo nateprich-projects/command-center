@@ -34,10 +34,8 @@ the plan rejected?
 Walk each ticket and plan requirement one at a time against the diff;
 quote it, citing the lines meeting it.
 
-Probe every `plan_premises` entry labelled `inferred` against live
-packet evidence via its `evidence` pointer. Do not
-re-derive it from plan prose. Cite support or contradiction; unresolved or
-unavailable probes are `unsure`.
+`plan_premises` is context only: do not probe premises or judge them as
+requirements. The ticket's own first verification step checks them.
 
 For count requirements (one, once, per day, exactly, at most), trace every
 effect call site's paths (success, traps, `finally`, hooks, retries), putting

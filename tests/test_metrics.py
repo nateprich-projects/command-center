@@ -224,6 +224,7 @@ def test_d4_uses_priced_run_usage_and_excludes_unpriced_runs():
     assert cost_signal["merged_records"] == 2
     assert cost_signal["missing_records"] == 2
     assert cost_signal["by_lane"][0]["merged_prs"] == 1
+    assert cost_signal["by_lane"][0]["cost_per_merged_pr"] == pytest.approx(0.003)
     snapshot["brief"]["outcome_signals"] = signal_summary
 
     row = metrics.derive_row(
@@ -248,7 +249,11 @@ def test_d4_uses_priced_run_usage_and_excludes_unpriced_runs():
 
 
 def test_d4_shared_cost_join_fills_execution_panel_for_representative_window():
-    """#1284's Panel D contract: D4 by lane from outcomes.signal_summary."""
+    """#1272 D4, made concrete by #1284's Panel D contract.
+
+    #1272 sources cost per merged PR by lane from outcomes.signal_summary;
+    #1284 requires missing token_usage to remain a labelled gap, not zero.
+    """
     window = _jsonl("d4_representative_window.jsonl")
     summary = outcomes.signal_summary(window, now=NOW)
     cost = summary["signals"]["cost_per_merged_pr"]
@@ -265,7 +270,6 @@ def test_d4_shared_cost_join_fills_execution_panel_for_representative_window():
         "total_cost": 0.15,
         "cost_per_merged_pr": 0.025,
     }]
-
     snapshot = _json("metrics_snapshot.json")
     snapshot["brief"]["outcome_signals"] = summary
     _, ledgers, usage, _, commits, lines = _inputs()

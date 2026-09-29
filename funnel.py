@@ -812,6 +812,10 @@ class Item:
     # event condition.
     needs: Optional[str] = None
     status_since: Optional[datetime] = None
+    # When the Status field value was last written. ``status_since`` falls
+    # back to it when the read timeline has no event into the current Status:
+    # GitHub stopped writing Status-change events on 2026-09-28 (#1906).
+    status_updated_at: Optional[datetime] = None
     # ProjectV2 status history retained from the load query. The brief uses it
     # to find likely unattended shaping transitions before reading comments.
     status_events: List[Dict[str, object]] = field(default_factory=list)
@@ -9450,7 +9454,7 @@ ITEM_NODE_FIELDS = """\
             ... on ProjectV2ItemFieldTextValue { text }
           }
           status: fieldValueByName(name: "Status") {
-            ... on ProjectV2ItemFieldSingleSelectValue { name }
+            ... on ProjectV2ItemFieldSingleSelectValue { name updatedAt }
           }
           class: fieldValueByName(name: "Class") {
             ... on ProjectV2ItemFieldSingleSelectValue { name }
@@ -10778,9 +10782,14 @@ def _apply_item_timeline_fields(item: Item, content: dict) -> None:
     # Gate age uses the newest transition into the current status in this
     # Project. Select by timestamp so correctness does not depend on connection
     # ordering, and exclude matching status events from other Projects above.
-    item.status_since = (
-        max(matching_status_times) if matching_status_times else None
-    )
+    # When the timeline was read and holds no such event, the Status field's
+    # own write time stands in (#1949); unknown remains only when neither
+    # source exists. A load without a timeline read leaves it unknown, so the
+    # detail hydration that keys on a missing ``status_since`` still runs.
+    if matching_status_times:
+        item.status_since = max(matching_status_times)
+    elif "timelineItems" in content:
+        item.status_since = item.status_updated_at
 
 
 def _apply_item_detail_fields(
@@ -10869,6 +10878,7 @@ def _from_node(node: dict) -> Optional[Item]:
         state_reason=content.get("stateReason"),
         created_at=parse_time(content.get("createdAt")),
         status=status,
+        status_updated_at=parse_time((node.get("status") or {}).get("updatedAt")),
         klass=(node.get("class") or {}).get("name"),
         origin=(node.get("origin") or {}).get("name"),
         risk=(node.get("risk") or {}).get("name"),
@@ -15562,6 +15572,9 @@ def _write_status(item: Item, status: str, now: datetime) -> Optional[str]:
     previous = item.status
     item.status = status
     item.status_since = now
+    # GitHub just stamped the field too; a later hydrate in this session that
+    # finds no Status-change event falls back to this, not the loaded value.
+    item.status_updated_at = now
     if previous != status:
         item.status_events.append({
             "previous_status": previous,
@@ -17630,11 +17643,12 @@ def parse_shape_risk_record(body: str) -> Optional[Dict[str, List[str]]]:
 
     The newest block wins, as for every runner record, so a marker the
     shaper quoted in the narrative above cannot outrank the runner's own.
+    A record predating the declared field treats it as an empty list.
     """
     found = _marked_json(body, SHAPE_RISK_MARKER)
     if found is None:
         return None
-    declared = found.get("declared")
+    declared = found.get("declared", [])
     scan = found.get("scan")
     if not (isinstance(declared, list)
             and all(isinstance(reason, str) for reason in declared)
@@ -17649,7 +17663,8 @@ def _shaped_risk_holds(item: Item, body: str) -> bool:
 
     Until #1721 an escalated Risk held a plan whoever set it. Now it is
     released only on the runner's own record that the decision declared no
-    risk, and only when no declaration shows in the prose either. A plan
+    risk and the wording scan found a risk, and only when no declaration
+    shows in the prose either. A plan
     with no record, shaped before #1721 or by hand, or an unreadable one,
     holds; so do unset or unknown Risk and a body the load did not carry.
     ``Needs: human`` keeps its own hold whatever the Risk: after #1721 the
@@ -17661,7 +17676,7 @@ def _shaped_risk_holds(item: Item, body: str) -> bool:
     if item.risk != "escalated" or not body.strip():
         return True
     record = parse_shape_risk_record(body)
-    if record is None or record["declared"]:
+    if record is None or record["declared"] or not record["scan"]:
         return True
     return bool(plan_declared_risks(body))
 
@@ -19769,6 +19784,7 @@ def _close_auto_closeable_project(project: Item,
     # `begin` reloads these facts from GitHub, where the closed state is the
     # idempotence guard.
     project.status = "Done"
+    project.status_updated_at = datetime.now(timezone.utc)
     project.state = "CLOSED"
     project.state_reason = "COMPLETED"
     print("auto-closed {}".format(project.ref), file=sys.stderr)
@@ -19820,6 +19836,7 @@ def reconcile_closed_items(items: Sequence[Item]) -> List[str]:
                 option=_option_id(STATUS_FIELD_ID, target),
             )
             item.status = target
+            item.status_updated_at = datetime.now(timezone.utc)
             changed = True
 
         if "needs-shaping" in item.labels and item.status != "Ideas":

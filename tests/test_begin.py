@@ -3870,6 +3870,42 @@ def _sweep(monkeypatch, items):
     return advanced, writes, fields, comments
 
 
+def test_sweep_holds_hand_escalated_risk_with_an_empty_record(monkeypatch):
+    """Before #1938, the empty record released hand-set escalated Risk to Ready."""
+    plan = _held_plan(
+        321, "# Plan\n\nBuild the report.\n", needs="none", record=([], []))
+
+    advanced, writes, fields, comments = _sweep(monkeypatch, [plan])
+
+    assert (advanced, writes, fields, comments) == ([], [], [], [])
+    assert plan.status == "Shaped"
+
+
+@pytest.mark.parametrize("scan", [[], ["data-migration"]])
+def test_sweep_treats_a_missing_declared_key_as_empty(monkeypatch, scan):
+    plan = _held_plan(
+        322, "# Plan\n\nBuild the report.\n", needs="none")
+    missing_declared_record = (
+        "{}\n\n```json\n{}\n```".format(
+            funnel.SHAPE_RISK_MARKER,
+            json.dumps({"scan": scan}, indent=2, sort_keys=True)))
+    plan.body = "{}\n\n{}\n{}".format(
+        "# Plan\n\nBuild the report.", missing_declared_record,
+        funnel.origin_block("agent", at=NOW, run="shape-run", agent="muse"))
+
+    advanced, writes, fields, comments = _sweep(monkeypatch, [plan])
+
+    if scan:
+        assert advanced == [{"ref": plan.ref, "status": "Ready"}]
+        assert writes == [(plan.ref, "Ready")]
+        assert len(comments) == 1
+        assert plan.status == "Ready"
+    else:
+        assert (advanced, writes, comments) == ([], [], [])
+        assert plan.status == "Shaped"
+    assert fields == []
+
+
 def test_sweep_releases_an_escalated_plan_whose_record_declares_none(
         monkeypatch):
     """#1721: #1195's body, whose Needs Nate question has been answered, so

@@ -841,6 +841,23 @@ muse_quota_skip() {
   quota_stop
 }
 
+# Authentication failure is a provider outage, not evidence about the
+# subject. Keep the diagnostic match narrow so unrelated Muse failures retain
+# their ordinary fail-closed handling.
+muse_auth_failure() {
+  local diag_path="$1"
+  [[ "$BACKEND" == "muse" ]] || return 1
+  [[ -r "$diag_path" ]] || return 1
+  grep -Fqi -- "missing meta credentials" "$diag_path"
+}
+
+muse_auth_outage() {
+  local note="Muse provider outage: missing meta credentials"
+  echo "muse-review-engine: $note; ending without a verdict" >&2
+  failure "$note" || true
+  exit 1
+}
+
 # The optional second argument is the failed call's own diagnostic, for a
 # call that ran in a directory of its own (the shape framer, #1599).
 model_failed() {
@@ -856,6 +873,9 @@ model_failed() {
   # retrying on its own schedule.
   elif MUSE_QUOTA_RESET="$(muse_quota_record "$diag_path" "${BEGIN_RUN:-}")"; then
     muse_quota_skip
+  fi
+  if muse_auth_failure "$diag_path"; then
+    muse_auth_outage
   fi
   if (( status == 124 )); then
     echo "muse-review-engine: the model call outlived the wall-clock bound" >&2
@@ -1372,6 +1392,11 @@ shape_part_calls() {
       "$call_dir/diag.txt"
     muse_status=$?
     if (( muse_status != 0 )); then
+      if muse_auth_failure "$call_dir/diag.txt"; then
+        : >"$call_dir/auth-outage"
+        echo "muse-review-engine: shape $name found missing meta credentials" >&2
+        return 1
+      fi
       # The same prompt again, whichever attempt went silent.
       if (( idle_retried < idle_retries )) \
         && model_stream_idle "$muse_status" "$call_dir/diag.txt"; then
@@ -1432,6 +1457,9 @@ run_shape_split() {
     exit 1
   fi
   if ! run_shape_part framer; then
+    if [[ -e "$framer_dir/auth-outage" ]]; then
+      muse_auth_outage
+    fi
     # The framer's own model failure reads like the one-call path's: a
     # quota refusal parks the lanes, a timeout exits 124.
     if [[ -e "$framer_dir/model-status" ]]; then
@@ -1466,6 +1494,12 @@ run_shape_split() {
   done
   for pid in ${part_pids[@]+"${part_pids[@]}"}; do
     wait "$pid"
+  done
+
+  for name in ${part_names[@]+"${part_names[@]}"}; do
+    if [[ -e "$RUN_DIR/shape.$name/auth-outage" ]]; then
+      muse_auth_outage
+    fi
   done
 
   # Any part's diagnostic can hold the provider's refusal. Scanned whatever
@@ -2526,6 +2560,11 @@ judge_chunk_calls() {
         echo "muse-review-engine: judge chunk $index met a spent z.ai window" >&2
         return 0
       fi
+      if muse_auth_failure "$diag_path"; then
+        : >"$call_dir/auth-outage"
+        echo "muse-review-engine: judge chunk $index found missing meta credentials" >&2
+        return 0
+      fi
       # A silent stream is not a judgement either: the same prompt again
       # before the chunk fails closed, whichever attempt went silent.
       if (( idle_retried < REVIEW_IDLE_RETRIES )) \
@@ -2639,6 +2678,13 @@ for judge_pid in ${JUDGE_PIDS[@]+"${JUDGE_PIDS[@]}"}; do
     JUDGE_RUN_STATUS=1
   fi
 done
+if [[ "$BACKEND" == "muse" ]]; then
+  for (( index = 0; index < JUDGE_COUNT; index++ )); do
+    if [[ -e "$RUN_DIR/judge.$index/auth-outage" ]]; then
+      muse_auth_outage
+    fi
+  done
+fi
 if (( JUDGE_RUN_STATUS != 0 )); then
   failure "could not record one or more judge results for PR #$BEGIN_PR in $BEGIN_REPO" || true
   exit 1

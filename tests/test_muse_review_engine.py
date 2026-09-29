@@ -1637,6 +1637,26 @@ def test_later_capture_slot_allocation_failure_keeps_run_and_capture_count(
     assert "using a run-local fallback" in proc.stderr
 
 
+def test_missing_meta_credentials_stops_before_writing_a_verdict(tmp_path):
+    """The 2026-09-28 auth diagnostic is an outage, not an unsure judgement."""
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), _packet(),
+        answers=_review_answers(_judge_answer()),
+        extra_env={
+            "MUSE_JUDGE_FAIL_IF": "thing.py prints the thing",
+            "MUSE_JUDGE_FAILURE": "missing meta credentials",
+        })
+
+    assert _apply_calls(repo) == []
+    assert proc.returncode == 1, proc.stderr
+    assert not (repo / "apply.answer").exists()
+    heartbeat = _heartbeat_without_muse_call_record(repo)
+    assert "--outcome errored" in heartbeat
+    assert "provider outage" in heartbeat
+    assert "--review-result rejected" not in heartbeat
+    assert "requirement unsure" not in heartbeat
+
+
 @pytest.mark.parametrize("failure_kind", ["failed", "timed out"])
 def test_a_failed_or_timed_out_judge_rejects_its_chunk_without_dropping_it(
         tmp_path, failure_kind):
@@ -2452,6 +2472,21 @@ def test_a_breakdown_is_applied_and_finished_done(tmp_path):
     )
 
 
+def test_a_breakdown_auth_failure_ends_as_provider_outage(tmp_path):
+    proc, repo = _stubbed_runner(
+        tmp_path, _issue_begin("breakdown"), _issue_packet("breakdown"),
+        extra_env={"MUSE_STATUS": "1",
+                   "MUSE_STDERR": "Missing META Credentials"})
+
+    assert proc.returncode == 1, proc.stderr
+    assert _muse_calls(repo) == 1
+    assert _apply_calls(repo) == []
+    heartbeat = _heartbeat(repo)
+    assert "--outcome errored" in heartbeat
+    assert "provider outage" in heartbeat
+    assert "recorded rejected" not in heartbeat
+
+
 def test_a_shape_is_applied_and_finished_done(tmp_path):
     """Shape on Muse (#1599): the framer, then one sibling check, one
     decider and the auditor, merged in code and applied once."""
@@ -2849,6 +2884,22 @@ def test_a_failed_or_timed_out_shape_part_applies_nothing(
     else:
         assert "shape sibling.0 was killed after 0 minutes" in heartbeat
     assert not (tmp_path / ".claude" / "command-center-muse-quota-hold").exists()
+
+
+def test_a_shape_part_auth_failure_ends_as_provider_outage(tmp_path):
+    proc, repo = _stubbed_runner(
+        tmp_path, _issue_begin("shape"), _issue_packet("shape"),
+        answers=(_framer_answer(),),
+        extra_env={"MUSE_SHAPE_FAIL_PART": "decider",
+                   "MUSE_SHAPE_FAILURE": "Missing META Credentials"})
+
+    assert proc.returncode == 1, proc.stderr
+    assert _muse_calls(repo) == 4
+    assert _apply_calls(repo) == []
+    heartbeat = _heartbeat(repo)
+    assert "--outcome errored" in heartbeat
+    assert "provider outage" in heartbeat
+    assert "requirement unsure" not in heartbeat
 
 
 def test_a_malformed_shape_part_retries_once_with_the_parse_error(tmp_path):
@@ -4124,6 +4175,19 @@ def test_a_lister_stream_idle_twice_fails_the_run(tmp_path):
     assert STREAM_IDLE in heartbeat
 
 
+def test_a_lister_auth_failure_matches_case_insensitively(tmp_path):
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), _packet(),
+        extra_env={"MUSE_LISTER_FAILURE": "MiSsInG MeTa CrEdEnTiAlS"})
+
+    assert proc.returncode == 1, proc.stderr
+    assert _muse_calls(repo) == 1
+    assert _apply_calls(repo) == []
+    heartbeat = _heartbeat(repo)
+    assert "--outcome errored" in heartbeat
+    assert "provider outage" in heartbeat
+
+
 def test_a_lister_failure_that_is_not_stream_idle_is_not_retried(tmp_path):
     proc, repo = _stubbed_runner(
         tmp_path, _begin(), _packet(),
@@ -4133,7 +4197,10 @@ def test_a_lister_failure_that_is_not_stream_idle_is_not_retried(tmp_path):
     assert proc.returncode == 1
     assert _muse_calls(repo) == 1
     assert "stream-idle" not in proc.stderr
-    assert "--outcome errored" in _heartbeat(repo)
+    heartbeat = _heartbeat(repo)
+    assert "--outcome errored" in heartbeat
+    assert "model stream error: connection reset by peer" in heartbeat
+    assert "provider outage" not in heartbeat
 
 
 def test_a_lister_malformed_then_idle_still_gets_its_idle_retry(tmp_path):
@@ -5122,6 +5189,20 @@ def test_a_replay_lister_failure_exits_non_zero_with_no_answer(
     assert "muse-review-engine: " in proc.stderr
     assert _forbidden(repo) == ""
     assert _run_dirs(tmp_path) == []
+
+
+def test_a_replay_of_recorded_muse_auth_stderr_writes_no_answer(tmp_path):
+    # The 2026-09-28 watch recorded this diagnostic on a refused judge.
+    proc, repo, answer_path = _replay_runner(
+        tmp_path, answers=_review_answers(_judge_answer()),
+        extra_env={"MUSE_JUDGE_FAIL_IF": "thing.py prints the thing",
+                   "MUSE_JUDGE_FAILURE": "missing meta credentials"})
+
+    assert proc.returncode == 1, proc.stderr
+    assert not answer_path.exists()
+    assert _apply_calls(repo) == []
+    assert "provider outage" in proc.stderr
+    assert _forbidden(repo) == ""
 
 
 def test_a_replay_lister_stream_idle_once_then_answers_succeeds(tmp_path):

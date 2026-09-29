@@ -77,3 +77,15 @@ def test_the_skill_invokes_the_code_template():
 def test_the_template_prints():
     assert funnel_render.main([]) == 0
     assert funnel_render.main(["--bogus"]) == 2
+
+
+def test_skill_and_template_offer_to_work_the_top_item_in_session():
+    """Both say the same thing: the session offers to work the top item
+    itself rather than handing Nate a launch line to run (#1901)."""
+    skill = " ".join(SKILL.read_text(encoding="utf-8").split())
+    template = " ".join(funnel_render.render_template().split())
+    offer = ("Offer to work the top item yourself, in this session or as a "
+             "background task, and start once he says yes.")
+    for text in (skill, template):
+        assert offer in text
+        assert "Do not run it" not in text

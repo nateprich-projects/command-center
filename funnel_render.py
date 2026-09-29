@@ -160,7 +160,9 @@ unknown, not healthy. Show `disposal` `finished_vs_abandoned` beside it with
 `done`, `parked`, `net_open_growth`, no targets. Three stale takeovers in a
 week means runs are dying; one is noise.
 
-Offer the `launch` command for the top item. Do not run it.
+Offer to work the top item yourself, in this session or as a background
+task, and start once he says yes. Never hand him a terminal `launch` line to
+run.
 """
 
 

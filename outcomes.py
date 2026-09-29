@@ -31,6 +31,21 @@ import session_usage
 REPO = "nateprich-projects/command-center"
 HEARTBEAT_BRANCH = "heartbeat"
 OUTCOMES_PATH = "outcomes.jsonl"
+REPO_ALIASES = {
+    "nateprich-projects/FF-Weekly-Start-Sit": "nateprich-projects/Fantasy-GM",
+}
+
+
+def _canonical_ticket_ref(ticket_ref: str) -> str:
+    """Resolve the one settled repository rename for outcome joins."""
+    repo, separator, number = ticket_ref.rpartition("#")
+    if not separator:
+        return ticket_ref
+    canonical_repo = REPO_ALIASES.get(repo)
+    if canonical_repo is None:
+        return ticket_ref
+    return "{}#{}".format(canonical_repo, number)
+
 
 # ``funnel.ticket_pr_index`` defaults to the brief's 100-row diagnostic bound.
 # Outcome derivation asks for a larger whole-repository scan, and refuses to
@@ -487,7 +502,11 @@ def _ticket_runs(
         finishes = _latest_by_run(rows, "finish")
         bindings = _latest_by_run(rows, "bind")
         for run, binding in bindings.items():
-            if binding.get("do") != "ticket" or str(binding.get("work")) != ticket_ref:
+            if (
+                binding.get("do") != "ticket"
+                or _canonical_ticket_ref(str(binding.get("work")))
+                != _canonical_ticket_ref(ticket_ref)
+            ):
                 continue
             start = starts.get(run, {})
             finish = finishes.get(run)
@@ -1521,8 +1540,34 @@ def _read_blob(repo: str, sha: str, size: object, path: str = OUTCOMES_PATH) -> 
 def read_records(
     repo: str = REPO, branch: str = HEARTBEAT_BRANCH
 ) -> List[Dict[str, object]]:
-    """Read the durable derived records from the heartbeat branch."""
-    return _read_remote(repo, branch)[0]
+    """Read durable outcomes with renamed ticket refs joined canonically.
+
+    When both keys exist the current-repo record is authoritative. An old-only
+    row is returned under its normalized ref, while the raw heartbeat-branch
+    ledger stays untouched as the rename history.
+    """
+    records = _read_remote(repo, branch)[0]
+    current_by_ref = {
+        row["ticket"]: row
+        for row in records
+        if isinstance(row.get("ticket"), str)
+        and _canonical_ticket_ref(row["ticket"]) == row["ticket"]
+    }
+    normalized: List[Dict[str, object]] = []
+    seen = set()
+    for row in records:
+        original_ref = row.get("ticket")
+        if not isinstance(original_ref, str):
+            continue
+        canonical_ref = _canonical_ticket_ref(original_ref)
+        if canonical_ref in seen:
+            continue
+        seen.add(canonical_ref)
+        selected = current_by_ref.get(canonical_ref, row)
+        normalized_row = dict(selected)
+        normalized_row["ticket"] = canonical_ref
+        normalized.append(normalized_row)
+    return normalized
 
 
 def _new_records(

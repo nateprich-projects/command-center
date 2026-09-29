@@ -135,3 +135,19 @@ def test_a_short_claim_matches_only_as_whole_words():
 
     assert review.normalize_plan_premise_requirements(
         packet, [kept, probe]) == [kept]
+
+
+def test_probes_of_a_second_plan_are_dropped_too():
+    # A PR can close tickets from two plans; each group's premises count.
+    packet = {"plan_premises": [
+        {"available": True, "premises": [
+            {"claim": "the first plan's claim holds", "evidence": "a",
+             "label": "inferred"}]},
+        {"available": True, "premises": [
+            {"claim": "the second plan's claim holds", "evidence": "b",
+             "label": "inferred"}]},
+    ]}
+    probe = "Probe inferred premise 'the second plan's claim holds' via 'b'"
+
+    assert review.normalize_plan_premise_requirements(
+        packet, [probe, "Do it"]) == ["Do it"]

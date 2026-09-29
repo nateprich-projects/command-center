@@ -3767,7 +3767,8 @@ def test_the_lister_asks_for_requirements_before_the_judge_is_asked(tmp_path):
     assert listed["head_sha"] == HEAD
     assert "PACKET_JSON" not in lister
     assert "has `deferred_answer`" in lister
-    assert "Do not emit a live-evidence" in lister
+    assert "Never list a requirement\nthat probes a `plan_premises` entry" \
+        in lister
     assert "ticket.deferred_acceptance" in lister
     assert "exact `deferred_clause`" in lister
     assert "exact `checkable_line` as an ordinary acceptance" in lister
@@ -3814,7 +3815,7 @@ def test_the_lister_asks_for_requirements_before_the_judge_is_asked(tmp_path):
     assert "For a labeling-error requirement" in judge
     assert "mark the requirement `unmet`" in judge
     assert "never defer it" in judge
-    assert "without `deferred_answer` still follows the normal" in judge
+    assert "No other premise is a requirement" in judge
     assert "inspect the entry's" in judge
 
 
@@ -3912,11 +3913,18 @@ def test_measured_forward_pointer_is_rejected_as_a_labeling_error(tmp_path):
     ]
 
 
-def test_a_missing_checkable_inferred_premise_still_rejects(tmp_path):
-    requirement = (
+def test_a_premise_probe_is_dropped_before_the_judges(tmp_path):
+    """#1966: premise probes are out of review scope (Nate, 2026-09-28).
+
+    Before, an unresolved probe of an inferred premise read unsure and
+    rejected the PR; now the runner drops it after the lister and the judges
+    see only the ticket's own requirement.
+    """
+    probe = (
         "Probe the inferred premise 'the missing setting is enabled' using "
         "its evidence pointer #1700; unresolved evidence remains unsure."
     )
+    do_line = "thing.py prints the thing the ticket asks for"
     plan_premises = [{
         "parent_ref": "owner/repo#1",
         "ticket_refs": ["owner/repo#6"],
@@ -3929,16 +3937,18 @@ def test_a_missing_checkable_inferred_premise_still_rejects(tmp_path):
     }]
     proc, repo = _stubbed_runner(
         tmp_path, _begin(), _packet(plan_premises=plan_premises),
-        answers=_review_answers(_judge_answer(
-            requirement, status="unsure",
-            evidence="the packet contains no evidence for #1700")))
+        answers=(_requirements_answer(probe, do_line),
+                 _judge_answer(do_line)))
 
     assert proc.returncode == 0, proc.stderr
     lister = (repo / "muse.prompt.1").read_text()
-    assert "leave it `unsure` when a required record is unavailable" in lister
+    assert "leave it `unsure` when a required record is unavailable" \
+        not in lister
+    judge = (repo / "muse.prompt.2").read_text()
+    assert probe not in judge
     applied = json.loads((repo / "apply.answer").read_text())
-    assert applied["verdict"] == "rejected"
-    assert any("requirement unsure:" in row for row in applied["blocking"])
+    assert applied["verdict"] == "approved"
+    assert [row["requirement"] for row in applied["requirements"]] == [do_line]
 
 
 def test_the_pr_body_reaches_the_lister_and_judge_as_the_implementers_claims(

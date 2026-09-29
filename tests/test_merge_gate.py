@@ -582,8 +582,9 @@ def test_a_rejected_merge_reopens_only_the_funnels_own_ticket(
             "author"} <= set(fields)
     assert any(argv[:3] == ["gh", "issue", "reopen"]
                for argv in runs) is reopened
-    # The project goes back to Building / Broken only for the funnel's PR.
-    assert moved == (["Building", "Broken"] if reopened else [])
+    # The project is marked Broken only for the funnel's PR. It is already
+    # Building in this fixture, so the Status write must be skipped.
+    assert moved == (["Broken"] if reopened else [])
 
 
 # -- a skipped check verified nothing (#1794) ---------------------------------

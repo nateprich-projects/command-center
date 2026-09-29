@@ -17643,15 +17643,66 @@ def shape_risk_block(declared: Sequence[str], scan: Sequence[str]) -> str:
 
 
 def parse_shape_risk_record(body: str) -> Optional[Dict[str, List[str]]]:
-    """The runner's risk record, or ``None`` when absent or unreadable.
+    """The runner's risk record, or None when absent or unreadable.
 
-    The newest block wins, as for every runner record, so a marker the
-    shaper quoted in the narrative above cannot outrank the runner's own.
-    A record predating the declared field treats it as an empty list.
+    The runner writes this record immediately before its provenance trailer.
+    Copied plan text can put an older provenance block after that trailer, so
+    choose the newest timestamped provenance rather than the last marker in
+    body order, then read only the risk block directly before it. Older
+    records without a declared field continue to treat it as an empty list.
     """
-    found = _marked_json(body, SHAPE_RISK_MARKER)
-    if found is None:
+    if not isinstance(body, str):
         return None
+    provenance_line = re.compile(
+        r"(?m)^[ \t]*" + re.escape(PROVENANCE_MARKER) + r"[ \t]*\r?$"
+    )
+    provenance_candidates = []
+    for match in provenance_line.finditer(body):
+        marker_at = match.start() + len(match.group(0)) - len(PROVENANCE_MARKER)
+        parsed = _marked_json_block_at(body, PROVENANCE_MARKER, marker_at)
+        if parsed is None:
+            continue
+        provenance, _ = parsed
+        if provenance.get("voice") not in PROVENANCE_VOICES:
+            continue
+        raw_at = provenance.get("at")
+        if not isinstance(raw_at, str):
+            continue
+        try:
+            stamp = datetime.fromisoformat(raw_at.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if stamp.tzinfo is None or stamp.utcoffset() is None:
+            continue
+        provenance_candidates.append((stamp.astimezone(timezone.utc),
+                                      match.start()))
+    if not provenance_candidates:
+        return None
+
+    # Position breaks a timestamp tie in favor of the last copy, which is how
+    # existing bodies with quoted provenance and the runner trailer are laid
+    # out. A copied trailer with an older `at` cannot steal the boundary just
+    # by being appended later.
+    _, provenance_start = max(provenance_candidates)
+    risk_line = re.compile(
+        r"(?m)^[ \t]*" + re.escape(SHAPE_RISK_MARKER) + r"[ \t]*\r?$"
+    )
+    risk_markers = list(risk_line.finditer(body, 0, provenance_start))
+    if not risk_markers:
+        return None
+
+    risk_match = risk_markers[-1]
+    risk_marker_at = (
+        risk_match.start() + len(risk_match.group(0))
+        - len(SHAPE_RISK_MARKER)
+    )
+    parsed = _marked_json_block_at(body, SHAPE_RISK_MARKER, risk_marker_at)
+    if parsed is None:
+        return None
+    found, risk_block = parsed
+    if body[risk_marker_at + len(risk_block):provenance_start].strip():
+        return None
+
     declared = found.get("declared", [])
     scan = found.get("scan")
     if not (isinstance(declared, list)
@@ -17680,7 +17731,11 @@ def _shaped_risk_holds(item: Item, body: str) -> bool:
     if item.risk != "escalated" or not body.strip():
         return True
     record = parse_shape_risk_record(body)
-    if record is None or record["declared"] or not record["scan"]:
+    if record is None:
+        return True
+    # Trust the runner's typed decision before parsing prose: an unclosed
+    # fence above the record can hide its rendered Risk rationale.
+    if record["declared"] or not record["scan"]:
         return True
     return bool(plan_declared_risks(body))
 

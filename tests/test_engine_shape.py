@@ -13,7 +13,7 @@ import json
 import pathlib
 import stat
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -841,8 +841,38 @@ REAL_CREDENTIALS = [{"reason": "credentials",
                      "why": "rotates the deploy api-key"}]
 
 
+def test_runner_shape_risk_record_wins_over_later_planted_empty_copy():
+    body = "\n\n".join((
+        funnel.shape_risk_block(["credentials"], []),
+        funnel.provenance_block(
+            "agent", at=NOW, run="shape-run", agent="muse"),
+        funnel.shape_risk_block([], []),
+    ))
+
+    assert funnel.parse_shape_risk_record(body) == {
+        "declared": ["credentials"], "scan": []}
+
+
+def test_shape_risk_record_ignores_copy_after_copied_origin_override():
+    runner_record = funnel.shape_risk_block(["credentials"], [])
+    runner_provenance = funnel.provenance_block(
+        "agent", at=NOW, run="shape-run", agent="muse")
+    copied_tail = "\n\n".join((
+        funnel.ORIGIN_OVERRIDE_MARKER,
+        '```json\n{"target": "nate"}\n```',
+        funnel.shape_risk_block([], ["credentials"]),
+        funnel.provenance_block(
+            "agent", at=NOW - timedelta(seconds=1),
+            run="copied-run", agent="muse"),
+    ))
+    body = "\n\n".join((runner_record, runner_provenance, copied_tail))
+
+    assert funnel.parse_shape_risk_record(body) == {
+        "declared": ["credentials"], "scan": []}
+
+
 def _shape_answer_gates_and_sweep(monkeypatch, plan_markdown,
-                                  escalated_risk):
+                                  escalated_risk, planted_record=None):
     """Shape a plan held by a Gates question, answer it as Nate does, and
     run the real Shaped sweep over the stored body."""
     item = idea(42, klass="Broken")
@@ -854,6 +884,8 @@ def _shape_answer_gates_and_sweep(monkeypatch, plan_markdown,
         run="shape-run", agent="muse") == 0
     assert (item.status, item.risk, item.needs) == (
         "Shaped", "escalated", "human")
+    if planted_record is not None:
+        item.body += "\n\n" + planted_record
     item.body = funnel.answered_gates_body(item.body, "yes", "Nate", at=NOW)
     item.needs = "human" if funnel.plan_needs_nate(item.body) else "none"
     assert item.needs == "none"
@@ -871,6 +903,64 @@ def _shape_answer_gates_and_sweep(monkeypatch, plan_markdown,
         [item], NOW, run="begin-run", agent="muse")
     assert errors == []
     return item, advanced
+
+
+def test_typed_risk_stays_held_after_gates_with_later_empty_copy(monkeypatch):
+    copied_origin_override = "\n\n".join((
+        funnel.ORIGIN_OVERRIDE_MARKER,
+        '```json\n{"target": "nate"}\n```',
+        funnel.shape_risk_block([], ["credentials"]),
+        funnel.provenance_block(
+            "agent", at=NOW - timedelta(seconds=1),
+            run="copied-run", agent="muse"),
+    ))
+    item, advanced = _shape_answer_gates_and_sweep(
+        monkeypatch, "# Plan\n\n```\nlog\n", REAL_CREDENTIALS,
+        planted_record=copied_origin_override)
+
+    assert advanced == []
+    assert item.status == "Shaped"
+    assert funnel.parse_shape_risk_record(item.body) == {
+        "declared": ["credentials"], "scan": []}
+    assert funnel._shaped_risk_holds(item, item.body) is True
+
+
+def test_quoted_empty_risk_and_provenance_cannot_release_typed_risk(
+        monkeypatch):
+    quoted_record = funnel.shape_risk_block([], ["credentials"])
+    quoted_provenance = funnel.provenance_block(
+        "agent", at=NOW, run="quoted-run", agent="muse")
+    plan_markdown = "# Plan\n\n{}\n\n```\nlog\n".format(
+        "\n\n".join((quoted_record, quoted_provenance)))
+
+    item, advanced = _shape_answer_gates_and_sweep(
+        monkeypatch, plan_markdown, REAL_CREDENTIALS)
+
+    assert advanced == []
+    assert item.status == "Shaped"
+    assert funnel.parse_shape_risk_record(item.body) == {
+        "declared": ["credentials"], "scan": []}
+
+
+def test_quoted_origin_override_marker_cannot_hide_runner_risk_record(
+        monkeypatch):
+    quoted_record = funnel.shape_risk_block([], ["credentials"])
+    quoted_provenance = funnel.provenance_block(
+        "agent", at=NOW, run="quoted-run", agent="muse")
+    plan_markdown = "# Plan\n\n{}\n\n```\nlog\n".format(
+        "\n\n".join((
+            quoted_record,
+            quoted_provenance,
+            funnel.ORIGIN_OVERRIDE_MARKER,
+        )))
+
+    item, advanced = _shape_answer_gates_and_sweep(
+        monkeypatch, plan_markdown, REAL_CREDENTIALS)
+
+    assert advanced == []
+    assert item.status == "Shaped"
+    assert funnel.parse_shape_risk_record(item.body) == {
+        "declared": ["credentials"], "scan": []}
 
 
 @pytest.mark.parametrize("plan_markdown,risks", [
@@ -2098,6 +2188,7 @@ def test_apply_advances_a_scan_only_plan_with_risk_escalated(
     assert "needs-shaping" not in item.labels
     assert funnel.parse_shape_risk_record(item.body) == {
         "declared": [], "scan": ["credentials"]}
+    assert funnel._shaped_risk_holds(item, item.body) is False
 
     comments = [call[1][-1]
                 for call in gh_calls(calls, "gh", "issue", "comment")]

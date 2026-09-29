@@ -1078,3 +1078,49 @@ def test_an_unreadable_heartbeat_is_a_problem_the_issue_names(monkeypatch):
     assert bodies, posted
     assert "`muse`: heartbeat unreadable (HTTP 502 from the contents API)." \
         in bodies[0]
+
+
+def test_xcode_license_refusal_alerts_once_without_heartbeat(monkeypatch):
+    stderr = (
+        "You have not agreed to the Xcode license agreements. "
+        "Please run 'sudo xcodebuild -license' from within a Terminal "
+        "window to review and agree to the Xcode and Apple SDKs license.\n"
+    )
+    calls = []
+
+    monkeypatch.setattr(watchdog.heartbeat, "PROVIDERS", {"codex": "openai"})
+    monkeypatch.setattr(watchdog, "records", lambda agent: [])
+    monkeypatch.setattr(watchdog, "existing_issue", lambda: {})
+    monkeypatch.setattr(
+        watchdog, "gh",
+        lambda *args: calls.append(args) or json.dumps({"number": 1}),
+    )
+
+    assert watchdog.main(stderr + stderr) == 0
+
+    bodies = [
+        argument[len("body="):]
+        for call in calls
+        for argument in call
+        if isinstance(argument, str) and argument.startswith("body=")
+    ]
+    assert len(bodies) == 1
+    assert bodies[0].count("Xcode license agreement not accepted") == 1
+    assert "heartbeat unreadable" not in bodies[0]
+    assert "sudo xcodebuild" not in bodies[0]
+
+
+def test_nonmatching_failed_job_stderr_does_not_create_license_alert(
+        monkeypatch, capsys):
+    calls = []
+    monkeypatch.setattr(watchdog.heartbeat, "PROVIDERS", {"codex": "openai"})
+    monkeypatch.setattr(watchdog, "records", lambda agent: [])
+    monkeypatch.setattr(watchdog, "existing_issue", lambda: {})
+    monkeypatch.setattr(
+        watchdog, "gh", lambda *args: calls.append(args) or "{}"
+    )
+
+    assert watchdog.main("python failed: unrelated missing module") == 0
+
+    assert calls == []
+    assert "Xcode license agreement not accepted" not in capsys.readouterr().out

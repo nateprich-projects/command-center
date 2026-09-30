@@ -16760,6 +16760,45 @@ def classify_blockers(blockers: Iterable[dict], repo: str) -> Dict[str, List[str
     return refs
 
 
+def _current_block_comment_details(
+    comments: Sequence[Mapping[str, object]],
+) -> Optional[Tuple[List[str], Optional[date], str,
+                    Optional[Dict[str, str]]]]:
+    """Choose the newest block-making comment by its GitHub creation time.
+
+    A later Declined comment starts a new blocked episode without machine-
+    readable conditions. An older Blocked-on header must not satisfy it. A
+    newer Blocked-on header can establish conditions for that later episode.
+    """
+    bodies = [str(comment.get("body") or "") for comment in comments]
+    block_rows = []
+    decline_times = []
+    has_decline = False
+    for comment, body in zip(comments, bodies):
+        details = _parse_block_comment_details([body])
+        if details is not None:
+            block_rows.append((parse_time(comment.get("createdAt")), details))
+        if body.lstrip().startswith(DECLINED_PREFIX):
+            has_decline = True
+            decline_times.append(parse_time(comment.get("createdAt")))
+
+    if has_decline:
+        if (
+            not block_rows
+            or any(at is None for at, _ in block_rows)
+            or any(at is None for at in decline_times)
+        ):
+            return None
+        newest_block = max(at for at, _ in block_rows)
+        newest_decline = max(decline_times)
+        if newest_decline >= newest_block:
+            return None
+
+    if block_rows and all(at is not None for at, _ in block_rows):
+        return max(block_rows, key=lambda row: row[0])[1]
+    return _parse_block_comment_details(bodies)
+
+
 def _load_block_comment(item: Item) -> None:
     """Populate one open blocked item's parsed comment state.
 
@@ -16779,13 +16818,11 @@ def _load_block_comment(item: Item) -> None:
     # Only the owner account's comments carry them (#1788); anyone can
     # comment on a public repository, and an outsider's copy of any of these
     # would block, unblock or re-route real work.
-    bodies = [
-        comment.get("body") or ""
-        for comment in trusted_comments(payload["comments"])
-    ]
+    comments = trusted_comments(payload["comments"])
+    bodies = [comment.get("body") or "" for comment in comments]
     item.unparseable_block_comments = unparseable_block_comment_lines(bodies)
     item.block_event = None
-    parsed = _parse_block_comment_details(bodies)
+    parsed = _current_block_comment_details(comments)
     if parsed is not None:
         (
             item.block_references,

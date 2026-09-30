@@ -225,6 +225,142 @@ def test_fully_satisfied_blocks_are_recorded_then_cleared(
     assert waiting.blocked_cleared_at == NOW
 
 
+def test_newer_decline_does_not_reuse_satisfied_older_header(monkeypatch):
+    repo = "nateprich-projects/command-center"
+    waiting = issue(2005)
+    waiting.repo = repo
+    waiting.labels = ["blocked"]
+    waiting.blocked_since = funnel.parse_time("2026-09-30T03:29:24Z")
+    blocker = issue(2006, state="CLOSED")
+    blocker.repo = repo
+    header = "**Blocked on #2006:** Complete the human step before resuming."
+    old_satisfied = funnel.satisfied_block_comment(
+        [blocker.ref],
+        funnel.parse_time("2026-09-30T02:41:23Z"),
+        run="run-2005-satisfied",
+        agent="codex",
+    )
+    comments = [
+        {
+            "author": {"login": "nateprich"},
+            "createdAt": "2026-09-30T00:32:27Z",
+            "body": header,
+        },
+        {
+            "author": {"login": "nateprich"},
+            "createdAt": "2026-09-30T02:42:49Z",
+            "body": old_satisfied,
+        },
+        {
+            "author": {"login": "nateprich"},
+            "createdAt": "2026-09-30T03:21:03Z",
+            "body": "**Declined:** The ticket prerequisite is false in this run.",
+        },
+    ]
+    monkeypatch.setattr(
+        funnel, "_gh_json", lambda *args: {"comments": comments}
+    )
+    funnel._load_block_comment(waiting)
+
+    calls = []
+
+    def run(args, capture_output, text=True):
+        calls.append(tuple(args))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(funnel.subprocess, "run", run)
+    funnel.clear_satisfied_blocks(
+        [waiting, blocker],
+        datetime(2026, 9, 30, 5, 0, tzinfo=timezone.utc),
+        run="run-2019",
+        agent="codex",
+    )
+
+    assert calls == []
+    assert waiting.is_blocked
+
+
+def test_newer_header_after_decline_clears_and_records_satisfied_refs(
+    monkeypatch,
+):
+    repo = "nateprich-projects/command-center"
+    newer_blocker_ref = "nateprich-projects/command-center#2007"
+    waiting = issue(2005)
+    waiting.repo = repo
+    waiting.labels = ["blocked"]
+    waiting.blocked_since = funnel.parse_time("2026-09-30T03:29:24Z")
+    older_blocker = issue(2006, state="CLOSED")
+    older_blocker.repo = repo
+    newer_blocker = issue(2007, state="CLOSED")
+    newer_blocker.repo = repo
+    old_satisfied = funnel.satisfied_block_comment(
+        ["nateprich-projects/command-center#2006"],
+        funnel.parse_time("2026-09-30T02:41:23Z"),
+        run="run-2005-satisfied",
+        agent="codex",
+    )
+    comments = [
+        {
+            "author": {"login": "nateprich"},
+            "createdAt": "2026-09-30T03:40:00Z",
+            "body": "**Blocked on #2007:** Wait for the tracked prerequisite.",
+        },
+        {
+            "author": {"login": "nateprich"},
+            "createdAt": "2026-09-30T00:32:27Z",
+            "body": "**Blocked on #2006:** Complete the human step.",
+        },
+        {
+            "author": {"login": "nateprich"},
+            "createdAt": "2026-09-30T02:42:49Z",
+            "body": old_satisfied,
+        },
+        {
+            "author": {"login": "nateprich"},
+            "createdAt": "2026-09-30T03:21:03Z",
+            "body": "**Declined:** The ticket prerequisite is false in this run.",
+        },
+    ]
+    monkeypatch.setattr(
+        funnel, "_gh_json", lambda *args: {"comments": comments}
+    )
+    funnel._load_block_comment(waiting)
+    assert waiting.block_references == ["#2007"]
+
+    calls = []
+
+    def run(args, capture_output, text=True):
+        calls.append(tuple(args))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(funnel.subprocess, "run", run)
+    cleared = funnel.clear_satisfied_blocks(
+        [waiting, older_blocker, newer_blocker],
+        datetime(2026, 9, 30, 5, 0, tzinfo=timezone.utc),
+        run="run-2019",
+        agent="codex",
+    )
+
+    assert cleared == [{
+        "ref": "nateprich-projects/command-center#2005",
+        "conditions": [newer_blocker_ref],
+        "cleared_at": "2026-09-30T05:00:00+00:00",
+    }]
+    assert len(calls) == 2
+    assert calls[0][:6] == (
+        "gh", "issue", "comment", "2005", "--repo", repo,
+    )
+    assert funnel.parse_satisfied_block_comment(calls[0][-1]) == {
+        "conditions": [newer_blocker_ref],
+        "found_closed_at": "2026-09-30T05:00:00Z",
+    }
+    assert calls[1] == (
+        "gh", "issue", "edit", "2005", "--repo", repo,
+        "--remove-label", "blocked",
+    )
+    assert not waiting.is_blocked
+
+
 def test_declined_unblock_clears_legacy_human_needs_before_label(
     monkeypatch,
 ):

@@ -12622,8 +12622,8 @@ def _dashboard_item(
 #: only on its siblings is "queued"; it and "blocked" share one run, ordered
 #: by ``_dashboard_pip_order``.
 PIP_PROGRESS_ORDER = (
-    "closed", "approved", "changes-requested", "submitted", "unknown",
-    "open", "queued", "blocked",
+    "closed", "approved", "changes-requested", "submitted", "stale",
+    "unknown", "open", "queued", "blocked",
 )
 _PIP_BLOCKED_STATES = ("queued", "blocked")
 
@@ -12632,6 +12632,10 @@ def _dashboard_pip_state(ticket: Mapping[str, object]) -> str:
     """The furthest state one ticket has reached, for its bar segment."""
     if ticket.get("state") != "OPEN":
         return "closed"
+    if ticket.get("pr_stale"):
+        return "stale"
+    if ticket.get("pr_unknown"):
+        return "unknown"
     pr = ticket.get("pr")
     if pr == "approved":
         return "approved"
@@ -12810,6 +12814,7 @@ def dashboard_board(
     authoring_pr_agents: Optional[Mapping[str, Iterable[str]]] = None,
     backed_off: Optional[Mapping[str, Mapping[str, object]]] = None,
     recent_starts: Sequence[Optional[str]] = (),
+    pr_display_overrides: Optional[Mapping[str, Mapping[str, object]]] = None,
 ) -> Dict[str, List[Dict[str, object]]]:
     """Build the ordered parent-project board for one already-loaded brief.
 
@@ -12836,6 +12841,7 @@ def dashboard_board(
     max_time = datetime.max.replace(tzinfo=timezone.utc)
 
     facts = dict(pr_facts or {})
+    display_overrides = pr_display_overrides or {}
     authoring = authoring_pr_agents or {}
     # The brief returns an empty mapping both when nothing has a PR and when
     # the scan failed, so it says which through ``pr_facts_known``. A caller
@@ -12972,8 +12978,9 @@ def dashboard_board(
             )
         siblings_of = list(children.get(parent.ref, ()))
         siblings = {child.ref for child in siblings_of}
-        return [
-            _dashboard_ticket(
+
+        def render_ticket(child: Item) -> Dict[str, object]:
+            row = _dashboard_ticket(
                 child,
                 facts.get(child.ref),
                 verdict_for(child),
@@ -12999,6 +13006,21 @@ def dashboard_board(
                 paused_rows.get(child.ref) if child.state == "OPEN" else None,
                 child.ref in finished and child.state == "OPEN",
             )
+            override = display_overrides.get(child.ref)
+            if isinstance(override, Mapping):
+                if override.get("status") == "stale":
+                    row["pr_stale"] = True
+                    row["pr_stale_state"] = override.get("pr")
+                    row["pr_stale_age"] = override.get("age")
+                    number = override.get("pr_number")
+                    if isinstance(number, int) and not isinstance(number, bool):
+                        row["pr_stale_number"] = number
+                elif override.get("status") == "unknown":
+                    row["pr_unknown"] = True
+            return row
+
+        return [
+            render_ticket(child)
             for child in sorted(siblings_of, key=ticket_key)
         ]
 
@@ -22458,6 +22480,38 @@ def main(argv: Optional[Sequence[str]] = None, *,
                         recent_starts = recent_ticket_starts(heartbeat_rows)
                     except Exception:
                         recent_starts = []
+                    pr_display_overrides: Dict[str, Dict[str, object]] = {}
+                    try:
+                        # Local to the display snapshot path: merge and review
+                        # continue to read only the live GitHub fact helpers.
+                        from dashboard.prior_facts import (
+                            carry_forward_display_facts,
+                            read_prior_pr_facts,
+                        )
+
+                        captured_at, prior_pr_facts = read_prior_pr_facts(
+                            _dashboard_spool_dir()
+                        )
+                        pr_display_overrides = carry_forward_display_facts(
+                            [
+                                item.ref for item in items
+                                if item.parent is not None
+                                and item.state == "OPEN"
+                            ],
+                            pr_facts,
+                            live_facts_known=not pr_facts_missing,
+                            captured_at=captured_at,
+                            prior_facts=prior_pr_facts,
+                            now=now,
+                        )
+                    except Exception as exc:
+                        # The prior brief is only a display buffer. If it
+                        # cannot be read, keep the live or unknown board intact.
+                        print(
+                            "funnel: could not read prior dashboard PR facts: "
+                            "{}".format(exc),
+                            file=sys.stderr,
+                        )
                     write_dashboard_snapshot(
                         brief_payload,
                         dashboard_board(
@@ -22466,6 +22520,7 @@ def main(argv: Optional[Sequence[str]] = None, *,
                             authoring_pr_agents=authoring_pr_agents,
                             backed_off=backed_off,
                             recent_starts=recent_starts,
+                            pr_display_overrides=pr_display_overrides,
                         ),
                         generated_at,
                         usage={

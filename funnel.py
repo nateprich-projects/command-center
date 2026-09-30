@@ -22485,14 +22485,11 @@ def main(argv: Optional[Sequence[str]] = None, *,
                         # Local to the display snapshot path: merge and review
                         # continue to read only the live GitHub fact helpers.
                         from dashboard.prior_facts import (
-                            carry_forward_display_facts,
-                            read_prior_pr_facts,
+                            dashboard_pr_display_overrides,
                         )
 
-                        captured_at, prior_pr_facts = read_prior_pr_facts(
-                            _dashboard_spool_dir()
-                        )
-                        pr_display_overrides = carry_forward_display_facts(
+                        pr_display_overrides = dashboard_pr_display_overrides(
+                            _dashboard_spool_dir(),
                             [
                                 item.ref for item in items
                                 if item.parent is not None
@@ -22500,8 +22497,6 @@ def main(argv: Optional[Sequence[str]] = None, *,
                             ],
                             pr_facts,
                             live_facts_known=not pr_facts_missing,
-                            captured_at=captured_at,
-                            prior_facts=prior_pr_facts,
                             now=now,
                         )
                     except Exception as exc:

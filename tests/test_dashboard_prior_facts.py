@@ -13,7 +13,9 @@ sys.path.insert(0, str(ROOT))
 
 import funnel  # noqa: E402
 from dashboard.prior_facts import (  # noqa: E402
+    DISABLE_CARRY_FORWARD_FLAG,
     carry_forward_display_facts,
+    dashboard_pr_display_overrides,
     read_prior_pr_facts,
 )
 
@@ -131,6 +133,33 @@ def test_prior_facts_expire_at_24_hours():
     )
 
     assert overrides == {"repo#1": {"status": "unknown"}}
+
+
+def test_runtime_disable_flag_turns_off_carry_forward_and_can_be_removed(tmp_path):
+    (tmp_path / "brief-001-aaaaaaaaaaaaaaaa.json").write_text(
+        json.dumps(_entry(
+            (NOW - timedelta(hours=5)).isoformat(),
+            [_ticket("repo#1", "submitted", 7)],
+        )),
+        encoding="utf-8",
+    )
+    kwargs = {
+        "spool_dir": tmp_path,
+        "ticket_refs": ["repo#1"],
+        "live_facts": {},
+        "live_facts_known": False,
+        "now": NOW,
+    }
+
+    enabled = dashboard_pr_display_overrides(**kwargs)
+    assert enabled["repo#1"]["status"] == "stale"
+
+    disable_flag = tmp_path / DISABLE_CARRY_FORWARD_FLAG
+    disable_flag.touch()
+    assert dashboard_pr_display_overrides(**kwargs) == {}
+
+    disable_flag.unlink()
+    assert dashboard_pr_display_overrides(**kwargs) == enabled
 
 
 def test_merge_and_review_decisions_do_not_import_prior_display_facts():

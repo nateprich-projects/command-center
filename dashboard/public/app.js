@@ -283,10 +283,13 @@ function pips(item, tickets, closed, total) {
     }
   }
   if (bar.childElementCount) wrap.append(bar);
-  const staleAges = rows
-    .filter((ticket) => ticket && ticket.pr_stale === true)
-    .map((ticket) => ticket.pr_stale_age)
-    .filter((age) => typeof age === "string");
+  const staleAges = [];
+  for (const ticket of rows) {
+    if (!ticket || ticket.pr_stale !== true) continue;
+    if (typeof ticket.pr_stale_age === "string") {
+      staleAges.push(ticket.pr_stale_age);
+    }
+  }
   if (staleAges.length) {
     wrap.append(element("span", "pr-stale-age pr-stale-summary", `stale ${staleAges.join(", ")}`));
   }

@@ -547,6 +547,37 @@ def test_a_failed_pr_scan_reads_unknown_rather_than_no_pr():
     assert "unknown" in row["pips"]
 
 
+def test_carried_pr_pip_is_stale_while_live_board_ownership_stays_unchanged():
+    board = funnel.dashboard_board(
+        [project(children_total=2), ticket(11), ticket(12)],
+        NOW,
+        pr_facts={},
+        pr_facts_known=True,
+        pr_display_overrides={
+            REPO + "#11": {
+                "status": "stale", "pr": "approved", "pr_number": 7,
+                "age": "5h",
+            },
+            REPO + "#12": {"status": "unknown"},
+        },
+    )
+    row = next(
+        column for column in board["columns"]
+        if column["stage"] == "Building"
+    )["items"][0]
+    by_number = {entry["number"]: entry for entry in row["tickets"]}
+
+    assert by_number[11]["pr"] is None
+    assert by_number[11]["pr_stale"] is True
+    assert by_number[11]["pr_stale_state"] == "approved"
+    assert by_number[11]["pr_stale_age"] == "5h"
+    assert by_number[11]["pr_stale_number"] == 7
+    assert by_number[11]["owner"] == funnel.OWNER_CODEX
+    assert by_number[11]["queue_rank"] == 0
+    assert by_number[12]["pr_unknown"] is True
+    assert row["pips"] == ["stale", "unknown"]
+
+
 def test_a_successful_scan_with_no_prs_still_reads_as_no_pr():
     rows = funnel.dashboard_board(
         [project(status="Building", children_total=1), ticket(11)],

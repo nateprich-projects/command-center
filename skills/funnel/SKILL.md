@@ -33,13 +33,14 @@ If the command fails, show the error. Do not query GitHub yourself.
 | `human_steps` | Tickets waiting on Nate to go and do the declared `reason`; outside `total_needing_nate`, their only surface |
 | `machine_local_steps` | Tickets waiting on a Claude Code session to go and do the declared `reason`; never folded into decisions or the total |
 | `unattended_merges` | Agent merges without him (`pr`, `at`, `note`, `agent`; retired agents excluded); call `self_reviewed: true` self-reviewed |
+| `price_changes` | Model token rates that changed in the last seven days, with old and new USD per million tokens and the effective date |
 
 The code template documents these: `generated_at`, `counts_by_gate`,
 `items`, `waiting_on`, `waited`, `class`, `pinned`, `needs_class`,
 `unclassed_captures`, `in_motion`, `wip_limit`, `stale_locks_taken_over`,
 `stranded`, `working_tree_touched`, `maintenance_load`, `disposal`,
 `recorded_cause_regressions`, `command_center_ticket_pr_share`,
-`resend_ratio`, `outcome_signals`, `blocked`, `held_at_accept`,
+`resend_ratio`, `outcome_signals`, `price_changes`, `blocked`, `held_at_accept`,
 `blocked_human_steps`, `blocked_machine_local_steps`,
 `suspected_human_steps`, `parked`,
 `closed_itself`, `cleared_blocks`, `awaiting_breakdown`,

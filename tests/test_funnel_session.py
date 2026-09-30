@@ -764,6 +764,11 @@ def _begin_in_a_session(monkeypatch, loader):
 
     monkeypatch.setattr(funnel, "member_repos", member_repos)
     monkeypatch.setattr(
+        funnel, "_load_minimal_startable_view",
+        lambda _members: loader.full if loader.full is not None
+        else (loader.view or []),
+    )
+    monkeypatch.setattr(
         funnel, "cmd_begin",
         lambda items, *args, **kwargs: begun.append(items) or 0)
     monkeypatch.setattr(funnel, "report_api_cost",
@@ -833,6 +838,13 @@ def test_a_session_reloads_the_full_board_after_begin_for_other_commands(
     loader = _ScopedLoader()
     session = _begin_in_a_session(monkeypatch, loader)
     seen = []
+    minimal_loads = []
+    if command[0] == "queue":
+        monkeypatch.setattr(
+            funnel, "_load_minimal_startable_view",
+            lambda members: minimal_loads.append(set(members))
+            or [loader.full[0]],
+        )
     monkeypatch.setattr(funnel, "repo_readiness_for_items",
                         lambda items: {})
     monkeypatch.setattr(
@@ -845,12 +857,19 @@ def test_a_session_reloads_the_full_board_after_begin_for_other_commands(
     assert session.dispatch(command)[0] == 0
     assert loader.scopes == ["begin", None]
     assert seen == [loader.full]
-    assert session.items is loader.full
+    if command[0] == "queue":
+        assert isinstance(session.items, funnel.ScopedItems)
+        assert session.items.startable_items == [loader.full[0]]
+        assert minimal_loads == [{_VIEW_REPO}]
+    else:
+        assert session.items is loader.full
     assert funnel.items_scope(session.items) == "full"
 
     # The session keeps the full read for the commands that follow.
     assert session.dispatch(command)[0] == 0
     assert loader.scopes == ["begin", None]
+    if command[0] == "queue":
+        assert minimal_loads == [{_VIEW_REPO}]
 
 
 def test_a_session_brief_after_begin_reads_the_full_board(monkeypatch):

@@ -223,7 +223,9 @@ def test_the_165_record_on_an_unrelated_issue_stays_in_the_queue(
     output = capsys.readouterr().out
     assert "Startable by Codex (1)" in output
     assert ticket.ref in output
-    assert calls == [[ticket.ref]]
+    # The projected-turn simulation re-evaluates later states; the first
+    # listing is the queue's shared startable view.
+    assert calls[0] == [ticket.ref]
 
 
 def test_the_same_number_in_another_repo_does_not_withhold(monkeypatch):

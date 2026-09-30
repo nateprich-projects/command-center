@@ -2226,12 +2226,15 @@ def test_queue_and_begin_share_one_startable_view_for_the_165_regression(
     def counted_listing(items, *args, **kwargs):
         result = original_listing(items, *args, **kwargs)
         refs = [item.ref for item in result]
-        events.append(("listing", refs))
-        calls.append((
-            items is view.startable_items,
-            kwargs.get("candidate_items") is view.startable_candidates,
-            refs,
-        ))
+        # Queue's projected-turn simulation asks the pure helper about later
+        # simulated states. Count only the shared loaded view used by queue
+        # and begin here.
+        if (
+            items is view.startable_items
+            and kwargs.get("candidate_items") is view.startable_candidates
+        ):
+            events.append(("listing", refs))
+            calls.append((True, True, refs))
         return result
 
     def counted_next(*args, **kwargs):

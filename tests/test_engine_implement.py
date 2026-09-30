@@ -4754,6 +4754,84 @@ def test_timed_out_test_keeps_checkpointed_work_and_finishes(
     ).stdout == "unfinished\n"
 
 
+def test_private_repo_timeout_note_redacts_script_name(monkeypatch):
+    visibility_reads = []
+    finished = []
+
+    def read_visibility(endpoint):
+        visibility_reads.append(endpoint)
+        return {"visibility": "private"}
+
+    monkeypatch.setattr(funnel, "_gh_api_json", read_visibility)
+    implement._record_command_timeout(
+        implement.CommandTimeoutError(["./ci/private-suite.sh"], 7),
+        run="run-42", agent="codex", ref=REPO + "#42",
+        release=lambda ref: None,
+        heartbeat_finish=lambda *args: finished.append(args),
+        work_kept=True,
+    )
+
+    assert finished[0][3] == (
+        "test command timed out after 7s; work was checkpointed")
+    assert "private-suite.sh" not in finished[0][3]
+    assert visibility_reads == ["repos/owner/repo"]
+
+
+def test_private_repo_timeout_note_redacts_make_target(monkeypatch):
+    finished = []
+    monkeypatch.setattr(
+        funnel, "_gh_api_json", lambda endpoint: {"visibility": "private"})
+
+    implement._record_command_timeout(
+        implement.CommandTimeoutError(["make", "private-target"], 11),
+        run="run-42", agent="codex", ref=REPO + "#42",
+        release=lambda ref: None,
+        heartbeat_finish=lambda *args: finished.append(args),
+        work_kept=True,
+    )
+
+    assert finished[0][3] == (
+        "test command timed out after 11s; work was checkpointed")
+    assert "private-target" not in finished[0][3]
+
+
+def test_unreadable_repo_visibility_redacts_timeout_command(monkeypatch):
+    finished = []
+
+    def unreadable(endpoint):
+        raise OSError("visibility unavailable")
+
+    monkeypatch.setattr(funnel, "_gh_api_json", unreadable)
+    implement._record_command_timeout(
+        implement.CommandTimeoutError(["./ci/private-suite.sh"], 13),
+        run="run-42", agent="codex", ref=REPO + "#42",
+        release=lambda ref: None,
+        heartbeat_finish=lambda *args: finished.append(args),
+        work_kept=True,
+    )
+
+    assert finished[0][3] == (
+        "test command timed out after 13s; work was checkpointed")
+    assert "private-suite.sh" not in finished[0][3]
+
+
+def test_public_repo_timeout_note_keeps_command_name(monkeypatch):
+    finished = []
+    monkeypatch.setattr(
+        funnel, "_gh_api_json", lambda endpoint: {"visibility": "public"})
+
+    implement._record_command_timeout(
+        implement.CommandTimeoutError(["make", "public-suite"], 17),
+        run="run-42", agent="codex", ref=PUBLIC_REPO + "#42",
+        release=lambda ref: None,
+        heartbeat_finish=lambda *args: finished.append(args),
+        work_kept=True,
+    )
+
+    assert finished[0][3] == (
+        "make public-suite timed out after 17s; work was checkpointed")
+
+
 # --- The finish tests the work merged with current main (#1804) ---
 #
 # Each fixture clones a remote whose main then moves on, so only the fetch at

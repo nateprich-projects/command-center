@@ -179,12 +179,21 @@ TICKET_COMMENT_BODY_LIMIT = 4000
 #: never a reason to reject.
 TICKET_COMMENTS_TEXT_LIMIT = 24000
 
-#: The repository's plan.md is cut at this many characters (#1801). It is
-#: design context for every call's prompt, not the change under review.
-#: command-center's own, the largest in the funnel at about 62 K characters
-#: on 2026-09-28, still arrives whole; the bound stops it growing into every
-#: prompt unchecked.
-PLAN_MD_LIMIT = 64 * 1024
+#: The repository's plan.md is kept to this many characters. It is design
+#: context for every call's prompt, not the change under review. Above the
+#: bound, lower-decision sections go first so build-kickoff decisions and
+#: verification status remain available as the plan grows.
+PLAN_MD_LIMIT = 96_000
+PLAN_MD_DROP_FIRST = (
+    "The problem",
+    "Surfaces",
+    "Scope and membership",
+    "Architecture",
+)
+PLAN_MD_KEEP_LAST = (
+    "Decisions settled at build kickoff",
+    "Verification status",
+)
 
 # PR comments are durable run evidence. Keep each body bounded while carrying
 # every comment, newest last, so a reviewer can see the complete conversation.
@@ -627,6 +636,81 @@ def _bounded_text(text: object, limit: int) -> object:
     if not isinstance(text, str) or len(text) <= limit:
         return text
     return text[:limit] + "\n…[truncated {} chars]".format(len(text) - limit)
+
+
+_PLAN_MD_SECTION_HEADING = re.compile(r"(?m)^## ([^\n]+)$")
+
+
+def _plan_md_heading_matches(title: str, name: str) -> bool:
+    return title == name or title.startswith(name + " ")
+
+
+def _bounded_plan_md(text: object) -> object:
+    """Keep plan.md within its bound by removing whole sections by priority."""
+    if not isinstance(text, str) or len(text) <= PLAN_MD_LIMIT:
+        return text
+
+    headings = list(_PLAN_MD_SECTION_HEADING.finditer(text))
+    if not headings:
+        return _bounded_text(text, PLAN_MD_LIMIT)
+
+    sections = []
+    titles = []
+    for index, heading in enumerate(headings):
+        end = (headings[index + 1].start()
+               if index + 1 < len(headings) else len(text))
+        sections.append(text[heading.start():end])
+        titles.append(heading.group(1).strip())
+
+    drop_order = []
+    scheduled = set()
+
+    def schedule_matching(name: str) -> None:
+        for index, title in enumerate(titles):
+            if (index not in scheduled
+                    and _plan_md_heading_matches(title, name)):
+                scheduled.add(index)
+                drop_order.append(index)
+
+    for name in PLAN_MD_DROP_FIRST:
+        schedule_matching(name)
+
+    for index, title in enumerate(titles):
+        is_kept_last = any(
+            _plan_md_heading_matches(title, name)
+            for name in PLAN_MD_KEEP_LAST
+        )
+        if index not in scheduled and not is_kept_last:
+            scheduled.add(index)
+            drop_order.append(index)
+
+    for name in PLAN_MD_KEEP_LAST:
+        schedule_matching(name)
+
+    dropped = set()
+
+    def render() -> str:
+        chunks = [text[:headings[0].start()]]
+        for index, section in enumerate(sections):
+            if index not in dropped:
+                chunks.append(section)
+                continue
+            trailing_whitespace = section[len(section.rstrip()):]
+            if not trailing_whitespace:
+                trailing_whitespace = "\n\n"
+            chunks.append(
+                "[section omitted: {}]{}".format(
+                    titles[index], trailing_whitespace))
+        return "".join(chunks)
+
+    bounded = text
+    for index in drop_order:
+        dropped.add(index)
+        bounded = render()
+        if len(bounded) <= PLAN_MD_LIMIT:
+            return bounded
+
+    return _bounded_text(bounded, PLAN_MD_LIMIT)
 
 
 def ticket_comments(rows: Optional[Sequence[dict]]) -> List[Dict]:
@@ -2800,7 +2884,7 @@ def build_packet(*, repo: str, pr_number: int, pr_view: dict, diff: str,
         "tickets": tickets_packet,
         "plan_premises": plan_premises,
         "pr_comments": pr_comments,
-        "plan_md": _bounded_text(plan_md, PLAN_MD_LIMIT),
+        "plan_md": _bounded_plan_md(plan_md),
         "plan_md_missing": plan_md_missing,
         "diff": diff,
         "changed_files": changed_files,

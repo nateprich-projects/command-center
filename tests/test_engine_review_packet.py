@@ -1225,12 +1225,86 @@ def test_packet_marks_a_missing_plan():
     assert found["plan_md"] == "" and found["plan_md_missing"] is True
 
 
-def test_a_plan_md_over_64k_characters_is_cut_and_marked():
-    """Context is bounded, never rejected (#1801)."""
-    found = packet(plan_md="d" * 65546, verdict=None)
-    assert found["plan_md"] == "d" * 65536 + "\n…[truncated 10 chars]"
-    assert found["precheck"] == {"pass": True, "reasons": []}
-    assert packet(plan_md="d" * 65536)["plan_md"] == "d" * 65536
+def test_current_plan_plus_6000_chars_keeps_verification_status_whole():
+    current_plan = (ROOT / "plan.md").read_text()
+    source = current_plan + "x" * 6000
+    verification_tail = current_plan[
+        current_plan.index("## Verification status"):]
+
+    found = packet(plan_md=source, verdict=None)
+
+    assert found["plan_md"].endswith(verification_tail + "x" * 6000)
+
+
+def test_plan_md_at_or_under_96000_characters_passes_unchanged():
+    assert review.PLAN_MD_LIMIT == 96_000
+    for size in (95_999, 96_000):
+        source = "d" * size
+        assert packet(plan_md=source, verdict=None)["plan_md"] == source
+
+
+@pytest.mark.parametrize(
+    ("filler_size", "omitted", "kept"),
+    [
+        (87_900, ("The problem",),
+         ("Scope and membership", "Surfaces", "Architecture")),
+        (91_000, ("The problem", "Surfaces"),
+         ("Scope and membership", "Architecture")),
+        (93_000, ("The problem", "Surfaces", "Scope and membership"),
+         ("Architecture",)),
+        (95_000, ("The problem", "Surfaces", "Scope and membership",
+                  "Architecture"), ()),
+    ],
+)
+def test_plan_md_drops_named_sections_in_priority_order_before_protected_tail(
+        filler_size, omitted, kept):
+    source = (
+        "## The problem\n" + "p" * 2_000 + "\n"
+        "## Scope and membership\n" + "s" * 2_000 + "\n"
+        "## Surfaces\n" + "u" * 2_000 + "\n"
+        "## Architecture\n" + "a" * 2_000 + "\n"
+        "## The funnel\n" + "f" * filler_size + "\n"
+        "## Decisions settled at build kickoff (2026-09-05)\n"
+        "Keep the settled decisions.\n"
+        "## Verification status\n"
+        "Keep the verification status.\n"
+    )
+
+    found = packet(plan_md=source, verdict=None)["plan_md"]
+
+    for title in omitted:
+        assert f"[section omitted: {title}]" in found
+    for title in kept:
+        assert f"## {title}\n" in found
+        assert f"[section omitted: {title}]" not in found
+    assert "Keep the settled decisions." in found
+    assert "Keep the verification status." in found
+    assert len(found) <= review.PLAN_MD_LIMIT
+
+
+def test_plan_md_continued_growth_drops_other_sections_before_protected_tail():
+    source = (
+        "## The problem\n" + "p" * 500 + "\n"
+        "## Surfaces\n" + "u" * 500 + "\n"
+        "## Scope and membership\n" + "s" * 500 + "\n"
+        "## Architecture\n" + "a" * 500 + "\n"
+        "## The funnel\n" + "f" * 52_000 + "\n"
+        "## Two queues, two orderings\n" + "q" * 51_000 + "\n"
+        "## Decisions settled at build kickoff (2026-09-05)\n"
+        "Keep the settled decisions.\n"
+        "## Verification status\n"
+        "Keep the verification status.\n"
+    )
+
+    found = packet(plan_md=source, verdict=None)["plan_md"]
+
+    for title in ("The problem", "Surfaces", "Scope and membership",
+                  "Architecture", "The funnel"):
+        assert f"[section omitted: {title}]" in found
+    assert "## Two queues, two orderings\n" in found
+    assert "Keep the settled decisions." in found
+    assert "Keep the verification status." in found
+    assert len(found) <= review.PLAN_MD_LIMIT
 
 
 def test_a_ticket_body_over_20000_characters_is_cut_and_marked():

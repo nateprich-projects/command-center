@@ -23,6 +23,7 @@ import difflib
 import json
 import os
 import re
+import shlex
 import sys
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
@@ -263,6 +264,16 @@ DIFF_TOO_LARGE_REASON = (
 #: and its Blocking list), so a PR with thousands of unread files must not
 #: push that comment past GitHub's size limit.
 DIFF_INCOMPLETE_NAMED = 10
+
+# Keep each reviewer-visible weakening list small; the exact count remains
+# available so a long list is still a useful signal.
+TEST_WEAKENING_ITEM_LIMIT = 20
+TEST_FUNCTION_RE = re.compile(
+    r"^[ \t]*(?:async[ \t]+)?def[ \t]+(?P<name>test_[A-Za-z0-9_]+)[ \t]*\(")
+TEST_ASSERT_RE = re.compile(r"^[ \t]*assert\b")
+TEST_SKIP_XFAIL_RE = re.compile(
+    r"\b(?:pytest\.)?mark\.(?:skip|skipif|xfail)\b|"
+    r"\bpytest\.skip[ \t]*\(")
 
 # A Departures header is a label line (``Departures:``, bold or not, with or
 # without text after the colon) or a Markdown heading (``## Departures``).
@@ -2789,6 +2800,225 @@ def fetch_pr_comments(repo: str, pr_number: int) -> Dict:
         }
 
 
+def _diff_header_paths(line: str) -> Tuple[Optional[str], Optional[str]]:
+    """Read the two paths from a ``diff --git`` header when possible."""
+    try:
+        fields = shlex.split(line)
+    except ValueError:
+        return None, None
+    if len(fields) != 4:
+        return None, None
+    old_path, new_path = fields[2], fields[3]
+    if old_path.startswith("a/"):
+        old_path = old_path[2:]
+    if new_path.startswith("b/"):
+        new_path = new_path[2:]
+    return old_path, new_path
+
+
+def _diff_marker_path(line: str, prefix: str) -> Optional[str]:
+    """Read a path from a unified-diff ``---`` or ``+++`` marker."""
+    path = line[4:].split("\t", 1)[0].rstrip()
+    if path.startswith('"'):
+        try:
+            fields = shlex.split(path)
+        except ValueError:
+            return None
+        if not fields:
+            return None
+        path = fields[0]
+    if path == "/dev/null":
+        return None
+    if path.startswith(prefix):
+        return path[len(prefix):]
+    return path
+
+
+def _diff_sections(diff: str) -> List[Dict[str, Any]]:
+    """Split a unified diff into file sections and their changed hunks."""
+    sections: List[Dict[str, Any]] = []
+    section: Optional[Dict[str, Any]] = None
+    hunk: Optional[Dict[str, List[str]]] = None
+    for line in (diff or "").splitlines():
+        if line.startswith("diff --git "):
+            old_path, new_path = _diff_header_paths(line)
+            section = {"old_path": old_path, "new_path": new_path,
+                       "hunks": []}
+            sections.append(section)
+            hunk = None
+            continue
+        if section is None:
+            continue
+        if line.startswith("@@"):
+            hunk = {"removed": [], "added": [],
+                    "old_lines": [], "new_lines": []}
+            section["hunks"].append(hunk)
+            continue
+        if hunk is None:
+            if line.startswith("--- "):
+                section["old_path"] = _diff_marker_path(line, "a/")
+            elif line.startswith("+++ "):
+                section["new_path"] = _diff_marker_path(line, "b/")
+            continue
+        if line.startswith("\\"):
+            continue
+        if line.startswith(" "):
+            text = line[1:]
+            hunk["old_lines"].append(text)
+            hunk["new_lines"].append(text)
+        elif line.startswith("-"):
+            text = line[1:]
+            hunk["removed"].append(text)
+            hunk["old_lines"].append(text)
+        elif line.startswith("+"):
+            text = line[1:]
+            hunk["added"].append(text)
+            hunk["new_lines"].append(text)
+    return sections
+
+
+def _is_test_file(path: Optional[str]) -> bool:
+    """Whether a Python path follows the repository's pytest file shapes."""
+    if not path:
+        return False
+    parts = path.replace("\\", "/").split("/")
+    name = parts[-1].casefold()
+    return name.endswith(".py") and (
+        name.startswith("test_") or name.endswith("_test.py")
+        or any(part.casefold() in ("test", "tests") for part in parts[:-1]))
+
+
+def _test_function_blocks(lines: Sequence[str]) -> List[Dict[str, Any]]:
+    """Find test functions and the body lines visible in one diff hunk."""
+    blocks: List[Dict[str, Any]] = []
+    current: Optional[Dict[str, Any]] = None
+    for line in lines:
+        match = TEST_FUNCTION_RE.match(line)
+        if match:
+            if current is not None:
+                blocks.append(current)
+            indent = len(match.group(0)) - len(match.group(0).lstrip(" \t"))
+            current = {"name": match.group("name"), "indent": indent,
+                       "body": []}
+            continue
+        if current is None or not line.strip():
+            continue
+        indent = len(line) - len(line.lstrip(" \t"))
+        if indent <= current["indent"]:
+            blocks.append(current)
+            current = None
+            continue
+        current["body"].append(line.strip())
+    if current is not None:
+        blocks.append(current)
+    return blocks
+
+
+def _changed_test_functions(changed: Sequence[str], context: Sequence[str],
+                            path: str, section_index: int,
+                            hunk_index: int) -> List[Dict[str, Any]]:
+    """Attach each changed test definition to its hunk-visible body."""
+    blocks = _test_function_blocks(context)
+    used = set()
+    changes: List[Dict[str, Any]] = []
+    for line in changed:
+        match = TEST_FUNCTION_RE.match(line)
+        if not match:
+            continue
+        name = match.group("name")
+        body: Tuple[str, ...] = ()
+        for index, block in enumerate(blocks):
+            if index not in used and block["name"] == name:
+                used.add(index)
+                body = tuple(block["body"])
+                break
+        changes.append({"name": name, "body": body,
+                        "path": path,
+                        "item": "{}::{}".format(path, name),
+                        "hunk": (section_index, hunk_index)})
+    return changes
+
+
+def _test_weakening_report(items: Sequence[str]) -> Dict[str, Any]:
+    count = len(items)
+    return {"count": count,
+            "items": list(items[:TEST_WEAKENING_ITEM_LIMIT]),
+            "truncated": count > TEST_WEAKENING_ITEM_LIMIT}
+
+
+def _test_weakening(diff: str) -> Dict[str, Any]:
+    """Report test functions, assertions, and skips weakened by this diff."""
+    deleted_functions: List[Dict[str, Any]] = []
+    added_functions: List[Dict[str, Any]] = []
+    removed_asserts: List[str] = []
+    added_skips: List[str] = []
+
+    for section_index, section in enumerate(_diff_sections(diff)):
+        old_path = section.get("old_path")
+        new_path = section.get("new_path")
+        old_is_test = _is_test_file(old_path)
+        new_is_test = _is_test_file(new_path)
+        for hunk_index, hunk in enumerate(section["hunks"]):
+            if old_is_test and old_path:
+                deleted_functions.extend(_changed_test_functions(
+                    hunk["removed"], hunk["old_lines"], old_path,
+                    section_index, hunk_index))
+                removed_asserts.extend(
+                    "{}: {}".format(old_path, line.strip())
+                    for line in hunk["removed"]
+                    if TEST_ASSERT_RE.match(line))
+            if new_is_test and new_path:
+                added_functions.extend(_changed_test_functions(
+                    hunk["added"], hunk["new_lines"], new_path,
+                    section_index, hunk_index))
+                added_skips.extend(
+                    "{}: {}".format(new_path, line.strip())
+                    for line in hunk["added"]
+                    if not line.lstrip().startswith("#")
+                    and TEST_SKIP_XFAIL_RE.search(line))
+
+    added_names = {entry["name"] for entry in added_functions}
+    deleted_body_matches: Dict[Tuple[str, ...], List[int]] = {}
+    added_body_matches: Dict[Tuple[str, ...], List[int]] = {}
+    for index, entry in enumerate(deleted_functions):
+        if entry["body"]:
+            deleted_body_matches.setdefault(entry["body"], []).append(index)
+    for index, entry in enumerate(added_functions):
+        if entry["body"]:
+            added_body_matches.setdefault(entry["body"], []).append(index)
+
+    moved_or_renamed = set()
+    for body, deleted_indexes in deleted_body_matches.items():
+        added_indexes = added_body_matches.get(body, [])
+        if len(deleted_indexes) == 1 and len(added_indexes) == 1:
+            moved_or_renamed.add(deleted_indexes[0])
+
+    deleted_by_hunk: Dict[Tuple[int, int], List[int]] = {}
+    added_by_hunk: Dict[Tuple[int, int], List[int]] = {}
+    for index, entry in enumerate(deleted_functions):
+        deleted_by_hunk.setdefault(entry["hunk"], []).append(index)
+    for index, entry in enumerate(added_functions):
+        added_by_hunk.setdefault(entry["hunk"], []).append(index)
+    for hunk_key, deleted_indexes in deleted_by_hunk.items():
+        added_indexes = added_by_hunk.get(hunk_key, [])
+        if len(deleted_indexes) == 1 and len(added_indexes) == 1:
+            deleted_index, added_index = deleted_indexes[0], added_indexes[0]
+            if (deleted_functions[deleted_index]["body"]
+                    == added_functions[added_index]["body"]):
+                moved_or_renamed.add(deleted_index)
+
+    deleted_items = [
+        entry["item"]
+        for index, entry in enumerate(deleted_functions)
+        if (entry["name"] not in added_names and index not in moved_or_renamed)
+    ]
+    return {
+        "deleted_test_functions": _test_weakening_report(deleted_items),
+        "removed_assert_lines": _test_weakening_report(removed_asserts),
+        "added_skip_or_xfail": _test_weakening_report(added_skips),
+    }
+
+
 def build_packet(*, repo: str, pr_number: int, pr_view: dict, diff: str,
                  ticket: Optional[dict], plan_md: str,
                  plan_md_missing: bool, open_prs: Sequence[dict],
@@ -2895,6 +3125,7 @@ def build_packet(*, repo: str, pr_number: int, pr_view: dict, diff: str,
         "plan_md": _bounded_plan_md(plan_md),
         "plan_md_missing": plan_md_missing,
         "diff": diff,
+        "test_weakening": _test_weakening(diff),
         "changed_files": changed_files,
         "merge_base": merge_base,
         "pr_base_sha": pr_view.get("baseRefOid"),

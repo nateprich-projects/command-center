@@ -994,6 +994,14 @@ def test_packet_carries_every_field():
     assert found["plan_md"] == "# design record"
     assert found["plan_md_missing"] is False
     assert found["diff"].startswith("diff --git")
+    assert found["test_weakening"] == {
+        "deleted_test_functions": {
+            "count": 0, "items": [], "truncated": False},
+        "removed_assert_lines": {
+            "count": 0, "items": [], "truncated": False},
+        "added_skip_or_xfail": {
+            "count": 0, "items": [], "truncated": False},
+    }
     assert found["changed_files"] == ["funnel.py"]
     assert found["ci"]["state"] == "green"
     assert found["ci"]["checks"] == [
@@ -1008,6 +1016,130 @@ def test_packet_carries_every_field():
     assert found["stop_auto_merging"] == STOP_COUNTER
     assert found["collected_at"] == "2026-09-13T00:00:00+00:00"
     json.dumps(found)  # the packet is JSON by contract
+
+
+def test_packet_lists_deleted_test_functions():
+    diff = """diff --git a/tests/test_removed.py b/tests/test_removed.py
+index 1111111..2222222 100644
+--- a/tests/test_removed.py
++++ /dev/null
+@@ -1,2 +0,0 @@
+-def test_removed_behavior():
+-    assert calculate() == 3
+"""
+
+    report = packet(diff=diff)["test_weakening"]["deleted_test_functions"]
+
+    assert report == {
+        "count": 1,
+        "items": ["tests/test_removed.py::test_removed_behavior"],
+        "truncated": False,
+    }
+
+
+def test_packet_lists_removed_assert_lines_from_test_files():
+    diff = """diff --git a/tests/test_values.py b/tests/test_values.py
+index 1111111..2222222 100644
+--- a/tests/test_values.py
++++ b/tests/test_values.py
+@@ -1,3 +1,2 @@
+ def test_value():
+-    assert calculate() == 3
+     assert ready
+diff --git a/engine/values.py b/engine/values.py
+index 1111111..2222222 100644
+--- a/engine/values.py
++++ b/engine/values.py
+@@ -1 +1,0 @@
+-    assert invariant
+"""
+
+    report = packet(diff=diff)["test_weakening"]["removed_assert_lines"]
+
+    assert report == {
+        "count": 1,
+        "items": ["tests/test_values.py: assert calculate() == 3"],
+        "truncated": False,
+    }
+
+
+def test_packet_lists_added_skip_xfail_markers_and_pytest_skip_calls():
+    diff = """diff --git a/tests/test_skip.py b/tests/test_skip.py
+index 1111111..2222222 100644
+--- a/tests/test_skip.py
++++ b/tests/test_skip.py
+@@ -1,0 +1,4 @@
++@pytest.mark.skip(reason="not ready")
++@pytest.mark.skipif(True, reason="platform")
++@pytest.mark.xfail(reason="known issue")
++    pytest.skip("missing fixture")
+"""
+
+    report = packet(diff=diff)["test_weakening"]["added_skip_or_xfail"]
+
+    assert report == {
+        "count": 4,
+        "items": [
+            'tests/test_skip.py: @pytest.mark.skip(reason="not ready")',
+            'tests/test_skip.py: @pytest.mark.skipif(True, reason="platform")',
+            'tests/test_skip.py: @pytest.mark.xfail(reason="known issue")',
+            'tests/test_skip.py: pytest.skip("missing fixture")',
+        ],
+        "truncated": False,
+    }
+
+
+def test_packet_does_not_report_moved_or_renamed_tests_as_deleted():
+    diff = """diff --git a/tests/test_old.py b/tests/test_new.py
+similarity index 100%
+rename from tests/test_old.py
+rename to tests/test_new.py
+--- a/tests/test_old.py
++++ b/tests/test_new.py
+@@ -1,2 +1,2 @@
+-def test_moved():
++def test_moved():
+     assert value == 1
+diff --git a/tests/test_rename.py b/tests/test_rename.py
+index 1111111..2222222 100644
+--- a/tests/test_rename.py
++++ b/tests/test_rename.py
+@@ -1,2 +1,2 @@
+-def test_before_rename():
++def test_after_rename():
+     assert value == 2
+"""
+
+    report = packet(diff=diff)["test_weakening"]["deleted_test_functions"]
+
+    assert report == {"count": 0, "items": [], "truncated": False}
+
+
+def test_packet_caps_each_test_weakening_list_and_keeps_counts():
+    removed = []
+    added = []
+    for index in range(review.TEST_WEAKENING_ITEM_LIMIT + 1):
+        removed.extend([
+            "-def test_removed_{:02d}():".format(index),
+            "-    assert value == {:02d}".format(index),
+        ])
+        added.append(
+            '+    pytest.skip("skip {:02d}")'.format(index))
+    diff = "\n".join([
+        "diff --git a/tests/test_many.py b/tests/test_many.py",
+        "index 1111111..2222222 100644",
+        "--- a/tests/test_many.py",
+        "+++ b/tests/test_many.py",
+        "@@ -1,42 +1,21 @@",
+    ] + removed + added) + "\n"
+
+    report = packet(diff=diff)["test_weakening"]
+
+    for name in ("deleted_test_functions", "removed_assert_lines",
+                 "added_skip_or_xfail"):
+        assert report[name]["count"] == review.TEST_WEAKENING_ITEM_LIMIT + 1
+        assert len(report[name]["items"]) == review.TEST_WEAKENING_ITEM_LIMIT
+        assert report[name]["truncated"] is True
 
 
 def test_packet_ci_section_renders_per_check_conclusions_at_its_head():

@@ -22,7 +22,9 @@ break nothing the plan, `plan_md` or the repository's rules require?
 - `diff` and `changed_files` are the change at `head_sha`.
 - `pr_body` and `pr_departures` are the implementer's own claims: cite them, weigh them against the diff. Description records are read from `pr_body`. A departure never meets its requirement by itself.
 - `evidence`, the implement run's report at `head_sha`, adds findings, never meets a requirement by itself. A merged-suite failure absent on main is blocking. `reproduction: passes-on-base` does not meet a first Accept item beginning `Reproduction:` unless a Departure explains why that seam cannot show the symptom (then weigh it). `no signal`, `unsupported`, `not run` and `over budget` are weighed, not blocking. Look hardest at `pr_body`'s `Risks:`. If `unavailable`, say so; judge as usual.
-- `verdict` is newest, judged at `verdict_head_sha`; an older rejection is answered unless the fault repeats.
+- A trusted rejection for this packet's `head_sha` remains authoritative despite a later same-head approval; a
+  changed `head_sha` starts a fresh review. The merge gate requires the selected verdict to match the PR's
+  current head.
 - `ticket_prior_prs` names merged slices; judge only what this diff adds.
 - `plan_premises` groups parent-plan entries; an available empty `premises` list is valid, `available: false` unreadable or malformed.
 - `overlap` lists open PRs sharing files; weigh staleness.

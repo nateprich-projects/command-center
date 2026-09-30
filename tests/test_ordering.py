@@ -2114,40 +2114,61 @@ def test_bugs_show_on_the_turns_begin_takes_them(bug_repo, history, expected):
 
 
 @_pytest.mark.parametrize("needs", ["human", "claude-code-environment"])
-def test_unclaimable_ready_step_does_not_commit_sibling_bugs_off_turn(needs):
-    """Finishing an underway step releases Improve work, not Bug commitment."""
-    ready_bug = project(1, "Ready", "Bug", children=3)
+@_pytest.mark.parametrize("with_bugs", [False, True],
+                           ids=["bug-free", "with-bugs"])
+def test_unclaimable_ready_step_does_not_commit_sibling_bugs_off_turn(
+    needs, with_bugs,
+):
+    """A human step under a Ready Bug does not commit its Bug siblings.
+
+    Reproduction from origin/main: the Bug-free projection is [2, 11, 13, 15]
+    and begin starts [11, 13, 15]. With sibling Bugs, projection was
+    [2, 3, 4, 11, 13, 15] while begin started [11, 13, 15, 3, 4];
+    promoting the Ready Bug to Building leaked its siblings off-turn.
+    """
+    ready_class = "Bug" if with_bugs else "Improve"
+    ready_children = 3 if with_bugs else 1
+    ready_project = project(1, "Ready", ready_class, children=ready_children)
     unclaimable = ticket(2, 1, needs=needs)
-    bug_siblings = [ticket(3, 1), ticket(4, 1)]
+    bug_siblings = [ticket(3, 1), ticket(4, 1)] if with_bugs else []
     newly_unblocked = [
         (project(parent, "Ready", "Improve"),
          ticket(number, parent, open_blockers=[unclaimable.ref]))
         for parent, number in ((10, 11), (12, 13), (14, 15))
     ]
-    rows = [ready_bug, unclaimable, *bug_siblings]
+    rows = [ready_project, unclaimable, *bug_siblings]
     for parent, child in newly_unblocked:
         rows.extend((parent, child))
 
+    history = ["Bug"]
     projected = funnel.projected_pull_order(
-        rows, NOW, recent_starts=["Bug"]
+        rows, NOW, recent_starts=history
     )
-    assert [int(ref.rsplit("#", 1)[1]) for ref in projected] == [
-        2, 11, 13, 15, 3, 4,
-    ]
-
+    expected_projection = [2, 11, 13, 15]
+    expected_begin = [11, 13, 15]
+    if with_bugs:
+        expected_projection += [3, 4]
+        expected_begin += [3, 4]
     begin_rows = [copy.copy(row) for row in rows]
     begin_by_ref = {row.ref: row for row in begin_rows}
     begin_by_ref[unclaimable.ref].state = "CLOSED"
-    begin_by_ref[ready_bug.ref].children_done = 1
+    begin_parent = begin_by_ref[ready_project.ref]
+    begin_parent.children_done += 1
+    if begin_parent.children_done >= begin_parent.children_total:
+        begin_parent.state = "CLOSED"
     for row in begin_rows:
         row.open_blockers = [
             ref for ref in row.open_blockers if ref != unclaimable.ref
         ]
-    begin_picks, _moved = _successive_starts(begin_rows, ["Bug"])
-    assert [int(ref.rsplit("#", 1)[1]) for ref in begin_picks] == [
-        11, 13, 15, 3, 4,
+    begin_picks, _moved = _successive_starts(begin_rows, history)
+    projected_numbers = [int(ref.rsplit("#", 1)[1]) for ref in projected]
+    projected_starts = [
+        number for number in projected_numbers if number != unclaimable.number
     ]
-    assert [ref for ref in projected if ref != unclaimable.ref] == begin_picks
+    begin_numbers = [int(ref.rsplit("#", 1)[1]) for ref in begin_picks]
+    assert projected_starts == begin_numbers
+    assert projected_numbers == expected_projection
+    assert begin_numbers == expected_begin
 
 
 @_pytest.mark.parametrize("under_way", ["claimed", "in review", "human"])

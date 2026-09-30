@@ -47,6 +47,7 @@ from typing import (IO, Any, Callable, Collection, Dict, FrozenSet, Iterable,
 import agent_health as agent_health_module
 from agent_health import assess as assess_agent_health
 from decline_classifier import classify_decline_reason
+import price_watch
 
 # --------------------------------------------------------------------------
 # Configuration. These are the only knobs; everything else is derived.
@@ -763,6 +764,7 @@ BRIEF_PURE_SECTIONS = frozenset({
     "disposal",
     "status_state_mismatches",
     "rejected_merges",
+    "price_changes",
 })
 
 # No brief section feeds a gate any more: the merge gate reads the
@@ -15333,6 +15335,9 @@ def cmd_brief(
             "status_state_mismatches",
             lambda: status_state_mismatches(items),
         )
+        price_changes = section(
+            "price_changes", lambda: price_watch.recent_changes(now),
+        )
 
         # The reader-bound sections have now had their deadline-bounded turn.
         # These renderers use only the loaded Project items and preloaded PR
@@ -15370,6 +15375,7 @@ def cmd_brief(
         disposal_report = pure_values["disposal"]
         rejected = pure_values["rejected_merges"]
         status_mismatches = pure_values["status_state_mismatches"]
+        price_changes = pure_values["price_changes"]
         pending_wakes = pending_wakes_json(parked)
 
         blocked_comment_errors = [
@@ -15450,6 +15456,7 @@ def cmd_brief(
             "main_ci": main_ci,
             "member_issues_without_project_items": orphan_issues,
             "outcome_signals": outcome_signals,
+            "price_changes": price_changes,
             "rejected_merges": rejected,
             "degraded": degraded,
             "timings": timings,

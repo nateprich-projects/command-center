@@ -99,6 +99,10 @@ sizes. `insufficient_data` and `partial` are unknown: say what is missing,
 never turn them into zero. No combined score; raw token counts are not
 dollars.
 
+When `price_changes` is non-empty, show each model and token kind with its
+old and new USD-per-million rates and effective date. It is informational,
+not a decision count.
+
 Then `recorded_cause_regressions` and `command_center_ticket_pr_share` as
 portfolio signals: Broken numerator and denominator; ticket-branch numerator,
 merged-PR denominator and percentage. Then `decline_routing`: the four

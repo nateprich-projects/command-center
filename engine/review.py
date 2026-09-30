@@ -247,6 +247,13 @@ EVIDENCE_SHA_RE = re.compile(r"- sha: ([0-9a-f]{40})")
 #: stops one runaway body, carried in every call's prompt, from flooding it.
 TICKET_BODY_LIMIT = PR_BODY_LIMIT
 
+# A parent plan's rejected alternatives are the only prose from its body that
+# enters the review packet (#2020). Keep the excerpt bounded with a visible
+# marker, at a whole line, so a large parent body cannot restore #1474's
+# unbounded packet growth.
+PARENT_REJECTED_EXCERPT_LIMIT = 2000
+PARENT_REJECTED_TRUNCATION_MARKER = "…[truncated]"
+
 #: The diff a review judges, at most (#1801). Measured on the diff alone, in
 #: UTF-8 bytes, as ``LARGE_PACKET_BYTES`` in scripts/muse-review-engine
 #: measures a packet: the plan, tickets and comments around it are bounded
@@ -3312,8 +3319,9 @@ def shape_ticket(ticket: Optional[dict]) -> Dict[str, Optional[object]]:
 
     Shared by the single branch ``ticket`` and every entry of the
     ``tickets`` list, so both carry the same fields: the parent with its
-    comments shaped, and the ticket's newest comments with their recorded
-    voices. None reads as the empty ticket a ticketless branch gets.
+    comments shaped and its bounded Rejected excerpt, and the ticket's newest
+    comments with their recorded voices. None reads as the empty ticket a
+    ticketless branch gets.
     The body is cut at TICKET_BODY_LIMIT and each comment list is bounded
     by ``ticket_comments``, so the context every ticket adds is bounded
     and marked where cut (#1801); none of it can fail the precheck.
@@ -3322,13 +3330,20 @@ def shape_ticket(ticket: Optional[dict]) -> Dict[str, Optional[object]]:
         return {
             "ref": None, "number": None, "title": None, "url": None,
             "body": None, "risk": None, "parent": None, "comments": [],
+            "parent_rejected_excerpt": "",
+            "parent_rejected_excerpt_truncated": False,
         }
     parent = ticket.get("parent")
+    parent_rejected_excerpt = ""
+    parent_rejected_excerpt_truncated = False
     if isinstance(parent, dict):
         parent = dict(parent)
         parent["comments"] = ticket_comments(parent.get("comments"))
-        # The full project plan is read only to render its structured
-        # premises in the packet's dedicated section.
+        (parent_rejected_excerpt,
+         parent_rejected_excerpt_truncated) = _bounded_parent_rejected_excerpt(
+             parent.get("body"))
+        # Keep the full parent body out of the packet per #1474; only this
+        # bounded Rejected excerpt is carried as parent-plan prose.
         parent.pop("body", None)
         parent.pop("body_unavailable", None)
     return {
@@ -3340,7 +3355,95 @@ def shape_ticket(ticket: Optional[dict]) -> Dict[str, Optional[object]]:
         "risk": ticket.get("risk"),
         "parent": parent,
         "comments": ticket_comments(ticket.get("comments")),
+        "parent_rejected_excerpt": parent_rejected_excerpt,
+        "parent_rejected_excerpt_truncated": (
+            parent_rejected_excerpt_truncated),
     }
+
+
+_ATX_HEADING_RE = re.compile(
+    r"^ {0,3}(?P<level>#{1,6})(?:[ \t]+(?P<title>.*?)|[ \t]*)$")
+_FENCE_OPEN_RE = re.compile(r"^ {0,3}(?P<marker>`{3,}|~{3,})(?P<info>.*)$")
+_FENCE_CLOSE_RE = re.compile(r"^ {0,3}(?P<marker>`{3,}|~{3,})[ \t]*$")
+
+
+def _atx_heading(line: str) -> Optional[Tuple[int, str]]:
+    """Return an ATX heading's level and title, excluding closing hashes."""
+    match = _ATX_HEADING_RE.match(line)
+    if not match:
+        return None
+    title = (match.group("title") or "").strip()
+    title = re.sub(r"[ \t]+#+[ \t]*$", "", title).strip()
+    return len(match.group("level")), title
+
+
+def _bounded_parent_rejected_excerpt(body: object) -> Tuple[str, bool]:
+    """Return the first bounded parent ``Rejected`` section and its cut flag.
+
+    Markdown headings inside fenced code are ignored. A same-or-higher ATX
+    heading ends the section; deeper headings remain part of it. The visible
+    truncation marker counts inside the 2000-character cap.
+    """
+    if not isinstance(body, str):
+        return "", False
+
+    lines = body.splitlines(keepends=True)
+    start = None
+    heading_level = None
+    end = len(lines)
+    fence = None
+    for index, source_line in enumerate(lines):
+        line = source_line.rstrip("\r\n")
+        if fence is not None:
+            closing = _FENCE_CLOSE_RE.match(line)
+            if closing:
+                marker = closing.group("marker")
+                if (marker[0] == fence[0]
+                        and len(marker) >= len(fence)):
+                    fence = None
+            continue
+
+        opening = _FENCE_OPEN_RE.match(line)
+        if opening:
+            marker = opening.group("marker")
+            info = opening.group("info")
+            if marker[0] != "`" or "`" not in info:
+                fence = marker
+            continue
+
+        heading = _atx_heading(line)
+        if heading is None:
+            continue
+        level, title = heading
+        if start is None:
+            if title.casefold() == "rejected":
+                start = index
+                heading_level = level
+        elif level <= heading_level:
+            end = index
+            break
+
+    if start is None:
+        return "", False
+
+    section_lines = lines[start:end]
+    section = "".join(section_lines)
+    if len(section) <= PARENT_REJECTED_EXCERPT_LIMIT:
+        return section, False
+
+    excerpt = ""
+    marker = PARENT_REJECTED_TRUNCATION_MARKER
+    for source_line in section_lines:
+        candidate = excerpt + source_line
+        separator = ("" if not candidate
+                     or candidate.endswith(("\n", "\r")) else "\n")
+        if (len(candidate) + len(separator) + len(marker)
+                > PARENT_REJECTED_EXCERPT_LIMIT):
+            break
+        excerpt = candidate
+
+    separator = "\n" if excerpt and not excerpt.endswith(("\n", "\r")) else ""
+    return excerpt + separator + marker, True
 
 
 def parent_repo_from_row(parent: dict) -> Optional[str]:

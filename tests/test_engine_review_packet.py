@@ -777,7 +777,8 @@ def test_the_block_finish_writes_is_the_block_the_packet_reads():
         reproduction={"line": "reproduction: passes-on-base", "tests": [
             {"id": "tests/test_half.py::test_half_rounds_down",
              "outcome": "passes-on-base"}]},
-        repo="nateprich-projects/command-center")
+        repo="nateprich-projects/command-center",
+        prior_fixes=[(42, "engine/implement.py", "finish_done")])
     body = implement.render_pr_body(
         {"number": 9, "ref": REPO + "#9"},
         {"summary": "Fixed half().", "departures": [],
@@ -792,7 +793,8 @@ def test_the_block_finish_writes_is_the_block_the_packet_reads():
         "- merged suite: pass on origin/main 5d41402abc4b\n"
         "- reproduction: passes-on-base\n"
         "- added tests: 0 red, 1 passes-on-base, 0 no signal\n"
-        "- passes-on-base: tests/test_half.py::test_half_rounds_down")
+        "- passes-on-base: tests/test_half.py::test_half_rounds_down\n"
+        "- rewrites prior fix: #42 (engine/implement.py:finish_done)")
     assert "command-center-evidence" not in found["pr_body"]
     assert found["pr_body"].endswith("- `python3 -m pytest -q`")
 

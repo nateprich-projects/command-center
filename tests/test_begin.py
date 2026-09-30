@@ -128,6 +128,7 @@ def _deny_preflight_project_reads(monkeypatch):
         "member_repos", "load_items", "_load_begin_items",
         "_load_minimal_startable_view", "hydrate_item_details", "gh_graphql",
         "startable_listing", "_order_startable_items",
+        "_run_bounded_subprocess",
     ):
         monkeypatch.setattr(funnel, name, denied(name))
     monkeypatch.setattr(funnel.subprocess, "run", denied("subprocess.run"))
@@ -479,7 +480,9 @@ def test_begin_preflight_uses_the_capped_engineering_floor(monkeypatch):
     ) is None
 
 
-def test_run_preflight_does_not_list_or_hydrate_project_items(monkeypatch):
+def test_run_preflight_uses_local_gates_without_ordering_or_timeout_work(
+    monkeypatch,
+):
     reading = {"windows": {}}
     _allow_local_preflight(monkeypatch, reading)
     _deny_preflight_project_reads(monkeypatch)

@@ -17837,7 +17837,7 @@ def _merge_batched_pr_reads(
         # once merged. The history read happens second, so its row is the later
         # observation and wins; a row with no number cannot be paired and is
         # kept as it is.
-        by_number: Dict[object, Dict[str, object]] = {}
+        position_by_number: Dict[object, int] = {}
         rows: List[Dict[str, object]] = []
         for row in list(open_read.rows_by_repo.get(repo, ())) + list(
             history.rows_by_repo.get(repo, ())
@@ -17846,13 +17846,16 @@ def _merge_batched_pr_reads(
             if number is None:
                 rows.append(row)
                 continue
-            if number in by_number:
-                rows[rows.index(by_number[number])] = row
+            if number in position_by_number:
+                rows[position_by_number[number]] = row
             else:
+                position_by_number[number] = len(rows)
                 rows.append(row)
-            by_number[number] = row
         rows.sort(
-            key=lambda row: str(row.get("createdAt") or ""), reverse=True
+            key=lambda row: (
+                str(row.get("createdAt") or ""), row.get("number") or 0
+            ),
+            reverse=True,
         )
         rows_by_repo[repo] = tuple(rows)
     return BatchedPRRead(

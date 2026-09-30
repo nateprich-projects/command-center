@@ -96,6 +96,12 @@ sentence in the body, add the `blocked` label, and comment
 
 ## Coverage
 
+### Study tickets
+
+For future breakdowns, each study ticket states its coverage bar. If the plan gives no bar, use 95%. Measure coverage as real records measured divided by intended real records.
+
+If measured coverage is below the bar, stop without posting results as findings and record the miss on the ticket. Close the ticket as blocked, leave the parent in Building, and make the rerun a new ticket under the same parent.
+
 Cover the plan's stated outcome, not its headings. Reread the plan, trace
 setup through dependencies and registration to the usable end state, and map
 each outcome to its tickets. **Anything deliberately left out, say so

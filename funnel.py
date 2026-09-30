@@ -4573,21 +4573,51 @@ def _visible_comment(body: str) -> str:
     return body[:marker_at].rstrip()
 
 
-def latest_verdict(repo: str, pr) -> Optional[Dict]:
-    """The newest verdict on a PR.
+def _latest_verdict_for_reviewed_head(comments: object) -> Optional[Dict]:
+    """Resolve the latest trusted verdict sequence, keeping same-head rejects."""
+    if not isinstance(comments, list):
+        return None
 
-    Newest wins: a re-review after a fix is a fresh read against the plan, and an
-    older verdict must never authorise a diff it did not see. Newest means the
-    newest from a trusted author (#1787); ``--json comments`` rows carry
-    ``author.login`` for that check.
+    selected: Optional[Dict] = None
+    selected_head: Optional[str] = None
+    for row in comments:
+        if not isinstance(row, dict):
+            continue
+        found = _verdict_from_comment(row)
+        if found is None:
+            continue
+        head_sha = found.get("head_sha")
+        head_key = head_sha if isinstance(head_sha, str) and head_sha else None
+        if selected is None or head_key != selected_head:
+            # A review of another head starts a fresh sequence. The gate below
+            # still requires this verdict to match the PR's current head.
+            selected = found
+            selected_head = head_key
+            continue
+
+        if (
+            found.get("verdict") == "rejected"
+            or selected.get("verdict") != "rejected"
+        ):
+            # A later rejection on this head updates the recorded rejection;
+            # an approval on that same head cannot clear it.
+            selected = found
+
+    return selected
+
+
+def latest_verdict(repo: str, pr) -> Optional[Dict]:
+    """The latest trusted decision for the most recently reviewed head.
+
+    The fresh-read boundary is a head change: a review on a new SHA starts a
+    new decision sequence, while a trusted rejection stays authoritative on
+    its SHA despite any later approval there. The merge gate separately checks
+    that the selected verdict covers the PR's current head. ``--json comments``
+    rows carry ``author.login`` for the trusted-author check (#1787).
     """
     rows = (_gh_json("gh", "pr", "view", str(pr), "--repo", repo,
                      "--json", "comments") or {}).get("comments", [])
-    for row in reversed(rows):
-        found = _verdict_from_comment(row)
-        if found:
-            return found
-    return None
+    return _latest_verdict_for_reviewed_head(rows)
 
 
 #: A run that finished its ticket by comments -- an investigation or proposal
@@ -17492,20 +17522,8 @@ def _read_batched_pr_snapshots(
 
 
 def _latest_verdict_from_comments(comments: object) -> Optional[Dict]:
-    """Return the newest structured verdict from an already-read comment tail.
-
-    The batch asks for each comment's ``author { login }`` so that
-    ``_verdict_from_comment`` can skip untrusted authors (#1787).
-    """
-    if not isinstance(comments, list):
-        return None
-    for row in reversed(comments):
-        if not isinstance(row, dict):
-            continue
-        found = _verdict_from_comment(row)
-        if found:
-            return found
-    return None
+    """Resolve an already-read comment tail with the merge gate's head rule."""
+    return _latest_verdict_for_reviewed_head(comments)
 
 
 def _pr_rows_for_ref(

@@ -278,6 +278,8 @@ def test_a_forged_decline_or_route_from_another_author_is_not_counted():
     ])
     rows = funnel._decline_routing_comment_rows(issue, CUTOFF)
     (event,) = funnel._codex_decline_events(rows, CUTOFF, NOW)
+    assert funnel.parse_decline_route_comment(
+        [row["body"] for row in rows]) is None
     assert funnel._decline_routing_outcome(
         issue, rows, event[0], event[1], event[2], CUTOFF, NOW) is None
 

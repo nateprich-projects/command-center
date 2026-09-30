@@ -326,6 +326,41 @@ def test_every_comment_reader_applies_the_trust_filter():
     assert missing == []
 
 
+def test_override_adjacent_marker_readers_stay_classified_and_filtered():
+    """Override citations reuse the established comment trust boundaries.
+
+    Origin overrides are read from the issue body, while block, decline,
+    verdict, ticket, and PR comment readers must stay on the trust registry.
+    """
+    required_comment_readers = {
+        "funnel.py:_load_block_comment",
+        "funnel.py:render_comment_voice",
+        "engine/review.py:ticket_comments",
+        "engine/review.py:_shape_pr_comment",
+    }
+    required_comment_text_readers = {
+        "funnel.py:_decline_routing_comment_rows",
+        "funnel.py:verdict_covers_head",
+    }
+    required_text_parsers = {
+        "funnel.py:parse_decline_route_comment",
+        "funnel.py:parse_provenance",
+        "funnel.py:render_voice",
+        "funnel.py:parse_origin_override",
+    }
+
+    assert required_comment_readers <= set(COMMENT_READERS)
+    assert required_comment_text_readers <= COMMENT_TEXT_READERS
+    assert required_text_parsers <= TEXT_PARSERS
+    assert BODY_READERS["engine/shape.py:preview_decision"] == _PLAN_BODY
+
+    units = _units(_trees())
+    for reader in required_comment_readers:
+        assert _called(units[COMMENT_READERS[reader]]) & TRUST_FILTERS
+    for reader in required_comment_text_readers:
+        assert _called(units[reader]) & TRUST_FILTERS
+
+
 def test_the_walk_finds_a_new_reader_that_skips_the_filter():
     """The enumeration is live: an unlisted reader shows up by name.
 

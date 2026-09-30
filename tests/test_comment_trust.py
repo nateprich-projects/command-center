@@ -79,6 +79,8 @@ COMMENT_READERS: Dict[str, str] = {
     "funnel.py:_latest_park_comment": "funnel.py:_latest_park_comment",
     "funnel.py:_closed_itself_item_json": "funnel.py:_closed_itself_item_json",
     "funnel.py:_cleared_block_item_json": "funnel.py:_cleared_block_item_json",
+    "funnel.py:_connector_gate_verb": "funnel.py:_connector_gate_verb",
+    "funnel.py:connector_gate_answers": "funnel.py:connector_gate_answers",
     "funnel.py:_codex_decline_events": "funnel.py:_decline_routing_comment_rows",
     "funnel.py:_decline_routing_outcome":
         "funnel.py:_decline_routing_comment_rows",
@@ -152,6 +154,8 @@ WRITERS = frozenset({
     "funnel.py:_needs_decision_comment_body",
     "funnel.py:_write_verdict",
     "funnel.py:cmd_park",
+    "funnel.py:cmd_capture",
+    "funnel.py:cmd_promote",
     "decline_classifier.py:declined_review_routing_comment",
     "decline_classifier.py:declined_unsatisfiable_acceptance_comment",
     "decline_classifier.py:declined_pending_gate_answer_comment",

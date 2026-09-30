@@ -548,6 +548,8 @@ def coverage_comment_body(project_ref: str, created: Sequence[dict]) -> str:
     breakdown without opening every ticket. A Risk taken from an escalated
     project rather than the answer says so (#1757), so a reader can tell the
     model's judgement from the project's.
+
+    A title is the model's words, so it is made inert (#1798).
     """
     lines = ["Breakdown of {} created {} ticket{}:".format(
         project_ref, len(created), "" if len(created) == 1 else "s")]
@@ -556,7 +558,8 @@ def coverage_comment_body(project_ref: str, created: Sequence[dict]) -> str:
         if ticket.get("risk_inherited"):
             risk += ", inherited from the project"
         entry = "- {}: {} (Risk: {}, Needs: {}".format(
-            ticket["ref"], ticket["title"], risk, ticket["needs"])
+            ticket["ref"], funnel.inert_comment_text(ticket["title"]), risk,
+            ticket["needs"])
         if ticket.get("blocked_by"):
             entry += "; blocked by {}".format(
                 ", ".join(ticket["blocked_by"]))
@@ -859,11 +862,13 @@ def apply_question(repo: str, parent_number: int, question: str, *,
     """Post the breakdown's question and park the project on Nate's answer.
 
     Creates no tickets: a ticket built on an invented decision is worse
-    than no ticket, because someone will implement it.
+    than no ticket, because someone will implement it. The question is the
+    model's words, so it is made inert (#1798).
     """
     post_comment(
         repo, parent_number,
-        "{} {}".format(funnel.NEEDS_DECISION_PREFIX, question),
+        "{} {}".format(funnel.NEEDS_DECISION_PREFIX,
+                       funnel.inert_comment_text(question)),
         run=run, agent=agent)
     url = "https://github.com/{}/issues/{}".format(repo, parent_number)
     funnel.write_project_select(

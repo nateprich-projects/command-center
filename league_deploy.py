@@ -35,7 +35,7 @@ def runtime_health_check(checkout: Path) -> core.CommandResult:
         return version
     return core._run_process(
         [
-            str(python), "scripts/run-module.py", "lib.snapshot_io", "--verify",
+            str(python), "scripts/run-module.py", "the_league._internal.snapshot_io", "--verify",
             "data/fp_projections", "data/fp_snapshots",
         ],
         cwd=checkout,

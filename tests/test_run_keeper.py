@@ -607,6 +607,29 @@ def test_keeper_copies_and_reloads_only_the_changed_plist(tmp_path):
     }
 
 
+def test_keeper_refresh_keeps_the_developer_dir_pin(tmp_path):
+    """A refresh installs the repo copy, so the Command Line Tools pin (#1899)
+    survives every plist change the keeper reloads."""
+    bare, checkout, seed = make_install_remote(tmp_path)
+    home = tmp_path / "home"
+    routine = checkout / "routines" / "codex-work.md"
+    write_current_automation(home, routine, DAY_NAME, DAY_RRULE)
+    agents = install_launchd_copies(seed, home)
+
+    change_plist(seed, PUBLISHER_PLIST)
+    commit_and_push(seed, "plist change")
+
+    tools, _ = make_tools(tmp_path)
+    result = run_keeper(checkout, home, tools, tools / "launchctl")
+    assert result.returncode == 0, result.stderr
+
+    with (agents / PUBLISHER_PLIST).open("rb") as handle:
+        installed = plistlib.load(handle)
+    assert "keeper install test" in (agents / PUBLISHER_PLIST).read_text()
+    assert installed["EnvironmentVariables"]["DEVELOPER_DIR"] == (
+        "/Library/Developer/CommandLineTools"
+    )
+
 def test_keeper_records_a_failed_reload_and_keeps_both_records(tmp_path):
     bare, checkout, seed = make_install_remote(tmp_path)
     home = tmp_path / "home"

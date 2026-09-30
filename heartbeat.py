@@ -95,6 +95,7 @@ OUTCOMES = [
     "skipped-provider-quota",  # the model provider refused: its usage window is spent
     "skipped-outside-window",  # Claude's Saturday-morning window is closed (#1557)
     "budget-exhausted",     # begin could not start after the GraphQL pool hit zero
+    "skipped-stale-shape",  # the apply-time Project read found a moved idea or children
     "errored",             # tried and failed
 ]
 
@@ -133,6 +134,7 @@ UNCLASSIFIED_ERROR_MARKERS = (
     "could not derive a test command",
     "no module named pytest",
     "requires python ",
+    "tests timed out:",
 )
 
 
@@ -149,6 +151,10 @@ def classify_error(note: Optional[str], runtime: Optional[Dict]) -> str:
         return "unclassified"
 
     normalized = note.casefold()
+    # A merged-suite timeout is not evidence of a regression, even if its
+    # captured output contains one of the classifier's other phrases.
+    if "tests timed out:" in normalized:
+        return "unclassified"
     if all(marker in normalized for marker in BEGIN_TIMEOUT_ERROR_MARKERS):
         return "begin-timeout"
     if any(marker in normalized for marker in FLOOR_ERROR_MARKERS):
@@ -220,6 +226,11 @@ PROVIDERS = {"claude": "anthropic", "codex": "openai", "zcode": "zai",
 #: the two together.
 ZAI_STANDARD_UNTIL = 1790514000
 
+# Keep each retirement instant beside the policy that makes the lane retired.
+# Readers may use it to retain historical work without treating silence after
+# the cutoff as an active lane.
+RETIRED_AGENT_CUTOFFS = {"zcode": ZAI_STANDARD_UNTIL}
+
 
 def retired_agents(now: Optional[float] = None) -> frozenset:
     """Agents whose schedules are stopped on purpose, as of ``now``.
@@ -239,7 +250,10 @@ def retired_agents(now: Optional[float] = None) -> frozenset:
     lane that stopped, not the pause working.
     """
     now = time.time() if now is None else now
-    return frozenset() if now < ZAI_STANDARD_UNTIL else frozenset({"zcode"})
+    return frozenset(
+        agent for agent, cutoff in RETIRED_AGENT_CUTOFFS.items()
+        if now >= cutoff
+    )
 
 
 #: Read once per process. Every reader is a short-lived command (a brief, a
@@ -585,7 +599,8 @@ def record_api_cost(agent: str, run: Optional[str], api_cost: Dict) -> str:
 
 
 def record_binding(agent: str, run: str, do: str, work: str,
-                   repo: Optional[str] = None) -> str:
+                   repo: Optional[str] = None,
+                   klass: Optional[str] = None) -> str:
     """Bind the work `funnel begin` issued to the run that received it (#497).
 
     Its own record, because the spool is append-only and the start record is
@@ -605,6 +620,11 @@ def record_binding(agent: str, run: str, do: str, work: str,
         # A ticket ref carries its repo; a review PR is a bare number, so the
         # repo travels beside it for anything that must write there (#668).
         record["repo"] = repo
+    if klass:
+        # A ticket's class when it started. The Bug share counts recent
+        # starts by it, and a merged ticket's Project row is gone from
+        # begin's view long before its start leaves the count (#1846).
+        record["class"] = klass
     kept = append(agent, record)
     _report(kept)
     return kept
@@ -1140,7 +1160,7 @@ def bindings(records: List[Dict]) -> Dict[str, Dict]:
     for rec in rows:
         found[rec["run"]] = {
             "do": rec.get("do"), "work": rec.get("work"), "ts": rec.get("ts"),
-            "repo": rec.get("repo"),
+            "repo": rec.get("repo"), "class": rec.get("class"),
         }
     return found
 
@@ -1909,6 +1929,34 @@ def read_github_strict(agent: str, timeout: Optional[float] = None) -> List[Dict
     return _parse_records_strict(content)
 
 
+MUSE_AUTH_OUTAGE_NOTE = "Muse provider outage: missing meta credentials"
+
+
+def muse_auth_outage_open(records: List[Dict]) -> bool:
+    """Whether durable Muse records leave the authentication outage open.
+
+    The append-only order on GitHub is authoritative: the exact auth-outage
+    finish opens the park, and only a successful smoke probe closes it. Other
+    run failures and unsuccessful probes do not change the state.
+    """
+    open_outage = False
+    for record in records:
+        if not isinstance(record, dict) or record.get("agent") != "muse":
+            continue
+        if (
+            record.get("phase") == "finish"
+            and record.get("outcome") == "errored"
+            and record.get("note") == MUSE_AUTH_OUTAGE_NOTE
+        ):
+            open_outage = True
+        elif (
+            record.get("phase") == "auth_probe"
+            and record.get("result") == "success"
+        ):
+            open_outage = False
+    return open_outage
+
+
 def read(agent: str, timeout: Optional[float] = None) -> List[Dict]:
     """Every record this machine knows about — pushed and still spooled."""
     return read_github(agent, timeout=timeout) + _spooled(agent)
@@ -2140,11 +2188,42 @@ def main(argv=None) -> int:
     show = sub.add_parser("read", help="print an agent's records as JSON")
     show.add_argument("--agent", required=True, choices=sorted(PROVIDERS))
 
+    sub.add_parser(
+        "muse-auth-state",
+        help="read whether GitHub records leave Muse authentication parked",
+    )
+    sub.add_parser(
+        "muse-auth-recovered",
+        help="record a successful Muse authentication smoke probe",
+    )
+
     args = parser.parse_args(argv)
 
     try:
         if args.command == "read":
             print(json.dumps(read(args.agent), indent=2))
+            return 0
+
+        if args.command == "muse-auth-state":
+            records = read_github_strict("muse", timeout=10)
+            print("parked" if muse_auth_outage_open(records) else "clear")
+            return 0
+
+        if args.command == "muse-auth-recovered":
+            record = {
+                "agent": "muse",
+                "phase": "auth_probe",
+                "ts": int(time.time()),
+                "result": "success",
+            }
+            kept = append("muse", record)
+            _report(kept)
+            if kept != "pushed":
+                print(
+                    "heartbeat: successful Muse probe was not recorded on GitHub",
+                    file=sys.stderr,
+                )
+                return 2
             return 0
 
         if args.command == "start":

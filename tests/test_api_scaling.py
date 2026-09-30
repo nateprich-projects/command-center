@@ -135,10 +135,12 @@ def _measure_fixture_load(monkeypatch, item_count):
             for args in calls["json"]
             if args[:3] == ("gh", "issue", "view")
         ) == 1
+        # Two: open rows with their comment tails, and the closed-and-merged
+        # history without them (#1986). Both are bounded by pages, not items.
         assert sum(
             1 for query, _variables in calls["graphql"]
             if "pullRequests(first:" in query[0]
-        ) == 1
+        ) == 2
         return {kind: len(entries) for kind, entries in calls.items()}
 
 
@@ -700,3 +702,164 @@ def test_shape_item_query_fails_closed_when_thread_is_unreadable(monkeypatch):
             include_details=False, member_repo_names=[REPO],
             shape_issue=(REPO, 42),
         )
+
+
+def _item(number, *, parent=None):
+    """One Item as ``ticket_pr_facts`` selects it: a ticket under a parent."""
+    return funnel.Item(
+        number=number,
+        title="issue {}".format(number),
+        url="https://github.com/{}/issues/{}".format(REPO, number),
+        repo=REPO,
+        state="OPEN",
+        status="Building",
+        parent=parent,
+    )
+
+
+def _pr_row(number, *, state, created_at, ticket=11, comments=None):
+    row = {
+        "number": number,
+        "state": state,
+        "createdAt": created_at,
+        "headRefName": "ticket/{}".format(ticket),
+        "headRefOid": "sha-{}".format(number),
+        "author": OWNER,
+        "isCrossRepository": False,
+        "headRepository": {"nameWithOwner": REPO},
+    }
+    if comments is not None:
+        row["comments"] = comments
+    return row
+
+
+def _split_pr_scan(monkeypatch, rows_by_state, *, branches=()):
+    """Record every batched read ``ticket_pr_facts`` makes, and answer it."""
+    reads = []
+
+    def read_batched(repos, **kwargs):
+        reads.append({"states": tuple(kwargs["states"]), **kwargs})
+        rows = tuple(
+            row for state in kwargs["states"]
+            for row in rows_by_state.get(state, ())
+        )
+        return funnel.BatchedPRRead(
+            rows_by_repo={repo: rows for repo in repos},
+            branch_refs_by_repo={
+                repo: set(branches) for repo in repos
+            } if kwargs.get("include_refs") else {repo: set() for repo in repos},
+            pr_truncated_by_repo={repo: False for repo in repos},
+            branches_truncated_by_repo={repo: False for repo in repos},
+        )
+
+    monkeypatch.setattr(funnel, "_read_batched_pr_snapshots", read_batched)
+    return reads
+
+
+def test_the_pr_scan_asks_for_comment_tails_on_open_rows_only(monkeypatch):
+    """#1985: the all-states page carried 100 comment bodies per PR.
+
+    That request returned about 2 MB, and HTTP 502 or 504 on two attempts in
+    three on the board of 2026-09-29, so the brief's 35 s budget tripped and
+    every open ticket drew the unknown pip. Verdicts are read from open rows
+    only, so the history page's tails had no reader.
+    """
+    reads = _split_pr_scan(monkeypatch, {})
+
+    funnel.ticket_pr_facts([_item(11, parent=10)])
+
+    assert [read["states"] for read in reads] == [
+        ("OPEN",), ("CLOSED", "MERGED")
+    ]
+    by_states = {read["states"]: read for read in reads}
+    assert by_states[("OPEN",)]["include_comments"] is True
+    assert by_states[("CLOSED", "MERGED")]["include_comments"] is False
+    # Branch refs ride the open read; asking twice would double the cost.
+    assert by_states[("OPEN",)]["include_refs"] is True
+    assert by_states[("CLOSED", "MERGED")]["include_refs"] is False
+
+
+def test_the_split_pr_scan_keeps_the_newest_row_first(monkeypatch):
+    """The merged snapshot stays in CREATED_AT descending order.
+
+    ``ticket_pr_facts`` reports ``repo_rows[0]`` as the ticket's fact, so a
+    split that appended the history after the open rows would report a stale
+    merged PR for a branch that has an open one, or the reverse.
+    """
+    approved = [{
+        "author": OWNER,
+        "createdAt": "2026-09-02T01:00:00Z",
+        "body": '{}\n```json\n{{"verdict": "approved", "head_sha": "sha-2"}}\n```'
+                .format(funnel.REVIEW_MARKER),
+    }]
+    reads = _split_pr_scan(monkeypatch, {
+        "OPEN": (_pr_row(2, state="OPEN", created_at="2026-09-02T00:00:00Z",
+                         comments=approved),),
+        "MERGED": (_pr_row(3, state="MERGED",
+                           created_at="2026-09-03T00:00:00Z"),
+                   _pr_row(1, state="MERGED",
+                           created_at="2026-09-01T00:00:00Z")),
+    })
+
+    facts = funnel.ticket_pr_facts([_item(11, parent=10)])
+
+    rows = facts.rows_by_ref["{}#11".format(REPO)]
+    assert [row["number"] for row in rows] == [3, 2, 1]
+    assert len(reads) == 2
+    # The open row still derives its verdict from its own tail.
+    open_row = next(row for row in rows if row["state"] == "OPEN")
+    assert open_row["verdict"]["verdict"] == "approved"
+
+
+def test_a_pr_merged_between_the_two_reads_is_kept_once_as_merged():
+    """The split introduces a race the single all-states read could not have.
+
+    The open read runs first; if a PR merges before the history read, both
+    return it. One snapshot must carry it once, as the later observation saw
+    it, or the merge gate reads a row that is already stale.
+    """
+    open_read = funnel.BatchedPRRead(
+        rows_by_repo={REPO: (
+            _pr_row(5, state="OPEN", created_at="2026-09-05T00:00:00Z"),
+        )},
+        branch_refs_by_repo={REPO: {"{}#5".format(REPO)}},
+        pr_truncated_by_repo={REPO: False},
+        branches_truncated_by_repo={REPO: False},
+    )
+    history = funnel.BatchedPRRead(
+        rows_by_repo={REPO: (
+            _pr_row(5, state="MERGED", created_at="2026-09-05T00:00:00Z"),
+            _pr_row(4, state="MERGED", created_at="2026-09-04T00:00:00Z"),
+        )},
+        branch_refs_by_repo={},
+        pr_truncated_by_repo={REPO: False},
+        branches_truncated_by_repo={},
+    )
+
+    merged = funnel._merge_batched_pr_reads(open_read, history)
+
+    rows = merged.rows_by_repo[REPO]
+    assert [(row["number"], row["state"]) for row in rows] == [
+        (5, "MERGED"), (4, "MERGED"),
+    ]
+    # Branch refs and their truncation flag come from the open read alone.
+    assert merged.branch_refs_by_repo[REPO] == {"{}#5".format(REPO)}
+    assert merged.branches_truncated_by_repo[REPO] is False
+
+
+def test_either_read_hitting_its_bound_leaves_pr_absence_unestablished():
+    """A truncated history must not read as a complete scan (#968)."""
+    def read(truncated):
+        return funnel.BatchedPRRead(
+            rows_by_repo={REPO: ()},
+            branch_refs_by_repo={REPO: set()},
+            pr_truncated_by_repo={REPO: truncated},
+            branches_truncated_by_repo={REPO: False},
+        )
+
+    assert funnel._merge_batched_pr_reads(
+        read(False), read(True)).pr_truncated_by_repo[REPO] is True
+    assert funnel._merge_batched_pr_reads(
+        read(True), read(False)).pr_truncated_by_repo[REPO] is True
+    assert funnel._merge_batched_pr_reads(
+        read(False), read(False)).pr_truncated_by_repo[REPO] is False

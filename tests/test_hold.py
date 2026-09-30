@@ -228,11 +228,14 @@ def test_dry_run_prints_the_hold_and_changes_nothing(monkeypatch, capsys):
          "closes itself when its tickets close"),
         ({"klass": "Improve", "origin": "agent"},
          "closes itself when its tickets close"),
+        ({"klass": "Bug", "origin": "Nate"},
+         "closes itself when its tickets close"),
     ],
     ids=[
         "ticket", "closed", "not-building", "no-status", "no-tickets",
         "open-tickets", "broken-closes-itself",
         "nate-maintenance-closes-itself", "agent-improve-closes-itself",
+        "nate-bug-closes-itself",
     ],
 )
 def test_hold_refuses_what_does_not_wait_at_accept(

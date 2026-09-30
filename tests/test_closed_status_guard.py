@@ -93,13 +93,54 @@ def test_parked_is_allowed_on_a_closed_issue(monkeypatch):
 
 def test_open_behaviour_is_unchanged(monkeypatch):
     _state(monkeypatch, "OPEN")
+    calls = []
     monkeypatch.setattr(funnel, "_option_id", lambda field, name: "opt")
-    monkeypatch.setattr(funnel, "gh_graphql", lambda *a, **k: {})
+    monkeypatch.setattr(
+        funnel,
+        "gh_graphql",
+        lambda query, **variables: calls.append(variables) or {
+            "updateProjectV2ItemFieldValue": {
+                "projectV2Item": {"id": "PVTI_fake"}
+            }
+        },
+    )
     monkeypatch.setattr(funnel, "_status_write_confirmed", lambda *a: True)
 
-    item = project()
+    item = project(status="Shaped")
     assert funnel._write_status(item, "Ready", NOW) is None
     assert item.status == "Ready"
+    assert calls == [{
+        "project": funnel.PROJECT_ID,
+        "item": "PVTI_fake",
+        "field": funnel.STATUS_FIELD_ID,
+        "option": "opt",
+    }]
+    assert item.status_since == NOW
+    assert item.status_events[-1] == {
+        "previous_status": "Shaped",
+        "status": "Ready",
+        "at": NOW,
+    }
+
+
+def test_a_same_status_does_not_write_or_advance_gate_age(monkeypatch, no_writes):
+    _state(monkeypatch, "OPEN")
+    previous_since = datetime(2026, 9, 20, 12, 0, tzinfo=timezone.utc)
+    item = project(status="Ready")
+    item.status_since = previous_since
+    item.status_events.append({
+        "previous_status": "Shaped",
+        "status": "Ready",
+        "at": previous_since,
+    })
+    previous_events = list(item.status_events)
+
+    assert funnel._write_status(item, "Ready", NOW) is None
+
+    assert no_writes == []
+    assert item.status == "Ready"
+    assert item.status_since == previous_since
+    assert item.status_events == previous_events
 
 
 def test_an_unreadable_state_falls_back_to_the_loaded_one(monkeypatch, no_writes):

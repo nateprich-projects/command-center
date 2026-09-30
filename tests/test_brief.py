@@ -328,7 +328,10 @@ def test_brief_surfaces_recent_self_approvals_but_not_nate_or_old_ones(
     }]
     assert "authority signals: gate authority, policy authority" in \
         brief["unattended_approvals"][0]["basis"]
-    assert len(calls) == 1
+    # The approval reader loads the two recent transitions; the connector
+    # record also checks the current Ready item whose transition is outside
+    # the maintenance window.
+    assert len(calls) == 2
     assert "rateLimit { cost remaining resetAt }" in calls[0]
     assert "comments(last: {})".format(
         funnel.CLOSED_ITSELF_COMMENT_PAGE_SIZE
@@ -413,6 +416,263 @@ def test_brief_comment_tail_cache_is_shared_between_sections(monkeypatch):
     assert len(calls) == 1
 
 
+def test_connector_gate_answers_keep_verbatim_instruction_and_provenance():
+    approved = _approval_item(86, NOW - timedelta(hours=3))
+    accepted_at = NOW - timedelta(hours=2)
+    accepted = funnel.Item(
+        repo="nateprich/beta", number=87, title="Accepted project",
+        url="https://example.invalid/87", state="CLOSED", status="Done",
+        closed_at=accepted_at,
+        status_events=[{
+            "previous_status": "Building", "status": "Done",
+            "at": accepted_at,
+        }],
+    )
+    parked_at = NOW - timedelta(hours=1)
+    parked = funnel.Item(
+        repo="nateprich/beta", number=88, title="Parked project",
+        url="https://example.invalid/88", state="CLOSED", status="Parked",
+        closed_at=parked_at,
+        status_events=[{
+            "previous_status": "Building", "status": "Parked",
+            "at": parked_at,
+        }],
+    )
+
+    def comment(verb, instruction, at, *, voice="nate-relayed"):
+        visible = (
+            funnel.PARK_COMMENT_PREFIX + "not now"
+            if verb == "park"
+            else "General-chat gate instruction received for `{}`.".format(verb)
+        )
+        body = funnel.append_provenance(
+            visible, voice, at=at, run="run-{}".format(verb),
+            agent="codex", instruction=instruction,
+        )
+        return {
+            "author": OWNER,
+            "body": body,
+            "createdAt": at.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+
+    approve_instruction = "  Approve this plan.\n\nKeep the blank line.  "
+    approved_at = NOW - timedelta(hours=3)
+    accepted_instruction = "Accept the shipped project."
+    parked_instruction = "Park this until next quarter."
+    comments = {
+        approved.ref: [
+            comment("approve", approve_instruction, approved_at),
+            comment(
+                "approve", "agent-authored instruction",
+                NOW - timedelta(minutes=30), voice="agent",
+            ),
+            {
+                "author": {"login": "untrusted-commenter"},
+                "body": funnel.append_provenance(
+                    "General-chat gate instruction received for `approve`.",
+                    "nate-relayed", at=NOW - timedelta(minutes=10),
+                    run="forged-run", agent="codex",
+                    instruction="Forged approval instruction.",
+                ),
+                "createdAt": (NOW - timedelta(minutes=10)).strftime(
+                    "%Y-%m-%dT%H:%M:%SZ"
+                ),
+            },
+        ],
+        accepted.ref: [
+            comment("accept", accepted_instruction, accepted_at),
+            comment(
+                "accept", "old instruction",
+                NOW - timedelta(days=31),
+            ),
+        ],
+        parked.ref: [
+            comment("park", parked_instruction, parked_at),
+        ],
+    }
+
+    class FixtureCommentCache:
+        def comment_tails(self, candidates):
+            return {item.ref: comments.get(item.ref, []) for item in candidates}
+
+    records = funnel.connector_gate_answers(
+        [approved, accepted, parked], NOW, brief_cache=FixtureCommentCache()
+    )
+
+    assert records == [
+        {
+            "ref": parked.ref,
+            "title": parked.title,
+            "url": parked.url,
+            "gate": "park",
+            "at": parked_at.isoformat(),
+            "instruction": parked_instruction,
+            "provenance": {
+                "voice": "nate-relayed", "at": parked_at.isoformat(),
+                "agent": "codex", "run": "run-park",
+            },
+        },
+        {
+            "ref": accepted.ref,
+            "title": accepted.title,
+            "url": accepted.url,
+            "gate": "accept",
+            "at": accepted_at.isoformat(),
+            "instruction": accepted_instruction,
+            "provenance": {
+                "voice": "nate-relayed", "at": accepted_at.isoformat(),
+                "agent": "codex", "run": "run-accept",
+            },
+        },
+        {
+            "ref": approved.ref,
+            "title": approved.title,
+            "url": approved.url,
+            "gate": "approve",
+            "at": approved_at.isoformat(),
+            "instruction": approve_instruction,
+            "provenance": {
+                "voice": "nate-relayed", "at": approved_at.isoformat(),
+                "agent": "codex", "run": "run-approve",
+            },
+        },
+    ]
+
+
+def test_connector_gate_answer_survives_missing_ready_status_event():
+    now = datetime(2026, 9, 27, 4, 10, tzinfo=timezone.utc)
+    item = funnel.Item(
+        repo="nateprich-projects/command-center", number=1540,
+        title="Connector gate approval", url="https://example.invalid/1540",
+        state="OPEN", status="Ready",
+        status_events=[{
+            "previous_status": None, "status": "Ideas",
+            "at": datetime(2026, 9, 26, 0, 42, tzinfo=timezone.utc),
+        }],
+    )
+    answered_at = datetime(2026, 9, 27, 4, 5, tzinfo=timezone.utc)
+    instruction = "Approve the prepared plan."
+    body = funnel.append_provenance(
+        "General-chat gate instruction received for `approve`.",
+        "nate-relayed", at=answered_at, run="connector-run-1540",
+        agent="codex", instruction=instruction,
+    )
+
+    class FixtureCommentCache:
+        def comment_tails(self, candidates):
+            return {
+                candidate.ref: [{
+                    "author": OWNER,
+                    "body": body,
+                    "createdAt": answered_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                }]
+                for candidate in candidates
+            }
+
+    records = funnel.connector_gate_answers(
+        [item], now, brief_cache=FixtureCommentCache()
+    )
+
+    assert len(records) == 1
+    assert records[0]["ref"] == "nateprich-projects/command-center#1540"
+    assert records[0]["gate"] == "approve"
+    assert records[0]["instruction"] == instruction
+    assert records[0]["provenance"]["voice"] == "nate-relayed"
+
+
+def test_connector_gate_answer_survives_building_without_ready_status_event():
+    now = datetime(2026, 9, 28, 0, 30, tzinfo=timezone.utc)
+    item = funnel.Item(
+        repo="nateprich-projects/command-center", number=1739,
+        title="Built connector-approved project",
+        url="https://example.invalid/1739", state="OPEN", status="Building",
+        status_events=[{
+            "previous_status": None, "status": "Ideas",
+            "at": datetime(2026, 9, 27, 20, 0, tzinfo=timezone.utc),
+        }],
+    )
+    answered_at = datetime(2026, 9, 28, 0, 14, 59, tzinfo=timezone.utc)
+    instruction = "Approve the plan and begin implementation."
+    body = funnel.append_provenance(
+        "General-chat gate instruction received for `approve`.",
+        "nate-relayed", at=answered_at, run="connector-run-1739",
+        agent="codex", instruction=instruction,
+    )
+
+    class FixtureCommentCache:
+        def comment_tails(self, candidates):
+            return {
+                candidate.ref: [{
+                    "author": OWNER,
+                    "body": body,
+                    "createdAt": answered_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                }]
+                for candidate in candidates
+            }
+
+    records = funnel.connector_gate_answers(
+        [item], now, brief_cache=FixtureCommentCache()
+    )
+
+    assert records == [{
+        "ref": "nateprich-projects/command-center#1739",
+        "title": "Built connector-approved project",
+        "url": "https://example.invalid/1739",
+        "gate": "approve",
+        "at": answered_at.isoformat(),
+        "instruction": instruction,
+        "provenance": {
+            "voice": "nate-relayed", "at": answered_at.isoformat(),
+            "agent": "codex", "run": "connector-run-1739",
+        },
+    }]
+
+
+def test_brief_keeps_connector_answer_records_out_of_gate_counts(
+    monkeypatch, capsys
+):
+    approved = _approval_item(89, NOW - timedelta(hours=1))
+    instruction = "Approve this plan verbatim.\nDo not paraphrase it."
+    at = NOW - timedelta(hours=1)
+    body = funnel.append_provenance(
+        "General-chat gate instruction received for `approve`.",
+        "nate-relayed", at=at, run="connector-run", agent="codex",
+        instruction=instruction,
+    )
+    calls = []
+
+    def gh_graphql(query, **variables):
+        calls.append(query)
+        return {
+            "rateLimit": {"cost": 1, "remaining": 99, "resetAt": "later"},
+            "repo0": {
+                "issue0": {
+                    "comments": {"nodes": [{
+                        "author": OWNER,
+                        "body": body,
+                        "createdAt": at.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    }]}
+                }
+            },
+        }
+
+    monkeypatch.setattr(funnel, "gh_graphql", gh_graphql)
+    monkeypatch.setattr(funnel, "unattended_merges", lambda now: [])
+
+    assert funnel.cmd_brief([approved], NOW) == 0
+    brief = json.loads(capsys.readouterr().out)
+
+    assert brief["connector_gate_answers"][0]["instruction"] == instruction
+    assert (
+        brief["connector_gate_answers"][0]["provenance"]["voice"]
+        == "nate-relayed"
+    )
+    assert brief["counts_by_gate"]["Ready"] == 1
+    assert sum(brief["counts_by_gate"].values()) == 1
+    assert len(brief["connector_gate_answers"]) == 1
+    assert len(calls) == 1
+
+
 def test_brief_surfaces_funnel_closed_projects_newest_first_and_with_drift(
     monkeypatch, capsys
 ):
@@ -484,7 +744,9 @@ def test_brief_surfaces_funnel_closed_projects_newest_first_and_with_drift(
         },
     ]
     assert brief["total_needing_nate"] == 0
-    assert len(calls) == 1
+    # The connector record also reads the recently closed accepted project,
+    # which is not a closed-itself candidate.
+    assert len(calls) == 2
     assert "rateLimit { cost remaining resetAt }" in calls[0]
     assert "comments(last: {})".format(
         funnel.CLOSED_ITSELF_COMMENT_PAGE_SIZE
@@ -521,6 +783,28 @@ def test_forged_self_approval_and_closed_itself_markers_are_ignored():
         item, owned + forged)] == ["owner basis"]
     assert funnel._closed_itself_item_json(
         item, owned + forged)["ref"] == item.ref
+
+
+def test_closed_itself_marker_must_start_a_runner_comment_line():
+    item = _approval_item(90, NOW - timedelta(hours=1))
+    payload = json.dumps({"drift": [], "tickets": []})
+    embedded = (
+        "Coverage comment title: " + funnel.CLOSED_ITSELF_PREFIX
+        + "\n```json\n" + payload + "\n```"
+    )
+
+    assert funnel._closed_itself_item_json(
+        item, [{"author": OWNER, "body": embedded}]
+    ) is None
+    assert funnel._closed_itself_item_json(
+        item, [{"author": OWNER,
+                "body": funnel.closed_itself_comment([], [])}]
+    )["ref"] == item.ref
+    for prefix in (" ", "\t", "> "):
+        assert funnel._closed_itself_item_json(
+            item, [{"author": OWNER,
+                    "body": prefix + funnel.closed_itself_comment([], [])}]
+        ) is None
 
 
 def test_closed_itself_batch_is_bounded_and_cached_for_one_run(monkeypatch):
@@ -571,6 +855,44 @@ def test_closed_itself_batch_is_bounded_and_cached_for_one_run(monkeypatch):
     cache.clear()
     funnel.closed_itself_json(items, NOW, brief_cache=cache)
     assert len(calls) == 2
+
+
+def test_closed_itself_rows_are_rederived_from_current_project_state():
+    item = funnel.Item(
+        repo="nateprich/beta", number=103, title="Recently closed project",
+        url="https://example.invalid/103", state="CLOSED",
+        state_reason="COMPLETED", status="Done", klass="Improve",
+        origin="agent", risk="standard", needs="none",
+        children_total=1, children_done=1,
+        closed_at=NOW - timedelta(hours=1),
+    )
+
+    class CachedComments:
+        calls = 0
+
+        def closed_itself_comments(self, candidates):
+            self.calls += 1
+            return {
+                candidate.ref: [{
+                    "author": OWNER,
+                    "body": funnel.closed_itself_comment([], []),
+                }]
+                for candidate in candidates
+            }
+
+    cache = CachedComments()
+    assert funnel.closed_itself_json([item], NOW, brief_cache=cache) == [{
+        "ref": item.ref,
+        "title": item.title,
+        "url": item.url,
+        "closed_at": item.closed_at.isoformat(),
+        "drift": [],
+    }]
+
+    item.state = "OPEN"
+    item.status = "Building"
+    assert funnel.closed_itself_json([item], NOW, brief_cache=cache) == []
+    assert cache.calls == 1
 
 
 def test_closed_itself_candidates_follow_auto_close_eligibility_signal():
@@ -815,7 +1137,15 @@ def test_parked_items_stay_out_of_gate_counts_and_maintenance_load(monkeypatch, 
     without_parked = [item for item in items if item.status != "Parked"]
 
     assert brief["counts_by_gate"]["Parked"] == 0
-    assert brief["total_needing_nate"] == len(funnel.awaiting_decision(without_parked))
+    nate, watched = funnel.split_decisions(without_parked)
+    assert brief["total_needing_nate"] == len(nate)
+    # The two lists partition the queue: nothing is dropped (#1891).
+    assert len(nate) + len(watched) == len(
+        funnel.awaiting_decision(without_parked)
+    )
+    assert [row["ref"] for row in brief["watch_gates"]] == [
+        item.ref for item in watched
+    ]
     assert all(item["ref"] != "nateprich/beta#15" for item in brief["items"])
     assert brief["maintenance_load"] == funnel.maintenance_load(without_parked, NOW)
 
@@ -910,7 +1240,9 @@ def test_brief_surfaces_blocked_projects_and_tickets_oldest_first(
             "blocked_at": "2026-09-03T00:00:00+00:00",
         },
     ]
-    assert [row["ref"] for row in brief["items"]] == ["nateprich/beta#31"]
+    # The silent block's question is the funnel watch's, not Nate's (#1891).
+    assert [row["ref"] for row in brief["items"]] == []
+    assert [row["ref"] for row in brief["watch_gates"]] == ["nateprich/beta#31"]
     assert all(row["ref"] != "nateprich/beta#33" for row in brief["blocked"])
     assert calls == []
 
@@ -1060,11 +1392,12 @@ def test_brief_keeps_every_other_blocked_project_as_blocked_work(
         "conditions": ["#70"],
         "blocked_at": "2026-09-01T00:00:00+00:00",
     }
-    # The silent block still asks its own question, and is still counted.
-    assert [row["ref"] for row in brief["items"]] == ["nateprich/beta#61"]
-    assert brief["items"][0]["waiting_on"] == "Unblock or park?"
-    assert "waiting_reason" not in brief["items"][0]
-    assert brief["total_needing_nate"] == 1
+    # The silent block still asks its own question, which the funnel watch
+    # answers: it is listed under watch_gates and not counted (#1891).
+    assert brief["items"] == []
+    assert [row["ref"] for row in brief["watch_gates"]] == ["nateprich/beta#61"]
+    assert brief["watch_gates"][0]["question"] == "Unblock or park?"
+    assert brief["total_needing_nate"] == 0
 
 
 def test_brief_unblocked_finished_project_still_reads_as_ordinary_accept(
@@ -1435,6 +1768,9 @@ def test_brief_keeps_readable_sections_when_one_section_cannot_be_read(
         raise funnel.GitHubError("rate limit")
 
     monkeypatch.setattr(funnel, "unattended_merges", unreadable)
+    monkeypatch.setattr(
+        funnel, "connector_gate_answers", lambda *args, **kwargs: []
+    )
 
     assert funnel.cmd_brief([item], NOW) == 0
     brief = json.loads(capsys.readouterr().out)
@@ -1470,6 +1806,9 @@ def test_brief_marks_an_unreadable_comment_section_instead_of_empty_result(
 def test_brief_surfaces_blocked_comment_load_failures(
     monkeypatch, capsys
 ):
+    monkeypatch.setattr(
+        funnel, "connector_gate_answers", lambda *args, **kwargs: []
+    )
     item = funnel.Item(
         repo="nateprich/beta", number=93, title="Blocked ticket",
         url="https://example.invalid/93", state="OPEN", status="Building",
@@ -1589,6 +1928,9 @@ def test_brief_emits_elapsed_seconds_for_each_section(monkeypatch, capsys):
 
     monkeypatch.setattr(funnel.time, "perf_counter", fake_perf_counter)
     monkeypatch.setattr(funnel, "recent_resend_ratio", lambda now: {})
+    monkeypatch.setattr(
+        funnel, "connector_gate_answers", lambda *args, **kwargs: []
+    )
 
     assert funnel.cmd_brief([item], NOW) == 0
     brief = json.loads(capsys.readouterr().out)
@@ -1650,6 +1992,9 @@ def test_brief_timings_identify_a_slow_stage_without_changing_payload(
         return []
 
     monkeypatch.setattr(funnel, "closed_itself_json", slow_closed_itself)
+    monkeypatch.setattr(
+        funnel, "connector_gate_answers", lambda *args, **kwargs: []
+    )
 
     assert funnel.cmd_brief([item], NOW) == 0
     brief = json.loads(capsys.readouterr().out)
@@ -1672,6 +2017,9 @@ def test_brief_skips_a_zero_budget_informational_section_as_unknown(
     monkeypatch.setitem(funnel.BRIEF_SECTION_BUDGETS,
                         "working_tree_touched", 0.0)
     monkeypatch.setattr(funnel, "working_tree_touched", lambda now: [])
+    monkeypatch.setattr(
+        funnel, "connector_gate_answers", lambda *args, **kwargs: []
+    )
 
     assert funnel.cmd_brief([item], NOW) == 0
     brief = json.loads(capsys.readouterr().out)
@@ -1741,6 +2089,7 @@ def test_brief_record_sections_allow_the_observed_two_second_read(
         ("closed_itself", "closed_itself_json"),
         ("cleared_blocks", "cleared_blocks_json"),
         ("unattended_approvals", "unattended_approvals"),
+        ("connector_gate_answers", "connector_gate_answers"),
         ("rejected_merges", "rejected_merges"),
     ],
 )
@@ -1755,7 +2104,15 @@ def test_brief_degrades_a_slow_section_without_losing_the_rest(
         status_since=NOW,
     )
     monkeypatch.setitem(funnel.BRIEF_SECTION_BUDGETS, section, 0.0)
-    monkeypatch.setattr(funnel, reader, lambda *args: {})
+    if reader == "connector_gate_answers":
+        monkeypatch.setattr(
+            funnel, reader, lambda *args, **kwargs: []
+        )
+    else:
+        monkeypatch.setattr(funnel, reader, lambda *args: {})
+        monkeypatch.setattr(
+            funnel, "connector_gate_answers", lambda *args, **kwargs: []
+        )
 
     assert funnel.cmd_brief([item], NOW) == 0
     brief = json.loads(capsys.readouterr().out)
@@ -1784,6 +2141,9 @@ def test_closed_itself_degrades_explicitly_when_over_budget(
         klass="Improve", children_total=1, children_done=1, closed_at=NOW,
     )
     monkeypatch.setitem(funnel.BRIEF_SECTION_BUDGETS, "closed_itself", 0.0)
+    monkeypatch.setattr(
+        funnel, "connector_gate_answers", lambda *args, **kwargs: []
+    )
 
     assert funnel.cmd_brief([item], NOW) == 0
     brief = json.loads(capsys.readouterr().out)

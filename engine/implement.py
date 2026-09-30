@@ -66,10 +66,12 @@ class StrayFileError(ImplementError):
 
 
 class CommandTimeoutError(ImplementError):
-    """A finish subprocess exceeded its bound and was abandoned."""
+    """A bounded finish subprocess was abandoned with partial output."""
 
-    def __init__(self, command: Sequence[str], timeout: float):
+    def __init__(self, command: Sequence[str], timeout: float,
+                 captured_output: str = ""):
         self.timeout_seconds = timeout
+        self.captured_output = captured_output
         self.finish_recorded = False
         super().__init__("{} timed out after {:g}s".format(
             _command_label(command), timeout))
@@ -105,17 +107,29 @@ class MergeConflictError(ImplementError):
 
 
 
-#: The blocked_on_human reason enum: the four specific human capabilities
-#: from the implement answer schema (#794). These are prose in the created
-#: sub-issue for Nate to read; the machine signal is Needs=human on the
-#: Project field, written alongside. Kept here (not in funnel) because only
-#: this job validates the implement answer.
+#: The blocked_on_human reason enum from the implement answer schema (#794):
+#: four capabilities only Nate has, and one a Claude Code session on the Mac
+#: mini has (#1901). These are prose in the created sub-issue; the machine
+#: signal is the Needs Project field written alongside, which
+#: ``HUMAN_STEP_NEEDS`` maps each reason to. Kept here (not in funnel) because
+#: only this job validates the implement answer.
+CLAUDE_CODE_ENVIRONMENT_REASON = "a Claude Code environment"
+
 BLOCKED_ON_HUMAN_REASONS = (
     "an app UI with no API",
     "entering a credential",
     "an account or billing setting",
     "physical access to a machine",
+    CLAUDE_CODE_ENVIRONMENT_REASON,
 )
+
+#: The Needs value each blocked reason files its step with. A step a Claude
+#: Code session can do goes to a session, not to Nate (#1901).
+HUMAN_STEP_NEEDS = {
+    reason: ("claude-code-environment"
+             if reason == CLAUDE_CODE_ENVIRONMENT_REASON else "human")
+    for reason in BLOCKED_ON_HUMAN_REASONS
+}
 
 
 def fetch_ticket(repo: str, number: int) -> dict:
@@ -537,9 +551,19 @@ def _run(command: Sequence[str], *, cwd: pathlib.Path,
     )
     try:
         stdout, stderr = proc.communicate(input=input_text, timeout=bound)
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as exc:
+        output = []
+        for part in (exc.output, exc.stderr):
+            if isinstance(part, bytes):
+                part = part.decode("utf-8", errors="replace")
+            elif part is not None:
+                part = str(part)
+            if part:
+                output.append(part)
         _abandon_child(proc)
-        raise CommandTimeoutError(command, bound) from None
+        raise CommandTimeoutError(
+            command, bound, captured_output="\n".join(output),
+        ) from None
     completed = subprocess.CompletedProcess(
         list(command), proc.returncode, stdout, stderr)
     if check and completed.returncode != 0:
@@ -1035,6 +1059,16 @@ def _merged_failure(record: dict) -> MergedSuiteError:
     counts only failures main does not share, which is what fails the
     finish.
     """
+    timed_out = [entry for entry in record["commands"]
+                 if entry.get("timed_out") is True]
+    if timed_out:
+        entry = timed_out[-1]
+        lines = ["tests timed out: {} timed out on the merge with "
+                 "origin/main {}".format(
+                     entry["command"], record["base"][:12])]
+        if entry.get("output"):
+            lines.append(entry["output"])
+        return MergedSuiteError("\n".join(lines))
     failed = [entry["command"] for entry in record["commands"]
               if entry["result"] == "fail"]
     lines = ["{} failed on the merge with origin/main {}".format(
@@ -1147,7 +1181,7 @@ def _run_reproduction(root: pathlib.Path,
         return evidence.reproduction(
             root, merged["base"], work_dir=root.parent,
             budget=REPRODUCTION_BUDGET_SECONDS)
-    except (evidence.ReviewEvidenceError, ImplementError, OSError):
+    except Exception:
         return dict(_REPRODUCTION_NOT_RUN)
 
 
@@ -1713,19 +1747,23 @@ def render_human_step_body(*, parent_number: int, ticket_number: int,
 
     The ``Human step: <reason>`` line is prose for Nate to read, not a
     marker: the body scanner is deleted (#826) and the machine signal is
-    Needs=human on the Project field, written alongside by
-    ``finish_blocked_on_human``.
+    the Needs Project field, written alongside by ``finish_blocked_on_human``.
+    A step a Claude Code session can do names the session as its actor,
+    not Nate (#1901).
     """
     doing = action.rstrip()
     if not doing.endswith("."):
         doing += "."
+    who = ("a Claude Code session on the Mac mini"
+           if HUMAN_STEP_NEEDS.get(reason) == "claude-code-environment"
+           else "Nate")
     return "\n".join([
         "Part of #{}; discovered while implementing #{}.".format(
             parent_number, ticket_number),
         "",
         "Human step: {}".format(reason),
         "",
-        "Action Nate must perform: {}".format(doing),
+        "Action {} must perform: {}".format(who, doing),
         "",
     ])
 
@@ -1770,21 +1808,27 @@ def create_human_step_issue(repo: str, parent_number: int, title: str,
     return {"number": number, "ref": "{}#{}".format(repo, number), "url": url}
 
 
-def write_human_step_needs(url: str, ref: str) -> None:
+def write_human_step_needs(url: str, ref: str, needs: str = "human") -> None:
     """Set canonical routing fields on a new human-step sub-issue.
 
     The sub-issue joins the parent's Project automatically with its fields
     blank; ``gh project item-add`` answers its row id whether fresh or
     already present (as breakdown's ``add_to_project`` does), then one
     mutation sets the field. Without this the new ticket would read as
-    unset and miss the human_steps section (#826).
+    unset and miss the human_steps section (#826). ``needs`` is ``human``
+    for Nate's steps and ``claude-code-environment`` for a session's (#1901).
     """
     from engine import breakdown as breakdown_engine
 
     item_id = breakdown_engine.add_to_project(url)
     funnel.write_project_select(item_id, "Origin", "agent", ref)
     funnel.write_project_select(item_id, "Risk", "standard", ref)
-    breakdown_engine.write_needs(item_id, "human", ref)
+    breakdown_engine.write_needs(item_id, needs, ref)
+
+
+def write_session_step_needs(url: str, ref: str) -> None:
+    """Route a new step to a Claude Code session on the Mac mini (#1901)."""
+    write_human_step_needs(url, ref, needs="claude-code-environment")
 
 
 def write_declined_needs(url: str, ref: str) -> None:
@@ -1803,12 +1847,12 @@ def write_declined_external_event_needs(url: str, ref: str) -> None:
     breakdown_engine.write_needs(item_id, "external-event", ref)
 
 
-def write_declined_human_needs(url: str, ref: str) -> None:
-    """Route an unhandled decline to Nate so its block cannot be stranded."""
+def write_declined_agent_needs(url: str, ref: str) -> None:
+    """Route an unhandled lane decline to the watch-owned agent lane."""
     from engine import breakdown as breakdown_engine
 
     item_id = breakdown_engine.add_to_project(url)
-    breakdown_engine.write_needs(item_id, "human", ref)
+    breakdown_engine.write_needs(item_id, "agent", ref)
 
 
 def mark_ticket_blocked(repo: str, number: int, *, blocked_by: Optional[int] = None,
@@ -2205,9 +2249,13 @@ def add_declined_prerequisite_edge(repo: str, number: int, prerequisite: str,
 def close_declined_defer_note_proof(
         repo: str, number: int, reason: str, *, run: str, agent: str,
         cwd: pathlib.Path) -> None:
-    """Close an explicitly accepted defer-note proof as completed."""
+    """Close an explicitly accepted defer-note proof as completed.
+
+    The reason is the model's words, so it is made inert (#1798).
+    """
     comment = funnel.append_provenance(
-        "{} {}".format(funnel.DECLINED_PREFIX, reason), "agent",
+        "{} {}".format(funnel.DECLINED_PREFIX,
+                       funnel.inert_comment_text(reason)), "agent",
         at=datetime.now(timezone.utc), run=run, agent=agent,
     )
     proc = funnel._run_gh(
@@ -2465,6 +2513,15 @@ def _failure_note(exc: ImplementError, kept: str = "", *, repo: str) -> str:
     ``_failure_comment``, where the next run's packet reads them.
     """
     text = str(exc)
+    if text.startswith("tests timed out:"):
+        public = _is_public_repo(repo)
+        if public:
+            note = text
+        else:
+            note = _with_markers(text, "tests timed out: merged suite")
+        if kept:
+            note += " | " + (_member_kept(kept) if not public else kept)
+        return note
     ids = _failed_test_ids(text)
     counts = _pytest_counts(text)
     parts = []
@@ -2494,7 +2551,9 @@ def _failure_comment(exc: ImplementError, kept: str = "") -> str:
 
     The failing test ids, pytest's counts line and, when pytest named no
     test, the first line of the output: what the note carried before. The
-    next run reads it in its packet's issue thread.
+    next run reads it in its packet's issue thread. The branch prints that
+    output, so the free-text lines are made inert (#1798); an id is one
+    ``\\S+`` token, which no marker fits.
     """
     text = str(exc)
     ids = _failed_test_ids(text)
@@ -2516,9 +2575,10 @@ def _failure_comment(exc: ImplementError, kept: str = "") -> str:
         lines.append("")
     elif counts is None:
         lines.extend(["First line of the output:", "", "```text",
-                      _first_output_line(text), "```", ""])
+                      funnel.inert_comment_text(_first_output_line(text)),
+                      "```", ""])
     if counts is not None:
-        lines.append("Counts: `{}`".format(counts))
+        lines.append("Counts: `{}`".format(funnel.inert_comment_text(counts)))
     if kept:
         lines.append("Work: {}".format(kept))
     return "\n".join(lines).rstrip() + "\n"
@@ -2615,29 +2675,59 @@ def _push_ticket_branch(root: pathlib.Path, branch: str, *, ref: str,
 
 def _remove_codex_run_checkout(root: pathlib.Path, number: int,
                                agent: str) -> bool:
-    """Remove only this Codex ticket checkout under the runtime codex-runs/.
+    """Remove only this Codex ticket checkout under a runtime codex-runs/.
 
     The per-run clone is named ``ticket-<number>-<UTC timestamp>`` and is
     owner-only. Restrict removal to that exact direct child; finish-ticket also
     runs from session workspaces and other agents' checkouts, which must remain
     untouched.
+
+    Live runs clone into the heartbeat directory's ``codex-runs/``
+    (``heartbeat.SPOOL_DIR``), because that is the Codex sandbox's only
+    writable root. ``CLAUDE_DIR/codex-runs`` does not exist there, and while
+    it was the only root every live checkout was kept (#1856). Either root
+    counts, and one that is missing or a symlink is skipped rather than
+    fatal. The merged suite's temporary
+    worktrees also sit in the runs root (#1804), but one level down, under
+    ``review-evidence-*``, so no guard below can match them; they are
+    removed by review_evidence itself.
+
+    Call it only once this run has pushed the ticket branch. #1711 also
+    removed the checkout once a finish recorded work not kept, but that
+    checkout can hold the only copy of the work: a stray-file refusal, a
+    ``_keep_work`` failure before its push, a superseded run, a decline or
+    a human step. Those paths never ran live while the root went unmatched,
+    so matching it (#1856) would have started deleting that work. They leave
+    the directory for a later run or Nate to recover: a leaked directory is
+    the safe failure, lost work is not.
     """
     if agent != "codex":
         return False
     checkout = pathlib.Path(root)
-    runs_root = pathlib.Path(funnel.CLAUDE_DIR) / "codex-runs"
-    if checkout.is_symlink() or runs_root.is_symlink():
+    if checkout.is_symlink():
         return False
     try:
-        runs_root = runs_root.resolve(strict=True)
         checkout = checkout.resolve(strict=True)
     except (OSError, RuntimeError):
         return False
+    import heartbeat
+    runs_root = None
+    for candidate in (pathlib.Path(funnel.CLAUDE_DIR) / "codex-runs",
+                      pathlib.Path(heartbeat.SPOOL_DIR) / "codex-runs"):
+        if candidate.is_symlink():
+            continue
+        try:
+            resolved = candidate.resolve(strict=True)
+        except (OSError, RuntimeError):
+            continue
+        if checkout.parent == resolved:
+            runs_root = resolved
+            break
     match = re.fullmatch(
         r"ticket-([1-9][0-9]*)-([0-9]{8}T[0-9]{12}Z)", checkout.name,
     )
     if (match is None or int(match.group(1)) != number
-            or checkout.parent != runs_root):
+            or runs_root is None):
         return False
     try:
         info = checkout.stat()
@@ -2667,10 +2757,10 @@ def _keep_work(root: pathlib.Path, number: int, branch: str, *, ref: str,
 
     Never opens a PR. Returns a short phrase for the heartbeat note. The same
     pre-PR scratch check applies here so a WIP branch cannot carry run debris.
-    The second result is true if the push path failed; that checkout is kept
-    for diagnosis.
+    The second result is true only once the branch is pushed, which is the
+    only time the Codex checkout may be removed (#1856); every other result
+    keeps it, for diagnosis or because it holds the only copy of the work.
     """
-    push_attempted = False
     try:
         _require_current_claim(ref, run, agent)
         paths = _working_tree_paths(root)
@@ -2687,14 +2777,13 @@ def _keep_work(root: pathlib.Path, number: int, branch: str, *, ref: str,
                      timeout=LOCAL_GIT_TIMEOUT_SECONDS).stdout.strip()
         if not ahead.isdigit() or int(ahead) < 1:
             return "no work to keep", False
-        push_attempted = True
         _push_ticket_branch(root, branch, ref=ref, run=run, agent=agent)
-        return "work kept on {}".format(branch), False
+        return "work kept on {}".format(branch), True
     except SupersededRunError:
         raise
     except ImplementError as exc:
         first = str(exc).splitlines()[0] if str(exc) else "unknown error"
-        return "work NOT kept: {}".format(first[:120]), push_attempted
+        return "work NOT kept: {}".format(first[:120]), False
 
 
 def _checkpoint_work(root: pathlib.Path, number: int, branch: str, *,
@@ -2741,7 +2830,7 @@ def _recover_answer_error(
     release_effect = release or (
         lambda target: release_claim(target, run=run, agent=agent)
     )
-    kept, push_failed = _keep_work(
+    kept, pushed = _keep_work(
         context["root"], context["number"], context["branch"],
         ref=ref, run=run, agent=agent, reason="answer unreadable",
     )
@@ -2754,7 +2843,7 @@ def _recover_answer_error(
         note = _with_markers(note, "answer error: {} | {}".format(
             first[:200], _member_kept(kept)))
     heartbeat_finish(agent, run, "errored", note, ref)
-    if not push_failed:
+    if pushed:
         _remove_codex_run_checkout(context["root"], context["number"], agent)
     return True
 
@@ -2805,7 +2894,9 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
         release_effect(ref)
         heartbeat_finish(
             agent, run, "errored", _stray_note(exc, repo=resolved), ref)
-        _remove_codex_run_checkout(context["root"], context["number"], agent)
+        # The note asks for the scratch to be removed and the work
+        # re-staged, and the work may be pushed nowhere: keep the checkout
+        # (#1856).
         raise
     except CommandTimeoutError as exc:
         _record_command_timeout(
@@ -2823,7 +2914,7 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
         # conflict with main finishes the same way, so the backoff bounds a
         # ticket that keeps conflicting (#1804).
         conflict = isinstance(exc, MergeConflictError)
-        kept, push_failed = _keep_work(
+        kept, pushed = _keep_work(
             context["root"], context["number"], context["branch"],
             ref=ref, run=run, agent=agent,
             reason=("merge conflict with origin/main" if conflict else
@@ -2857,7 +2948,7 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
         if posted is False:
             note += " | failing tests NOT posted to the ticket"
         heartbeat_finish(agent, run, "errored", note, ref)
-        if not push_failed:
+        if pushed:
             _remove_codex_run_checkout(
                 context["root"], context["number"], agent)
         raise
@@ -2881,9 +2972,8 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
                 ", ".join(evidence))
             if extra_note:
                 note += "; " + extra_note.strip()
+            # Nothing was pushed, so the checkout stays (#1856).
             heartbeat_finish(agent, run, "done", note, ref)
-            _remove_codex_run_checkout(
-                context["root"], context["number"], agent)
             return {"number": context["number"], "url": ticket["url"],
                     "closed": True}
         # Re-read immediately before pushing so a ticket branch never carries
@@ -2906,7 +2996,9 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
         release_effect(ref)
         heartbeat_finish(
             agent, run, "errored", _stray_note(exc, repo=resolved), ref)
-        _remove_codex_run_checkout(context["root"], context["number"], agent)
+        # The note asks for the scratch to be removed and the work
+        # re-staged, and the work may be pushed nowhere: keep the checkout
+        # (#1856).
         raise
     except CommandTimeoutError as exc:
         _record_command_timeout(
@@ -2949,6 +3041,8 @@ def finish_blocked_on_human(
         block_effect: Callable[..., None] = mark_ticket_blocked,
         comment_effect: Callable[..., None] = post_agent_comment,
         needs_effect: Callable[[str, str], None] = write_human_step_needs,
+        session_needs_effect: Callable[[str, str], None]
+        = write_session_step_needs,
         sub_issues_effect: Callable[[str, int], List[Dict[str, object]]]
         = read_parent_sub_issues,
         comments_effect: Callable[[str, int], List[str]]
@@ -2957,14 +3051,17 @@ def finish_blocked_on_human(
         = remote_ticket_head,
         route_needs_effect: Callable[[str, str], None] = write_declined_needs,
         human_needs_effect: Callable[[str, str], None]
-        = write_declined_human_needs,
+        = write_human_step_needs,
         extra_note: Optional[str] = None) -> dict:
     """File the human step, block the ticket, release, and finish. No PR.
 
     No test run, commit, or push happens here: the finish records the
-    implementation as not kept, then removes this run's Codex checkout.
+    implementation as not kept and leaves this run's Codex checkout, which
+    may hold the only copy of it (#1856; #1711 removed it).
     A failure after the sub-issue exists names it, so the retry starts
-    from GitHub's truth rather than filing a second one.
+    from GitHub's truth rather than filing a second one. The step's Needs
+    follows its reason: ``session_needs_effect`` for a step a Claude Code
+    session can do, ``needs_effect`` for Nate's (#1901).
 
     A human step Nate closed as not planned for this ticket is his answer
     that no step will happen, so nothing is filed again (#1726): the ticket
@@ -3005,8 +3102,12 @@ def finish_blocked_on_human(
         reason=blocked["reason"], action=blocked["action"])
     created = create_effect(
         resolved, parent_number, title, body, cwd=context["root"])
+    step_needs = HUMAN_STEP_NEEDS[blocked["reason"]]
     try:
-        needs_effect(created["url"], created["ref"])
+        if step_needs == "claude-code-environment":
+            session_needs_effect(created["url"], created["ref"])
+        else:
+            needs_effect(created["url"], created["ref"])
         block_effect(resolved, context["number"],
                      blocked_by=created["number"], cwd=context["root"])
         comment_effect(
@@ -3023,7 +3124,6 @@ def finish_blocked_on_human(
     if extra_note:
         note += "; " + extra_note.strip()
     heartbeat_finish(agent, run, "skipped-human-step", note, ref)
-    _remove_codex_run_checkout(context["root"], context["number"], agent)
     return {"ticket": ref,
             "human_step": {"number": created["number"],
                            "ref": created["ref"],
@@ -3094,8 +3194,8 @@ def finish_declined(
         block_effect: Callable[..., None] = mark_ticket_blocked,
         comment_effect: Callable[..., None] = post_agent_comment,
         needs_effect: Callable[[str, str], None] = write_declined_needs,
-        human_needs_effect: Callable[[str, str], None]
-        = write_declined_human_needs,
+        declined_needs_effect: Callable[[str, str], None]
+        = write_declined_agent_needs,
         external_event_needs_effect: Callable[[str, str], None]
         = write_declined_external_event_needs,
         prerequisite_facts_effect: Callable[[str], Optional[Dict[str, object]]]
@@ -3126,7 +3226,6 @@ def finish_declined(
         if extra_note:
             note += "; " + extra_note.strip()
         heartbeat_finish(agent, run, "done", note, ref)
-        _remove_codex_run_checkout(context["root"], context["number"], agent)
         return {"ticket": ref, "declined": reason}
     accept_conflict_routed = (
         decline_class == "accept-body-conflict" and decline_target is not None
@@ -3168,11 +3267,14 @@ def finish_declined(
             and not unsatisfiable_acceptance_routed
             and not pending_gate_answer_routed):
         # Unknown declines and failed prerequisite handoffs have no machine-
-        # readable condition that can clear them. Ask Nate instead of leaving
-        # a blocked ticket in the silent Needs=agent lane.
-        human_needs_effect(ticket["url"], ref)
+        # readable condition that can clear them. Keep the ticket blocked and
+        # route its Unblock question through the funnel watch.
+        declined_needs_effect(ticket["url"], ref)
         block_effect(resolved, context["number"], cwd=context["root"])
-    declined_comment = "{} {}".format(funnel.DECLINED_PREFIX, reason)
+    # The reason is the model's words: one line with no ``<!--``, so it can
+    # never form a runner marker in the owner's comment (#1798).
+    declined_comment = "{} {}".format(
+        funnel.DECLINED_PREFIX, funnel.inert_comment_text(reason))
     if prerequisite_evidence is not None:
         declined_comment += "\n\n" + prerequisite_evidence
     comment_effect(resolved, context["number"], declined_comment,
@@ -3203,7 +3305,7 @@ def finish_declined(
             )
         except (funnel.GitHubError, OSError, subprocess.SubprocessError):
             # An unposted handoff must not leave a false unblocked ticket.
-            human_needs_effect(ticket["url"], ref)
+            declined_needs_effect(ticket["url"], ref)
             block_effect(resolved, context["number"], cwd=context["root"])
             routing_failed = True
     elif unsatisfiable_acceptance_routed or pending_gate_answer_routed:
@@ -3230,8 +3332,8 @@ def finish_declined(
         except (funnel.GitHubError, ImplementError, OSError,
                 subprocess.SubprocessError):
             # The route comment is the durable queue hold. If it cannot be
-            # recorded, put the ticket back in Nate's visible queue.
-            human_needs_effect(ticket["url"], ref)
+            # recorded, keep the ticket blocked for the watch to resolve.
+            declined_needs_effect(ticket["url"], ref)
             block_effect(resolved, context["number"], cwd=context["root"])
             routing_failed = True
     release_effect(ref)
@@ -3268,7 +3370,6 @@ def finish_declined(
     if extra_note:
         note += "; " + extra_note.strip()
     heartbeat_finish(agent, run, "skipped-blocked", note, ref)
-    _remove_codex_run_checkout(context["root"], context["number"], agent)
     return {"ticket": ref, "declined": reason}
 
 
@@ -3291,7 +3392,11 @@ def dry_run_main() -> int:
 
 def _record_superseded_finish(args: argparse.Namespace, ref: str,
                               reason: str) -> int:
-    """Finish a refused run without releasing, committing, or pushing work."""
+    """Finish a refused run without releasing, committing, or pushing work.
+
+    The checkout stays: this run keeps none of its work, so the checkout
+    may hold the only copy (#1856).
+    """
     if not args.run:
         print("finish-ticket: cannot record superseded finish without --run",
               file=sys.stderr)
@@ -3304,14 +3409,6 @@ def _record_superseded_finish(args: argparse.Namespace, ref: str,
         print("finish-ticket: {}; heartbeat finish failed: {}".format(
             note, exc), file=sys.stderr)
         return 1
-    try:
-        context = checkout_context()
-    except ImplementError:
-        context = None
-    if context is not None:
-        _remove_codex_run_checkout(
-            context["root"], context["number"], args.agent,
-        )
     print(json.dumps({
         "ticket": ref, "superseded": True, "work_kept": False,
     }, sort_keys=True))

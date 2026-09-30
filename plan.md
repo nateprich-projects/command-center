@@ -72,6 +72,15 @@ consistently:
   and no risk the shaper declares advance to `Ready`; a wording-scan hit alone raises
   `Risk` to `escalated` and posts its reasons but does not stop them (#1679, Nate
   2026-09-27); the other combinations stop at `Shaped`.
+- **The funnel watch answers two questions itself, not Nate.** Every `Unblock?` and
+  `Unblock or park?` item, except one waiting on his hands (Needs `human`, which he
+  also sees as a blocked human step); and `Is the plan good?` on an agent-origin plan
+  of Class Broken or Bug, except one whose `## Needs Nate` section still holds an
+  Exposure or Preference question. `funnel.py brief` lists them under `watch_gates`,
+  outside `items` and `total_needing_nate`, through the one predicate
+  `watch_owns_gate`; `gate_question` still asks them, so lanes and sweeps read what
+  they read before. _(Nate, 2026-09-28, relayed from an interactive session; #1891:
+  "please ensure these stop showing up as needing my review.")_
 - **"Accept it?" remains the human gate** for work whose class and origin make its
   completion a Nate decision. Whether the thing is worth keeping is not checkable,
   and no agent may decide it.
@@ -90,6 +99,13 @@ predicate for both the `Accept it?` gate and unattended close:
    `Accept it?` and never closes itself. **Confirmed by Nate, 2026-09-17.**
 3. **New and Replace are unchanged:** they always wait at `Accept it?` after
    their tickets close. **Confirmed by Nate, 2026-09-17.**
+
+   `Bug` (added by #1845) closes itself exactly as Broken does, whoever asked
+   for it. #987, which coded these rules, names the upkeep classes as
+   `SELF_APPROVABLE_CLASSES` and closes every one of them but Improve; Bug is a
+   defect class, upkeep like Broken, so the rules already decide it. #1832 had
+   listed it as a gate question; it is settled from that precedent.
+   _(agent rule, unconfirmed — advisory)_
 4. **The #145 amendment is superseded for upkeep classes.** A project that
    carried a human-step ticket does not thereby return to the accept gate;
    the class/origin rule above decides. **Confirmed by Nate, 2026-09-17.**
@@ -219,7 +235,7 @@ a stalled item from permanently plugging the queue.
 
 **Codex's work runs the ladder:**
 
-`Investigate > Broken > Maintenance > Improve existing > Build new > Replace existing`
+`Investigate > Broken > Maintenance > Improve existing > Build new > Replace existing > Bug`
 
 The ladder ranks what to **start**. Once a project is Building, its remaining tickets
 finish first. Passing a gate is a commitment and nothing may silently un-commit it.
@@ -265,6 +281,25 @@ new project ideas.")_
 are finite. `Investigate` is deliberately first in start order but does not preempt or
 take a separate WIP exception. The governing rule remains: **only classes that are
 finite may preempt.**
+
+**Bug is a latent defect: found by reading, review or tests, with no observed
+occurrence. It never preempts.** Broken is what was seen to fail. Reviews keep finding
+latent defects, so a Broken class that held them was unbounded, and preempting with it
+starved everything below (#1832). Bug ranks last on the ladder, below Replace, and
+takes no WIP exception. A Bug ticket that blocks other work ranks and goes with that
+work, and one that blocks finite work preempts with it.
+
+**Bugs get one start in four** (#1846), counted over the last eight ticket starts
+across every lane, never by what is running. On the Bugs' turn, finite work still goes
+first, then pinned work, then the startable Bug in the highest repo tier, oldest within
+the tier. _(Nate, 2026-09-28, #1877: "Pins win; Bugs finish" and "Tier, then
+oldest.")_ A pinned Bug is pinned work, so it takes the turn itself.
+_(confirmed by Nate 2026-09-28, in session)_ Off their turn, a Ready Bug waits: tier does
+not lift it ahead of other work, and it fills only a pull nothing else can, chosen the
+same way. A Bug project already Building keeps its place, as does a pinned Bug, and
+their starts count against the share. The share applies where a lane pulls
+(`next_ticket`), and the board's projected order and `funnel queue` run that pick
+forward from the start history, so a Bug shows on the turn begin gives it (#1878).
 
 **Maintenance is defined tightly:** it is degrading, or it has a known date on which it
 stops working. Expiring certs, a sunsetting API, a CVE, a service that keeps dying, an
@@ -334,8 +369,9 @@ way is the single mistake that competes with him; not working is the healthy out
 
 **Portfolio signal:** if maintenance load ever blocks new work, that is not a tuning
 problem. It is the signal to reassess how many plates are spinning. The brief carries
-share-of-runs on Broken + Maintenance over 30 days, and days since anything new
-started.
+share-of-runs on Broken + Bug + Maintenance over 30 days, and days since anything new
+started. Bug counts with Broken there, as it does in the fix-on-fix join, because
+latent finds were classed Broken until #1832 split them out (#1845).
 
 ## The agents
 
@@ -762,7 +798,7 @@ deliberately deferred rather than oversights, and all four are now settled.
 ### Ladder class is a Project single-select field
 
 An item's ladder class (`Investigate`, `Broken`, `Maintenance`, `Improve`, `New`,
-`Replace`) is
+`Replace`, `Bug`) is
 **un-derivable** — it fails the same test `needs-shaping` passed, so it has to be
 written down. It lives as a **`Class` single-select field on the Project**, alongside
 `Status`.
@@ -784,7 +820,8 @@ During an explicit `funnel approve --yes`, when `Class` is unset and the plan
 contains exactly one non-empty whole line of the form `Proposed class: <one ladder
 class>`, the funnel adopts the named class before the normal `Status` write and
 records that source line in its output and the issue comment. The name must exactly
-match one of `Investigate`, `Broken`, `Maintenance`, `Improve`, `New`, or `Replace`.
+match one of `Investigate`, `Broken`, `Maintenance`, `Improve`, `New`, `Replace`, or
+`Bug`.
 A missing, blank, malformed, fuzzy, or multiple proposal stays unset for Nate;
 titles, body prose, and other proposal text never supply the value. Nate may
 override it at any time.

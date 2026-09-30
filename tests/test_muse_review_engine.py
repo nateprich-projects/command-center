@@ -226,6 +226,8 @@ FUNNEL_STUB = (
     "    if command == 'session-server':\n"
     "        print('127.0.0.1:1:stub', flush=True)\n"
     "    elif command == 'begin':\n"
+    "        if os.environ.get('AUTH_RECOVERED_REQUIRED') == '1' and not (root / 'auth.recovered').exists():\n"
+    "            raise SystemExit('auth recovery was not recorded before begin')\n"
     "        (root / 'begin.session_id').write_text(os.environ.get('MUSE_SESSION_ID', ''))\n"
     "        (root / 'begin.zcode_session_id').write_text(os.environ.get('ZCODE_SESSION_ID', ''))\n"
     "        print((root / 'begin.json').read_text(), end='')\n"
@@ -242,8 +244,17 @@ FUNNEL_STUB = (
 )
 
 HEARTBEAT_STUB = (
-    "import pathlib, sys\n"
-    "with (pathlib.Path(__file__).parent / 'heartbeat.log').open('a') as fh:\n"
+    "import os, pathlib, sys\n"
+    "root = pathlib.Path(__file__).parent\n"
+    "command = sys.argv[1] if len(sys.argv) > 1 else ''\n"
+    "if command == 'muse-auth-state':\n"
+    "    (root / 'auth.state.calls').open('a').write('state\\n')\n"
+    "    print(os.environ.get('MUSE_AUTH_STATE', 'clear'))\n"
+    "    raise SystemExit(int(os.environ.get('MUSE_AUTH_STATE_STATUS', '0')))\n"
+    "if command == 'muse-auth-recovered':\n"
+    "    (root / 'auth.recovered').write_text('recorded')\n"
+    "    raise SystemExit(int(os.environ.get('MUSE_AUTH_RECOVERED_STATUS', '0')))\n"
+    "with (root / 'heartbeat.log').open('a') as fh:\n"
     "    fh.write(' '.join(sys.argv[1:]) + '\\n')\n"
 )
 
@@ -468,11 +479,14 @@ SHAPE_APPLY_STUB = (
     "if validate_only:\n"
     "    print(json.dumps({'status': status, 'reason': reason, 'answer': data}, sort_keys=True))\n"
     "    raise SystemExit(0)\n"
+    "ref = '{}#{}'.format(flag('--repo'), args[0])\n"
+    "if os.environ.get('APPLY_STALE_SHAPE', ''):\n"
+    "    print('run outcome: skipped-stale-shape ref={} fresh Status=Shaped children=2'.format(ref))\n"
+    "    raise SystemExit(0)\n"
     "if os.environ.get('APPLY_REFUSE', ''):\n"
     "    sys.stderr.write('shape-apply: idea {} is not in the Project\\n'.format(args[0]))\n"
     "    raise SystemExit(1)\n"
     "(root / 'applied.marker').write_text('applied')\n"
-    "ref = '{}#{}'.format(flag('--repo'), args[0])\n"
     "print('{0} \\u2192 {1}\\nhttps://github.com/{2}/issues/{3}'.format(ref, status, flag('--repo'), args[0]))\n"
     "if status == 'Ready':\n"
     "    print('advanced to Ready: {}'.format(reason))\n"
@@ -497,6 +511,10 @@ MUSE_STUB = (
     "  previous=\"$argument\"\n"
     "done\n"
     "cp \"$prompt_file\" \"$MUSE_PROMPT.$n\"\n"
+    "if grep -q '^AUTH_LOGIN_PROBE$' \"$prompt_file\"; then\n"
+    "  if [[ -n \"${MUSE_AUTH_PROBE_STDERR:-}\" ]]; then printf '%s' \"$MUSE_AUTH_PROBE_STDERR\" >&2; fi\n"
+    "  exit \"${MUSE_AUTH_PROBE_STATUS:-0}\"\n"
+    "fi\n"
     "judge_call=0\n"
     "if grep -q 'This is one judge call in a larger review' \"$prompt_file\"; then judge_call=1; fi\n"
     # #1599: which part of a split shape this call is, from the runner's
@@ -896,7 +914,8 @@ STREAM_IDLE = "model stream idle timeout after 180000ms"
 
 
 def _timing_lines(stderr):
-    """Each shape part's and judge chunk's timing line (#1719), by name.
+    """Each shape part's, judge chunk's and the lister's timing line
+    (#1719, #1855), by name.
 
     Exactly one line per part: a second would mean a return path logged
     twice, or a retry logged as a part of its own."""
@@ -927,7 +946,7 @@ def test_the_review_prompt_is_judgement_text_under_500_words():
     prompt = body.split("\n---\n", 1)[1]
     assert prompt.count("PACKET_JSON") == 1
     normalized = " ".join(prompt.split()).lower()
-    assert "does this diff do what the ticket and the plan say" in normalized
+    assert "does this diff do what its tickets ask" in normalized
     assert "avoid what the plan rejected" in normalized
     assert '"verdict": "approved" | "rejected"' in prompt
     assert "exactly one json object and nothing else" in normalized
@@ -1414,7 +1433,7 @@ def test_an_approval_is_applied_and_finished_done(tmp_path):
     # One lister call and one judge call for the default single requirement.
     assert _muse_calls(repo) == 2
     prompt = (repo / "muse.prompt.2").read_text()
-    assert "Does this diff do what the ticket and the plan say" in prompt
+    assert "Does this diff do what its tickets ask" in prompt
     assert "This is one judge call in a larger review" in prompt
     assert "the thing the ticket asks for" in prompt
     assert '"verdict"' not in prompt.split("The assigned requirements are:", 1)[0]
@@ -1636,6 +1655,99 @@ def test_later_capture_slot_allocation_failure_keeps_run_and_capture_count(
     assert "using a run-local fallback" in proc.stderr
 
 
+def test_missing_meta_credentials_stops_before_writing_a_verdict(tmp_path):
+    """The 2026-09-28 auth diagnostic is an outage, not an unsure judgement."""
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), _packet(),
+        answers=_review_answers(_judge_answer()),
+        extra_env={
+            "MUSE_JUDGE_FAIL_IF": "thing.py prints the thing",
+            "MUSE_JUDGE_FAILURE": "missing meta credentials",
+        })
+
+    assert _apply_calls(repo) == []
+    assert proc.returncode == 1, proc.stderr
+    assert not (repo / "apply.answer").exists()
+    heartbeat = _heartbeat_without_muse_call_record(repo)
+    assert "--outcome errored" in heartbeat
+    assert "provider outage" in heartbeat
+    assert "--review-result rejected" not in heartbeat
+    assert "requirement unsure" not in heartbeat
+
+
+@pytest.mark.parametrize("args", [(), ("standard",)])
+def test_an_open_muse_auth_outage_parks_each_tier_before_begin(tmp_path, args):
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), _packet(), args=args,
+        extra_env={
+            "MUSE_AUTH_STATE": "parked",
+            "MUSE_AUTH_PROBE_STATUS": "1",
+            "MUSE_AUTH_PROBE_STDERR": "missing meta credentials",
+        })
+
+    assert proc.returncode == 0, proc.stderr
+    assert _muse_calls(repo) == 1
+    assert "AUTH_LOGIN_PROBE" in (repo / "muse.prompt.1").read_text()
+    funnel_calls = (repo / "funnel.calls").read_text().splitlines()
+    assert not any(call.startswith("begin ") for call in funnel_calls)
+    assert not (repo / "auth.recovered").exists()
+
+
+def test_an_unreadable_auth_state_does_not_launch_a_muse_lane(tmp_path):
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), _packet(),
+        extra_env={"MUSE_AUTH_STATE_STATUS": "2"})
+
+    assert proc.returncode == 1
+    assert "could not establish Muse auth outage state" in proc.stderr
+    assert _muse_calls(repo) == 0
+    assert not any(call.startswith("begin ") for call in
+                   (repo / "funnel.calls").read_text().splitlines())
+
+
+@pytest.mark.parametrize("args", [(), ("standard",)])
+def test_a_successful_auth_probe_is_recorded_before_the_lane_resumes(
+        tmp_path, args):
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), _packet(), args=args,
+        extra_env={
+            "MUSE_AUTH_STATE": "parked",
+            "MUSE_AUTH_PROBE_STATUS": "0",
+            "AUTH_RECOVERED_REQUIRED": "1",
+            "MUSE_ANSWER_2": _requirements_answer(),
+            "MUSE_ANSWER_3": _judge_answer(),
+        })
+
+    assert proc.returncode == 0, proc.stderr
+    assert _muse_calls(repo) == 3
+    assert (repo / "auth.recovered").exists()
+    assert any(call.startswith("begin ")
+               for call in (repo / "funnel.calls").read_text().splitlines())
+    probe_args = (repo / "muse.args.1").read_text().splitlines()
+    assert probe_args[0] == "exec"
+    assert probe_args[probe_args.index("--model") + 1] == "muse-spark-1.3"
+    assert "--disable-shell" in probe_args
+    assert "--disable-write" in probe_args
+    assert "--disable-web-tools" in probe_args
+    assert probe_args[probe_args.index("--max-model-steps") + 1] == "1"
+
+
+def test_a_probe_is_not_recovered_until_its_github_record_is_written(tmp_path):
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), _packet(),
+        extra_env={
+            "MUSE_AUTH_STATE": "parked",
+            "MUSE_AUTH_PROBE_STATUS": "0",
+            "MUSE_AUTH_RECOVERED_STATUS": "2",
+        })
+
+    assert proc.returncode == 0, proc.stderr
+    assert _muse_calls(repo) == 1
+    assert "GitHub did not record it" in proc.stderr
+    assert not any(call.startswith("begin ") for call in
+                   (repo / "funnel.calls").read_text().splitlines())
+
+
 @pytest.mark.parametrize("failure_kind", ["failed", "timed out"])
 def test_a_failed_or_timed_out_judge_rejects_its_chunk_without_dropping_it(
         tmp_path, failure_kind):
@@ -1725,6 +1837,7 @@ def test_a_judge_chunk_stream_idle_once_is_asked_again_and_judged(tmp_path):
     timing = _timing_lines(proc.stderr)
     assert {name: (line["calls"], line["outcome"])
             for name, line in timing.items()} == {
+        "lister": (1, "done"),
         "judge.0": (1, "done"), "judge.1": (2, "retried-done")}
 
 
@@ -1790,6 +1903,7 @@ def test_every_judge_chunk_logs_its_time_and_one_of_three_outcomes(tmp_path):
     timing = _timing_lines(proc.stderr)
     assert {name: (line["calls"], line["outcome"])
             for name, line in timing.items()} == {
+        "lister": (1, "done"),
         "judge.0": (1, "done"),
         "judge.1": (2, "retried-done"),
         "judge.2": (1, "failed")}
@@ -1877,7 +1991,7 @@ def test_a_judge_parse_retry_alone_logs_two_calls_done(tmp_path):
 
 # -- a large packet gets a second stream-idle retry (#1785) --------------------
 # The must-approve seed's ~240 KB packet lost a judge after its one retry
-# (plan #1772), and every judge and the lister carry the whole packet. A call
+# (plan #1772), and every judge and the lister carried the whole packet. A call
 # whose packet file is over 150 KB is asked up to twice more; a smaller one
 # keeps its one retry. The parse retry stays its own either way.
 
@@ -1926,6 +2040,7 @@ def test_a_large_packet_judge_stream_idle_twice_is_asked_again_and_judged(
     timing = _timing_lines(proc.stderr)
     assert {name: (line["calls"], line["outcome"])
             for name, line in timing.items()} == {
+        "lister": (1, "done"),
         "judge.0": (1, "done"), "judge.1": (3, "retried-done")}
 
 
@@ -2272,6 +2387,21 @@ def test_the_breakdown_prompt_is_judgement_text_under_500_words():
                 protocol))
 
 
+def test_the_breakdown_prompt_keeps_nates_needs_list_open_and_whole():
+    """The prompt is the only capability boundary Muse sees at breakdown, so
+    Nate's list must read as examples, not a closed list, and must keep the
+    cases a session cannot do: new apps or tunnels, an app UI with no API,
+    and root code from any user-writable path (#1903 review)."""
+    prompt = ROUTINE_BREAKDOWN.read_text().split("\n---\n", 1)[1]
+    normalized = " ".join(prompt.split())
+    assert "`human` for Nate's acts, such as:" in normalized
+    assert "`human` only" not in normalized
+    for phrase in ("a new account, app or tunnel", "an app UI with no API",
+                   "root code from a user-writable path",
+                   "a GUI consent prompt", "hands on hardware"):
+        assert phrase in normalized, phrase
+
+
 def test_the_breakdown_prompt_asks_for_seams_a_reproduction_and_sequencing(
         tmp_path):
     """The prompt Muse is sent carries the ticket shape the implementer
@@ -2322,6 +2452,44 @@ def test_the_shape_prompt_is_judgement_text_under_500_words():
         assert protocol not in prompt, (
             "judgement text only: {!r} is unreachable without tools".format(
                 protocol))
+
+
+def test_every_shape_part_is_sent_the_bug_rule_and_the_smallest_fix(
+        tmp_path):
+    """Each shape part's prompt says what separates Broken from Bug, that a
+    Broken plan is the smallest fix, and offers Bug as a class (#1848, plan
+    #1832). Read from the sent prompts, not the file: the header above `---`
+    never reaches the model. The rule sits under the question, the part of
+    the routine every header says to follow; each header replaces the
+    routine's decision record or answer format, so a rule placed there
+    would not bind the framer that drafts the plan."""
+    proc, repo = _stubbed_runner(
+        tmp_path, _issue_begin("shape"), _issue_packet("shape"),
+        answers=(_framer_answer(),))
+
+    assert proc.returncode == 0, proc.stderr
+    parts = _shape_part_prompts(repo)
+    assert sorted(parts) == ["auditor", "decider", "framer", "sibling"]
+    rule = ("**broken** is an observed failure or a security or privacy "
+            "exposure; any other defect found by reading, review or tests "
+            "is **bug**. a broken plan fixes the observed failure with the "
+            "smallest change; hardening beyond it is separate bug or "
+            "improve ideas, not more tickets.")
+    for kind, prompts in parts.items():
+        for _, prompt in prompts:
+            normalized = " ".join(prompt.split()).lower()
+            question = normalized.split("## the question", 1)[1].split(
+                "## the decision record", 1)[0]
+            assert rule in question, kind
+            assert ("`proposed_class` names one ladder class: investigate, "
+                    "broken, maintenance, improve, new, replace, or bug. "
+                    "propose, never gate." in normalized), kind
+    # The framer's own header, which replaces the routine's answer format,
+    # offers Bug too.
+    framer = " ".join(parts["framer"][0][1].split()).lower()
+    header = framer.split("the text after this paragraph", 1)[0]
+    assert ("`proposed_class` names one ladder class: investigate, broken, "
+            "maintenance, improve, new, replace, or bug." in header)
 
 
 def test_the_runner_reads_the_issue_routines_at_run_time():
@@ -2395,6 +2563,21 @@ def test_a_breakdown_is_applied_and_finished_done(tmp_path):
     )
 
 
+def test_a_breakdown_auth_failure_ends_as_provider_outage(tmp_path):
+    proc, repo = _stubbed_runner(
+        tmp_path, _issue_begin("breakdown"), _issue_packet("breakdown"),
+        extra_env={"MUSE_STATUS": "1",
+                   "MUSE_STDERR": "Missing META Credentials"})
+
+    assert proc.returncode == 1, proc.stderr
+    assert _muse_calls(repo) == 1
+    assert _apply_calls(repo) == []
+    heartbeat = _heartbeat(repo)
+    assert "--outcome errored" in heartbeat
+    assert "provider outage" in heartbeat
+    assert "recorded rejected" not in heartbeat
+
+
 def test_a_shape_is_applied_and_finished_done(tmp_path):
     """Shape on Muse (#1599): the framer, then one sibling check, one
     decider and the auditor, merged in code and applied once."""
@@ -2435,6 +2618,22 @@ def test_a_shape_is_applied_and_finished_done(tmp_path):
         "finish --agent muse --run engine-run --outcome done "
         "--note shaped {}: Ready (self-approved: agent idea, finite "
         "class, no open questions) --shape-status Ready\n".format(SHAPE_REF)
+    )
+
+
+def test_a_stale_shape_is_recorded_without_shape_status(tmp_path):
+    proc, repo = _stubbed_runner(
+        tmp_path, _issue_begin("shape"), _issue_packet("shape"),
+        answers=(_framer_answer(),),
+        extra_env={"APPLY_STALE_SHAPE": "1"})
+
+    assert proc.returncode == 0, proc.stderr
+    assert len(_apply_calls(repo)) == 1
+    assert not (repo / "applied.marker").exists()
+    assert _heartbeat_without_muse_call_record(repo) == (
+        "finish --agent muse --run engine-run "
+        "--outcome skipped-stale-shape --note skipped stale shape: "
+        "ref={} fresh Status=Shaped children=2\n".format(SHAPE_REF)
     )
 
 
@@ -2792,6 +2991,22 @@ def test_a_failed_or_timed_out_shape_part_applies_nothing(
     else:
         assert "shape sibling.0 was killed after 0 minutes" in heartbeat
     assert not (tmp_path / ".claude" / "command-center-muse-quota-hold").exists()
+
+
+def test_a_shape_part_auth_failure_ends_as_provider_outage(tmp_path):
+    proc, repo = _stubbed_runner(
+        tmp_path, _issue_begin("shape"), _issue_packet("shape"),
+        answers=(_framer_answer(),),
+        extra_env={"MUSE_SHAPE_FAIL_PART": "decider",
+                   "MUSE_SHAPE_FAILURE": "Missing META Credentials"})
+
+    assert proc.returncode == 1, proc.stderr
+    assert _muse_calls(repo) == 4
+    assert _apply_calls(repo) == []
+    heartbeat = _heartbeat(repo)
+    assert "--outcome errored" in heartbeat
+    assert "provider outage" in heartbeat
+    assert "requirement unsure" not in heartbeat
 
 
 def test_a_malformed_shape_part_retries_once_with_the_parse_error(tmp_path):
@@ -3649,21 +3864,36 @@ def test_the_lister_asks_for_requirements_before_the_judge_is_asked(tmp_path):
     assert "This call is not the review" in lister
     assert "judge nothing" in lister.lower()
     assert '{"requirements": [' in lister
-    # It still carries the packet, because that is what it enumerates from.
-    assert "print('the thing')" in lister
-    assert '"head_sha": "{}"'.format(HEAD) in lister
+    # It still carries the packet, because that is what it enumerates from,
+    # less the diff the judges check (#1866): a small packet's lister reads
+    # the changed paths and a note where the diff was.
+    assert "print('the thing')" not in lister
+    listed = json.loads(_cached_packet_from_judge_prompt(lister))
+    assert listed["changed_files"] == ["thing.py"]
+    assert listed["diff"].startswith("withheld from this call only")
+    assert listed["head_sha"] == HEAD
     assert "PACKET_JSON" not in lister
     assert "has `deferred_answer`" in lister
-    assert "Do not emit a live-evidence" in lister
+    assert "Never list a requirement\nthat probes a `plan_premises` entry" \
+        in lister
+    assert "ticket.deferred_acceptance" in lister
+    assert "exact `deferred_clause`" in lister
+    assert "exact `checkable_line` as an ordinary acceptance" in lister
+    assert "such as a same-ticket verification" in lister
+    assert "Never defer the whole acceptance line" in lister
     assert "verified `label_error`" in lister
     assert "reject it explicitly as a" in lister
     assert "Do not defer that entry" in lister
 
     judge = (repo / "muse.prompt.2").read_text()
+    # The lister's list is what the judge is asked, against the whole diff.
+    assert _assigned_requirements(judge) == \
+        ["thing.py prints the thing the ticket asks for"]
+    assert "print('the thing')" in judge
     # The lister framing does not survive; this call judges only its assigned
     # requirements, and the runner derives the verdict after all chunks.
     assert "This call is not the review" not in judge
-    assert "Does this diff do what the ticket and the plan say" in judge
+    assert "Does this diff do what its tickets ask" in judge
     assert "posted PR" in judge
     assert "packet's CI section first" in judge
     assert (
@@ -3683,10 +3913,16 @@ def test_the_lister_asks_for_requirements_before_the_judge_is_asked(tmp_path):
     assert "Install nothing; leave the keeper unchanged" in judge
     assert "deferred-premise requirement" in judge
     assert "mark that deferral requirement met, not" in judge
+    assert "deferred-ticket-acceptance requirement" in judge
+    assert "`deferred_clause` is the exact after-deploy clause" in judge
+    assert "Judge the entry's" in judge
+    assert "`checkable_line` as an ordinary acceptance requirement" in judge
+    assert "same-ticket verification requirement from that" in judge
+    assert "Any acceptance line without a matching deferral" in judge
     assert "For a labeling-error requirement" in judge
     assert "mark the requirement `unmet`" in judge
     assert "never defer it" in judge
-    assert "without `deferred_answer` still follows the normal" in judge
+    assert "No other premise is a requirement" in judge
     assert "inspect the entry's" in judge
 
 
@@ -3784,11 +4020,18 @@ def test_measured_forward_pointer_is_rejected_as_a_labeling_error(tmp_path):
     ]
 
 
-def test_a_missing_checkable_inferred_premise_still_rejects(tmp_path):
-    requirement = (
+def test_a_premise_probe_is_dropped_before_the_judges(tmp_path):
+    """#1966: premise probes are out of review scope (Nate, 2026-09-28).
+
+    Before, an unresolved probe of an inferred premise read unsure and
+    rejected the PR; now the runner drops it after the lister and the judges
+    see only the ticket's own requirement.
+    """
+    probe = (
         "Probe the inferred premise 'the missing setting is enabled' using "
         "its evidence pointer #1700; unresolved evidence remains unsure."
     )
+    do_line = "thing.py prints the thing the ticket asks for"
     plan_premises = [{
         "parent_ref": "owner/repo#1",
         "ticket_refs": ["owner/repo#6"],
@@ -3801,16 +4044,18 @@ def test_a_missing_checkable_inferred_premise_still_rejects(tmp_path):
     }]
     proc, repo = _stubbed_runner(
         tmp_path, _begin(), _packet(plan_premises=plan_premises),
-        answers=_review_answers(_judge_answer(
-            requirement, status="unsure",
-            evidence="the packet contains no evidence for #1700")))
+        answers=(_requirements_answer(probe, do_line),
+                 _judge_answer(do_line)))
 
     assert proc.returncode == 0, proc.stderr
     lister = (repo / "muse.prompt.1").read_text()
-    assert "leave it `unsure` when a required record is unavailable" in lister
+    assert "leave it `unsure` when a required record is unavailable" \
+        not in lister
+    judge = (repo / "muse.prompt.2").read_text()
+    assert probe not in judge
     applied = json.loads((repo / "apply.answer").read_text())
-    assert applied["verdict"] == "rejected"
-    assert any("requirement unsure:" in row for row in applied["blocking"])
+    assert applied["verdict"] == "approved"
+    assert [row["requirement"] for row in applied["requirements"]] == [do_line]
 
 
 def test_the_pr_body_reaches_the_lister_and_judge_as_the_implementers_claims(
@@ -4003,8 +4248,8 @@ def test_a_lister_call_past_the_bound_is_killed_like_any_other(tmp_path):
 
 
 # -- a stream-idle lister is asked once more (#1730) ---------------------------
-# The lister is the one call that reads the whole packet, and a single call
-# over the ~240 KB must-approve seed went stream-idle twice running (#1698).
+# The lister read the whole packet until #1866, and a single call over the
+# ~240 KB must-approve seed went stream-idle twice running (#1698).
 # It gets #1719's one retry: the same prompt, unbound, then the run fails.
 
 def test_a_lister_stream_idle_once_is_asked_again_and_reviewed(tmp_path):
@@ -4047,6 +4292,19 @@ def test_a_lister_stream_idle_twice_fails_the_run(tmp_path):
     assert STREAM_IDLE in heartbeat
 
 
+def test_a_lister_auth_failure_matches_case_insensitively(tmp_path):
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), _packet(),
+        extra_env={"MUSE_LISTER_FAILURE": "MiSsInG MeTa CrEdEnTiAlS"})
+
+    assert proc.returncode == 1, proc.stderr
+    assert _muse_calls(repo) == 1
+    assert _apply_calls(repo) == []
+    heartbeat = _heartbeat(repo)
+    assert "--outcome errored" in heartbeat
+    assert "provider outage" in heartbeat
+
+
 def test_a_lister_failure_that_is_not_stream_idle_is_not_retried(tmp_path):
     proc, repo = _stubbed_runner(
         tmp_path, _begin(), _packet(),
@@ -4056,7 +4314,11 @@ def test_a_lister_failure_that_is_not_stream_idle_is_not_retried(tmp_path):
     assert proc.returncode == 1
     assert _muse_calls(repo) == 1
     assert "stream-idle" not in proc.stderr
-    assert "--outcome errored" in _heartbeat(repo)
+    heartbeat = _heartbeat(repo)
+    assert "--outcome errored" in heartbeat
+    assert "model stream error: connection reset by peer" in heartbeat
+    assert "provider outage" not in heartbeat
+    assert not (repo / "auth.recovered").exists()
 
 
 def test_a_lister_malformed_then_idle_still_gets_its_idle_retry(tmp_path):
@@ -4081,8 +4343,9 @@ def test_a_lister_malformed_then_idle_still_gets_its_idle_retry(tmp_path):
 
 
 # -- a large packet's lister gets a second stream-idle retry (#1785) -----------
-# The lister reads the same whole packet as the judges, so it takes the same
-# count: two retries over 150 KB. The small-packet tests above pin the one.
+# The lister takes the judges' count, measured from the whole packet though
+# its own copy leaves the diff out (#1866): two retries over 150 KB. The
+# small-packet tests above pin the one.
 
 def _lister_prompts(repo, count):
     return [(repo / "muse.prompt.{}".format(call)).read_text()
@@ -4185,6 +4448,281 @@ def test_a_large_packet_lister_idle_count_spans_its_parse_retry(tmp_path):
     assert PARSE_RETRY in (repo / "muse.prompt.3").read_text()
     assert _apply_calls(repo) == []
     assert "--outcome errored" in _heartbeat(repo)
+
+
+# -- the lister reads the packet without the diff (#1866) ----------------------
+# The lister lists what the ticket, its parent plan and the repository's rules
+# ask of the change; the judges check the diff. It was handed the whole
+# packet, diff included, and went stream-idle on all three attempts over the
+# 232 KB must-approve seed (#1698, #1855's timing line). Its copy keeps the
+# changed paths, so a rule scoped to a path is still listed, and the judges'
+# prompts are unchanged.
+
+#: The paths the large diff below changes, sorted as build_packet sorts them.
+LARGE_DIFF_PATHS = ["engine/alpha.py", "scripts/beta-runner",
+                    "tests/test_gamma.py"]
+
+#: On every added line of the large diff, and in no other packet field.
+DIFF_SENTINEL = "DIFF-SENTINEL"
+
+# The assertions below over 200 KB prompts are counts and booleans: pytest
+# explains a failed `in` or `==` between strings with a difflib diff, which
+# over texts this size runs for many minutes before it reports.
+
+
+def _large_diff(size):
+    """A unified diff of at least ``size`` bytes, one section per path in
+    LARGE_DIFF_PATHS, every added line carrying DIFF_SENTINEL."""
+    per_file = size // len(LARGE_DIFF_PATHS) + 1
+    sections = []
+    for path in LARGE_DIFF_PATHS:
+        section = ("diff --git a/{0} b/{0}\n--- a/{0}\n+++ b/{0}\n"
+                   "@@ -0,0 +1,9999 @@\n".format(path))
+        line = 0
+        while len(section) < per_file:
+            line += 1
+            section += "+{} {} line {}\n".format(DIFF_SENTINEL, path, line)
+        sections.append(section)
+    diff = "".join(sections)
+    assert len(diff.encode()) >= size
+    return diff
+
+
+def test_a_200_kb_diff_stays_out_of_the_lister_and_reaches_every_judge(
+        tmp_path):
+    """Reproduction (#1866): the lister's prompt carries none of a 200 KB
+    diff and lists the changed paths; the judges still read it whole."""
+    packet = _packet(diff=_large_diff(200 * 1024),
+                     changed_files=LARGE_DIFF_PATHS)
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), packet,
+        answers=_review_answers(_judge_answer()))
+
+    assert proc.returncode == 0, proc.stderr
+    assert _muse_calls(repo) == 2
+    lister = (repo / "muse.prompt.1").read_text()
+    assert lister.startswith("This call is not the review.")
+    # None of the diff: no added line, and no section header either.
+    assert lister.count(DIFF_SENTINEL) == 0
+    assert lister.count("diff --git") == 0
+    assert lister.count("@@ -0,0") == 0
+    listed = json.loads(_cached_packet_from_judge_prompt(lister))
+    # The changed paths, as names.
+    assert listed["changed_files"] == [
+        "engine/alpha.py", "scripts/beta-runner", "tests/test_gamma.py"]
+    # One line saying the diff is withheld from this call only, where the
+    # routine tells the model the diff is.
+    assert "withheld from this call only" in listed["diff"]
+    assert "\n" not in listed["diff"]
+    # Every other field as the judges get it: the lister still reads the
+    # ticket, the plan and the rules it lists from.
+    assert {key: value for key, value in listed.items() if key != "diff"} \
+        == {key: value for key, value in packet.items() if key != "diff"}
+
+    # The judge's prompt carries the packet file byte for byte, diff and all.
+    judge = (repo / "muse.prompt.2").read_text()
+    assert judge.startswith("This is one judge call in a larger review.")
+    judged = _cached_packet_from_judge_prompt(judge)
+    whole_packet = judged == (repo / "packet.json").read_text()
+    assert whole_packet
+    whole_diff = json.loads(judged)["diff"] == packet["diff"]
+    assert whole_diff
+    assert judge.count("withheld from this call only") == 0
+    assert json.loads((repo / "apply.answer").read_text())["verdict"] == \
+        "approved"
+
+
+def test_the_listers_parse_retry_is_asked_without_the_diff_too(tmp_path):
+    packet = _packet(diff=_large_diff(200 * 1024),
+                     changed_files=LARGE_DIFF_PATHS)
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), packet,
+        answers=("{not json", _requirements_answer(), _judge_answer()))
+
+    assert proc.returncode == 0, proc.stderr
+    assert _muse_calls(repo) == 3
+    retry = (repo / "muse.prompt.2").read_text()
+    assert retry.startswith("This call is not the review.")
+    assert retry.count(PARSE_RETRY) == 1
+    assert retry.count(DIFF_SENTINEL) == 0
+    assert json.loads(_cached_packet_from_judge_prompt(retry))[
+        "changed_files"] == LARGE_DIFF_PATHS
+    assert retry.count("withheld from this call only") == 1
+    assert (repo / "muse.prompt.3").read_text().count(DIFF_SENTINEL) > 0
+
+
+# The seed's diff was 13 KB of its 232 KB (#1866): the bulk was the branch
+# ticket repeated as `tickets[0]` and one parent repeated in every ticket. The
+# lister's copy keeps `ticket` whole, as the routine's "branch ticket", and
+# leaves a one-line pointer where a copy repeats one already in the packet.
+
+def _shaped_ticket(number, parent, body="Do the thing"):
+    """A ticket as build_packet's shape_ticket writes it."""
+    return {"ref": "owner/repo#{}".format(number), "number": number,
+            "title": "Ticket {}".format(number),
+            "url": "https://github.com/owner/repo/issues/{}".format(number),
+            "body": body, "risk": None, "parent": parent,
+            "comments": [{"author": "nateprich", "voice": "agent",
+                          "created_at": "2026-09-28T00:00:00Z",
+                          "body": "ticket {} comment".format(number)}]}
+
+
+def _shaped_parent(number):
+    return {"ref": "owner/repo#{}".format(number), "number": number,
+            "title": "Plan {}".format(number), "state": "OPEN",
+            "comments": [{"author": "nateprich", "voice": "nate-direct",
+                          "created_at": "2026-09-27T00:00:00Z",
+                          "body": "PARENT-{}-SENTINEL".format(number)}]}
+
+
+def _judge_prompt_is_the_routine_over_the_packet_file(repo, judge):
+    """The judge prompt's tail is the routine's prompt with the packet file
+    where PACKET_JSON stands, byte for byte: what the engine sent before
+    #1866. Everything after the routine's first `---` line, trailing
+    newlines dropped, as the engine reads it."""
+    routine = (repo / "routines" / "muse-review.md").read_text()
+    template = routine.split("\n---\n", 1)[1].rstrip("\n")
+    packet_text = (repo / "packet.json").read_text()
+    return judge.endswith(
+        "\n\n" + template.replace("PACKET_JSON", packet_text))
+
+
+def test_the_listers_copy_points_at_a_ticket_or_parent_it_already_carries(
+        tmp_path):
+    first_plan, second_plan = _shaped_parent(1), _shaped_parent(2)
+    branch = _shaped_ticket(6, first_plan)
+    packet = _packet(
+        ticket=branch,
+        tickets=[
+            branch,
+            _shaped_ticket(7, first_plan),
+            _shaped_ticket(8, second_plan),
+            _shaped_ticket(9, second_plan),
+        ])
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), packet,
+        answers=_review_answers(_judge_answer()))
+
+    assert proc.returncode == 0, proc.stderr
+    lister = (repo / "muse.prompt.1").read_text()
+    listed = json.loads(_cached_packet_from_judge_prompt(lister))
+    # The branch ticket in full, where the routine and the header name it.
+    assert listed["ticket"] == branch
+    assert listed["tickets"] == [
+        "same as ticket",
+        dict(_shaped_ticket(7, first_plan),
+             parent="same parent plan as ticket"),
+        _shaped_ticket(8, second_plan),
+        dict(_shaped_ticket(9, second_plan),
+             parent="same parent plan as tickets[2]"),
+    ]
+    # One full copy of each parent, and each ticket's own comments.
+    assert lister.count("PARENT-1-SENTINEL") == 1
+    assert lister.count("PARENT-2-SENTINEL") == 1
+    for number in (6, 7, 8, 9):
+        assert lister.count("ticket {} comment".format(number)) == 1
+
+    # The judges read the packet as it was sent before #1866.
+    judge = (repo / "muse.prompt.2").read_text()
+    assert _judge_prompt_is_the_routine_over_the_packet_file(repo, judge)
+    assert judge.count("PARENT-1-SENTINEL") == 3
+    assert json.loads(_cached_packet_from_judge_prompt(judge))["tickets"] \
+        == packet["tickets"]
+
+
+def test_a_ticket_unlike_every_entry_keeps_both_in_full(tmp_path):
+    # The same ref with another body is another copy, not a repeat: the
+    # comparison is the whole entry, never its name. Every parent differs too.
+    branch = _shaped_ticket(6, _shaped_parent(1))
+    packet = _packet(
+        ticket=branch,
+        tickets=[
+            _shaped_ticket(6, _shaped_parent(3), body="Do the thing, v2"),
+            _shaped_ticket(8, _shaped_parent(2)),
+        ])
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), packet,
+        answers=_review_answers(_judge_answer()))
+
+    assert proc.returncode == 0, proc.stderr
+    listed = json.loads(_cached_packet_from_judge_prompt(
+        (repo / "muse.prompt.1").read_text()))
+    # Nothing repeats, so the copy is the packet less its diff.
+    assert listed["diff"].startswith("withheld from this call only")
+    assert {key: value for key, value in listed.items() if key != "diff"} \
+        == {key: value for key, value in packet.items() if key != "diff"}
+    judge = (repo / "muse.prompt.2").read_text()
+    assert _judge_prompt_is_the_routine_over_the_packet_file(repo, judge)
+
+
+# -- the lister asks at high on a max lane (#1887) -----------------------------
+# At max the escalated lister went stream-idle in 2 of 4 live reviews on
+# 2026-09-28, once after #1866's lean copy (#1886). Listing is the easy half
+# of a review (#1233), so on a max lane every lister call asks at high; the
+# judges keep the lane's effort. Below max nothing changes, and z.ai, which
+# takes no effort, is unchanged.
+
+def _lister_and_judge_efforts(tmp_path, lane):
+    """Each Muse call's --reasoning-effort, split by the prompt's header, over
+    every kind of lister call: the first, a parse retry, and a stream-idle
+    retry on each side of it (a large packet's two), then two judge chunks."""
+    four = ["requirement {}".format(i) for i in range(1, 5)]
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), _sized_packet(LARGE_PACKET_BYTES + 1),
+        args=("escalated", lane),
+        # Call 1 goes idle, call 2 is malformed, call 3 goes idle, call 4
+        # lists; calls 5 and 6 judge chunks of three and one.
+        answers=(_requirements_answer(), "{not json", _requirements_answer(),
+                 _requirements_answer(*four)),
+        extra_env={"MUSE_FAIL_CALLS": "1 3",
+                   "MUSE_FAIL_CALLS_FAILURE": STREAM_IDLE,
+                   "MUSE_DYNAMIC_JUDGES": "1"})
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads((repo / "apply.answer").read_text())["verdict"] == \
+        "approved"
+    efforts = {"lister": [], "judge": []}
+    for call in range(1, _muse_calls(repo) + 1):
+        prompt = (repo / "muse.prompt.{}".format(call)).read_text()
+        args = (repo / "muse.args.{}".format(call)).read_text().splitlines()
+        if prompt.startswith("This call is not the review."):
+            part = "lister"
+        else:
+            assert prompt.startswith(
+                "This is one judge call in a larger review.")
+            part = "judge"
+        efforts[part].append(args[args.index("--reasoning-effort") + 1])
+    return efforts
+
+
+def test_on_a_max_lane_every_lister_call_asks_at_high_and_judges_at_max(
+        tmp_path):
+    assert _lister_and_judge_efforts(tmp_path, "max") == {
+        "lister": ["high", "high", "high", "high"],
+        "judge": ["max", "max"],
+    }
+
+
+def test_below_max_the_lister_asks_at_the_lanes_effort(tmp_path):
+    # Not one step below whatever the lane runs at: high stays high.
+    assert _lister_and_judge_efforts(tmp_path, "high") == {
+        "lister": ["high", "high", "high", "high"],
+        "judge": ["high", "high"],
+    }
+
+
+def test_a_zai_lister_on_a_max_lane_asks_exactly_as_its_judge_does(tmp_path):
+    proc, repo = _zai_standard(
+        tmp_path, _begin(), _packet(),
+        answers=_review_answers(_judge_answer()))
+
+    assert proc.returncode == 0, proc.stderr
+    lister, judge = _model_argvs(repo)
+    assert "This call is not the review." in \
+        (repo / "muse.prompt.1").read_text()
+    # zai-exec takes the prompt and its own deadline and nothing else: no
+    # effort for the lister to lower (#1411).
+    assert lister[0::2] == judge[0::2] == ["--prompt-file", "--timeout"]
+    assert lister[3] == judge[3]
 
 
 # -- the z.ai standard tier (Nate, 2026-09-23) ---------------------------------
@@ -4664,18 +5202,21 @@ def test_a_replay_runs_the_lister_and_judges_on_its_packet(tmp_path):
     judge = (repo / "muse.prompt.2").read_text()
     assert lister.startswith("This call is not the review.")
     assert judge.startswith("This is one judge call in a larger review.")
-    # Both ask with the given routine and carry the given packet.
+    # Both ask with the given routine and carry the given packet, the
+    # lister's without its diff, as on a lane (#1866).
     for prompt in (lister, judge):
         assert REPLAY_ROUTINE_MARK in prompt
-        assert "print('the thing')" in prompt
+        assert '"thing.py"' in prompt
         assert "PACKET_JSON" not in prompt
+    assert "print('the thing')" not in lister
+    assert "print('the thing')" in judge
     assert _assigned_requirements(judge) == \
         ["thing.py prints the thing the ticket asks for"]
-    # Max, no tools, and no session id: a replay binds nothing to a
-    # heartbeat it never writes.
-    for call in (1, 2):
+    # The lane's efforts (the lister at high under max, #1887), no tools, and
+    # no session id: a replay binds nothing to a heartbeat it never writes.
+    for call, effort in ((1, "high"), (2, "max")):
         args = (repo / "muse.args.{}".format(call)).read_text().splitlines()
-        assert args[args.index("--reasoning-effort") + 1] == "max"
+        assert args[args.index("--reasoning-effort") + 1] == effort
         assert "--disable-shell" in args
         assert "--session-id" not in args
     assert json.loads(answer_path.read_text())["verdict"] == "approved"
@@ -4766,6 +5307,20 @@ def test_a_replay_lister_failure_exits_non_zero_with_no_answer(
     assert "muse-review-engine: " in proc.stderr
     assert _forbidden(repo) == ""
     assert _run_dirs(tmp_path) == []
+
+
+def test_a_replay_of_recorded_muse_auth_stderr_writes_no_answer(tmp_path):
+    # The 2026-09-28 watch recorded this diagnostic on a refused judge.
+    proc, repo, answer_path = _replay_runner(
+        tmp_path, answers=_review_answers(_judge_answer()),
+        extra_env={"MUSE_JUDGE_FAIL_IF": "thing.py prints the thing",
+                   "MUSE_JUDGE_FAILURE": "missing meta credentials"})
+
+    assert proc.returncode == 1, proc.stderr
+    assert not answer_path.exists()
+    assert _apply_calls(repo) == []
+    assert "provider outage" in proc.stderr
+    assert _forbidden(repo) == ""
 
 
 def test_a_replay_lister_stream_idle_once_then_answers_succeeds(tmp_path):
@@ -4927,3 +5482,104 @@ def test_a_replay_refuses_a_bad_setup_before_any_call(tmp_path, case):
         assert answer_path.read_text() == "a stale answer"
     else:
         assert not answer_path.exists()
+
+
+# -- the lister's timing line (#1855) -------------------------------------------
+# The lister writes one timing line, as each judge chunk and shape part does
+# (#1719), on every way out of it. model_failed exits the engine, so on a
+# model failure the line comes first. Without it a failed lister reads
+# `failed parts: none` in review-replay, as the must-approve seed's engine
+# failures on 2026-09-27 and 2026-09-28 did, which names nothing to
+# diagnose (plan #1854).
+
+@pytest.mark.parametrize("failure,calls,status", [
+    ({"MUSE_LISTER_FAILURE": "provider outage"}, 1, 1),
+    ({"MUSE_LISTER_FAILURE": STREAM_IDLE}, 2, 1),
+    ({"MUSE_ANSWER": "{not json"}, 2, 1),
+    ({"MUSE_SLEEP": "30"}, 1, 124),
+    # A spent window ends the run cleanly, through model_failed all the same.
+    ({"MUSE_LISTER_FAILURE": REFUSAL}, 1, 0),
+], ids=["failed", "stream-idle twice", "malformed twice", "timed out",
+        "quota refusal"])
+def test_a_failed_lister_writes_one_failed_timing_line(
+        tmp_path, failure, calls, status):
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), _packet(), extra_env=failure,
+        bound_seconds=1 if status == 124 else 20, timeout=60)
+
+    assert proc.returncode == status, proc.stderr
+    assert _muse_calls(repo) == calls
+    assert _apply_calls(repo) == []
+    timing = _timing_lines(proc.stderr)
+    assert {name: (line["calls"], line["outcome"])
+            for name, line in timing.items()} == {"lister": (calls, "failed")}
+    if status == 124:
+        # Wall time from the first call, not a constant: the killed lister
+        # ran at least its bound.
+        assert timing["lister"]["elapsed"] >= 1
+
+
+def test_review_replay_names_a_failed_lister(tmp_path, monkeypatch, capfd):
+    """The engine's replay entry, run by review-replay itself: a lister that
+    fails is reported by name, where it used to read `failed parts: none`."""
+    monkeypatch.syspath_prepend(str(ROOT))
+    from engine import replay
+
+    repo, env = _stub_repo(tmp_path, _begin(), _packet())
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setenv("MUSE_LISTER_FAILURE", "provider outage")
+    # This checkout's engine, run against the stub repository.
+    monkeypatch.setattr(replay, "CHECKOUT", repo)
+    monkeypatch.setattr(replay, "check_budget", lambda _runs: None)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir(mode=0o700)
+    packet_path = corpus / "packet.json"
+    packet_path.write_text(json.dumps(_packet()))
+    packet_path.chmod(0o600)
+
+    assert replay.ENGINE == SCRIPT
+    assert replay.main([
+        str(packet_path), "--routine", str(ROUTINE), "--runs", "1",
+        "--expected-verdict", "approved", "--runtime-root", str(tmp_path),
+    ]) == 1
+    output = capfd.readouterr()
+
+    assert _muse_calls(repo) == 1
+    assert output.out == ""
+    lines = output.err.splitlines()
+    assert lines[-2:] == [
+        "review-replay: run 1 failed: exit status 1; failed parts: lister",
+        "review-replay: replay failed"]
+    [timing] = lines[:-2]
+    assert timing.startswith("review-replay: run 1: timing lister elapsed=")
+    assert timing.endswith("s calls=1 outcome=failed")
+
+
+@pytest.mark.parametrize("packet,answers,extra_env,expected", [
+    (_packet(), _review_answers(_judge_answer()), {}, (1, "done")),
+    # A parse retry is a second call, not a stream-idle retry.
+    (_packet(), ("{not json",) + _review_answers(_judge_answer()), {},
+     (2, "done")),
+    (_packet(), (_requirements_answer(),) + _review_answers(_judge_answer()),
+     {"MUSE_LISTER_FAILURE": STREAM_IDLE, "MUSE_LISTER_FAIL_TIMES": "1"},
+     (2, "retried-done")),
+    (_sized_packet(LARGE_PACKET_BYTES + 1),
+     (_requirements_answer(), _requirements_answer())
+     + _review_answers(_judge_answer()),
+     {"MUSE_LISTER_FAILURE": STREAM_IDLE, "MUSE_LISTER_FAIL_TIMES": "2"},
+     (3, "retried-done")),
+], ids=["first call", "parse retry", "stream-idle retry",
+        "large packet, two stream-idle retries"])
+def test_a_lister_that_answers_writes_done_or_retried_done(
+        tmp_path, packet, answers, extra_env, expected):
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), packet, answers=answers, extra_env=extra_env)
+
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads((repo / "apply.answer").read_text())["verdict"] == \
+        "approved"
+    timing = _timing_lines(proc.stderr)
+    assert {name: (line["calls"], line["outcome"])
+            for name, line in timing.items()} == {
+        "lister": expected, "judge.0": (1, "done")}

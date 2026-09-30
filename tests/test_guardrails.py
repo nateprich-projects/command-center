@@ -249,8 +249,13 @@ def test_every_work_routine_captures_observed_defects_before_finishing():
 
 
 def test_active_work_routines_pass_origin_and_class_to_capture():
+    """The routine's capture line passes `--observed`, which a Broken capture
+    requires (#1847), and offers Bug for a find that has not happened."""
     offenders = []
-    expected = "--origin agent --class <Broken|Maintenance|Improve|New|Replace>"
+    expected = (
+        "--origin agent --class <Broken|Maintenance|Improve|New|Replace|Bug> "
+        "--note \"<evidence>\" --observed \""
+    )
     for filename in AGENT_CAPTURE_ROUTINES:
         body = " ".join(
             (ROOT / "routines" / filename).read_text(encoding="utf-8").split()
@@ -271,3 +276,51 @@ def test_shape_skill_pins_plan_section_names():
         "skills/shape/SKILL.md must keep the plan section names stable; missing: {}"
         .format(", ".join(missing))
     )
+
+
+def test_shape_skill_capture_rule_keeps_security_exposures_broken():
+    """The class rule the capture routines point at says Broken needs
+    `--observed`, names `promote`, and keeps a latent security or privacy
+    exposure in Broken with `--observed` naming it (#1847)."""
+    skill = " ".join(
+        (ROOT / "skills" / "shape" / "SKILL.md").read_text().split())
+    for phrase in (
+        "an agent's `capture --class Broken` refuses without "
+        "`--observed <evidence>`",
+        "`funnel promote <n> --observed <evidence>` moves it to `Broken`",
+        "A latent security or privacy exposure stays `Broken`, with "
+        "`--observed` naming the exposure",
+    ):
+        assert phrase in skill, phrase
+
+
+def test_shape_skill_defines_bug_and_asks_broken_plans_for_the_smallest_fix():
+    """The class rule shaping and capture read offers Bug, tells it from
+    Broken by whether the failure happened, keeps Nate's smallest-fix rule
+    for a Broken plan, and leaves every reclassification to Nate but the
+    two #1832 gives agents (#1848)."""
+    skill = " ".join(
+        (ROOT / "skills" / "shape" / "SKILL.md").read_text().split())
+    for phrase in (
+        "`Investigate`, `Broken`, `Maintenance`, `Improve`, `New`, "
+        "`Replace`, `Bug` — and say why",
+        "`Bug` is a latent defect: found by reading, review or tests, with no "
+        "observed occurrence. It never preempts;",
+        "Tell the two apart by whether the failure has happened, not by how "
+        "bad it would be",
+        "unless it is the security or privacy exposure above",
+        "A `Broken` plan fixes the observed failure with the smallest change.",
+        "becomes separate `Bug` or `Improve` ideas linked back, not more "
+        "tickets in the same plan.",
+        "**Still his:** the class on anything *he* raises, and any "
+        "reclassification but the two #1832 gives agents: `funnel promote` "
+        "on a `Bug` that has happened, with its evidence, and the one-time "
+        "#1849 re-sort he authorised on 2026-09-28. Otherwise propose, do "
+        "not set.",
+    ):
+        assert phrase in skill, phrase
+    # The scheduling rule names every agent-origin class the engine applies
+    # it to: SELF_APPROVABLE_CLASSES, which gained Bug in #1845.
+    assert ("For an **agent-origin** `Investigate`, `Broken`, `Maintenance`, "
+            "`Improve`, or `Bug` plan" in skill)
+    assert "in the five classes above" in skill

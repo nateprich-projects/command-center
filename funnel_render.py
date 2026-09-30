@@ -32,6 +32,15 @@ section and its error before interpreting any other empty or null value. A
 missing `items` section means the Project could not be read; it is not
 evidence that nothing is waiting.
 
+Then `watch_gates`, whenever non-empty, as its own short list headed as
+answered by the funnel watch: for each, its `class`, `question`, the `title`
+as a link to `url`, and how long it has `waited`. The funnel watch answers
+these; not Nate's decision. Never fold them into the decision list or count
+them in `total_needing_nate`. Since 2026-09-28 (#1891) they are every
+`Unblock?` and `Unblock or park?` item not waiting on Nate's hands, and
+`Is the plan good?` on an agent-origin Broken or Bug plan with no open
+Exposure or Preference question.
+
 Then `working_tree_touched`, whenever non-empty, as its own short list. For
 each grouped HEAD transition show `before.head` to `after.head` and every
 `observers` entry as its `agent`/`run`; distinguish one observer from
@@ -78,6 +87,11 @@ longer parked and therefore no longer appear here.
 
 Then `unattended_approvals`, newest first: issue, transition time, stated
 `basis`. A record to read at will, not a notification or review request.
+
+Then `connector_gate_answers`, newest first, for the last 30 days: issue,
+gate, verbatim `instruction`, and `provenance` (`voice`, `agent`, `run`).
+These are audit records; they do not add to `counts_by_gate` or
+`total_needing_nate`.
 
 Then `outcome_signals` as three independent named signals: cost per merged
 PR by lane with its unit, then rework and intervention rates with sample
@@ -146,7 +160,11 @@ unknown, not healthy. Show `disposal` `finished_vs_abandoned` beside it with
 `done`, `parked`, `net_open_growth`, no targets. Three stale takeovers in a
 week means runs are dying; one is noise.
 
-Offer the `launch` command for the top item. Do not run it.
+Check the top item's Needs first. If it is in `human_steps` (Needs `human`),
+it needs his own hands: say what he must do, and do not offer to work it.
+Otherwise offer to work the top item yourself, in this session or as a
+background task, and start once he says yes. Never hand him a terminal
+`launch` line to run.
 """
 
 

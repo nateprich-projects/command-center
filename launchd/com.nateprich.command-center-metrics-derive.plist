@@ -59,6 +59,8 @@
 
     <key>EnvironmentVariables</key>
     <dict>
+        <key>DEVELOPER_DIR</key>
+        <string>/Library/Developer/CommandLineTools</string>
         <key>PATH</key>
         <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/Users/nateprich/.local/bin</string>
         <key>HOME</key>

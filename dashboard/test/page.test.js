@@ -3,7 +3,8 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import {
-  STAGES, age, boardColumns, failureState, museUsageText, nextOwner, ownerCell,
+  STAGES, age, boardColumns, boardTabCounts, boardTabFromUrl, boardTabUrl, tabColumns,
+  failureState, museUsageText, nextOwner, ownerCell,
   phoneState, pipState, projectBlocked, projectHold, holdChip, renderPhoneBoard, ticketHold, unblocksChip,
   repoLabels, repoOf,
   repoOptions, rowTier, shortRepo, visible, renderExecutionTiles, requestMetrics,
@@ -164,6 +165,53 @@ test("a pre-grouped board is rendered exactly in producer order", () => {
     { stage: "Ideas", items: [] },
   ];
   assert.equal(boardColumns({ columns }), columns);
+});
+
+test("the board splits into Parked, In Progress and Bugs in producer order (Nate, 2026-09-28)", () => {
+  const columns = [
+    { stage: "Ideas", items: [{ title: "idea", class: "Bug" }, { title: "improve", class: "Improve" }] },
+    { stage: "Building", items: [
+      { title: "broken", class: "Broken" }, { title: "bug", class: "Bug" }, { title: "new", class: "New" },
+    ] },
+    { stage: "Parked", items: [{ title: "parked bug", class: "Bug" }, { title: "parked", class: null }] },
+    { stage: "Done", items: [{ title: "done", class: "Broken" }, { title: "done bug", class: "Bug" }] },
+  ];
+  const titles = (tab) => tabColumns(columns, tab).map((column) => [
+    column.stage, column.items.map((item) => item.title),
+  ]);
+
+  assert.deepEqual(titles("in-progress"), [
+    ["Ideas", ["improve"]], ["Building", ["broken", "new"]], ["Parked", []], ["Done", ["done"]],
+  ]);
+  assert.deepEqual(titles("bugs"), [
+    ["Ideas", ["idea"]], ["Building", ["bug"]], ["Parked", []], ["Done", ["done bug"]],
+  ]);
+  assert.deepEqual(titles("parked"), [
+    ["Ideas", []], ["Building", []], ["Parked", ["parked bug", "parked"]], ["Done", []],
+  ]);
+  // Counts are open projects only, so Done never inflates a tab.
+  assert.deepEqual(boardTabCounts(columns, null), { parked: 2, "in-progress": 3, bugs: 2 });
+});
+
+test("the board tab counts follow the repository filter", () => {
+  const columns = [{ stage: "Ready", items: [
+    { ref: "o/a#1", class: "Bug" }, { ref: "o/b#2", class: "Bug" }, { ref: "o/a#3", class: "Improve" },
+  ] }];
+  assert.deepEqual(boardTabCounts(columns, "o/a"), { parked: 0, "in-progress": 1, bugs: 1 });
+});
+
+test("In Progress is the default board tab and the others live in the URL", async () => {
+  assert.equal(boardTabFromUrl("/"), "in-progress");
+  assert.equal(boardTabFromUrl("/?board=nonsense"), "in-progress");
+  assert.equal(boardTabFromUrl("/?repo=o%2Fa&board=bugs"), "bugs");
+  assert.equal(boardTabUrl("parked", "/?repo=o%2Fa"), "/?repo=o%2Fa&board=parked");
+  assert.equal(boardTabUrl("in-progress", "/?board=bugs&tab=funnel"), "/?tab=funnel");
+  const html = await readFile(new URL("../public/index.html", import.meta.url), "utf8");
+  const tabs = html.slice(html.indexOf('id="board-tabs"'), html.indexOf('<div class="legend"'));
+  assert.deepEqual([...tabs.matchAll(/data-board-tab="([^"]+)"/g)].map((match) => match[1]),
+    ["parked", "in-progress", "bugs"]);
+  assert.match(tabs, /data-board-tab="in-progress"\s+aria-selected="true"/);
+  assert.equal((tabs.match(/data-count/g) || []).length, 3);
 });
 
 test("a pip carries the ticket's furthest state", () => {

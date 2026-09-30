@@ -118,6 +118,72 @@ def test_read_github_strict_refuses_malformed_jsonl(monkeypatch):
         heartbeat.read_github_strict("codex")
 
 
+def test_muse_auth_outage_state_opens_only_for_auth_failure_and_closes_on_probe():
+    auth_failure = {
+        "agent": "muse", "phase": "finish", "outcome": "errored",
+        "note": "Muse provider outage: missing meta credentials",
+    }
+    other_failure = {
+        "agent": "muse", "phase": "finish", "outcome": "errored",
+        "note": "muse exec failed: connection reset by peer",
+    }
+    recovery = {
+        "agent": "muse", "phase": "auth_probe", "result": "success",
+    }
+
+    assert not heartbeat.muse_auth_outage_open([other_failure])
+    assert heartbeat.muse_auth_outage_open([auth_failure])
+    assert heartbeat.muse_auth_outage_open([auth_failure, other_failure])
+    assert not heartbeat.muse_auth_outage_open([auth_failure, recovery])
+
+
+def test_muse_auth_state_command_reads_only_durable_github_records(
+        monkeypatch, capsys):
+    auth_failure = {
+        "agent": "muse", "phase": "finish", "outcome": "errored",
+        "note": "Muse provider outage: missing meta credentials",
+    }
+    monkeypatch.setattr(
+        heartbeat, "read_github_strict", lambda agent, timeout=None: [auth_failure]
+    )
+    monkeypatch.setattr(
+        heartbeat, "read",
+        lambda _agent: pytest.fail("auth state must not read the local spool"),
+    )
+
+    assert heartbeat.main(["muse-auth-state"]) == 0
+    assert capsys.readouterr().out == "parked\n"
+
+
+def test_muse_auth_recovered_command_closes_the_outage_only_when_pushed(
+        monkeypatch, capsys):
+    written = []
+    monkeypatch.setattr(heartbeat.time, "time", lambda: NOW)
+    monkeypatch.setattr(
+        heartbeat, "append",
+        lambda agent, record: written.append((agent, record)) or "pushed",
+    )
+    monkeypatch.setattr(heartbeat, "_report", lambda _kept: None)
+
+    assert heartbeat.main(["muse-auth-recovered"]) == 0
+    agent, record = written[0]
+    assert agent == "muse"
+    assert record == {
+        "agent": "muse", "phase": "auth_probe", "ts": int(NOW),
+        "result": "success",
+    }
+    assert capsys.readouterr().err == ""
+
+
+def test_muse_auth_recovered_command_rejects_a_spooled_only_record(
+        monkeypatch, capsys):
+    monkeypatch.setattr(heartbeat, "append", lambda _agent, _record: "spooled")
+    monkeypatch.setattr(heartbeat, "_report", lambda _kept: None)
+
+    assert heartbeat.main(["muse-auth-recovered"]) == 2
+    assert "not recorded on GitHub" in capsys.readouterr().err
+
+
 def test_one_open_start_resolves_without_a_run_id():
     records = [start("aaa", NOW)]
     assert heartbeat.resolve_run(records, None) == ("aaa", None)
@@ -503,6 +569,16 @@ def test_error_classification_fixture_fails_unmatched_notes_to_unclassified():
     assert heartbeat.classify_error(
         "API rate limit exceeded", None
     ) == "unclassified"
+
+
+def test_merged_suite_timeout_stays_unclassified_with_mixed_output_markers():
+    note = (
+        "tests timed out: make test timed out on the merge with origin/main "
+        "0123456789ab\nrequest timed out; tests failed: test_example"
+    )
+
+    assert heartbeat.classify_error(
+        note, {"head": "0123456789ab"}) == "unclassified"
 
 
 def test_errored_finish_records_its_class_and_runtime_head(monkeypatch):
@@ -1185,11 +1261,14 @@ def test_watchdog_still_reports_genuinely_dying_runs():
     assert any("never finished" in p for p in found)
 
 
-def test_finish_accepts_skipped_api_reserve(monkeypatch):
-    """A GraphQL reserve decline is a refusal, not a failure (#273).
+@pytest.mark.parametrize("outcome", [
+    "skipped-api-reserve", "skipped-stale-shape",
+])
+def test_finish_accepts_named_skips(monkeypatch, outcome):
+    """A clean refusal is accepted and recorded as a skipped run.
 
-    Recording it as `errored` would make the watchdog alarm on the system
-    working correctly.
+    Recording either case as `errored` would make the watchdog alarm on the
+    system working correctly.
     """
     records = []
     monkeypatch.setattr(heartbeat, "read", lambda agent: [])
@@ -1205,9 +1284,9 @@ def test_finish_accepts_skipped_api_reserve(monkeypatch):
 
     assert heartbeat.main([
         "finish", "--agent", "codex", "--run", "run-id",
-        "--outcome", "skipped-api-reserve",
+        "--outcome", outcome,
     ]) == 0
-    assert records[0]["outcome"] == "skipped-api-reserve"
+    assert records[0]["outcome"] == outcome
 
 
 def test_the_reserve_decline_is_in_the_skipped_family():

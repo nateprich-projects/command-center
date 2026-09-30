@@ -29,6 +29,7 @@ If the command fails, show the error. Do not query GitHub yourself.
 | Field | Meaning |
 |---|---|
 | `total_needing_nate` | Decisions waiting; `Ideas` excluded, never pressure |
+| `watch_gates` | Questions the funnel watch answers itself, not Nate's decision (#1891); outside `items` and `total_needing_nate` |
 | `human_steps` | Tickets waiting on Nate to go and do the declared `reason`; outside `total_needing_nate`, their only surface |
 | `machine_local_steps` | Tickets waiting on a Claude Code session to go and do the declared `reason`; never folded into decisions or the total |
 | `unattended_merges` | Agent merges without him (`pr`, `at`, `note`, `agent`; retired agents excluded); call `self_reviewed: true` self-reviewed |
@@ -64,7 +65,11 @@ Full per-section wording lives in code; render through it:
 python3 /Users/nateprich/.claude/command-center/funnel_render.py
 ```
 
-Offer the top `launch` command. Do not run it.
+Check the top item's Needs first. If it is in `human_steps` (Needs `human`),
+it needs his own hands: say what he must do, and do not offer to work it.
+Otherwise offer to work the top item yourself, in this session or as a
+background task, and start once he says yes. Never hand him a terminal
+`launch` line to run.
 
 ## Answering a gate
 
@@ -82,7 +87,7 @@ closes itself, since the unattended close ignores `blocked` (#1724).
 
 With Class unset, `approve --yes` adopts exactly one non-empty whole-line
 `Proposed class: <one ladder class>`, an exact match for `Investigate`,
-`Broken`, `Maintenance`, `Improve`, `New` or `Replace`, and records the
+`Broken`, `Maintenance`, `Improve`, `New`, `Replace` or `Bug`, and records the
 source line. Missing, malformed, fuzzy or multiple proposals stay unset;
 never infer a class from a title or body prose (Nate's rule, 2026-09-16,
 overridable by him). Adoption fills a field; it never

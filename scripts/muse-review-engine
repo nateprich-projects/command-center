@@ -24,8 +24,10 @@
 # on z.ai answers one JSON question. Calls retry once on a parse error; a
 # shape part or a judge chunk whose call goes stream-idle is also asked once
 # more, and each writes one timing line to stderr (#1719). The review lister
-# gets the same stream-idle retry (#1730). A call whose packet is over 150 KB
-# gets a second stream-idle retry (#1785).
+# gets the same stream-idle retry (#1730) and the same timing line (#1855),
+# reads the packet without its diff or its repeats (#1866), and on a max lane
+# asks Muse at high while the judges keep max (#1887).
+# A call whose packet is over 150 KB gets a second stream-idle retry (#1785).
 # Breakdown rides the standard tier only; shape follows wherever begin offers
 # it.
 #
@@ -91,6 +93,23 @@ case "$EFFORT" in
   max|high) ;;
   *) echo "muse-review-engine: reasoning effort must be max or high, got '$EFFORT'" >&2; exit 1 ;;
 esac
+
+# The review lister's effort (#1887). At max the escalated lister went
+# stream-idle in 2 of 4 live reviews on 2026-09-28, once after #1866 had taken
+# the diff out of its copy (#1886). Listing what a ticket asks for is the easy
+# half of a review (#1233), so on a max lane the lister asks at high, the one
+# effort below max this runner takes; the judges, and every other call, keep
+# the lane's. Below max the lister keeps it too. Muse only: zai-exec takes no
+# effort.
+if [[ "$EFFORT" == "max" ]]; then
+  LISTER_EFFORT="high"
+else
+  LISTER_EFFORT="$EFFORT"
+fi
+# The effort call_model_files hands Muse. list_requirements shadows it with a
+# local set to LISTER_EFFORT, so its calls and their retries ask at that, and
+# bash's dynamic scope puts the lane's back when it returns.
+CALL_EFFORT="$EFFORT"
 
 # --- the replay entry (#1730) -------------------------------------------------
 #
@@ -447,8 +466,13 @@ finish_done() {
   local review_result="${2:-}"
   local result_path="${3:-}"
   local merged_pr="${4:-}"
+  local outcome="done"
+  if [[ -n "$result_path" && "$JOB" == "shape" ]] \
+    && grep -q '^run outcome: skipped-stale-shape ' "$result_path"; then
+    outcome="skipped-stale-shape"
+  fi
   local -a finish_args=(
-    finish --agent "$AGENT" --run "$BEGIN_RUN" --outcome done --note "$note"
+    finish --agent "$AGENT" --run "$BEGIN_RUN" --outcome "$outcome" --note "$note"
   )
   if [[ -n "$result_path" && "$JOB" == "breakdown" ]]; then
     local ticket_count
@@ -492,8 +516,9 @@ PY
     fi
     finish_args+=(--ticket-count "$ticket_count" --needs-decision "$needs_decision")
   elif [[ -n "$result_path" && "$JOB" == "shape" ]]; then
-    local shape_status
-    if ! shape_status="$(python3 - "$result_path" <<'PY'
+    if [[ "$outcome" != "skipped-stale-shape" ]]; then
+      local shape_status
+      if ! shape_status="$(python3 - "$result_path" <<'PY'
 import sys
 
 status = ""
@@ -506,11 +531,12 @@ if status not in {"Shaped", "Ready"}:
     raise SystemExit("shape result has no Shaped or Ready status")
 print(status)
 PY
-)"; then
-      echo "muse-review-engine: could not read the live shape result" >&2
-      exit 1
+      )"; then
+        echo "muse-review-engine: could not read the live shape result" >&2
+        exit 1
+      fi
+      finish_args+=(--shape-status "$shape_status")
     fi
-    finish_args+=(--shape-status "$shape_status")
   fi
   if [[ "$review_result" == "approved" || "$review_result" == "rejected" ]]; then
     finish_args+=(--review-result "$review_result")
@@ -649,6 +675,7 @@ call_model_files() {
   local prompt_path="$1"
   local answer_path="$2"
   local diag_path="$3"
+  local max_model_steps="${4:-60}"
   local killed_marker
   local raw_answer_path=""
   local muse_capture_path=""
@@ -707,12 +734,13 @@ call_model_files() {
       fi
     fi
     raw_answer_path="${answer_path}.muse-jsonl"
+    # CALL_EFFORT: the lane's effort, or the lister's inside it (#1887).
     "${muse_exec[@]}" \
-      --reasoning-effort "$EFFORT" \
+      --reasoning-effort "$CALL_EFFORT" \
       --disable-shell \
       --disable-write \
       --disable-web-tools \
-      --max-model-steps 60 \
+      --max-model-steps "$max_model_steps" \
       --no-foreign-personal-context \
       --workspace "$WORKSPACE" \
       --prompt-file "$prompt_path" >"$raw_answer_path" 2>"$diag_path" &
@@ -821,6 +849,23 @@ muse_quota_skip() {
   quota_stop
 }
 
+# Authentication failure is a provider outage, not evidence about the
+# subject. Keep the diagnostic match narrow so unrelated Muse failures retain
+# their ordinary fail-closed handling.
+muse_auth_failure() {
+  local diag_path="$1"
+  [[ "$BACKEND" == "muse" ]] || return 1
+  [[ -r "$diag_path" ]] || return 1
+  grep -Fqi -- "missing meta credentials" "$diag_path"
+}
+
+muse_auth_outage() {
+  local note="Muse provider outage: missing meta credentials"
+  echo "muse-review-engine: $note; ending without a verdict" >&2
+  failure "$note" || true
+  exit 1
+}
+
 # The optional second argument is the failed call's own diagnostic, for a
 # call that ran in a directory of its own (the shape framer, #1599).
 model_failed() {
@@ -836,6 +881,9 @@ model_failed() {
   # retrying on its own schedule.
   elif MUSE_QUOTA_RESET="$(muse_quota_record "$diag_path" "${BEGIN_RUN:-}")"; then
     muse_quota_skip
+  fi
+  if muse_auth_failure "$diag_path"; then
+    muse_auth_outage
   fi
   if (( status == 124 )); then
     echo "muse-review-engine: the model call outlived the wall-clock bound" >&2
@@ -882,9 +930,10 @@ model_stream_idle() {
 # requirement chunks would not shrink the prompt that stalls (plan #1772).
 # Measured on the packet file the call's prompt carries: the review's
 # RUN_DIR/packet.json, which a replay copies its given packet into, or a
-# shape part's own slice. The count is the only change: the wall-clock bound
-# still kills each call, a kill (124) is still never retried, and the parse
-# retry is still its own.
+# shape part's own slice. The review lister keeps that whole packet's count,
+# though its prompt carries a smaller copy (#1866). The count is the
+# only change: the wall-clock bound still kills each call, a kill (124) is
+# still never retried, and the parse retry is still its own.
 LARGE_PACKET_BYTES=$((150 * 1024))
 
 # How many stream-idle retries a call over this packet file gets: 2 over
@@ -925,12 +974,12 @@ stream_idle_retried_note() {
 # One stderr line per shape part and per judge chunk, which the schedule's
 # error log keeps: #1600's closing evidence is each part's wall time, and a
 # heartbeat only times the whole run. The name is the call's directory in
-# RUN_DIR; elapsed is whole seconds over every call the part made, and calls
-# says how many that was, so a parse or stream-idle retry is not mistaken for
-# one slow call. The outcome is `done`, `retried-done` when the part answered
-# only after a stream-idle retry (idle_retried counts them, #1785), or
-# `failed` when it has no answer — a judge chunk that failed closed to
-# `unsure` included.
+# RUN_DIR, or `lister` for the review lister (#1855); elapsed is whole
+# seconds over every call the part made, and calls says how many that was,
+# so a parse or stream-idle retry is not mistaken for one slow call. The
+# outcome is `done`, `retried-done` when the part answered only after a
+# stream-idle retry (idle_retried counts them, #1785), or `failed` when it
+# has no answer — a judge chunk that failed closed to `unsure` included.
 #
 #   muse-review-engine: timing shape.decider.0 elapsed=412s calls=2 outcome=retried-done
 log_call_timing() {
@@ -1007,6 +1056,12 @@ if job == "breakdown":
             ref, count, "" if count == 1 else "s"))
 else:
     lines = open(path).read().splitlines()
+    stale_prefix = "run outcome: skipped-stale-shape "
+    for line in lines:
+        if line.startswith(stale_prefix):
+            print("skipped stale shape: {}".format(
+                line[len(stale_prefix):]))
+            raise SystemExit(0)
     status = ""
     reason = ""
     for line in lines:
@@ -1192,7 +1247,7 @@ escalated risk. So:
   named-ticket order in `depends_on` as `owner/repo#n` refs; `[]` when the
   plan waits on nothing.
 - `proposed_class` names one ladder class: Investigate, Broken, Maintenance,
-  Improve, New, or Replace.
+  Improve, New, Replace, or Bug.
 
 Answer with exactly one JSON object and nothing else:
 
@@ -1351,6 +1406,11 @@ shape_part_calls() {
       "$call_dir/diag.txt"
     muse_status=$?
     if (( muse_status != 0 )); then
+      if muse_auth_failure "$call_dir/diag.txt"; then
+        : >"$call_dir/auth-outage"
+        echo "muse-review-engine: shape $name found missing meta credentials" >&2
+        return 1
+      fi
       # The same prompt again, whichever attempt went silent.
       if (( idle_retried < idle_retries )) \
         && model_stream_idle "$muse_status" "$call_dir/diag.txt"; then
@@ -1411,6 +1471,9 @@ run_shape_split() {
     exit 1
   fi
   if ! run_shape_part framer; then
+    if [[ -e "$framer_dir/auth-outage" ]]; then
+      muse_auth_outage
+    fi
     # The framer's own model failure reads like the one-call path's: a
     # quota refusal parks the lanes, a timeout exits 124.
     if [[ -e "$framer_dir/model-status" ]]; then
@@ -1445,6 +1508,12 @@ run_shape_split() {
   done
   for pid in ${part_pids[@]+"${part_pids[@]}"}; do
     wait "$pid"
+  done
+
+  for name in ${part_names[@]+"${part_names[@]}"}; do
+    if [[ -e "$RUN_DIR/shape.$name/auth-outage" ]]; then
+      muse_auth_outage
+    fi
   done
 
   # Any part's diagnostic can hold the provider's refusal. Scanned whatever
@@ -1562,6 +1631,53 @@ if [[ "$BACKEND" == "muse" ]] \
   && MUSE_QUOTA_RESET="$(muse_quota_hold_until)"; then
   echo "muse-review-engine: parked until $MUSE_QUOTA_RESET — Muse's provider quota is exhausted" >&2
   quota_stop
+fi
+
+# Authentication parks are derived only from the durable heartbeat branch.
+# A successful minimal Muse call writes the recovery event there before any
+# lane claims work; a failed probe leaves the existing outage open.
+if [[ "$BACKEND" == "muse" ]] && (( ! REPLAY )); then
+  if ! MUSE_AUTH_STATE="$(python3 "$REPO/heartbeat.py" muse-auth-state)"; then
+    echo "muse-review-engine: could not establish Muse auth outage state; refusing to run" >&2
+    exit 1
+  fi
+  case "$MUSE_AUTH_STATE" in
+    clear)
+      ;;
+    parked)
+      echo "muse-review-engine: Muse auth outage is open; probing login recovery" >&2
+      AUTH_PROBE_PROMPT="$RUN_DIR/auth-probe-prompt.txt"
+      AUTH_PROBE_ANSWER="$RUN_DIR/auth-probe-answer.json"
+      AUTH_PROBE_DIAG="$RUN_DIR/auth-probe-diag.txt"
+      if ! printf 'AUTH_LOGIN_PROBE\nReply with exactly OK.\n' \
+        >"$AUTH_PROBE_PROMPT"; then
+        echo "muse-review-engine: could not prepare the Muse auth recovery probe" >&2
+        quota_stop
+      fi
+      MUSE_MODEL="$MUSE_FALLBACK_MODEL"
+      MUSE_EXEC=("$MUSE_BIN" exec --model "$MUSE_MODEL" --json)
+      MUSE_EXEC_UNBOUND=("$MUSE_BIN" exec --model "$MUSE_MODEL" --json)
+      AUTH_PROBE_STATUS=0
+      call_model_files "$AUTH_PROBE_PROMPT" "$AUTH_PROBE_ANSWER" \
+        "$AUTH_PROBE_DIAG" 1 || AUTH_PROBE_STATUS=$?
+      if (( AUTH_PROBE_STATUS != 0 )); then
+        if MUSE_QUOTA_RESET="$(muse_quota_record "$AUTH_PROBE_DIAG" "")"; then
+          muse_quota_skip
+        fi
+        echo "muse-review-engine: Muse auth outage remains parked; recovery probe failed (exit $AUTH_PROBE_STATUS)" >&2
+        quota_stop
+      fi
+      if ! python3 "$REPO/heartbeat.py" muse-auth-recovered; then
+        echo "muse-review-engine: recovery probe succeeded but GitHub did not record it; lane remains parked" >&2
+        quota_stop
+      fi
+      echo "muse-review-engine: Muse auth recovery is recorded; resuming the lane" >&2
+      ;;
+    *)
+      echo "muse-review-engine: heartbeat returned an unknown Muse auth state; refusing to run" >&2
+      exit 1
+      ;;
+  esac
 fi
 
 # Own the opening poll. Empty polls must not launch a model: `begin` has
@@ -1970,15 +2086,90 @@ fi
 # can outgrow the argument limit.
 PACKET_JSON="$(cat "$PACKET_FILE")"
 PROMPT="${PROMPT_TEMPLATE//PACKET_JSON/$PACKET_JSON}"
-# The lister and every judge carry this whole packet, so they share one count
-# of stream-idle retries, measured once from the file they all read (#1785).
+# Every judge carries this whole packet and the lister a copy without its
+# diff or its repeats (#1866, below). They share one count of stream-idle retries, measured
+# once from the whole packet file (#1785).
 REVIEW_IDLE_RETRIES="$(stream_idle_retries "$PACKET_FILE")"
+
+# The lister's own copy of the packet, without the diff or its repeats
+# (#1866). The lister lists what the tickets ask of the change, and the plan
+# and repository rules only as `Does not break:` rows (#1973); none of that is
+# in the diff. The judges check the diff and still read the whole packet, from
+# PROMPT above.
+# Handed the whole packet, the lister went stream-idle on all three attempts
+# over the 232 KB must-approve seed, 785 s, and the judges never started
+# (#1698, by #1855's timing line).
+#
+# The diff text goes. build_packet folds every file's patch into `diff`, and
+# no other field carries patch text. The changed paths stay, as names in
+# `changed_files`, so a rule scoped to a path (a protected file, a member-repo
+# boundary) is still listed. `diff` keeps its place and holds one line saying
+# the text is withheld from this call only, so the lister reads a diff it was
+# not shown as withheld, not as an empty change.
+#
+# Repeats go too, because the diff was not the bulk: 13 KB of the seed's
+# 232 KB. The branch ticket was repeated whole as `tickets[0]`, and one parent
+# repeated in every ticket. So an entry of `tickets` equal to `ticket` becomes
+# "same as ticket", and an entry's `parent` equal to one already carried, on
+# `ticket` or an earlier entry, becomes "same parent plan as <that one>".
+# `ticket` itself stays whole: the routine names it the branch ticket, and the
+# code that reads `ticket.ref` after the lister reads packet.json, not this
+# copy. Equality is of the whole entry, never its ref. A parent carries no
+# plan text (shape_ticket drops its body), so it never repeats `plan_md`,
+# which is the repository's plan.md. Comments stay as they are: #1801 bounds
+# them when a packet is built. The copy is written beside the packet, in the
+# owner-only run directory (#1240).
+LISTER_PACKET_FILE="$RUN_DIR/lister-packet.json"
+if ! python3 - "$PACKET_FILE" "$LISTER_PACKET_FILE" >"$DIAG_FILE" 2>&1 <<'PY'
+import json
+import sys
+
+with open(sys.argv[1]) as handle:
+    packet = json.load(handle)
+if not isinstance(packet, dict):
+    raise SystemExit("the review packet is not a JSON object")
+packet["diff"] = ("withheld from this call only: every judge reads the whole "
+                  "diff, and changed_files names the paths it changes")
+ticket = packet.get("ticket")
+tickets = packet.get("tickets")
+if isinstance(tickets, list):
+    # The parents already carried in full, by the name a pointer gives them.
+    parents = []
+    if isinstance(ticket, dict) and isinstance(ticket.get("parent"), dict):
+        parents.append(("ticket", ticket["parent"]))
+    entries = []
+    for index, entry in enumerate(tickets):
+        if isinstance(ticket, dict) and entry == ticket:
+            entries.append("same as ticket")
+            continue
+        if isinstance(entry, dict) and isinstance(entry.get("parent"), dict):
+            carried = [name for name, parent in parents
+                       if parent == entry["parent"]]
+            if carried:
+                entry = dict(entry,
+                             parent="same parent plan as " + carried[0])
+            else:
+                parents.append(("tickets[{}]".format(index), entry["parent"]))
+        entries.append(entry)
+    packet["tickets"] = entries
+with open(sys.argv[2], "w") as handle:
+    json.dump(packet, handle, indent=2, sort_keys=True)
+PY
+then
+  lister_packet_err="$(cat "$DIAG_FILE")"
+  echo "muse-review-engine: could not build the lister's packet: $lister_packet_err" >&2
+  failure "could not build the lister packet for PR #$BEGIN_PR in $BEGIN_REPO: $lister_packet_err" || true
+  exit 1
+fi
+LISTER_PACKET_JSON="$(cat "$LISTER_PACKET_FILE")"
+LISTER_PROMPT="${PROMPT_TEMPLATE//PACKET_JSON/$LISTER_PACKET_JSON}"
 
 # --- the lister call (#1241) -------------------------------------------------
 #
 # One small question first: what does this diff have to do, and what must it
-# avoid? The answer is a flat list of requirements drawn from the ticket, its
-# parent plan and the repository's rules, and it judges nothing. #1242 splits
+# avoid? The answer is a flat list of requirements: the tickets' Do and Accept,
+# plus the plan's and repository's rules as `Does not break:` rows (#1973). It
+# judges nothing. #1242 splits
 # the judging into calls of at most three requirements each, and every one of
 # them reads this list rather than deriving its own — one canonical list is
 # what keeps two judges of the same PR asking the same questions.
@@ -1998,11 +2189,17 @@ lister_header() {
 This call is not the review. Record no verdict and judge nothing: do not say
 whether the diff meets anything, and do not comment on its quality.
 
-List what this diff must do and what it must avoid — the requirements the
-ticket, its parent plan, and the repository's stated rules place on it. One
-checkable claim per entry, in the words of the ticket or the plan wherever it
-states one. Every later judge reads this list and nothing else, so a
-requirement missing here is never checked, and a vague one cannot be answered.
+List what this diff must do and what it must avoid. What it must do comes
+from the tickets it closes: their Do and Accept, as amended by Nate-voiced
+comments. `plan_md`, the parent plan and the repository's stated rules add
+only what the diff must not break or contradict, including anything the plan
+rejected: list such a rule as
+"Does not break: <the rule>", and only where the diff touches the code or
+behaviour it governs. Never list a rule as something the diff must implement
+unless a ticket asks for it. One checkable claim per entry, in the words of
+the ticket or the plan wherever it states one. Every later judge reads this
+list and nothing else, so a requirement missing here is never checked, and a
+vague one cannot be answered.
 
 The packet's `pr_body` (the PR description) and `pr_departures` (the entries
 of its Departures section) are the implementer's own claims. You may cite
@@ -2012,9 +2209,19 @@ explains like any other, so its judge can weigh the departure.
 
 For a `plan_premises` entry labelled `inferred` that has `deferred_answer`,
 include a requirement that preserves its exact evidence pointer and says it is
-deferred until the named `reviewed_ticket` is complete. Do not emit a live-evidence
-probe requirement for that premise. An inferred entry without `deferred_answer`
-keeps the normal probe requirement; leave it `unsure` when a required record is unavailable.
+deferred until the named `reviewed_ticket` is complete. Never list a requirement
+that probes a `plan_premises` entry against evidence: the ticket's own first
+verification step checks premises, and a review weighs the ticket's Do and Accept.
+
+For a ticket acceptance line in `ticket.deferred_acceptance` (or the matching
+entry in `tickets`) that has `deferred_answer`, include a deferral requirement
+preserving the exact `deferred_clause` and saying it is deferred until that
+ticket deploys. Keep the exact `checkable_line` as an ordinary acceptance
+artifact requirement; do not drop its before-deploy evidence because another
+clause is deferred. Keep any other checkable obligations from the same
+acceptance context, such as a same-ticket verification, as ordinary
+requirements. Never defer the whole acceptance line. A checkable acceptance
+line without a verified `deferred_answer` remains an ordinary requirement.
 
 For a `measured` or `documented` entry with verified `label_error`, include a
 requirement to reject it explicitly as a labeling error and preserve its exact
@@ -2097,19 +2304,33 @@ PY
 # rejected for the model's formatting.
 #
 # The stream-idle retry is #1719's, given to the judge chunks and shape parts
-# first. The lister is the one call that reads the whole packet, and on the
+# first. The lister read the whole packet until #1866, and on the
 # ~240 KB must-approve corpus seed the single call replay used to make went
 # silent past Muse's 180-second limit on two consecutive replays (#1698), so a
 # silent lister is asked again, unbound like every call after the first,
 # before it fails the run. Any other failure still fails at once.
+#
+# Every way out writes the lister's timing line, as a judge chunk's and a
+# shape part's do (#1855): a lister failure read `failed parts: none` in
+# review-replay without it. model_failed exits the engine, so on a model
+# failure the line is written before it is called.
+#
+# Every call here, retries included, asks at LISTER_EFFORT: high on a max
+# lane (#1887). A local, so the judges after it ask at the lane's effort.
 list_requirements() {
+  local CALL_EFFORT="$LISTER_EFFORT"
   local attempt=1
+  local calls=0
+  local answered=0
   local idle_retried=0
+  local started
   local parse_err
   local muse_status
   local parse_status
-  printf '%s\n\n%s' "$(lister_header)" "$PROMPT" >"$PROMPT_FILE"
+  started="$(date +%s)"
+  printf '%s\n\n%s' "$(lister_header)" "$LISTER_PROMPT" >"$PROMPT_FILE"
   while true; do
+    calls=$((calls + 1))
     call_model
     muse_status=$?
     if (( muse_status != 0 )); then
@@ -2120,6 +2341,8 @@ list_requirements() {
         log_stream_idle_retry "the lister" "$idle_retried" "$DIAG_FILE"
         continue
       fi
+      log_call_timing "lister" "$started" "$calls" "$answered" \
+        "$idle_retried"
       model_failed "$muse_status"
     fi
     # Read the status directly, for the same reason the judging loop does:
@@ -2127,16 +2350,20 @@ list_requirements() {
     parse_requirements 2>"$DIAG_FILE"
     parse_status=$?
     if (( parse_status == 0 )); then
+      answered=1
+      log_call_timing "lister" "$started" "$calls" "$answered" \
+        "$idle_retried"
       return 0
     fi
     parse_err="$(cat "$DIAG_FILE")"
     if (( attempt == 1 )); then
       printf '%s\n\n%s\n\nYour previous answer could not be parsed: %s\nReply again with exactly one JSON object and nothing else.' \
-        "$(lister_header)" "$PROMPT" "$parse_err" >"$PROMPT_FILE"
+        "$(lister_header)" "$LISTER_PROMPT" "$parse_err" >"$PROMPT_FILE"
       attempt=2
       continue
     fi
     echo "muse-review-engine: the requirement list could not be parsed: $parse_err" >&2
+    log_call_timing "lister" "$started" "$calls" "$answered" "$idle_retried"
     failure "could not list the requirements for PR #$BEGIN_PR in $BEGIN_REPO: $parse_err" || true
     return 1
   done
@@ -2210,14 +2437,28 @@ below. Use unmet when the diff clearly fails it and unsure when the packet
 cannot resolve it. For each result, cite the relevant diff lines or explain
 the uncertainty.
 
+A `Does not break:` requirement is met unless a diff line breaks or
+contradicts the rule. That the diff does not implement the rule is never a
+reason for unmet or unsure.
+
 For a deferred-premise requirement, inspect the entry's `label`, `evidence`,
 and `deferred_answer` fields, and verify that the matching packet entry is
 labelled `inferred`, its `deferred_answer.evidence_pointer` exactly matches
 the entry's `evidence`, and `deferred_answer.reviewed_ticket` matches
 `ticket.ref`. If those fields match, the pointer is visibly deferred and its
 future evidence is not expected yet; mark that deferral requirement met, not
-unsure. An inferred entry without `deferred_answer` still follows the normal
-probe rule in the review question.
+unsure. No other premise is a requirement: the review never probes premises.
+
+For a deferred-ticket-acceptance requirement, inspect the matching ticket's
+`deferred_acceptance` entry and verify that its `line` is the exact acceptance
+line, `deferred_clause` is the exact after-deploy clause,
+`deferred_answer.evidence_pointer` matches that clause, and
+`deferred_answer.reviewed_ticket` matches that ticket's `ref`. If those fields
+match, mark only the deferral requirement met, not unsure. Judge the entry's
+`checkable_line` as an ordinary acceptance requirement against the packet and
+diff, along with any other same-ticket verification requirement from that
+acceptance context. Any acceptance line without a matching deferral remains
+an ordinary requirement and must still be judged against the packet and diff.
 
 For a labeling-error requirement, verify that the matching packet entry is
 labelled `measured` or `documented`, its `label_error.evidence_pointer` exactly
@@ -2391,6 +2632,11 @@ judge_chunk_calls() {
         echo "muse-review-engine: judge chunk $index met a spent z.ai window" >&2
         return 0
       fi
+      if muse_auth_failure "$diag_path"; then
+        : >"$call_dir/auth-outage"
+        echo "muse-review-engine: judge chunk $index found missing meta credentials" >&2
+        return 0
+      fi
       # A silent stream is not a judgement either: the same prompt again
       # before the chunk fails closed, whichever attempt went silent.
       if (( idle_retried < REVIEW_IDLE_RETRIES )) \
@@ -2504,6 +2750,13 @@ for judge_pid in ${JUDGE_PIDS[@]+"${JUDGE_PIDS[@]}"}; do
     JUDGE_RUN_STATUS=1
   fi
 done
+if [[ "$BACKEND" == "muse" ]]; then
+  for (( index = 0; index < JUDGE_COUNT; index++ )); do
+    if [[ -e "$RUN_DIR/judge.$index/auth-outage" ]]; then
+      muse_auth_outage
+    fi
+  done
+fi
 if (( JUDGE_RUN_STATUS != 0 )); then
   failure "could not record one or more judge results for PR #$BEGIN_PR in $BEGIN_REPO" || true
   exit 1

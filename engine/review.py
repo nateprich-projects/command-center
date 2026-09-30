@@ -294,6 +294,25 @@ RUN_EVIDENCE_FENCE_RE = re.compile(
     r"(?P<payload>.*?)\r?\n[ \t]*```[ \t]*(?:\r?\n|$)",
     re.DOTALL,
 )
+RUN_EVIDENCE_MENTION_RE = re.compile(r"\bRun\s+evidence\b", re.IGNORECASE)
+ACCEPTANCE_CLAUSE_BOUNDARY_RE = re.compile(r"(?<=[;.!?])\s+")
+ACCEPTANCE_LABEL_RE = re.compile(
+    r"(?<![\w])(?:\*\*|__)?Acceptance(?:\*\*|__)?[ \t]*:"
+    r"(?:\*\*|__)?|"
+    r"(?<![\w])(?:\*\*|__)?Acceptance[ \t]*:(?:\*\*|__)",
+    re.IGNORECASE,
+)
+ACCEPTANCE_HEADING_RE = re.compile(
+    r"^[ \t]{0,3}#{1,6}[ \t]+(?:\*\*|__)?Acceptance"
+    r"(?:\*\*|__)?[ \t]*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+TICKET_BODY_SECTION_END_RE = re.compile(
+    r"(?im)(?:\n[ \t]{0,3}|[ \t]+)(?:#{1,6}[ \t]+|"
+    r"(?:\*\*|__)?(?:Parent plan|Proof|Test|Tests|Rejected|"
+    r"Siblings checked|Premises|Proposed class|Needs Nate|Risk|Needs|"
+    r"Dependencies)(?:\*\*|__)?[ \t]*:)"
+)
 
 PR_COMMENTS_QUERY = """
 query($owner: String!, $name: String!, $number: Int!,
@@ -1731,22 +1750,186 @@ def evidence_ticket_is_unrunnable(evidence_pointer: object,
     return False
 
 
+def _ticket_acceptance_lines(body: object) -> List[str]:
+    """Return explicitly labelled acceptance criteria from a ticket body."""
+    if not isinstance(body, str) or not body:
+        return []
+    markers = [(match.start(), match.end())
+               for match in ACCEPTANCE_LABEL_RE.finditer(body)]
+    markers.extend((match.start(), match.end())
+                   for match in ACCEPTANCE_HEADING_RE.finditer(body))
+    markers = sorted(set(markers))
+    found: List[str] = []
+    for index, (_, section_start) in enumerate(markers):
+        section_end = len(body)
+        if index + 1 < len(markers):
+            section_end = min(section_end, markers[index + 1][0])
+        end_label = TICKET_BODY_SECTION_END_RE.search(body, section_start)
+        if end_label is not None:
+            section_end = min(section_end, end_label.start())
+        section = body[section_start:section_end]
+
+        current: List[str] = []
+
+        def flush() -> None:
+            if current:
+                line = " ".join(current).strip()
+                if line:
+                    found.append(line)
+                current.clear()
+
+        for raw_line in section.splitlines():
+            line = raw_line.strip()
+            if not line:
+                flush()
+                continue
+            bullet = DEPARTURE_BULLET_RE.match(line)
+            if bullet is not None:
+                flush()
+                current.append(bullet.group("text").strip())
+            else:
+                current.append(line)
+        flush()
+    return found
+
+
+def _reviewed_ticket_deploy_signal(text: str, reviewed_ref: str) -> bool:
+    """Whether text explicitly places an event after this reviewed ticket."""
+    parts = _issue_ref_parts(reviewed_ref)
+    if parts is None:
+        return False
+    repo, number = parts
+    repo_ref = re.escape(repo) + r"\s*#\s*" + str(number)
+    subject = (
+        r"(?:this(?:\s+ticket)?|the\s+reviewed\s+ticket|"
+        r"(?:ticket\s+)?#\s*{}|{})".format(number, repo_ref)
+    )
+    event = r"(?:deploy(?:s|ed|ment)?|merge(?:s|d)?|land(?:s|ed)?|ship(?:s|ped)?)"
+    return bool(re.search(
+        r"\b(?:after|once|following|when)\s+" + subject
+        + r"(?:'s)?(?:\s+(?:ticket|PR|pull request))?"
+        + r"(?:\s+(?:is|has been|will be|gets))?\s+\b" + event + r"\b",
+        text,
+        re.IGNORECASE,
+    ))
+
+
+def _post_deploy_run_evidence_acceptance_parts(
+        line: str, reviewed_ref: str) -> Optional[Dict[str, str]]:
+    """Split a same-ticket post-deploy clause from checkable acceptance text."""
+    if not RUN_EVIDENCE_MENTION_RE.search(line):
+        return None
+    clauses = [part.strip() for part in ACCEPTANCE_CLAUSE_BOUNDARY_RE.split(line)
+               if part.strip()]
+    deferred = [part for part in clauses
+                if _reviewed_ticket_deploy_signal(part, reviewed_ref)]
+    if not deferred:
+        # A phase's before/after Run evidence is itself a post-deploy pair:
+        # preserve the before half as checkable and carry only the after half
+        # through the same deferred-answer path. Keep this narrow to the
+        # phase wording; replay-harness before/after timings can be checked
+        # before deployment.
+        phase_pair = re.search(
+            r"\bphase\s+before\s+and\s+after\b", line, re.IGNORECASE)
+        if phase_pair is None:
+            return None
+        checkable_line = (line[:phase_pair.start()] + "phase before"
+                          + line[phase_pair.end():]).rstrip(" .;").strip()
+        deferred_clause = (line[:phase_pair.start()] + "phase after"
+                           + line[phase_pair.end():]).rstrip(" .;").strip()
+        if (not checkable_line
+                or re.search(r"\bafter\b", checkable_line, re.IGNORECASE)):
+            return None
+        return {"deferred_clause": deferred_clause,
+                "checkable_line": checkable_line}
+    if len(deferred) != 1 or len(clauses) < 2:
+        return None
+    deferred_clause = deferred[0]
+    if (not re.search(r"\b(?:Run\s+evidence|timings?|phase|comment)\b",
+                      deferred_clause, re.IGNORECASE)
+            or re.search(r"\b(?:before|verification|verify)\b",
+                         deferred_clause, re.IGNORECASE)):
+        return None
+
+    checkable_parts = [part.rstrip(" ;") for part in clauses
+                       if part != deferred_clause]
+    checkable_line = " ".join(part for part in checkable_parts if part).strip()
+    checkable_line = re.sub(
+        r"\b(?:before\s+and\s+after|after\s+and\s+before)"
+        r"(?=\s+(?:phase\s+)?timings?\b)",
+        "before",
+        checkable_line,
+        flags=re.IGNORECASE,
+    )
+    # If the checkable remainder still describes an after-run artifact, the
+    # sentence did not separate that obligation cleanly enough to defer it.
+    if not checkable_line or re.search(r"\bafter\b", checkable_line, re.IGNORECASE):
+        return None
+    return {"deferred_clause": deferred_clause,
+            "checkable_line": checkable_line}
+
+
+def _packet_ticket_rows(packet: Dict) -> List[Dict]:
+    rows: List[Dict] = []
+    ticket = packet.get("ticket")
+    if isinstance(ticket, dict):
+        rows.append(ticket)
+    tickets = packet.get("tickets")
+    if isinstance(tickets, list):
+        rows.extend(row for row in tickets if isinstance(row, dict))
+    return rows
+
+
+def _annotate_deferred_ticket_acceptances(packet: Dict) -> None:
+    """Attach narrow deferrals to explicit same-ticket Run evidence clauses."""
+    for ticket in _packet_ticket_rows(packet):
+        ticket.pop("deferred_acceptance", None)
+        reviewed_ref = ticket.get("ref")
+        if (not isinstance(reviewed_ref, str)
+                or _issue_ref_parts(reviewed_ref) is None):
+            continue
+        deferred = []
+        for line in _ticket_acceptance_lines(ticket.get("body")):
+            parts = _post_deploy_run_evidence_acceptance_parts(line, reviewed_ref)
+            if parts is None:
+                continue
+            deferred.append({
+                "line": line,
+                "deferred_clause": parts["deferred_clause"],
+                "checkable_line": parts["checkable_line"],
+                "deferred_answer": {
+                    "status": "deferred",
+                    "evidence_pointer": parts["deferred_clause"],
+                    "reviewed_ticket": reviewed_ref,
+                    "reason": (
+                        "ticket acceptance requires Run evidence after the "
+                        "reviewed ticket deploys"
+                    ),
+                },
+            })
+        if deferred:
+            ticket["deferred_acceptance"] = deferred
+
+
 def annotate_unrunnable_premises(packet: Dict) -> Dict:
     """Record live-verified deferrals and premise-label errors in a packet.
 
     ``build_packet`` stays pure. ``collect`` calls this after assembling its
     packet so only live GitHub state can add ``deferred_answer`` for inferred
-    premises or ``label_error`` for measured/documented premises. Unavailable
-    plan groups and unresolved issue reads keep the existing review path.
+    premises or ``label_error`` for measured/documented premises. Explicit
+    post-deploy Run evidence acceptance lines carry the same deferral shape.
+    Unavailable plan groups and unresolved issue reads keep the existing path.
     """
     ticket = packet.get("ticket")
     reviewed_ref = ticket.get("ref") if isinstance(ticket, dict) else None
     if (not isinstance(reviewed_ref, str)
             or _issue_ref_parts(reviewed_ref) is None):
+        _annotate_deferred_ticket_acceptances(packet)
         return packet
 
     groups = packet.get("plan_premises")
     if not isinstance(groups, list):
+        _annotate_deferred_ticket_acceptances(packet)
         return packet
 
     checked: Dict[str, bool] = {}
@@ -1796,6 +1979,7 @@ def annotate_unrunnable_premises(packet: Dict) -> Dict:
                             "is complete"
                         ),
                     }
+    _annotate_deferred_ticket_acceptances(packet)
     return packet
 
 
@@ -1842,6 +2026,51 @@ def _verified_deferred_premises(packet: Dict) -> List[Dict[str, str]]:
     return verified
 
 
+def _verified_deferred_ticket_acceptances(
+        packet: Dict) -> List[Dict[str, str]]:
+    """Return only acceptance deferrals that match the reviewed ticket body."""
+    verified: List[Dict[str, str]] = []
+    seen = set()
+    for ticket in _packet_ticket_rows(packet):
+        reviewed_ref = ticket.get("ref")
+        if (not isinstance(reviewed_ref, str)
+                or _issue_ref_parts(reviewed_ref) is None):
+            continue
+        source_lines = set(_ticket_acceptance_lines(ticket.get("body")))
+        rows = ticket.get("deferred_acceptance")
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            line = row.get("line")
+            deferred_clause = row.get("deferred_clause")
+            checkable_line = row.get("checkable_line")
+            deferred = row.get("deferred_answer")
+            parts = (_post_deploy_run_evidence_acceptance_parts(
+                line, reviewed_ref) if isinstance(line, str) else None)
+            if (not isinstance(line, str) or line not in source_lines
+                    or parts is None
+                    or deferred_clause != parts["deferred_clause"]
+                    or checkable_line != parts["checkable_line"]
+                    or not isinstance(deferred, dict)
+                    or deferred.get("status") != "deferred"
+                    or deferred.get("evidence_pointer") != deferred_clause
+                    or deferred.get("reviewed_ticket") != reviewed_ref):
+                continue
+            key = (reviewed_ref, line)
+            if key in seen:
+                continue
+            seen.add(key)
+            verified.append({
+                "line": line,
+                "deferred_clause": deferred_clause,
+                "checkable_line": checkable_line,
+                "reviewed_ticket": reviewed_ref,
+            })
+    return verified
+
+
 def _deferred_premise_requirement(premise: Dict[str, str]) -> str:
     parts = _issue_ref_parts(premise["reviewed_ticket"])
     reviewed_ticket = ("#{}".format(parts[1]) if parts
@@ -1849,6 +2078,57 @@ def _deferred_premise_requirement(premise: Dict[str, str]) -> str:
     return ("Defer the inferred premise '{}' to its evidence pointer '{}' "
             "until ticket {} is complete.").format(
         premise["claim"], premise["evidence"], reviewed_ticket)
+
+
+def _deferred_acceptance_requirement(acceptance: Dict[str, str]) -> str:
+    parts = _issue_ref_parts(acceptance["reviewed_ticket"])
+    reviewed_ticket = ("#{}".format(parts[1]) if parts
+                       else acceptance["reviewed_ticket"])
+    clause = acceptance["deferred_clause"].rstrip(" .;")
+    return ("Defer the ticket acceptance clause '{}' until ticket {} is "
+            "deployed.").format(clause, reviewed_ticket)
+
+
+def _checkable_acceptance_requirement(acceptance: Dict[str, str]) -> str:
+    checkable_line = acceptance["checkable_line"].rstrip(" .;")
+    return "Acceptance artifact: {}.".format(checkable_line)
+
+
+def _is_verified_acceptance_artifact_requirement(
+        requirement: str, acceptance: Dict[str, str]) -> bool:
+    """Match only an artifact row containing this acceptance's text."""
+    prefix = "acceptance artifact:"
+    if not requirement.casefold().startswith(prefix):
+        return False
+    if requirement == _checkable_acceptance_requirement(acceptance):
+        return False
+
+    def normalized(value: str) -> str:
+        value = re.sub(r"[`*]+", "", value).casefold()
+        value = re.sub(r"\s+", " ", value)
+        return value.strip(" .;:")
+
+    payload = normalized(requirement[len(prefix):])
+    return any(
+        target and target in payload
+        for target in (normalized(acceptance["line"]),
+                       normalized(acceptance["deferred_clause"]))
+    )
+
+
+def _is_verified_deferred_acceptance_requirement(
+        requirement: str, acceptance: Dict[str, str]) -> bool:
+    """Match a lister's wording for this exact deferred clause and ticket."""
+    text = requirement.casefold()
+    clause = acceptance["deferred_clause"].rstrip(" .;").casefold()
+    parts = _issue_ref_parts(acceptance["reviewed_ticket"])
+    if not clause or parts is None or "defer" not in text:
+        return False
+    repo, number = parts
+    return (clause in text
+            and ("#{}".format(number) in text
+                 or acceptance["reviewed_ticket"].casefold() in text
+                 or repo.casefold() in text))
 
 
 def _verified_label_error_premises(packet: Dict) -> List[Dict[str, str]]:
@@ -1946,31 +2226,85 @@ def _is_verified_premise_probe(requirement: str,
     return "evidence pointer: {}".format(evidence.casefold()) in parenthetical
 
 
+def _packet_premise_claims(packet: Dict) -> List[str]:
+    """Every plan premise claim the packet carries, casefolded."""
+    groups = packet.get("plan_premises")
+    if not isinstance(groups, list):
+        return []
+    claims: List[str] = []
+    for group in groups:
+        premises = group.get("premises") if isinstance(group, dict) else None
+        if not isinstance(premises, list):
+            continue
+        for premise in premises:
+            claim = premise.get("claim") if isinstance(premise, dict) else None
+            if isinstance(claim, str) and claim.strip():
+                claims.append(claim.strip().casefold())
+    return claims
+
+
+def _is_premise_probe(requirement: str, claims: Sequence[str]) -> bool:
+    """A lister row that probes a plan premise: it names one and quotes it.
+
+    The claim must stand as whole words, so a short claim such as ``CI``
+    cannot match inside ``decision``.
+    """
+    text = requirement.casefold()
+    return "premise" in text and any(
+        re.search(r"(?<!\w){}(?!\w)".format(re.escape(claim)), text)
+        for claim in claims)
+
+
 def normalize_plan_premise_requirements(
         packet: Dict, requirements: Sequence[str]) -> List[str]:
-    """Replace model probe requirements with verified canonical premise rows.
+    """Drop premise probes; add verified canonical premise/acceptance rows.
 
-    The runner verifies these fields itself, so a lister wording lapse cannot
-    turn a verified deferral into an unsure probe or hide a verified label
-    error behind one.
+    A review weighs the ticket's Do and Accept; the ticket's own first
+    verification step checks the plan's premises, so a probe of one is never
+    a review requirement (Nate, 2026-09-28; #1966). The lister's probe
+    wording varies, so every row that names the word premise and quotes a
+    packet premise's claim goes, before the runner's own verified rows are
+    added. The runner verifies those itself, so a lister wording lapse cannot
+    hide a verified label error. A verified after-deploy acceptance clause is
+    split from its still-checkable remainder before both requirements are
+    added.
     """
+    claims = _packet_premise_claims(packet)
+    requirements = [requirement for requirement in requirements
+                    if not _is_premise_probe(requirement, claims)]
     deferred = _verified_deferred_premises(packet)
+    deferred_acceptances = _verified_deferred_ticket_acceptances(packet)
     label_errors = _verified_label_error_premises(packet)
     verified = deferred + label_errors
     if not verified:
-        return list(requirements)
+        if not deferred_acceptances:
+            return list(requirements)
 
     kept: List[str] = []
     for requirement in requirements:
-        if any(_is_verified_premise_probe(requirement, premise)
-               for premise in verified):
+        if (any(_is_verified_premise_probe(requirement, premise)
+                for premise in verified)
+                or any(
+                    requirement == _deferred_acceptance_requirement(row)
+                    or _is_verified_deferred_acceptance_requirement(
+                        requirement, row)
+                    or _is_verified_acceptance_artifact_requirement(
+                        requirement, row)
+                    for row in deferred_acceptances)):
             continue
         kept.append(requirement)
+
+    for acceptance in deferred_acceptances:
+        checkable = _checkable_acceptance_requirement(acceptance)
+        if checkable not in kept:
+            kept.append(checkable)
 
     for premise, canonical in (
             [(row, _deferred_premise_requirement(row)) for row in deferred]
             + [(row, _label_error_premise_requirement(row))
-               for row in label_errors]):
+               for row in label_errors]
+            + [(row, _deferred_acceptance_requirement(row))
+               for row in deferred_acceptances]):
         if canonical not in kept:
             kept.append(canonical)
     return kept
@@ -1978,7 +2312,7 @@ def normalize_plan_premise_requirements(
 
 def mark_verified_premise_requirements(
         packet: Dict, results: Sequence[Dict]) -> List[Dict]:
-    """Resolve canonical premise checks from matching verified packet fields."""
+    """Resolve canonical premise/acceptance checks from verified packet fields."""
     verified = {
         _deferred_premise_requirement(premise): (
             "met",
@@ -1993,6 +2327,13 @@ def mark_verified_premise_requirements(
             "evidence pointer names an open ticket that cannot run before "
             "the reviewed ticket is complete.")
         for premise in _verified_label_error_premises(packet)
+    })
+    verified.update({
+        _deferred_acceptance_requirement(acceptance): (
+            "met",
+            "Verified packet deferral: the ticket acceptance line and "
+            "reviewed ticket match its deferred_answer.")
+        for acceptance in _verified_deferred_ticket_acceptances(packet)
     })
     marked: List[Dict] = []
     for result in results:

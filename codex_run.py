@@ -400,7 +400,13 @@ def _rollout_drift(run: str, cwd: str, meta: Optional[Dict],
         return ["rollout for thread {} records id {}".format(
             run, meta.get("id"))]
     session_cwd = meta.get("cwd")
-    if not isinstance(session_cwd, str) or not _inside(cwd, session_cwd):
+    # Codex can launch an automation from the shared heartbeat spool. In that
+    # one exact case, validate against this thread's session path from the
+    # rollout; drift() below still checks the session and turn paths.
+    heartbeat_spool_cwd = (
+        os.path.realpath(cwd) == os.path.realpath(HEARTBEAT_SPOOL))
+    if not isinstance(session_cwd, str) or \
+            (not _inside(cwd, session_cwd) and not heartbeat_spool_cwd):
         return ["begin ran outside its session's directory {}".format(
             session_cwd)]
     if settings is None:

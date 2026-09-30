@@ -139,13 +139,20 @@ def test_re_review_on_a_new_head_supersedes_the_older_verdict(monkeypatch):
     """A re-review after a push is fresh; the previous head's verdict is stale."""
     old_head = "6ce94a4406b9"
     new_head = "9999newcommit"
-    wire(monkeypatch, pr(headRefOid=new_head), [
+    comments = [
         verdict(verdict="rejected", head_sha=old_head),
         verdict(head_sha=new_head),
-    ])
+    ]
+    wire(monkeypatch, pr(headRefOid=new_head), comments)
     found = funnel.latest_verdict(REPO, 5)
     assert found["verdict"] == "approved"
     assert found["head_sha"] == new_head
+
+    fact = pr(headRefOid=new_head)
+    fact["verdict"] = funnel._latest_verdict_from_comments([
+        comment_row(body) for body in comments
+    ])
+    assert funnel.merge_blockers(REPO, 5, items(), NOW, pr_fact=fact) == []
 
 
 def test_same_head_approval_does_not_clear_rejection_on_issue_1989_repro(
@@ -180,20 +187,6 @@ def test_same_head_rejection_after_approval_holds_the_merge_gate(monkeypatch):
     ])
     assert "latest review says 'rejected'" in funnel.merge_blockers(
         REPO, 5, items(), NOW, pr_fact=fact)
-
-
-def test_merge_gate_accepts_re_review_after_a_head_change():
-    old_head = "6ce94a4406b9"
-    new_head = "9999newcommit"
-    comments = [
-        verdict(verdict="rejected", head_sha=old_head),
-        verdict(head_sha=new_head),
-    ]
-    fact = pr(headRefOid=new_head)
-    fact["verdict"] = funnel._latest_verdict_from_comments([
-        comment_row(body) for body in comments
-    ])
-    assert funnel.merge_blockers(REPO, 5, items(), NOW, pr_fact=fact) == []
 
 
 # -- only the owner's comments carry verdicts (#1787) -------------------------

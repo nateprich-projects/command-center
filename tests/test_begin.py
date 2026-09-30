@@ -191,8 +191,8 @@ def test_begin_refreshes_the_selected_body_after_claim_before_starting(
     project, ticket = _ticket(51, 50)
     events = []
 
-    def hydrate(candidates, include_body=False):
-        events.append(("hydrate", include_body,
+    def hydrate(candidates, include_body=False, include_history=False):
+        events.append(("hydrate", include_body, include_history,
                        [item.ref for item in candidates]))
         candidates[0].body = "What: rewrite routines/muse.md."
         candidates[0].body_loaded = True
@@ -205,11 +205,62 @@ def test_begin_refreshes_the_selected_body_after_claim_before_starting(
     assert result["do"] == "stop"
     assert "routines/muse.md" in result["why"]
     assert events[0][0] == "claim_write"
-    assert events[1] == ("hydrate", True, [ticket.ref])
+    assert events[1] == ("hydrate", True, True, [ticket.ref])
+    assert events[2] == ("claim_write", ticket.ref, "")
+    assert len(events) == 3
     assert writes == [
         (ticket.ref, NOW.strftime("%Y-%m-%dT%H:%M:%SZ")),
         (ticket.ref, ""),
     ]
+
+
+def test_reviewer_begin_does_not_hydrate_all_idea_candidates_before_selection(
+    monkeypatch, capsys,
+):
+    idea = funnel.Item(
+        repo="nateprich/example",
+        number=52,
+        title="Idea 52",
+        url="https://github.com/nateprich/example/issues/52",
+        state="OPEN",
+        status="Ideas",
+        body=None,
+        body_loaded=False,
+        klass="Improve",
+        risk="standard",
+        needs="none",
+        labels=["needs-shaping"],
+    )
+    review = {
+        "pr": 53,
+        "repo": idea.repo,
+        "ref": idea.ref,
+    }
+    detail_calls = []
+
+    def hydrate(candidates, **kwargs):
+        detail_calls.append(([item.ref for item in candidates], kwargs))
+
+    _allow_begin(monkeypatch)
+    monkeypatch.setattr(funnel, "reconcile_approved_merges", lambda *args: [])
+    monkeypatch.setattr(
+        funnel, "review_queue",
+        lambda rows, tier, **kwargs: [review],
+    )
+    monkeypatch.setattr(
+        funnel, "_backed_off_work", lambda *args, **kwargs: {},
+    )
+    monkeypatch.setattr(funnel, "shapeable_idea", lambda *args: None)
+
+    assert funnel.cmd_begin(
+        [idea], NOW, "zcode", "standard", False,
+        caller_role="review",
+        _detail_loader=hydrate,
+    ) == 0
+    result = json.loads(capsys.readouterr().out)
+
+    assert result["do"] == "review"
+    assert detail_calls == []
 
 
 def test_begin_prints_a_transient_json_envelope_when_project_load_is_truncated(

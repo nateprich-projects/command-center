@@ -199,6 +199,7 @@ def test_startable_scan_projects_only_shared_listing_fields():
         assert detail not in query
     assert " body" not in query
     assert "timelineItems" not in query
+    assert "name updatedAt" in query
 
     begin_query = funnel._begin_item_query(ALIASES, minimal_startable=True)
     assert funnel.BEGIN_ITEM_NODE_FIELDS in begin_query
@@ -211,6 +212,7 @@ def test_from_node_accepts_shared_startable_projection_aliases():
         2, parent=1, needs="none", risk="escalated",
         lock="2026-09-28T10:00:00Z",
     )
+    source["status"]["updatedAt"] = "2026-09-27T10:00:00Z"
     item = funnel._from_node({
         "id": source["id"],
         "claim": source["lock"],
@@ -229,6 +231,12 @@ def test_from_node_accepts_shared_startable_projection_aliases():
     assert item.risk == "escalated"
     assert item.item_id == source["id"]
     assert item.in_motion_since == funnel.parse_time(source["lock"]["text"])
+    assert item.status_since == funnel.parse_time(
+        source["status"]["updatedAt"]
+    )
+    assert item.status_updated_at == funnel.parse_time(
+        source["status"]["updatedAt"]
+    )
     assert item.body_loaded is False
 
 
@@ -458,8 +466,9 @@ def test_begin_filters_startable_candidates_before_detail_hydration(
         events.append("filter")
         return original_filter(items, agent=agent)
 
-    def hydrate(items, candidates=None):
-        events.append("hydrate")
+    def hydrate(items, candidates=None, *, include_history=False,
+                include_body=False):
+        events.append(("hydrate", include_history, include_body))
         hydrated.extend(item.ref for item in (candidates or items))
 
     monkeypatch.setattr(funnel, "_startable_candidate_items", filter_candidates)
@@ -473,7 +482,7 @@ def test_begin_filters_startable_candidates_before_detail_hydration(
     )
 
     assert loaded.startable_candidates == [eligible, missing_risk]
-    assert events == ["minimal-list", "filter", "hydrate"]
+    assert events == ["minimal-list", "filter", ("hydrate", True, False)]
     assert eligible.ref in hydrated
     assert missing_risk.ref in hydrated
 
@@ -752,27 +761,26 @@ def test_members_and_block_comments_are_handled_as_in_the_full_load(
     ]
 
 
-def test_timings_record_the_same_phases_as_the_full_load(monkeypatch):
+def test_begin_scope_defaults_to_no_history_hydration(monkeypatch):
     monkeypatch.setattr(funnel, "member_repos", lambda: [REPO])
     monkeypatch.setattr(funnel, "gh_graphql",
                         FakeBoard({"open": [([_node(1)], None)]}))
     hydrated = []
     monkeypatch.setattr(
         funnel, "hydrate_item_details",
-        lambda items, candidates=None: hydrated.append(list(items)),
+        lambda items, candidates=None, **kwargs: hydrated.append(list(items)),
     )
     timings = {}
 
     items = funnel.load_items(timings=timings, scope="begin")
 
     assert [item.number for item in items] == [1]
-    assert hydrated == [items]
+    assert hydrated == []
     assert set(timings) == {
         "begin_load.member_repos",
         "begin_load.project_items",
         "begin_load.block_comments",
         "begin_load.anchor_items",
-        "begin_load.item_details",
     }
 
 

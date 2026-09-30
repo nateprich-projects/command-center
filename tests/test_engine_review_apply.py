@@ -992,7 +992,8 @@ def test_merge_history_is_loaded_only_for_the_funnels_own_pr(
         funnel, "load_items", lambda include_details=True: [parent, ticket])
     monkeypatch.setattr(
         funnel, "hydrate_item_details",
-        lambda items, subjects: calls.append([s.ref for s in subjects]))
+        lambda items, subjects, **kwargs: calls.append(
+            [s.ref for s in subjects]))
 
     review_apply.load_merge_items(REPO, fact)
 

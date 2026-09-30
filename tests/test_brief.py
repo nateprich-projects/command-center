@@ -1942,6 +1942,43 @@ def test_brief_emits_elapsed_seconds_for_each_section(monkeypatch, capsys):
     assert all(value >= 0 for value in brief["timings"].values())
 
 
+def test_brief_surfaces_recent_effective_dated_price_changes(
+    monkeypatch, capsys, tmp_path
+):
+    fixture = json.loads(
+        (pathlib.Path(__file__).parent / "fixtures" / "price_watch.json").read_text()
+    )
+    path = tmp_path / "model_rates.json"
+    path.write_text(json.dumps({
+        "schema_version": 1,
+        "rates": fixture["baseline_before_gpt_5_6_luna_update"],
+    }))
+    price_watch_now = datetime(2026, 7, 31, tzinfo=timezone.utc)
+    result = funnel.price_watch.watch(
+        {"openai": ("gpt-5.6-luna",)},
+        {"openai": fixture["captured_openai_update"]},
+        path=path,
+        now=price_watch_now,
+    )
+    assert len(result.changes) == 4
+
+    monkeypatch.setattr(funnel.price_watch, "RATE_TABLE_PATH", path)
+    _make_brief_readers_safe(monkeypatch)
+    monkeypatch.setattr(funnel, "connector_gate_answers", lambda *args, **kwargs: [])
+    monkeypatch.setattr(funnel, "api_cost", lambda: {})
+    monkeypatch.setattr(funnel, "graphql_caller_spend", lambda: {})
+    brief_now = datetime(2026, 8, 2, tzinfo=timezone.utc)
+
+    assert funnel.cmd_brief([], brief_now) == 0
+    brief = json.loads(capsys.readouterr().out)
+
+    assert len(brief["price_changes"]) == 4
+    assert brief["price_changes"][0]["model"] == "gpt-5.6-luna"
+    assert brief["price_changes"][0]["old_rate"] == 0.1
+    assert brief["price_changes"][0]["new_rate"] == 0.02
+    assert brief["price_changes"][0]["effective_date"] == "2026-07-30T00:00:00Z"
+
+
 def test_brief_places_measured_api_cost_in_documented_timings_map(monkeypatch, capsys):
     item = funnel.Item(
         repo="nateprich/beta", number=94, title="API metrics project",

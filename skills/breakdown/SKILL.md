@@ -102,6 +102,22 @@ each outcome to its tickets. **Anything deliberately left out, say so
 plainly** — silent omission is how a project looks finished while missing a
 third of itself.
 
+## Real-data validation
+
+For future breakdowns, apply this rule when any code ticket reads owner-local
+exports, links records across them, or asserts anything about real shape or
+coverage. In-flight breakdowns finish as ticketed.
+
+By default, the first ticket validates the fixtures against a real sample kept
+in an owner-only subdirectory under the documented runtime root and records
+the observed real shape. It posts a derived fixture-vs-real shape and coverage
+note on the validation ticket. Never commit real data: keep samples, raw records,
+and exports out of Git. Keep member-repository identifying details out of the
+note and this standard.
+
+Code tickets do not start until the validation ticket closes. If validation
+closes as blocked, record the reason and leave the code tickets unstarted.
+
 ## Capability
 
 Keep capability separate from sizing: small can still be out of reach. Use

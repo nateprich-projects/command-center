@@ -47,6 +47,7 @@ from typing import (IO, Any, Callable, Collection, Dict, FrozenSet, Iterable,
 import agent_health as agent_health_module
 from agent_health import assess as assess_agent_health
 from decline_classifier import classify_decline_reason
+import price_watch
 
 # --------------------------------------------------------------------------
 # Configuration. These are the only knobs; everything else is derived.
@@ -763,6 +764,7 @@ BRIEF_PURE_SECTIONS = frozenset({
     "disposal",
     "status_state_mismatches",
     "rejected_merges",
+    "price_changes",
 })
 
 # No brief section feeds a gate any more: the merge gate reads the
@@ -3070,6 +3072,7 @@ def projected_pull_order(
     finished: Collection[str] = (),
     in_review: Collection[str] = (),
     recent_starts: Sequence[Optional[str]] = (),
+    repo_readiness: Optional[Mapping[str, MemberRepoReadiness]] = None,
 ) -> List[str]:
     """Every ticket's projected turn, found by running ``next_ticket`` forward.
 
@@ -3087,6 +3090,9 @@ def projected_pull_order(
     fourth start takes one, and a tier-1 Bug showed first on pulls that pass
     it over. ``recent_starts`` is ``recent_ticket_starts``'s answer, and each
     turn that is a new start joins it with the class ``begin`` records.
+    ``repo_readiness`` is the same snapshot used by ``begin`` and
+    ``startable()``; a withheld ticket takes no projected turn and adds no
+    start to that history.
 
     Work already under way -- a claim, a PR in review (``in_review``), a
     human or Claude Code step -- queues with everything else under the same
@@ -3161,7 +3167,8 @@ def projected_pull_order(
         # No claim is left on the copies, so the WIP cap never binds and
         # this is the pick a free lane gets.
         chosen = next_ticket(sim, now, blocked=waiting_on_nate,
-                             backed_off=held, recent_starts=history)
+                             backed_off=held, recent_starts=history,
+                             repo_readiness=repo_readiness)
         if chosen is None and held:
             held = {}
             continue
@@ -12340,10 +12347,10 @@ def _dashboard_ticket(
         "title": item.title,
         "url": item.url,
         "state": item.state,
-        # Where this ticket sits in the engineers' own queue: 0 is the ticket
-        # the next run takes. None means it is not startable — closed, blocked,
-        # or already sitting in review. The order is `startable()`'s, never a
-        # second opinion computed here.
+        # `queue_rank` is the displayed rank in `startable()`'s order. Begin
+        # also applies the one-in-four Bug turn: finite work, then pinned work,
+        # then the startable Bug in the highest repo tier, oldest in that tier.
+        # None means not startable — closed, blocked, or already in review.
         "queue_rank": queue_rank,
         "blockers": list(blockers),
         "blocked_until": (
@@ -14707,6 +14714,7 @@ def cmd_queue(
             paused=_backed_off_work(items, now, rows=heartbeat_rows),
             finished=finished, in_review=in_review,
             recent_starts=recent_ticket_starts(heartbeat_rows),
+            repo_readiness=repo_readiness,
         ))
     }
     tickets.sort(key=lambda item: turn.get(item.ref, len(turn)))
@@ -14749,7 +14757,10 @@ def cmd_queue(
               "cannot be excluded, so the list below may name work that is "
               "already done.".format(pr_facts_unavailable))
 
-    print("\nStartable by Codex ({}), ladder order:".format(len(tickets)))
+    print(
+        "\nStartable by Codex ({}), start order "
+        "(Bug turn: one in four; tier then oldest):".format(len(tickets))
+    )
     _print_queue_section(
         tickets,
         lambda item, prefix: "{}{:<24} {:<34} {}".format(
@@ -15333,6 +15344,9 @@ def cmd_brief(
             "status_state_mismatches",
             lambda: status_state_mismatches(items),
         )
+        price_changes = section(
+            "price_changes", lambda: price_watch.recent_changes(now),
+        )
 
         # The reader-bound sections have now had their deadline-bounded turn.
         # These renderers use only the loaded Project items and preloaded PR
@@ -15370,6 +15384,7 @@ def cmd_brief(
         disposal_report = pure_values["disposal"]
         rejected = pure_values["rejected_merges"]
         status_mismatches = pure_values["status_state_mismatches"]
+        price_changes = pure_values["price_changes"]
         pending_wakes = pending_wakes_json(parked)
 
         blocked_comment_errors = [
@@ -15450,6 +15465,7 @@ def cmd_brief(
             "main_ci": main_ci,
             "member_issues_without_project_items": orphan_issues,
             "outcome_signals": outcome_signals,
+            "price_changes": price_changes,
             "rejected_merges": rejected,
             "degraded": degraded,
             "timings": timings,

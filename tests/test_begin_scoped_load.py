@@ -6,6 +6,7 @@ nothing here reaches GitHub.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import pathlib
 import re
@@ -43,7 +44,7 @@ ALIASES = list(EXPECTED_FILTERS)
 def _node(
     number, *, state="OPEN", reason=None, status="Building", parent=None,
     labels=(), lock=None, title=None, repo=REPO, closed_at=None, needs=None,
-    parent_repo=None,
+    parent_repo=None, children_total=0, risk=None,
 ):
     return {
         "id": "item-{}-{}".format(repo, number),
@@ -51,6 +52,7 @@ def _node(
         "status": {"name": status} if status else None,
         "class": {"name": "New"},
         "needs": {"name": needs} if needs else None,
+        "risk": {"name": risk} if risk else None,
         "content": {
             "number": number,
             "title": title or "issue {}".format(number),
@@ -70,7 +72,7 @@ def _node(
                 if parent is not None
                 else None
             ),
-            "subIssuesSummary": {"total": 0, "completed": 0},
+            "subIssuesSummary": {"total": children_total, "completed": 0},
             "blockedBy": {"nodes": []},
         },
     }
@@ -174,6 +176,286 @@ def test_query_document_carries_each_filter_string_exactly():
     assert query.count("nodes { ...BeginItem }") == len(ALIASES)
     assert funnel.ITEM_NODE_FIELDS in query
     assert funnel.ITEM_NODE_FIELDS in funnel.ITEM_QUERY
+
+
+def test_startable_scan_projects_only_shared_listing_fields():
+    query = funnel._begin_item_query(("open",), minimal_startable=True)
+
+    assert "nodes { ...StartableItem }" in query
+    assert funnel.STARTABLE_ITEM_NODE_FIELDS in query
+    assert funnel.ITEM_NODE_FIELDS not in query
+    for field in (
+        'claim: fieldValueByName(name: "In motion since")',
+        'status: fieldValueByName(name: "Status")',
+        'class: fieldValueByName(name: "Class")',
+        'gate: fieldValueByName(name: "Needs")',
+        'risk: fieldValueByName(name: "Risk")',
+        'pinned: fieldValueByName(name: "Pinned")',
+        "startable: content",
+    ):
+        assert field in query
+    for detail in ('fieldValueByName(name: "Origin")', "assignees"):
+        assert detail not in query
+
+
+def test_from_node_accepts_shared_startable_projection_aliases():
+    source = _node(
+        2, parent=1, needs="none", risk="escalated",
+        lock="2026-09-28T10:00:00Z",
+    )
+    item = funnel._from_node({
+        "id": source["id"],
+        "claim": source["lock"],
+        "status": source["status"],
+        "class": source["class"],
+        "gate": source["needs"],
+        "risk": source["risk"],
+        "pinned": None,
+        "startable": source["content"],
+    })
+
+    assert item is not None
+    assert item.ref == REPO + "#2"
+    assert item.parent == REPO + "#1"
+    assert item.needs == "none"
+    assert item.risk == "escalated"
+    assert item.item_id == source["id"]
+    assert item.in_motion_since == funnel.parse_time(source["lock"]["text"])
+
+
+def test_shared_claim_projection_preserves_the_two_hour_ttl():
+    now = funnel.parse_time("2026-09-28T12:00:00Z")
+
+    def projected_item(claim):
+        source = _node(
+            2, parent=1, needs="none", risk="standard", lock=claim,
+        )
+        return funnel._from_node({
+            "id": source["id"],
+            "claim": source["lock"],
+            "status": source["status"],
+            "class": source["class"],
+            "gate": source["needs"],
+            "risk": source["risk"],
+            "pinned": None,
+            "startable": source["content"],
+        })
+
+    fresh = projected_item("2026-09-28T10:01:00Z")
+    stale = projected_item("2026-09-28T10:00:00Z")
+
+    assert fresh is not None and stale is not None
+    assert funnel.in_motion([fresh], now) == [fresh]
+    assert funnel.stale_locks([fresh], now) == []
+    assert funnel.in_motion([stale], now) == []
+    assert funnel.stale_locks([stale], now) == [stale]
+
+
+def test_shared_projection_does_not_default_an_unset_parent_class():
+    source = _node(1, children_total=1, status="Ready")
+    parent = funnel._from_node({
+        "id": source["id"],
+        "status": source["status"],
+        "class": None,
+        "gate": {"name": "none"},
+        "claim": None,
+        "pinned": None,
+        "startable": source["content"],
+    })
+    ticket = funnel.Item(
+        repo=REPO, number=2, title="ticket", url="", state="OPEN",
+        parent=parent.ref, needs="none",
+    )
+
+    assert parent.klass is None
+    assert funnel._startable_candidate_items([parent, ticket]) == []
+
+
+@pytest.mark.parametrize(
+    ("needs", "expected"),
+    [("none", True), ("agent", True), (None, False), ("human", False),
+     ("claude-code-environment", False), ("external-event", False),
+     ("unknown", False)],
+)
+def test_shared_gate_alias_preserves_needs_routing(needs, expected):
+    parent = funnel.Item(
+        repo=REPO, number=1, title="parent", url="", state="OPEN",
+        status="Building", klass="Improve", origin="agent",
+        needs="none", children_total=1,
+    )
+    ticket = funnel.Item(
+        repo=REPO, number=2, title="ticket", url="", state="OPEN",
+        parent=parent.ref, origin="agent", risk=None, needs=needs,
+    )
+
+    assert bool(funnel._startable_candidate_items([parent, ticket])) is expected
+
+
+def test_unset_risk_does_not_drop_a_startable_ticket():
+    parent = funnel.Item(
+        repo=REPO, number=1, title="parent", url="", state="OPEN",
+        status="Building", klass="Improve", needs="none", children_total=1,
+    )
+    ticket = funnel.Item(
+        repo=REPO, number=2, title="ticket", url="", state="OPEN",
+        body="ordinary implementation details", parent=parent.ref,
+        needs="none", risk=None,
+    )
+
+    assert funnel._startable_candidate_items([parent, ticket]) == [ticket]
+
+
+def test_standard_risk_uses_the_canonical_field_not_issue_prose():
+    ticket = funnel.Item(
+        repo=REPO, number=2, title="ticket", url="", state="OPEN",
+        body="Risk: escalated — concurrency", risk="standard",
+    )
+
+    assert funnel._ticket_work_tier(ticket) == "standard"
+
+
+def test_unknown_risk_fails_closed_in_shared_startable_candidates():
+    parent = funnel.Item(
+        repo=REPO, number=1, title="parent", url="", state="OPEN",
+        status="Building", klass="Improve", needs="none", children_total=1,
+    )
+    ticket = funnel.Item(
+        repo=REPO, number=2, title="ticket", url="", state="OPEN",
+        parent=parent.ref, needs="none", risk="unrecognized",
+    )
+
+    assert funnel._startable_candidate_items([parent, ticket]) == []
+
+
+def test_shared_candidates_recheck_unsatisfiable_acceptance_digest():
+    parent = funnel.Item(
+        repo=REPO, number=1, title="parent", url="", state="OPEN",
+        status="Ready", klass="Improve", needs="none", children_total=1,
+    )
+    original = "Accept: an agent can never meet this condition"
+    ticket = funnel.Item(
+        repo=REPO, number=2, title="ticket", url="", state="OPEN",
+        body=original, parent=parent.ref, needs="agent", risk="standard",
+        decline_route={
+            "type": "unsatisfiable-acceptance",
+            "acceptance_digest": hashlib.sha256(
+                original.encode("utf-8")
+            ).hexdigest(),
+        },
+    )
+    rows = [parent, ticket]
+
+    assert funnel._startable_candidate_items(rows) == []
+
+    ticket.body = original + "\n\nAccept revised after shaping."
+    candidates = funnel._startable_candidate_items(rows)
+    listing = funnel.startable_listing(rows, candidate_items=candidates)
+
+    assert candidates == [ticket]
+    assert listing == [ticket]
+
+
+def test_shared_candidates_clear_an_answered_pending_gate_before_selection(
+    monkeypatch,
+):
+    parent = funnel.Item(
+        repo=REPO, number=1, title="parent", url="", state="OPEN",
+        status="Ready", klass="Improve", needs="none", children_total=1,
+    )
+    gate = funnel.Item(
+        repo=REPO, number=3, title="answer the gate", url="", state="OPEN",
+        body="Gates: is the plan good?",
+    )
+    ticket = funnel.Item(
+        repo=REPO, number=2, title="ticket", url="", state="OPEN",
+        body="Accept: wait for the gate", parent=parent.ref,
+        item_id="project-item-2", needs="external-event", risk="standard",
+        decline_route={
+            "type": "pending-gate-answer",
+            "gate_ref": gate.ref,
+        },
+    )
+    rows = [parent, gate, ticket]
+    monkeypatch.setattr(funnel, "write_project_select", lambda *_args: None)
+
+    assert funnel._startable_candidate_items(rows) == []
+
+    gate.body += "\n\n" + funnel.gates_answer_block(
+        "the plan is good", "Nate",
+    )
+    candidates = funnel._startable_candidate_items(rows)
+    listing = funnel.startable_listing(rows, candidate_items=candidates)
+
+    assert ticket.needs == "external-event"
+    assert candidates == [ticket]
+    assert listing == [ticket]
+
+    assert funnel.clear_answered_decline_routes(rows) == [
+        {"ref": ticket.ref, "gate_ref": gate.ref}
+    ]
+    candidates = funnel._startable_candidate_items(rows)
+    listing = funnel.startable_listing(rows, candidate_items=candidates)
+
+    assert ticket.needs == "none"
+    assert candidates == [ticket]
+    assert listing == [ticket]
+
+
+def test_begin_filters_startable_candidates_before_detail_hydration(
+    monkeypatch,
+):
+    parent = funnel.Item(
+        repo=REPO, number=1, title="parent", url="", state="OPEN",
+        status="Building", klass="Improve", origin="agent",
+        risk="standard", needs="none", children_total=1,
+    )
+    eligible = funnel.Item(
+        repo=REPO, number=2, title="eligible", url="", state="OPEN",
+        parent=parent.ref, origin="agent", risk="standard", needs="none",
+    )
+    missing_risk = funnel.Item(
+        repo=REPO, number=3, title="missing risk", url="", state="OPEN",
+        parent=parent.ref, origin="agent", risk=None, needs="none",
+    )
+    rows = [parent, eligible, missing_risk]
+    events = []
+    hydrated = []
+    original_filter = funnel._startable_candidate_items
+
+    def load_minimal(_members, _timings, _shape_issue=None,
+                     minimal_startable=False, require_open=True):
+        assert minimal_startable
+        events.append("minimal-list")
+        return list(rows)
+
+    monkeypatch.setattr(funnel, "_load_begin_items", load_minimal)
+    monkeypatch.setattr(
+        funnel, "_load_begin_anchor_items",
+        lambda *_args, **_kwargs: [],
+    )
+
+    def filter_candidates(items, agent="codex"):
+        events.append("filter")
+        return original_filter(items, agent=agent)
+
+    def hydrate(items, candidates=None):
+        events.append("hydrate")
+        hydrated.extend(item.ref for item in (candidates or items))
+
+    monkeypatch.setattr(funnel, "_startable_candidate_items", filter_candidates)
+    monkeypatch.setattr(funnel, "hydrate_item_details", hydrate)
+
+    loaded = funnel.load_items(
+        member_repo_names=[REPO],
+        scope="begin",
+        include_startable=True,
+        include_details=True,
+    )
+
+    assert loaded.startable_candidates == [eligible, missing_risk]
+    assert events == ["minimal-list", "filter", "hydrate"]
+    assert eligible.ref in hydrated
+    assert missing_risk.ref in hydrated
 
 
 def test_second_page_is_requested_for_the_paging_alias_only(monkeypatch):

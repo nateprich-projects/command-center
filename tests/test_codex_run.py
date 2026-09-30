@@ -224,10 +224,20 @@ def test_begin_in_a_directory_inside_the_workspace_is_ok(tmp_path):
     assert _check(tmp_path, cwd=os.path.join(WORKSPACE, "checkout"))["ok"]
 
 
+def test_begin_from_the_heartbeat_spool_uses_its_session_directory(tmp_path):
+    _rollout(tmp_path)
+
+    result = _check(tmp_path, cwd=codex_run.HEARTBEAT_SPOOL)
+
+    assert result["ok"] is True, result
+    assert result["drift"] == []
+
+
 @pytest.mark.parametrize("cwd", [
     WORKSPACE + "0",
     codex_run.SESSION_WORKSPACES,
     os.path.join(HOME, ".claude", "command-center-run"),
+    os.path.join(codex_run.HEARTBEAT_SPOOL, "subdirectory"),
 ])
 def test_begin_outside_its_sessions_directory_is_refused(tmp_path, cwd):
     _rollout(tmp_path)
@@ -645,6 +655,29 @@ def test_begin_reads_the_real_rollout_end_to_end(
     assert "effort: expected max, found high" in result["why"]
     assert workspace in result["why"]
     assert [event[2] for event in events] == ["config-drift"]
+
+
+def test_begin_from_heartbeat_spool_uses_its_own_session_rollout(
+        monkeypatch, capsys, tmp_path, codex_settings_match):
+    monkeypatch.setattr(funnel, "_codex_settings_check", codex_settings_match)
+    sessions = tmp_path / "sessions"
+    workspace = os.path.join(codex_run.SESSION_WORKSPACES, "2026-09-22",
+                             "fixture-run")
+    monkeypatch.setattr(codex_run, "DEFAULT_SESSIONS", str(sessions))
+    monkeypatch.setenv("CODEX_THREAD_ID", THREAD)
+    monkeypatch.setattr(os, "getcwd", lambda: codex_run.HEARTBEAT_SPOOL)
+    _rollout(sessions, cwd=workspace, day=datetime.date.today(),
+             turns=[_turn(cwd=workspace)])
+    monkeypatch.setattr(usage, "read_agent", lambda *args: {"windows": {}})
+    monkeypatch.setattr(usage, "pace", lambda *args, **kwargs: {
+        "over_pace": True})
+
+    code, result, events, _ = _begin_codex(monkeypatch, capsys)
+
+    assert code == 0
+    assert result["gate"] == "over"
+    assert result["effective"] == {"model": "gpt-6-luna", "effort": "max"}
+    assert events == []
 
 
 def test_a_check_that_raises_is_a_refusal(monkeypatch, codex_settings_match):

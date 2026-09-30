@@ -194,7 +194,9 @@ def test_a_mixed_case_repo_withholds_it(monkeypatch):
     assert _withheld(monkeypatch, [project, ticket], ticket, note) == {ticket.ref}
 
 
-def test_the_165_record_on_an_unrelated_issue_does_not_withhold(monkeypatch):
+def test_the_165_record_on_an_unrelated_issue_stays_in_the_queue(
+    monkeypatch, capsys,
+):
     """Codex run e1b3abbcf90a bound #165 and commented on #780 (2026-09-13)."""
     project = _project(162, repo=CC)
     ticket = _ticket(165, project, repo=CC)
@@ -205,6 +207,25 @@ def test_the_165_record_on_an_unrelated_issue_does_not_withhold(monkeypatch):
     assert _withheld(monkeypatch, [project, ticket], ticket, note,
                      run="e1b3abbcf90a") == set()
     assert [i.ref for i in funnel.startable([project, ticket])] == [ticket.ref]
+
+    monkeypatch.setattr(funnel, "ticket_pr_facts", lambda _items: {})
+    monkeypatch.setattr(funnel, "awaiting_review", lambda _items, pr_facts=None: set())
+    calls = []
+    original_listing = funnel.startable_listing
+
+    def counted_listing(*args, **kwargs):
+        result = original_listing(*args, **kwargs)
+        calls.append([item.ref for item in result])
+        return result
+
+    monkeypatch.setattr(funnel, "startable_listing", counted_listing)
+    assert funnel.cmd_queue([project, ticket], NOW, pr_facts={}) == 0
+    output = capsys.readouterr().out
+    assert "Startable by Codex (1)" in output
+    assert ticket.ref in output
+    # The projected-turn simulation re-evaluates later states; the first
+    # listing is the queue's shared startable view.
+    assert calls[0] == [ticket.ref]
 
 
 def test_the_same_number_in_another_repo_does_not_withhold(monkeypatch):

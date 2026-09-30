@@ -11173,6 +11173,11 @@ def _from_node(node: dict) -> Optional[Item]:
     status_updated_at = parse_time(
         (node.get("status") or {}).get("updatedAt")
     )
+    # The shared queue/begin projection intentionally omits timeline history,
+    # so its Status write time is the available age fallback. Ordinary compact
+    # loads keep ``status_since`` unknown until a timeline read so callers that
+    # need history still hydrate it.
+    status_since = status_updated_at if "startable" in node else None
 
     item = Item(
         repo=content["repository"]["nameWithOwner"],
@@ -11185,7 +11190,7 @@ def _from_node(node: dict) -> Optional[Item]:
         state_reason=content.get("stateReason"),
         created_at=parse_time(content.get("createdAt")),
         status=status,
-        status_since=status_updated_at,
+        status_since=status_since,
         status_updated_at=status_updated_at,
         klass=(node.get("class") or {}).get("name"),
         origin=(node.get("origin") or {}).get("name"),

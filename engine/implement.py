@@ -2680,7 +2680,10 @@ def _remove_codex_run_checkout(root: pathlib.Path, number: int,
     The per-run clone is named ``ticket-<number>-<UTC timestamp>`` and is
     owner-only. Restrict removal to that exact direct child; finish-ticket also
     runs from session workspaces and other agents' checkouts, which must remain
-    untouched.
+    untouched. For Git checkouts, remove only when the tree is clean and HEAD
+    exactly matches ``origin/ticket/<number>``. A non-Git directory retains the
+    prior cleanup behavior; the production finish path obtains its root from a
+    validated Git checkout.
 
     Live runs clone into the heartbeat directory's ``codex-runs/``
     (``heartbeat.SPOOL_DIR``), because that is the Codex sandbox's only
@@ -2692,14 +2695,12 @@ def _remove_codex_run_checkout(root: pathlib.Path, number: int,
     ``review-evidence-*``, so no guard below can match them; they are
     removed by review_evidence itself.
 
-    Call it only once this run has pushed the ticket branch. #1711 also
-    removed the checkout once a finish recorded work not kept, but that
-    checkout can hold the only copy of the work: a stray-file refusal, a
-    ``_keep_work`` failure before its push, a superseded run, a decline or
-    a human step. Those paths never ran live while the root went unmatched,
-    so matching it (#1856) would have started deleting that work. They leave
-    the directory for a later run or Nate to recover: a leaked directory is
-    the safe failure, lost work is not.
+    Call it only after a finish effect sequence has recorded its outcome.
+    The branch may have been pushed by this run or an earlier one; an exact
+    remote-tip match and a clean tree prove that this checkout holds no unique
+    Git work. A stray-file refusal, a ``_keep_work`` failure before its push,
+    or a superseded run can still hold the only copy, so those paths do not
+    call this cleanup and the pushed/clean guard keeps any other unsafe tree.
     """
     if agent != "codex":
         return False
@@ -2734,6 +2735,43 @@ def _remove_codex_run_checkout(root: pathlib.Path, number: int,
         if (not checkout.is_dir() or info.st_uid != os.getuid()
                 or info.st_mode & 0o077):
             return False
+        if (checkout / ".git").exists():
+            try:
+                top = _run(
+                    ["git", "rev-parse", "--show-toplevel"],
+                    cwd=checkout, check=False,
+                    timeout=LOCAL_GIT_TIMEOUT_SECONDS,
+                )
+                branch = _run(
+                    ["git", "branch", "--show-current"],
+                    cwd=checkout, check=False,
+                    timeout=LOCAL_GIT_TIMEOUT_SECONDS,
+                )
+                status = _run(
+                    ["git", "status", "--porcelain", "--untracked-files=all"],
+                    cwd=checkout, check=False,
+                    timeout=LOCAL_GIT_TIMEOUT_SECONDS,
+                )
+                head = _run(
+                    ["git", "rev-parse", "--verify", "HEAD"],
+                    cwd=checkout, check=False,
+                    timeout=LOCAL_GIT_TIMEOUT_SECONDS,
+                )
+                remote_head = _run(
+                    ["git", "rev-parse", "--verify",
+                     "refs/remotes/origin/ticket/{}".format(number)],
+                    cwd=checkout, check=False,
+                    timeout=LOCAL_GIT_TIMEOUT_SECONDS,
+                )
+            except (ImplementError, OSError, subprocess.SubprocessError):
+                return False
+            if (any(result.returncode != 0 for result in
+                    (top, branch, status, head, remote_head))
+                    or pathlib.Path(top.stdout.strip()).resolve() != checkout
+                    or branch.stdout.strip() != "ticket/{}".format(number)
+                    or status.stdout.strip()
+                    or head.stdout.strip() != remote_head.stdout.strip()):
+                return False
         current = pathlib.Path.cwd().resolve()
         try:
             current.relative_to(checkout)
@@ -2972,8 +3010,9 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
                 ", ".join(evidence))
             if extra_note:
                 note += "; " + extra_note.strip()
-            # Nothing was pushed, so the checkout stays (#1856).
             heartbeat_finish(agent, run, "done", note, ref)
+            _remove_codex_run_checkout(
+                context["root"], context["number"], agent)
             return {"number": context["number"], "url": ticket["url"],
                     "closed": True}
         # Re-read immediately before pushing so a ticket branch never carries
@@ -3055,9 +3094,9 @@ def finish_blocked_on_human(
         extra_note: Optional[str] = None) -> dict:
     """File the human step, block the ticket, release, and finish. No PR.
 
-    No test run, commit, or push happens here: the finish records the
-    implementation as not kept and leaves this run's Codex checkout, which
-    may hold the only copy of it (#1856; #1711 removed it).
+    No test run, commit, or push happens here. After recording the finish, the
+    guarded cleanup removes a checkout only if its clean Git head already
+    matches the ticket's remote branch; unpushed or dirty work stays (#1856).
     A failure after the sub-issue exists names it, so the retry starts
     from GitHub's truth rather than filing a second one. The step's Needs
     follows its reason: ``session_needs_effect`` for a step a Claude Code
@@ -3124,6 +3163,7 @@ def finish_blocked_on_human(
     if extra_note:
         note += "; " + extra_note.strip()
     heartbeat_finish(agent, run, "skipped-human-step", note, ref)
+    _remove_codex_run_checkout(context["root"], context["number"], agent)
     return {"ticket": ref,
             "human_step": {"number": created["number"],
                            "ref": created["ref"],
@@ -3182,6 +3222,7 @@ def _finish_closed_human_step(
     if extra_note:
         note += "; " + extra_note.strip()
     heartbeat_finish(agent, run, "skipped-blocked", note, ref)
+    _remove_codex_run_checkout(root, number, agent)
     return {"ticket": ref, "closed_human_step": step_ref, "routed": routed}
 
 
@@ -3226,6 +3267,8 @@ def finish_declined(
         if extra_note:
             note += "; " + extra_note.strip()
         heartbeat_finish(agent, run, "done", note, ref)
+        _remove_codex_run_checkout(
+            context["root"], context["number"], agent)
         return {"ticket": ref, "declined": reason}
     accept_conflict_routed = (
         decline_class == "accept-body-conflict" and decline_target is not None
@@ -3370,6 +3413,7 @@ def finish_declined(
     if extra_note:
         note += "; " + extra_note.strip()
     heartbeat_finish(agent, run, "skipped-blocked", note, ref)
+    _remove_codex_run_checkout(context["root"], context["number"], agent)
     return {"ticket": ref, "declined": reason}
 
 

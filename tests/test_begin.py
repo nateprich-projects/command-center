@@ -133,6 +133,16 @@ def _deny_preflight_project_reads(monkeypatch):
         monkeypatch.setattr(funnel, name, denied(name))
     monkeypatch.setattr(funnel.subprocess, "run", denied("subprocess.run"))
 
+    real_clock = funnel.time
+
+    class NoTimeoutClock:
+        def __getattr__(self, name):
+            if name in ("monotonic", "perf_counter", "sleep", "time"):
+                return denied("time." + name)
+            return getattr(real_clock, name)
+
+    monkeypatch.setattr(funnel, "time", NoTimeoutClock())
+
 
 def _begin(monkeypatch, capsys, *, breakdown):
     _allow_begin(monkeypatch)

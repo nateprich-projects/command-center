@@ -12041,6 +12041,8 @@ def load_items(
                     begin_items, details, include_history=True
                 ),
             )
+        # Keep the scope on the actual list; FunnelSession uses this tag to
+        # decide whether a later command can reuse the view or must load all.
         return ScopedItems(
             begin_items,
             scope="begin",

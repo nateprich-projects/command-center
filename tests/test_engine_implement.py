@@ -732,6 +732,44 @@ def test_no_diff_with_verified_evidence_closes_and_finishes(
         assert url in effects["finished"][0][3]
 
 
+def test_no_diff_finish_removes_a_clean_pushed_run_checkout(
+        tmp_path, monkeypatch):
+    # Reproduction: the no-diff caller returned after closing the ticket
+    # without invoking cleanup for an already-pushed, clean branch.
+    remote, clone = make_heartbeat_codex_run_clone(tmp_path, monkeypatch)
+    run_git("push", "--quiet", "--set-upstream", "origin", "ticket/42",
+            cwd=clone)
+    _stub_claim_state(monkeypatch, "empty")
+    monkeypatch.setattr(implement, "fetch_ticket",
+                        lambda repo, number: ticket(number))
+    monkeypatch.setattr(
+        implement, "_verify_done_evidence",
+        lambda evidence, *, run, agent: list(evidence),
+    )
+    effects = {"released": [], "finished": []}
+    assert run_git("status", "--porcelain", cwd=clone).stdout == ""
+    assert run_git("rev-parse", "HEAD", cwd=clone).stdout.strip() == (
+        run_git("--git-dir", str(remote), "rev-parse",
+                "refs/heads/ticket/42").stdout.strip()
+    )
+    monkeypatch.chdir(clone)
+
+    implement.finish_done(
+        {**answer(), "evidence": ["https://github.com/example/project/issues/1"]},
+        run="run-42",
+        repo=REPO,
+        cwd=clone,
+        test_commands=[[sys.executable, "-c", "pass"]],
+        release=effects["released"].append,
+        heartbeat_finish=lambda *args: effects["finished"].append(args),
+        close_effect=lambda *args, **kwargs: None,
+    )
+
+    assert effects["released"] == [REPO + "#42"]
+    assert effects["finished"][0][2] == "done"
+    assert not clone.exists()
+
+
 def test_no_diff_without_evidence_fails_named_without_effects(
         tmp_path, monkeypatch):
     _, clone = make_clone(tmp_path)
@@ -1536,6 +1574,28 @@ def test_heartbeat_root_cleanup_refuses_another_tickets_checkout(
     assert not checkout.exists()
 
 
+@pytest.mark.parametrize("work_state", ("unpushed", "dirty"))
+def test_heartbeat_root_cleanup_keeps_unpushed_or_dirty_git_checkouts(
+        tmp_path, monkeypatch, work_state):
+    remote, checkout = make_heartbeat_codex_run_clone(tmp_path, monkeypatch)
+    if work_state == "unpushed":
+        (checkout / "local.txt").write_text("local-only\n")
+        run_git("add", "local.txt", cwd=checkout)
+        run_git("commit", "--quiet", "-m", "local only", cwd=checkout)
+    else:
+        run_git("push", "--quiet", "--set-upstream", "origin", "ticket/42",
+                cwd=checkout)
+        (checkout / "README.md").write_text("dirty local copy\n")
+
+    assert not implement._remove_codex_run_checkout(checkout, 42, "codex")
+    assert checkout.is_dir()
+    if work_state == "unpushed":
+        assert run_git("--git-dir", str(remote), "branch", "--list",
+                       "ticket/42").stdout == ""
+    else:
+        assert run_git("status", "--porcelain", cwd=checkout).stdout
+
+
 def test_heartbeat_root_cleanup_is_for_codex_runs_only(
         tmp_path, monkeypatch):
     runs_root = point_runs_roots_at(tmp_path, monkeypatch)
@@ -2002,10 +2062,18 @@ def test_a_member_answer_error_note_drops_the_git_error(
 ), ids=("pushed", "not-pushed"))
 def test_an_answer_error_removes_the_run_checkout_only_once_pushed(
         tmp_path, monkeypatch, kept, pushed):
-    _, clone = make_heartbeat_codex_run_clone(tmp_path, monkeypatch)
+    remote, clone = make_heartbeat_codex_run_clone(tmp_path, monkeypatch)
     (clone / "implemented.txt").write_text("done\n")
-    monkeypatch.setattr(implement, "_keep_work",
-                        lambda *args, **kwargs: (kept, pushed))
+
+    def keep_work(*args, **kwargs):
+        if pushed:
+            run_git("add", "implemented.txt", cwd=clone)
+            run_git("commit", "--quiet", "-m", "kept work", cwd=clone)
+            run_git("push", "--quiet", "--set-upstream", "origin",
+                    "ticket/42", cwd=clone)
+        return kept, pushed
+
+    monkeypatch.setattr(implement, "_keep_work", keep_work)
 
     assert implement._recover_answer_error(
         implement.ImplementError("answer is not valid JSON: boom"),
@@ -2014,6 +2082,9 @@ def test_an_answer_error_removes_the_run_checkout_only_once_pushed(
 
     # Unpushed, the checkout is the only copy (#1856).
     assert clone.exists() is not pushed
+    if pushed:
+        assert run_git("--git-dir", str(remote), "rev-parse",
+                       "refs/heads/ticket/42").stdout.strip()
 
 
 def test_finish_ticket_requires_the_deterministic_branch(tmp_path):
@@ -2810,6 +2881,41 @@ def test_finish_declined_labels_comments_releases_and_finishes(
     assert "ticket/42" not in refs
     dirty = run_git("status", "--porcelain", cwd=clone).stdout.strip()
     assert "halfway.txt" in dirty
+
+
+def test_finish_declined_removes_a_clean_pushed_run_checkout(
+        tmp_path, monkeypatch):
+    # Declines also ended without invoking cleanup, which multiplied clean
+    # checkouts when a ticket was re-offered.
+    remote, clone = make_heartbeat_codex_run_clone(tmp_path, monkeypatch)
+    run_git("push", "--quiet", "--set-upstream", "origin", "ticket/42",
+            cwd=clone)
+    monkeypatch.setattr(implement, "fetch_ticket",
+                        lambda repo, number: ticket(number))
+    effects = {"released": [], "finished": []}
+    assert run_git("status", "--porcelain", cwd=clone).stdout == ""
+    assert run_git("--git-dir", str(remote), "rev-parse",
+                   "refs/heads/ticket/42").stdout.strip() == (
+        run_git("rev-parse", "HEAD", cwd=clone).stdout.strip()
+    )
+    monkeypatch.chdir(clone)
+
+    result = implement.finish_declined(
+        "I could not verify the required evidence.",
+        run="run-42",
+        repo=REPO,
+        cwd=clone,
+        release=effects["released"].append,
+        heartbeat_finish=lambda *args: effects["finished"].append(args),
+        block_effect=lambda *args, **kwargs: None,
+        comment_effect=lambda *args, **kwargs: None,
+        declined_needs_effect=lambda url, ref: None,
+    )
+
+    assert result["ticket"] == REPO + "#42"
+    assert effects["released"] == [REPO + "#42"]
+    assert effects["finished"][0][2] == "skipped-blocked"
+    assert not clone.exists()
 
 
 @pytest.mark.parametrize(("reason", "prerequisite"), [
@@ -4646,9 +4752,11 @@ def test_finish_git_invocation_sites_match_the_recorded_inventory():
         actual[(second, following)] += 1
 
     expected = Counter({
-        ("rev-parse", "--show-toplevel"): 1,
+        ("rev-parse", "--show-toplevel"): 2,
         ("rev-parse", "HEAD"): 1,
-        ("branch", "--show-current"): 1,
+        ("rev-parse", "--verify"): 2,
+        ("branch", "--show-current"): 2,
+        ("status", "--porcelain"): 1,
         ("remote", "get-url"): 2,
         ("ls-remote", "--exit-code"): 2,
         ("<path-command>", ""): 1,
@@ -4663,13 +4771,15 @@ def test_finish_git_invocation_sites_match_the_recorded_inventory():
     assert actual == expected
 
     inventory = (ROOT / "docs" / "finish-subprocess-bounds.md").read_text()
-    assert "19 bounded Git callsites" in inventory
+    assert "24 bounded Git callsites" in inventory
+    assert "23 static callsites" in inventory
     for command in (
         "git diff --name-only -z",
         "git diff --cached --name-only -z",
         "git ls-files --others --exclude-standard -z",
         "git diff --name-only -z origin/main...HEAD",
         "git ls-files -z -- <selected paths>",
+        "git status --porcelain --untracked-files=all",
         "git fetch origin",
         "git merge-base --is-ancestor",
         "git merge -s ours",

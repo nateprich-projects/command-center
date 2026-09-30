@@ -1219,7 +1219,9 @@ def test_packet_without_a_ticket_branch_has_no_ticket_body():
     found = packet(pr_view=view, ticket=None)
     assert found["ticket"] == {
         "ref": None, "number": None, "title": None, "url": None,
-        "body": None, "risk": None, "parent": None, "comments": []}
+        "body": None, "risk": None, "parent": None, "comments": [],
+        "parent_rejected_excerpt": "",
+        "parent_rejected_excerpt_truncated": False}
 
 
 def test_packet_marks_a_missing_plan():
@@ -1227,12 +1229,86 @@ def test_packet_marks_a_missing_plan():
     assert found["plan_md"] == "" and found["plan_md_missing"] is True
 
 
-def test_a_plan_md_over_64k_characters_is_cut_and_marked():
-    """Context is bounded, never rejected (#1801)."""
-    found = packet(plan_md="d" * 65546, verdict=None)
-    assert found["plan_md"] == "d" * 65536 + "\n…[truncated 10 chars]"
-    assert found["precheck"] == {"pass": True, "reasons": []}
-    assert packet(plan_md="d" * 65536)["plan_md"] == "d" * 65536
+def test_current_plan_plus_6000_chars_keeps_verification_status_whole():
+    current_plan = (ROOT / "plan.md").read_text()
+    source = current_plan + "x" * 6000
+    verification_tail = current_plan[
+        current_plan.index("## Verification status"):]
+
+    found = packet(plan_md=source, verdict=None)
+
+    assert found["plan_md"].endswith(verification_tail + "x" * 6000)
+
+
+def test_plan_md_at_or_under_96000_characters_passes_unchanged():
+    assert review.PLAN_MD_LIMIT == 96_000
+    for size in (95_999, 96_000):
+        source = "d" * size
+        assert packet(plan_md=source, verdict=None)["plan_md"] == source
+
+
+@pytest.mark.parametrize(
+    ("filler_size", "omitted", "kept"),
+    [
+        (87_900, ("The problem",),
+         ("Scope and membership", "Surfaces", "Architecture")),
+        (91_000, ("The problem", "Surfaces"),
+         ("Scope and membership", "Architecture")),
+        (93_000, ("The problem", "Surfaces", "Scope and membership"),
+         ("Architecture",)),
+        (95_000, ("The problem", "Surfaces", "Scope and membership",
+                  "Architecture"), ()),
+    ],
+)
+def test_plan_md_drops_named_sections_in_priority_order_before_protected_tail(
+        filler_size, omitted, kept):
+    source = (
+        "## The problem\n" + "p" * 2_000 + "\n"
+        "## Scope and membership\n" + "s" * 2_000 + "\n"
+        "## Surfaces\n" + "u" * 2_000 + "\n"
+        "## Architecture\n" + "a" * 2_000 + "\n"
+        "## The funnel\n" + "f" * filler_size + "\n"
+        "## Decisions settled at build kickoff (2026-09-05)\n"
+        "Keep the settled decisions.\n"
+        "## Verification status\n"
+        "Keep the verification status.\n"
+    )
+
+    found = packet(plan_md=source, verdict=None)["plan_md"]
+
+    for title in omitted:
+        assert f"[section omitted: {title}]" in found
+    for title in kept:
+        assert f"## {title}\n" in found
+        assert f"[section omitted: {title}]" not in found
+    assert "Keep the settled decisions." in found
+    assert "Keep the verification status." in found
+    assert len(found) <= review.PLAN_MD_LIMIT
+
+
+def test_plan_md_continued_growth_drops_other_sections_before_protected_tail():
+    source = (
+        "## The problem\n" + "p" * 500 + "\n"
+        "## Surfaces\n" + "u" * 500 + "\n"
+        "## Scope and membership\n" + "s" * 500 + "\n"
+        "## Architecture\n" + "a" * 500 + "\n"
+        "## The funnel\n" + "f" * 52_000 + "\n"
+        "## Two queues, two orderings\n" + "q" * 51_000 + "\n"
+        "## Decisions settled at build kickoff (2026-09-05)\n"
+        "Keep the settled decisions.\n"
+        "## Verification status\n"
+        "Keep the verification status.\n"
+    )
+
+    found = packet(plan_md=source, verdict=None)["plan_md"]
+
+    for title in ("The problem", "Surfaces", "Scope and membership",
+                  "Architecture", "The funnel"):
+        assert f"[section omitted: {title}]" in found
+    assert "## Two queues, two orderings\n" in found
+    assert "Keep the settled decisions." in found
+    assert "Keep the verification status." in found
+    assert len(found) <= review.PLAN_MD_LIMIT
 
 
 def test_a_ticket_body_over_20000_characters_is_cut_and_marked():
@@ -1592,6 +1668,96 @@ def test_packet_carries_parent_comments_with_the_same_shape_and_caps():
          "voice": "unknown",
          "body": "z" * 4000 + "\n…[truncated 100 chars]"},
     ]
+    json.dumps(found)
+
+
+def test_shape_ticket_extracts_only_the_first_parent_rejected_section():
+    body = (
+        "# Parent plan\n\n"
+        "## Accepted\nKeep this out of the ticket packet.\n\n"
+        "## Rejected\n- Keep the existing boundary.\n"
+        "### Detail\nThis nested heading stays in the section.\n"
+        "## Follow-up\nThis later section is not carried.\n"
+        "## Rejected\nOnly the first matching section is used.\n"
+    )
+
+    shaped = review.shape_ticket(ticket(parent={"body": body, "comments": []}))
+
+    assert shaped["parent_rejected_excerpt"] == (
+        "## Rejected\n- Keep the existing boundary.\n"
+        "### Detail\nThis nested heading stays in the section.\n"
+    )
+    assert shaped["parent_rejected_excerpt_truncated"] is False
+    assert "body" not in shaped["parent"]
+
+
+def test_shape_ticket_returns_an_empty_rejected_excerpt_when_missing():
+    shaped = review.shape_ticket(ticket(parent={
+        "body": (
+            "# Parent plan\n\n"
+            "```markdown\n## Rejected\nThis is an example, not a section.\n````\n"
+            "## Accepted\nKeep this plan choice.\n"
+        ),
+        "comments": [],
+    }))
+
+    assert shaped["parent_rejected_excerpt"] == ""
+    assert shaped["parent_rejected_excerpt_truncated"] is False
+
+
+def test_shape_ticket_bounds_parent_rejected_excerpt_on_a_line_boundary():
+    lines = ["## Rejected\n"] + [
+        "- option {} {}\n".format(index, "x" * 100)
+        for index in range(30)
+    ] + ["## Accepted\nDo not include this section.\n"]
+    body = "# Parent plan\n\n" + "".join(lines)
+
+    shaped = review.shape_ticket(ticket(parent={"body": body, "comments": []}))
+    excerpt = shaped["parent_rejected_excerpt"]
+    marker = review.PARENT_REJECTED_TRUNCATION_MARKER
+    prefix = excerpt[:excerpt.index(marker)]
+
+    assert len(excerpt) <= review.PARENT_REJECTED_EXCERPT_LIMIT
+    assert excerpt.endswith(marker)
+    assert prefix.endswith("\n")
+    assert "".join(lines).startswith(prefix)
+    assert shaped["parent_rejected_excerpt_truncated"] is True
+
+
+def test_shape_ticket_matches_casefolded_rejected_heading_variants():
+    body = (
+        "# Parent plan\n"
+        "# rEjEcTeD ###\n- keep this choice\n"
+        "### Detail\nNested content remains.\n"
+        "# Accepted\nThis follows the same-level heading.\n"
+    )
+
+    shaped = review.shape_ticket(ticket(parent={"body": body, "comments": []}))
+
+    assert shaped["parent_rejected_excerpt"] == (
+        "# rEjEcTeD ###\n- keep this choice\n"
+        "### Detail\nNested content remains.\n"
+    )
+    assert shaped["parent_rejected_excerpt_truncated"] is False
+
+
+def test_packet_wires_parent_rejected_excerpt_and_keeps_other_body_text_out():
+    body = (
+        "# Parent plan\n\n"
+        "## Rejected\n- Keep the bounded, dedicated field.\n\n"
+        "## Accepted\nDo not carry this parent prose.\n"
+    )
+    parent = {"number": 1, "ref": REPO + "#1", "body": body,
+              "comments": []}
+
+    found = packet(ticket=ticket(parent=parent))
+
+    for shaped in (found["ticket"], found["tickets"][0]):
+        assert shaped["parent_rejected_excerpt"] == (
+            "## Rejected\n- Keep the bounded, dedicated field.\n\n")
+        assert shaped["parent_rejected_excerpt_truncated"] is False
+        assert "body" not in shaped["parent"]
+        assert "Accepted" not in shaped["parent_rejected_excerpt"]
     json.dumps(found)
 
 

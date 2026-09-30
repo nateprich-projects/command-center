@@ -7837,3 +7837,4 @@
 {"agent": "codex", "job": "command-center-tickets-hourly", "phase": "job", "run": "4dd4182fe8dd", "ts": 1790743369}
 {"agent": "codex", "attempt": null, "escalated_from": null, "harness": "codex", "model": "gpt-6-luna", "model_source": "detected", "phase": "start", "provider": "openai", "reasoning_effort": "max", "repo": {"dirty": 4, "head": "6c6aec30a2e7"}, "run": "0eb4f0fe7514", "runtime": {"head": "6c6aec30a2e7", "root": "/Users/nateprich/.claude/command-center-run"}, "session_id": "01a0f0a6-578a-72e3-9992-7565812b52da", "ticket": null, "tier": "standard", "ts": 1790743851, "usage": {"seven_day": {"resets_at": 1791047417, "used_percent": 31.0}}}
 {"agent": "codex", "job": "command-center-tickets-hourly", "phase": "job", "run": "0eb4f0fe7514", "ts": 1790743867}
+{"agent": "codex", "class": "Broken", "do": "ticket", "phase": "bind", "run": "0eb4f0fe7514", "ts": 1790743933, "work": "nateprich-projects/command-center#2014"}

@@ -75,6 +75,63 @@ def test_begin_session_loader_accepts_compact_rows_and_timing_context():
     }
 
 
+def test_begin_refreshes_a_cached_session_view_through_the_shared_loader(
+    monkeypatch,
+):
+    old_item = _view_item(7)
+    old = funnel.ScopedItems(
+        [old_item], scope="full",
+        startable_candidates=[old_item], startable_items=[old_item],
+        startable_agent="codex",
+    )
+    fresh = funnel.ScopedItems(
+        [_view_item(7)], scope="begin", startable_candidates=[],
+        startable_items=[], startable_agent="muse",
+    )
+    scopes = []
+    begun = []
+
+    def loader(**kwargs):
+        scopes.append(kwargs.get("scope"))
+        return fresh if kwargs.get("scope") == "begin" else old
+
+    monkeypatch.setattr(
+        funnel, "_begin_preflight",
+        lambda now, agent, idle, tier=None: ({"agent": agent}, {}),
+    )
+    monkeypatch.setattr(
+        funnel, "_begin_api_reserve_preflight", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(funnel, "_begin_role_refusal", lambda *args: None)
+
+    def member_repos(after_first_response=None):
+        if after_first_response is not None:
+            after_first_response({"rateLimit": {"cost": 1, "remaining": 5000}})
+        return [_VIEW_REPO]
+
+    monkeypatch.setattr(funnel, "member_repos", member_repos)
+    monkeypatch.setattr(
+        funnel, "cmd_next_review", lambda items, tier: 0
+    )
+    monkeypatch.setattr(
+        funnel, "cmd_begin", lambda items, *args, **kwargs:
+        begun.append(items) or 0,
+    )
+    monkeypatch.setattr(funnel, "report_api_cost", lambda *args, **kwargs: None)
+    monkeypatch.setattr(funnel, "report_graphql_spend", lambda: None)
+
+    session = funnel.FunnelSession(loader=loader)
+    assert session.dispatch(["next-review", "--tier", "standard"])[0] == 0
+    assert session.items is old
+    assert session.dispatch([
+        "begin", "--agent", "muse", "--tier", "escalated", "--role", "review"
+    ])[0] == 0
+
+    assert scopes == [None, "begin"]
+    assert begun == [fresh]
+    assert session.items is fresh
+
+
 def test_main_accepts_the_session_view_without_loading_the_project_again(
     monkeypatch,
 ):

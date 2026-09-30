@@ -127,8 +127,10 @@ def _deny_preflight_project_reads(monkeypatch):
     for name in (
         "member_repos", "load_items", "_load_begin_items",
         "_load_minimal_startable_view", "hydrate_item_details", "gh_graphql",
+        "startable_listing", "_order_startable_items",
     ):
         monkeypatch.setattr(funnel, name, denied(name))
+    monkeypatch.setattr(funnel.subprocess, "run", denied("subprocess.run"))
 
 
 def _begin(monkeypatch, capsys, *, breakdown):
@@ -323,6 +325,7 @@ def test_main_loads_the_project_after_begin_gates_pass(
 ):
     """A passing preflight still reaches the normal queue and WIP checks."""
     events = []
+    load_args = []
     monkeypatch.setattr(
         funnel,
         "_start_begin_heartbeat",
@@ -353,11 +356,13 @@ def test_main_loads_the_project_after_begin_gates_pass(
         return []
 
     monkeypatch.setattr(funnel, "member_repos", member_repos)
-    monkeypatch.setattr(
-        funnel,
-        "load_items",
-        lambda include_details=True: events.append("load") or [],
-    )
+
+    def load_items(**kwargs):
+        events.append("load")
+        load_args.append(kwargs)
+        return []
+
+    monkeypatch.setattr(funnel, "load_items", load_items)
     monkeypatch.setattr(funnel, "repo_readiness_for_items", lambda items: {})
     monkeypatch.setattr(
         funnel,
@@ -378,6 +383,11 @@ def test_main_loads_the_project_after_begin_gates_pass(
     assert events[-1][0] == "begin"
     assert events[-1][2][0]["gate"] == "ok"
     assert "begin_load.member_repos" in events[-1][3]
+    assert len(load_args) == 1
+    assert load_args[0]["include_details"] is False
+    assert load_args[0]["scope"] == "begin"
+    assert load_args[0]["include_startable"] is True
+    assert load_args[0]["startable_agent"] == "codex"
 
 
 def test_main_stands_down_before_loading_the_project_when_reserve_is_low(
@@ -1950,6 +1960,19 @@ def test_begin_rechecks_a_stale_claim_projection_before_claiming(
     # The filtered listing can carry a claim that has since expired. A fresh
     # claim read returning no value is authoritative, so the ticket can start.
     ticket.in_motion_since = NOW - funnel.LOCK_TTL - timedelta(seconds=1)
+
+    result, writes = _implementing_begin(
+        monkeypatch, capsys, [project, ticket],
+        current_claims={ticket.ref: None},
+    )
+
+    assert result["do"] == "ticket"
+    assert result["work"]["ref"] == ticket.ref
+    assert writes[0][0] == ticket.ref and writes[0][1] is not None
+
+
+def test_begin_claims_ticket_when_live_claim_is_missing(monkeypatch, capsys):
+    project, ticket = _ticket(89, 84)
 
     result, writes = _implementing_begin(
         monkeypatch, capsys, [project, ticket],

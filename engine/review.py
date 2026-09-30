@@ -641,8 +641,11 @@ def ticket_comments(rows: Optional[Sequence[dict]]) -> List[Dict]:
     not re-read as prose. Only the newest TICKET_COMMENT_LIMIT rows are
     kept, and each body is capped at TICKET_COMMENT_BODY_LIMIT characters
     with the cut marked, so a long ticket cannot flood the prompt. The
-    kept bodies together stop at TICKET_COMMENTS_TEXT_LIMIT characters,
-    newest first (#1801): each older body is replaced by the cut mark.
+    comment text is bounded by TICKET_COMMENTS_TEXT_LIMIT characters
+    (#1801). Nate-voice rows are never trimmed to fit that bound. Overflow
+    trims agent rows oldest first, then unknown rows oldest first; visible
+    cut marks sit outside the comment-text budget. If Nate-voice text alone
+    exceeds the bound, it is kept whole.
 
     The login cannot establish a voice, but it can rule one out (#1788):
     only the owner account's comments are read. Any other author's comment
@@ -685,17 +688,21 @@ def ticket_comments(rows: Optional[Sequence[dict]]) -> List[Dict]:
         })
     shaped.sort(key=lambda entry: entry.get("created_at") or "")
     kept = shaped[-TICKET_COMMENT_LIMIT:]
-    # The newest win here as in the count above: a decision recorded late
-    # in a long ticket is what the reviewer must see (#821). The first body
-    # that would pass the bound is trimmed with everything older, so the
-    # cut is one line in time rather than a gap between whole comments.
-    spent = 0
-    for index in range(len(kept) - 1, -1, -1):
-        spent += len(kept[index]["body"])
-        if spent > TICKET_COMMENTS_TEXT_LIMIT:
-            for older in kept[:index + 1]:
-                older["body"] = "…[truncated {} chars]".format(
-                    len(older["body"]))
+    # Keep the latest rows, but preserve Nate's decisions even when older
+    # than agent context. Within each trimmable voice, oldest rows give way
+    # first; unknown rows are reached only after every agent row has been
+    # considered.
+    spent = sum(len(entry["body"]) for entry in kept)
+    for voice in ("agent", "unknown"):
+        for entry in kept:
+            if spent <= TICKET_COMMENTS_TEXT_LIMIT:
+                break
+            if entry["voice"] != voice:
+                continue
+            body = entry["body"]
+            entry["body"] = "…[truncated {} chars]".format(len(body))
+            spent -= len(body)
+        if spent <= TICKET_COMMENTS_TEXT_LIMIT:
             break
     return kept
 

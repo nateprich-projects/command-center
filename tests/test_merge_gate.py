@@ -1145,7 +1145,8 @@ def test_unhydrated_regressions_still_stop_auto_merging(monkeypatch):
     regressions = _regressions(funnel.REJECTED_MERGE_ALARM, NOW)
     hydrated = []
 
-    def hydrate(rows, candidates=None):
+    def hydrate(rows, candidates=None, *, include_history=False):
+        assert include_history is True
         chosen = list(candidates)
         hydrated.append([item.ref for item in chosen])
         for item in chosen:
@@ -1175,7 +1176,8 @@ def test_hydrated_regressions_are_not_read_again(monkeypatch):
 def test_unreadable_regression_history_refuses_the_merge(monkeypatch):
     wire(monkeypatch, pr(), [verdict()])
 
-    def hydrate(rows, candidates=None):
+    def hydrate(rows, candidates=None, *, include_history=False):
+        assert include_history is True
         raise funnel.GitHubError("HTTP 502")
 
     monkeypatch.setattr(funnel, "hydrate_item_details", hydrate)

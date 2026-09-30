@@ -2574,7 +2574,8 @@ def packet_evidence(inner: Optional[str], head_sha: object) -> str:
     marker of any spelling inside the block means it is not the runner's,
     which strips them from everything it writes (#1805). The block's own
     header line is replaced by ``EVIDENCE_LABEL``, which says whose report
-    it is.
+    it is. Prior-fix rewrite lines are runner facts too and pass through to
+    the review packet unchanged.
     """
     if inner is None or not isinstance(head_sha, str) or not head_sha:
         return EVIDENCE_UNAVAILABLE

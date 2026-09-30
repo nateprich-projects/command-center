@@ -149,6 +149,15 @@ def _new_repo(tmp_path, name="r"):
     return root
 
 
+def _snapshot_with_fix_tickets(*tickets):
+    return {"brief": {"recorded_cause_regressions": {
+        "broken_fix_tickets": [
+            {"ticket": ticket, "project": project}
+            for ticket, project in tickets
+        ]
+    }}}
+
+
 def test_ticket_accept_scenario_three_fix_commits(tmp_path):
     """#1684 Accept, literally: one cross-fix rewrite, one older, one tests."""
     root = _new_repo(tmp_path)
@@ -168,6 +177,58 @@ def test_ticket_accept_scenario_three_fix_commits(tmp_path):
     assert (result["numerator"], result["denominator"]) == (1, 2)
     assert [(row["path"], row["function"], row["projects"])
             for row in result["hotspots"]] == [("app.py", "run", [100, 200])]
+
+
+def test_prior_fixes_touched_names_a_recent_broken_fix_rewritten_by_the_pr(
+        tmp_path, monkeypatch):
+    root = _new_repo(tmp_path)
+    _commit(root, {"app.py": _body("run", ["value = 1", "other = 2"])},
+            "Initial", NOW - timedelta(days=40))
+    _commit(root, {"app.py": _body("run", ["value = 10", "other = 2"])},
+            "Fix the observed defect (#41) (#141)", NOW - timedelta(days=2))
+    base = fr._git(root, "rev-parse", "HEAD").strip()
+    _commit(root, {"app.py": _body("run", ["value = 11", "other = 2"])},
+            "Change the same line", NOW - timedelta(days=1))
+    head = fr._git(root, "rev-parse", "HEAD").strip()
+    monkeypatch.setattr(
+        fr, "_published_snapshot",
+        lambda: _snapshot_with_fix_tickets((41, 4)),
+    )
+
+    assert fr.prior_fixes_touched(root, base, head) == [
+        (41, "app.py", "run")
+    ]
+
+
+def test_prior_fixes_touched_ignores_lines_not_written_by_a_broken_fix(
+        tmp_path, monkeypatch):
+    root = _new_repo(tmp_path)
+    _commit(root, {"app.py": _body("run", ["value = 1", "other = 2"])},
+            "Initial", NOW - timedelta(days=40))
+    _commit(root, {"app.py": _body("run", ["value = 10", "other = 2"])},
+            "Ordinary change (#55) (#155)", NOW - timedelta(days=2))
+    base = fr._git(root, "rev-parse", "HEAD").strip()
+    _commit(root, {"app.py": _body("run", ["value = 11", "other = 2"])},
+            "Change the same line", NOW - timedelta(days=1))
+    head = fr._git(root, "rev-parse", "HEAD").strip()
+    monkeypatch.setattr(
+        fr, "_published_snapshot",
+        lambda: _snapshot_with_fix_tickets((41, 4)),
+    )
+
+    assert fr.prior_fixes_touched(root, base, head) == []
+
+
+def test_prior_fix_scan_obeys_its_budget(tmp_path, monkeypatch):
+    root = _new_repo(tmp_path)
+    monkeypatch.setattr(fr, "PRIOR_FIX_BUDGET_SECONDS", 0)
+    monkeypatch.setattr(
+        fr, "_published_snapshot",
+        lambda: _snapshot_with_fix_tickets((41, 4)),
+    )
+
+    with pytest.raises(fr.RecurrenceError, match="exceeded its budget"):
+        fr.prior_fixes_touched(root, "main", "main")
 
 
 def test_a_fix_older_than_the_window_is_not_recurrence(tmp_path):

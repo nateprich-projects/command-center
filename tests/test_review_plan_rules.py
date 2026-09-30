@@ -72,6 +72,19 @@ def test_the_lister_names_the_plans_rejected_options():
             "rejected") in lister
 
 
+def test_a_diff_reimplementing_a_carried_parent_rejection_is_reviewed_as_a_break():
+    lister = _flat(_heredoc("lister_header"))
+    judge = _flat(_heredoc("judge_header"))
+
+    assert ("`parent_rejected_excerpt`, the parent plan's bounded `Rejected` "
+            "section") in lister
+    assert ("For every visible option in that field, when the diff touches "
+            "the behaviour it governs, list it as a `Does not break: <the "
+            "option>` row.") in lister
+    assert ("A `Does not break:` requirement is met unless a diff line breaks "
+            "or contradicts the rule.") in judge
+
+
 def test_engine_comments_no_longer_describe_plan_sourced_must_do_work():
     assert "what the ticket, its parent plan and the" not in ENGINE
     assert "drawn from the ticket, its\n# parent plan" not in ENGINE

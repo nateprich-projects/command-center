@@ -261,6 +261,14 @@ def test_newer_decline_does_not_reuse_satisfied_older_header(monkeypatch):
         funnel, "_gh_json", lambda *args: {"comments": comments}
     )
     funnel._load_block_comment(waiting)
+    now = datetime(2026, 9, 30, 5, 0, tzinfo=timezone.utc)
+    by_ref = {waiting.ref: waiting, blocker.ref: blocker}
+    assert waiting.satisfied_block_record == {
+        "conditions": [blocker.ref],
+        "found_closed_at": "2026-09-30T02:41:23Z",
+    }
+    assert funnel.satisfied_block_refs(waiting, by_ref, now=now) is None
+    assert not funnel._record_covers_current_block(waiting, [blocker.ref])
 
     calls = []
 
@@ -270,8 +278,7 @@ def test_newer_decline_does_not_reuse_satisfied_older_header(monkeypatch):
 
     monkeypatch.setattr(funnel.subprocess, "run", run)
     funnel.clear_satisfied_blocks(
-        [waiting, blocker],
-        datetime(2026, 9, 30, 5, 0, tzinfo=timezone.utc),
+        [waiting, blocker], now,
         run="run-2019",
         agent="codex",
     )

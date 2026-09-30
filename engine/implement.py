@@ -2411,8 +2411,22 @@ def _record_command_timeout(
     exc.finish_recorded = True
     release(ref)
     kept_note = "work was checkpointed" if work_kept else "work NOT kept"
+    repo = ref.partition("#")[0]
+    try:
+        repository = funnel._gh_api_json("repos/{}".format(repo))
+    except Exception:
+        # A visibility read that fails is not permission to publish the
+        # command name into the public heartbeat ledger.
+        repository = None
+    command_note = (
+        str(exc)
+        if isinstance(repository, dict)
+        and repository.get("visibility") == "public"
+        else "test command timed out after {:g}s".format(
+            exc.timeout_seconds)
+    )
     heartbeat_finish(
-        agent, run, "errored", "{}; {}".format(exc, kept_note), ref,
+        agent, run, "errored", "{}; {}".format(command_note, kept_note), ref,
     )
 
 

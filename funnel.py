@@ -3078,8 +3078,9 @@ def projected_pull_order(
     (Nate, 2026-09-24). Each round takes the ticket ``next_ticket`` would
     hand a lane, counts it done, and lifts what that frees: a native edge on
     it, a labelled block whose every condition has now cleared, and a project
-    ref once all of that project's tickets are done. A Ready project moves to
-    Building on its first turn, as ``claim`` would move it.
+    ref once all of that project's tickets are done. A real projected start
+    moves a Ready project to Building, as ``claim`` would. A human or Claude
+    Code step in a Ready Bug project is shown as under way but does not commit it.
 
     The pick is ``next_ticket``'s own, so Bugs take the turns their share
     gives them (#1878). Before this each round took ``startable()``'s first,
@@ -3110,6 +3111,21 @@ def projected_pull_order(
     """
     sim = [copy.copy(item) for item in items]
     by_ref = {item.ref: item for item in sim}
+
+    def is_unclaimable_ready_bug_step(item: Item) -> bool:
+        parent = by_ref.get(item.parent or "")
+        return (
+            parent is not None
+            and parent.status == "Ready"
+            and parent.klass == "Bug"
+            and item.needs in ("human", "claude-code-environment")
+        )
+
+    # Capture before clearing Needs below; these turns cannot commit a Ready
+    # Bug project because neither agent can claim them as a start.
+    unclaimable_ready_steps = {
+        item.ref for item in sim if is_unclaimable_ready_bug_step(item)
+    }
     under_way = set(in_review)
     for item in sim:
         if item.needs in ("human", "claude-code-environment"):
@@ -3144,7 +3160,10 @@ def projected_pull_order(
         if parent is None:
             return
         parent.children_done += 1
-        if parent.status == "Ready":
+        if (
+            parent.status == "Ready"
+            and item.ref not in unclaimable_ready_steps
+        ):
             parent.status = "Building"
         if (
             parent.state == "OPEN"

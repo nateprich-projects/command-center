@@ -2041,6 +2041,43 @@ def test_bugs_show_on_the_turns_begin_takes_them(bug_repo, history, expected):
     ] == expected
 
 
+@_pytest.mark.parametrize("needs", ["human", "claude-code-environment"])
+def test_unclaimable_ready_step_does_not_commit_sibling_bugs_off_turn(needs):
+    """Finishing an underway step releases Improve work, not Bug commitment."""
+    ready_bug = project(1, "Ready", "Bug", children=3)
+    unclaimable = ticket(2, 1, needs=needs)
+    bug_siblings = [ticket(3, 1), ticket(4, 1)]
+    newly_unblocked = [
+        (project(parent, "Ready", "Improve"),
+         ticket(number, parent, open_blockers=[unclaimable.ref]))
+        for parent, number in ((10, 11), (12, 13), (14, 15))
+    ]
+    rows = [ready_bug, unclaimable, *bug_siblings]
+    for parent, child in newly_unblocked:
+        rows.extend((parent, child))
+
+    projected = funnel.projected_pull_order(
+        rows, NOW, recent_starts=["Bug"]
+    )
+    assert [int(ref.rsplit("#", 1)[1]) for ref in projected] == [
+        2, 11, 13, 15, 3, 4,
+    ]
+
+    begin_rows = [copy.copy(row) for row in rows]
+    begin_by_ref = {row.ref: row for row in begin_rows}
+    begin_by_ref[unclaimable.ref].state = "CLOSED"
+    begin_by_ref[ready_bug.ref].children_done = 1
+    for row in begin_rows:
+        row.open_blockers = [
+            ref for ref in row.open_blockers if ref != unclaimable.ref
+        ]
+    begin_picks, _moved = _successive_starts(begin_rows, ["Bug"])
+    assert [int(ref.rsplit("#", 1)[1]) for ref in begin_picks] == [
+        11, 13, 15, 3, 4,
+    ]
+    assert [ref for ref in projected if ref != unclaimable.ref] == begin_picks
+
+
 @_pytest.mark.parametrize("under_way", ["claimed", "in review", "human"])
 def test_a_turn_on_work_already_under_way_is_not_a_new_start(under_way):
     """A claimed Bug's start is in the history already: begin wrote it when

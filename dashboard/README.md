@@ -19,6 +19,17 @@ job never commits. After that it redeploys only when `main` changes under
 `dashboard/`. The declared route attaches as part of each deploy, and DNS needs
 no work.
 
+When a live PR scan is incomplete, the board can show prior PR facts for up to
+24 hours with a visible stale age. This is display-only; review and merge keep
+using live facts. The reader uses each spool entry's top-level `generated_at`
+and `board.columns[].items[].tickets[]` fields `ref`, `pr`, and `pr_number`.
+Carry-forward is enabled by default. To restore the board's existing live/unknown
+display immediately, create an empty
+`disable-pr-carry-forward` file in the dashboard spool directory. The default
+path is `~/.claude/command-center-dashboard-spool/disable-pr-carry-forward`;
+when `COMMAND_CENTER_DASHBOARD_SPOOL` is set, place the file in that directory.
+Remove the file to re-enable carry-forward.
+
 Run the JS checks with:
 
 ```bash

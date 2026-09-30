@@ -14,6 +14,7 @@ from typing import Dict, Iterable, Mapping, Optional, Tuple
 
 
 MAX_PRIOR_AGE = timedelta(hours=24)
+DISABLE_CARRY_FORWARD_FLAG = "disable-pr-carry-forward"
 PR_STATES = frozenset({"approved", "changes requested", "merged", "submitted"})
 LIVE_PR_STATES = frozenset({"OPEN", "CLOSED", "MERGED"})
 
@@ -109,6 +110,19 @@ def read_prior_pr_facts(
     return captured_at, _prior_ticket_facts(payload)
 
 
+def prior_pr_carry_forward_enabled(spool_dir: Path) -> bool:
+    """Default on unless the runtime spool contains its disable flag."""
+    flag = Path(spool_dir) / DISABLE_CARRY_FORWARD_FLAG
+    try:
+        flag.lstat()
+    except FileNotFoundError:
+        return True
+    except OSError:
+        # An unreadable switch must restore the established live/unknown board.
+        return False
+    return False
+
+
 def _age_label(age: timedelta) -> str:
     minutes = max(0, int(age.total_seconds() // 60))
     hours, remaining_minutes = divmod(minutes, 60)
@@ -175,3 +189,25 @@ def carry_forward_display_facts(
         else:
             overrides[ref] = {"status": "unknown"}
     return overrides
+
+
+def dashboard_pr_display_overrides(
+    spool_dir: Path,
+    ticket_refs: Iterable[str],
+    live_facts: Optional[Mapping[str, object]],
+    *,
+    live_facts_known: bool,
+    now: datetime,
+) -> Dict[str, Dict[str, object]]:
+    """Load display-only carry-forward unless its runtime flag is set."""
+    if not prior_pr_carry_forward_enabled(spool_dir):
+        return {}
+    captured_at, prior_facts = read_prior_pr_facts(spool_dir)
+    return carry_forward_display_facts(
+        ticket_refs,
+        live_facts,
+        live_facts_known=live_facts_known,
+        captured_at=captured_at,
+        prior_facts=prior_facts,
+        now=now,
+    )

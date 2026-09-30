@@ -852,6 +852,11 @@ class Item:
     blocked_cleared_at: Optional[datetime] = None
     closed_at: Optional[datetime] = None
     block_event: Optional[Dict[str, str]] = None
+    # ``None`` can mean either an empty Issue body or a projection that did not
+    # request it. Begin's minimal Project view uses the latter; the targeted
+    # post-claim detail read marks the field loaded, including a genuinely empty
+    # body.
+    body_loaded: bool = field(default=True, repr=False, compare=False)
 
     @property
     def ref(self) -> str:
@@ -2180,6 +2185,10 @@ def _decline_route_withholds_startability(
         item.needs == "agent"
         and route.get("type") == "unsatisfiable-acceptance"
     ):
+        # The begin projection omits Issue.body. In that view this check is
+        # deferred until the selected ticket's body is fetched after claim.
+        if not getattr(item, "body_loaded", True):
+            return False
         if not isinstance(item.body, str):
             return True
         current_digest = hashlib.sha256(
@@ -2192,6 +2201,8 @@ def _decline_route_withholds_startability(
     ):
         gate_ref = route.get("gate_ref")
         gate = by_ref.get(gate_ref) if isinstance(gate_ref, str) else None
+        if gate is not None and not getattr(gate, "body_loaded", True):
+            return False
         return (
             gate is None
             or not isinstance(gate.body, str)
@@ -2213,8 +2224,13 @@ def clear_answered_decline_routes(
             or item.needs != "external-event"
             or not isinstance(route, dict)
             or route.get("type") != "pending-gate-answer"
+            or not getattr(item, "body_loaded", True)
             or _decline_route_withholds_startability(item, by_ref)
         ):
+            continue
+        gate_ref = route.get("gate_ref")
+        gate = by_ref.get(gate_ref) if isinstance(gate_ref, str) else None
+        if gate is None or not getattr(gate, "body_loaded", True):
             continue
         if not item.item_id:
             raise GitHubError("{} is not in the Project".format(item.ref))
@@ -2723,6 +2739,10 @@ def freeze_withhold_reason(
     _paths, _parsers, exempt = governing
     parent_number = _parent_ticket_number(item)
     if parent_number in exempt:
+        return None
+    if not getattr(item, "body_loaded", True):
+        # A minimal begin row has not proved whether the body names frozen
+        # ground. The selected item is checked after claim from a fresh body.
         return None
     markers = freeze_markers(getattr(item, "body", None))
     if not markers:
@@ -9608,9 +9628,8 @@ query($cursor: String) {
 PROJECT_ITEM_PAGE_SIZE = 100
 PROJECT_ITEM_PREVIOUS_PAGE_SIZE = 50
 
-# The selection every Project item row carries. The full Project query and the
-# filtered begin query (``BEGIN_ITEM_CONNECTIONS``) both read exactly this, so
-# ``_from_node`` sees the same shape from either loader.
+# The full-board selection every Project item row carries. Begin uses compact
+# projections below, but ``_from_node`` accepts both shapes.
 ITEM_NODE_FIELDS = """\
           id
           lock: fieldValueByName(name: "In motion since") {
@@ -9650,10 +9669,18 @@ ITEM_NODE_FIELDS = """\
           }
 """
 
+# Closed rows and anchors that the begin path needs for reconciliation keep
+# their normal routing and terminal fields, but never carry issue bodies.
+# The full-board query still uses ITEM_NODE_FIELDS.
+BEGIN_ITEM_NODE_FIELDS = ITEM_NODE_FIELDS.replace(
+    "number title url body state stateReason",
+    "number title url state stateReason",
+)
+
 # Shared queue/begin startability scan. Keep this Project list projection to
 # the fields the startable predicate, parent checks, ordering, and tier routing
-# need. The issue body is needed for startability checks; timeline and child
-# history are read only after the candidate set is known.
+# need. Bodies and timeline/child history are deliberately absent: the
+# selected ticket's body and history are fetched after its claim.
 # The response aliases name the shared listing contract: startable issue
 # facts, Status, Class, gate (Needs), claim, and canonical ticket Risk. Pinned
 # is also read for the settled ordering rule; Origin does not route ticket work.
@@ -9679,7 +9706,7 @@ STARTABLE_ITEM_NODE_FIELDS = """\
           }
           startable: content {
             ... on Issue {
-              number title url body state stateReason createdAt closedAt
+              number title url state stateReason createdAt closedAt
               repository { nameWithOwner }
               labels(first: 25) { nodes { name } }
               parent { number repository { nameWithOwner } }
@@ -9770,7 +9797,7 @@ def _begin_item_query(
     if any(not (minimal_startable and alias == "open") for alias in aliases):
         fragments.append(
             "\nfragment BeginItem on ProjectV2Item {{\n{fields}}}\n"
-            .format(fields=ITEM_NODE_FIELDS)
+            .format(fields=BEGIN_ITEM_NODE_FIELDS)
         )
     if minimal_startable and "open" in aliases:
         fragments.append(
@@ -9815,7 +9842,9 @@ def _project_item_ref_filter(ref: str) -> str:
     return "repo:{} #{}".format(match.group(1), match.group(2))
 
 
-def _project_item_refs_query(refs: Sequence[str]) -> str:
+def _project_item_refs_query(
+    refs: Sequence[str], node_fields: str = ITEM_NODE_FIELDS,
+) -> str:
     """One Project query with a filtered connection per ref, ``r0`` onward."""
     if not refs or len(refs) > PROJECT_REF_ALIASES_PER_REQUEST:
         raise ValueError(
@@ -9845,7 +9874,7 @@ def _project_item_refs_query(refs: Sequence[str]) -> str:
         "\nfragment ProjectRefItem on ProjectV2Item {{\n"
         "{fields}"
         "}}\n"
-    ).format(connections=connections, fields=ITEM_NODE_FIELDS)
+    ).format(connections=connections, fields=node_fields)
 
 
 SHAPE_ISSUE_COMMENTS_PAGE_QUERY = """
@@ -10060,19 +10089,32 @@ query($ids: [ID!]!) {
 
 
 def _item_detail_request(
-    ids: Sequence[str], child_ids: Sequence[str],
+    ids: Sequence[str], child_ids: Sequence[str], include_body: bool = False,
 ) -> Tuple[str, Dict[str, List[str]], str, Optional[str]]:
     """Assemble one batched document for history and optional child nodes.
 
     History is fetched for every selected Project item in one ``nodes`` list.
     Child timestamps share that GraphQL document when any selected item has
-    children; otherwise use the smaller history-only document.
+    children; otherwise use the smaller history-only document. Bodies are
+    included only for the selected item read after a begin claim.
     """
     variables = {"ids": list(ids)}
     if child_ids:
         variables["childIds"] = list(child_ids)
-        return ITEM_DETAILS_QUERY, variables, "history", "children"
-    return ITEM_TIMELINE_DETAILS_QUERY, variables, "nodes", None
+        query, history_field, child_field = (
+            ITEM_DETAILS_QUERY, "history", "children"
+        )
+    else:
+        query, history_field, child_field = (
+            ITEM_TIMELINE_DETAILS_QUERY, "nodes", None
+        )
+    if include_body:
+        # Only the history side carries Issue.body; the children side remains
+        # limited to timestamps. Both detail documents use the same Issue
+        # fragment shape.
+        marker = "        ... on Issue {\n"
+        query = query.replace(marker, marker + "          body\n", 1)
+    return query, variables, history_field, child_field
 
 
 ITEM_LOCK_QUERY = """
@@ -11020,6 +11062,12 @@ def _apply_item_detail_fields(
     include_timeline: bool = True,
 ) -> None:
     """Apply child timestamps and timeline history from targeted Project reads."""
+    if "body" in content:
+        body = content.get("body")
+        if body is not None and not isinstance(body, str):
+            raise GitHubError("Project item detail response had an invalid body")
+        item.body = body
+        item.body_loaded = True
     if include_children:
         child_times = []
         child_close_times = []
@@ -11100,6 +11148,7 @@ def _from_node(node: dict) -> Optional[Item]:
         url=content["url"],
         state=content["state"],
         body=content.get("body"),
+        body_loaded="body" in content,
         state_reason=content.get("stateReason"),
         created_at=parse_time(content.get("createdAt")),
         status=status,
@@ -11145,13 +11194,15 @@ def _from_node(node: dict) -> Optional[Item]:
 
 def hydrate_item_details(
     items: Sequence[Item], candidates: Optional[Iterable[Item]] = None,
+    *, include_body: bool = False,
 ) -> None:
-    """Read child timestamps and timeline history for selected Project items.
+    """Read selected item history, child timestamps, and optionally bodies.
 
     The paged Project list is deliberately the cheap candidate scan. Callers
     that need a full board view may omit ``candidates``; queue paths pass only
-    the items that survived their cheap gates. A missing detail response is a
-    load failure, never permission to guess at gate age.
+    the items that survived their cheap gates. Begin requests a selected
+    ticket's current body only after claiming it. A missing detail response is
+    a load failure, never permission to guess at gate age or body contents.
     """
     by_id = {
         item.item_id: item
@@ -11181,7 +11232,7 @@ def hydrate_item_details(
         batch = ids[start:start + PROJECT_ITEM_DETAIL_BATCH_SIZE]
         child_batch = [item_id for item_id in batch if item_id in child_id_set]
         query, variables, history_field, child_field = _item_detail_request(
-            batch, child_batch
+            batch, child_batch, include_body=include_body,
         )
         data = gh_graphql(query, **variables)
         if not isinstance(data, dict):
@@ -11197,15 +11248,26 @@ def hydrate_item_details(
             or not isinstance(child_nodes, list)
         ):
             raise GitHubError("Project item detail response was malformed")
+        loaded_bodies: Set[str] = set()
         for node in timeline_nodes:
             if not isinstance(node, dict):
                 continue
             item = by_id.get(node.get("id"))
             content = node.get("content")
             if item is not None and isinstance(content, dict):
+                if include_body:
+                    if "body" not in content:
+                        raise GitHubError(
+                            "Project item detail response omitted issue body"
+                        )
+                    loaded_bodies.add(item.item_id or "")
                 _apply_item_detail_fields(
                     item, content, include_children=False
                 )
+        if include_body and loaded_bodies != set(batch):
+            raise GitHubError(
+                "Project item detail response omitted a selected issue body"
+            )
         for node in child_nodes:
             if not isinstance(node, dict):
                 continue
@@ -11379,7 +11441,7 @@ def _load_begin_items(
     members: Set[str],
     timings: Optional[Dict[str, object]],
     shape_issue: Optional[Tuple[str, int]] = None,
-    minimal_startable: bool = False,
+    minimal_startable: bool = True,
     require_open: bool = True,
 ) -> List[Item]:
     """Page the filtered begin connections and return the member items.
@@ -11588,7 +11650,9 @@ def _begin_anchor_refs(items: Sequence[Item], members: Set[str]) -> List[str]:
     return refs
 
 
-def _load_project_items_by_refs(refs: Sequence[str]) -> Dict[str, Item]:
+def _load_project_items_by_refs(
+    refs: Sequence[str], node_fields: str = ITEM_NODE_FIELDS,
+) -> Dict[str, Item]:
     """Fetch Project items through one exact-ref connection per issue."""
     global _PROJECT_ITEM_PAGE_COUNT, _PROJECT_ITEM_ROW_COUNT
     found: Dict[str, Item] = {}
@@ -11596,7 +11660,7 @@ def _load_project_items_by_refs(refs: Sequence[str]) -> Dict[str, Item]:
         batch = refs[start:start + PROJECT_REF_ALIASES_PER_REQUEST]
         _PROJECT_ITEM_PAGE_COUNT += 1
         response = gh_graphql(
-            _project_item_refs_query(batch),
+            _project_item_refs_query(batch, node_fields=node_fields),
             login=PROJECT_OWNER, number=PROJECT_NUMBER,
         )
         project = _begin_project_from_response(response)
@@ -11708,6 +11772,7 @@ def load_regression_items(
 def _load_begin_anchor_items(
     items: Sequence[Item], members: Set[str],
     timings: Optional[Dict[str, object]],
+    minimal_startable: bool = True,
 ) -> List[Item]:
     """Fetch the begin anchors by ref, up to 20 connections per request.
 
@@ -11721,7 +11786,13 @@ def _load_begin_anchor_items(
     started = time.perf_counter() if timings is not None else None
     try:
         refs = _begin_anchor_refs(items, members)
-        by_ref = _load_project_items_by_refs(refs)
+        by_ref = _load_project_items_by_refs(
+            refs,
+            node_fields=(
+                BEGIN_ITEM_NODE_FIELDS if minimal_startable
+                else ITEM_NODE_FIELDS
+            ),
+        )
         return [by_ref[ref] for ref in refs if ref in by_ref]
     finally:
         if started is not None:
@@ -11900,7 +11971,7 @@ def load_items(
     if scope == "begin":
         begin_items = _load_begin_items(
             members, timings, shape_issue,
-            minimal_startable=include_startable,
+            minimal_startable=True,
         )
         begin_items.extend(
             _load_begin_anchor_items(begin_items, members, timings)
@@ -19142,7 +19213,7 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
               Mapping[str, MemberRepoReadiness]
               ] = None,
               caller_role: Optional[str] = None,
-              _detail_loader: Optional[Callable[[Sequence[Item]], None]] = None,
+              _detail_loader: Optional[Callable[..., None]] = None,
               _preflight: Optional[
                   Tuple[Dict[str, object], Optional[Dict[str, object]]]
               ] = None,
@@ -19197,7 +19268,9 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
     if _detail_loader is not None and not ticket_path:
         candidates = begin_detail_candidates(items, breakdown)
         if candidates:
-            _detail_loader(candidates)
+            _call_with_optional_keyword(
+                _detail_loader, "include_body", True, candidates
+            )
     # Reconcile first, and never fatally. A step that cannot reach GitHub
     # records its failure and selection proceeds without it; only a failure
     # in selection's own reads stops the run (#732, #823).
@@ -19462,17 +19535,83 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
                 out["queue"] = "empty"
                 _record_queue_empty(agent, out.get("run"), tier)
         else:
-            if _detail_loader is not None:
-                _detail_loader([ticket])
             refusal = claim_ticket(items, now, ticket, pr_facts=pr_facts)
             if refusal is not None:
                 out.update(do="stop", why=refusal)
             else:
-                out.update(
-                    do="ticket",
-                    work=item_json(ticket, now, {i.ref: i for i in items}),
-                )
-                if agent in IMPLEMENT_VENDORS:
+                detail_candidates = [ticket]
+                route = ticket.decline_route
+                if (
+                    isinstance(route, dict)
+                    and route.get("type") == "pending-gate-answer"
+                ):
+                    gate_ref = route.get("gate_ref")
+                    gate = next((item for item in items
+                                 if item.ref == gate_ref), None)
+                    if gate is not None and gate is not ticket:
+                        detail_candidates.append(gate)
+
+                detail_error = None
+                try:
+                    if _detail_loader is not None:
+                        _call_with_optional_keyword(
+                            _detail_loader, "include_body", True,
+                            detail_candidates,
+                        )
+                    if any(
+                        not item.body_loaded for item in detail_candidates
+                    ):
+                        raise GitHubError(
+                            "selected ticket and gate bodies were not refreshed after claim"
+                        )
+                    # An answer may have landed between the minimal Project
+                    # scan and this claim. Recheck it using both fresh bodies.
+                    clear_answered_decline_routes(detail_candidates)
+                except (GitHubError, OSError,
+                        subprocess.SubprocessError) as exc:
+                    detail_error = exc
+
+                if detail_error is not None:
+                    try:
+                        write_lock(ticket, "")
+                        ticket.in_motion_since = None
+                    except GitHubError as release_exc:
+                        out["release_error"] = str(release_exc)
+                    out.update(
+                        do="stop",
+                        gate="error",
+                        why="could not refresh selected ticket details after claim: {}".format(
+                            detail_error
+                        ),
+                    )
+                else:
+                    by_ref = {item.ref: item for item in items}
+                    body_reason = freeze_withhold_reason(ticket, by_ref)
+                    if (
+                        body_reason is None
+                        and _decline_route_withholds_startability(
+                            ticket, by_ref
+                        )
+                    ):
+                        body_reason = (
+                            "ticket's decline route still withholds work"
+                        )
+                    if body_reason is not None:
+                        try:
+                            write_lock(ticket, "")
+                            ticket.in_motion_since = None
+                        except GitHubError as release_exc:
+                            out["release_error"] = str(release_exc)
+                        out.update(
+                            do="stop",
+                            why="nothing — {}".format(body_reason),
+                        )
+                    else:
+                        out.update(
+                            do="ticket",
+                            work=item_json(ticket, now, by_ref),
+                        )
+                if out.get("do") == "ticket" and agent in IMPLEMENT_VENDORS:
                     try:
                         ensure_ticket_branch(ticket.repo, ticket.number)
                     except (GitHubError, OSError,
@@ -21783,11 +21922,13 @@ def main(argv: Optional[Sequence[str]] = None, *,
                 startable_agent=args.agent,
             )
 
-            def hydrate_begin_candidates(candidates):
+            def hydrate_begin_candidates(candidates, include_body=False):
                 return _begin_load_timed(
                     begin_timings,
                     "item_details",
-                    lambda: hydrate_item_details(items, candidates),
+                    lambda: hydrate_item_details(
+                        items, candidates, include_body=include_body
+                    ),
                 )
 
             begin_detail_loader = hydrate_begin_candidates
@@ -21800,11 +21941,13 @@ def main(argv: Optional[Sequence[str]] = None, *,
                 startable_agent="codex",
             )
         if args.command == "begin" and begin_detail_loader is None:
-            def hydrate_begin_candidates(candidates):
+            def hydrate_begin_candidates(candidates, include_body=False):
                 return _begin_load_timed(
                     begin_timings,
                     "item_details",
-                    lambda: hydrate_item_details(items, candidates),
+                    lambda: hydrate_item_details(
+                        items, candidates, include_body=include_body
+                    ),
                 )
 
             begin_detail_loader = hydrate_begin_candidates

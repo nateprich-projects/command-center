@@ -143,7 +143,7 @@ def _ticket(number, parent, *, body="Risk: standard", klass="Improve",
 def _implementing_begin(monkeypatch, capsys, items, *, agent="codex",
                         tier="standard", repo_readiness=None, pr_facts=None,
                         caller_role=None, current_claims=None, reconcile=None,
-                        band=None):
+                        band=None, detail_loader=None, events=None):
     _allow_begin(monkeypatch)
     if band is not None:
         _tight_budget(monkeypatch, band)
@@ -170,15 +170,46 @@ def _implementing_begin(monkeypatch, capsys, items, *, agent="codex",
         ),
     )
     writes = []
-    monkeypatch.setattr(
-        funnel, "write_lock", lambda item, value: writes.append((item.ref, value))
-    )
+    def write_lock(item, value):
+        writes.append((item.ref, value))
+        if events is not None:
+            events.append(("claim_write", item.ref, value))
+
+    monkeypatch.setattr(funnel, "write_lock", write_lock)
     assert funnel.cmd_begin(
         items, NOW, agent, tier, False,
         repo_readiness=repo_readiness,
         caller_role=caller_role,
+        _detail_loader=detail_loader,
     ) == 0
     return json.loads(capsys.readouterr().out), writes
+
+
+def test_begin_refreshes_the_selected_body_after_claim_before_starting(
+    monkeypatch, capsys,
+):
+    project, ticket = _ticket(51, 50)
+    events = []
+
+    def hydrate(candidates, include_body=False):
+        events.append(("hydrate", include_body,
+                       [item.ref for item in candidates]))
+        candidates[0].body = "What: rewrite routines/muse.md."
+        candidates[0].body_loaded = True
+
+    result, writes = _implementing_begin(
+        monkeypatch, capsys, [project, ticket],
+        detail_loader=hydrate, events=events,
+    )
+
+    assert result["do"] == "stop"
+    assert "routines/muse.md" in result["why"]
+    assert events[0][0] == "claim_write"
+    assert events[1] == ("hydrate", True, [ticket.ref])
+    assert writes == [
+        (ticket.ref, NOW.strftime("%Y-%m-%dT%H:%M:%SZ")),
+        (ticket.ref, ""),
+    ]
 
 
 def test_begin_prints_a_transient_json_envelope_when_project_load_is_truncated(

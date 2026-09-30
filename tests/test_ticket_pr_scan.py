@@ -110,7 +110,12 @@ def repo_graphql_reads(prs, branches=(), calls=None, refs_has_next=False):
 
 
 def test_one_scan_per_repo_regardless_of_ticket_count(monkeypatch):
-    """The whole point: cost scales with repos, not with tickets."""
+    """The whole point: cost scales with repos, not with tickets.
+
+    Two reads per scan since #1986, not one: open rows with their comment
+    tails, then the closed-and-merged history without them. Both are bounded
+    by repositories and pages, so neither grows with the ticket count.
+    """
     calls = []
 
     rows = [pr_row(n, "ticket/{}".format(n)) for n in range(10, 40)]
@@ -124,8 +129,8 @@ def test_one_scan_per_repo_regardless_of_ticket_count(monkeypatch):
     calls.clear()
     many = funnel.ticket_pr_facts([ticket(n) for n in range(10, 40)])
 
-    assert calls_for_few == 1
-    assert len(calls) == 1, "call count must not grow with ticket count"
+    assert calls_for_few == 2
+    assert len(calls) == 2, "call count must not grow with ticket count"
     assert few["nateprich/beta#10"]["number"] == 10
     assert few["nateprich/beta#10"]["branch_exists"] is True
     assert len(many) == 30
@@ -247,14 +252,21 @@ def test_batch_replaces_per_pr_fanout_and_measures_saving_against_655(
     funnel.ticket_pr_facts([ticket(number) for number in range(10, 40)])
 
     before_calls = 1 + len(rows)  # pr list plus one comment read per open PR
-    after_calls = len(calls)      # one measured batch, including rateLimit.cost
+    # Two measured batches since #1986, each including rateLimit.cost: the
+    # open rows with their comment tails, and the history without them.
+    after_calls = len(calls)
     assert before_calls == 31
-    assert after_calls == 1
-    assert before_calls - after_calls == 30
-    assert "pullRequests(first: {}".format(
-        funnel.PR_GRAPHQL_PR_PAGE_SIZE) in calls[0][0]
-    assert "rateLimit { cost remaining resetAt }" in calls[0][0]
+    assert after_calls == 2
+    assert before_calls - after_calls == 29
+    for query, _variables in calls:
+        assert "pullRequests(first: {}".format(
+            funnel.PR_GRAPHQL_PR_PAGE_SIZE) in query
+        assert "rateLimit { cost remaining resetAt }" in query
+    # Branch refs ride the open read alone; asking twice would double the cost.
     assert 'refs(refPrefix: "refs/heads/", first: 100)' in calls[0][0]
+    assert 'refs(refPrefix: "refs/heads/", first: 100)' not in calls[1][0]
+    assert "comments(last:" in calls[0][0]
+    assert "comments(last:" not in calls[1][0]
 
 
 def test_scan_preserves_merge_state_status_for_conflict_routing(monkeypatch):

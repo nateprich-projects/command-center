@@ -4459,21 +4459,51 @@ def _visible_comment(body: str) -> str:
     return body[:marker_at].rstrip()
 
 
-def latest_verdict(repo: str, pr) -> Optional[Dict]:
-    """The newest verdict on a PR.
+def _latest_verdict_for_reviewed_head(comments: object) -> Optional[Dict]:
+    """Resolve the latest trusted verdict sequence, keeping same-head rejects."""
+    if not isinstance(comments, list):
+        return None
 
-    Newest wins: a re-review after a fix is a fresh read against the plan, and an
-    older verdict must never authorise a diff it did not see. Newest means the
-    newest from a trusted author (#1787); ``--json comments`` rows carry
-    ``author.login`` for that check.
+    selected: Optional[Dict] = None
+    selected_head: Optional[str] = None
+    for row in comments:
+        if not isinstance(row, dict):
+            continue
+        found = _verdict_from_comment(row)
+        if found is None:
+            continue
+        head_sha = found.get("head_sha")
+        head_key = head_sha if isinstance(head_sha, str) and head_sha else None
+        if selected is None or head_key != selected_head:
+            # A review of another head starts a fresh sequence. The gate below
+            # still requires this verdict to match the PR's current head.
+            selected = found
+            selected_head = head_key
+            continue
+
+        if (
+            found.get("verdict") == "rejected"
+            or selected.get("verdict") != "rejected"
+        ):
+            # A later rejection on this head updates the recorded rejection;
+            # an approval on that same head cannot clear it.
+            selected = found
+
+    return selected
+
+
+def latest_verdict(repo: str, pr) -> Optional[Dict]:
+    """The latest trusted decision for the most recently reviewed head.
+
+    The fresh-read boundary is a head change: a review on a new SHA starts a
+    new decision sequence, while a trusted rejection stays authoritative on
+    its SHA despite any later approval there. The merge gate separately checks
+    that the selected verdict covers the PR's current head. ``--json comments``
+    rows carry ``author.login`` for the trusted-author check (#1787).
     """
     rows = (_gh_json("gh", "pr", "view", str(pr), "--repo", repo,
                      "--json", "comments") or {}).get("comments", [])
-    for row in reversed(rows):
-        found = _verdict_from_comment(row)
-        if found:
-            return found
-    return None
+    return _latest_verdict_for_reviewed_head(rows)
 
 
 #: A run that finished its ticket by comments -- an investigation or proposal
@@ -15559,6 +15589,9 @@ def _write_status(item: Item, status: str, now: datetime) -> Optional[str]:
         _post_status_refusal(item, refusal)
         return refusal
 
+    if item.status == status:
+        return None
+
     try:
         response = gh_graphql(
             SET_FIELD,
@@ -15731,13 +15764,14 @@ def cmd_park(items: List[Item], now: datetime, ref: str, reason: str,
     # Done and Parked must remain distinguishable. Set the Project status first,
     # then close with NOT_PLANNED, then leave the reason where it can be read
     # without opening the Project.
-    gh_graphql(
-        SET_FIELD,
-        project=PROJECT_ID,
-        item=item.item_id,
-        field=STATUS_FIELD_ID,
-        option=_option_id(STATUS_FIELD_ID, "Parked"),
-    )
+    if item.status != "Parked":
+        gh_graphql(
+            SET_FIELD,
+            project=PROJECT_ID,
+            item=item.item_id,
+            field=STATUS_FIELD_ID,
+            option=_option_id(STATUS_FIELD_ID, "Parked"),
+        )
 
     close = _run_gh(
         ["gh", "issue", "close", str(item.number), "--repo", item.repo,
@@ -16095,8 +16129,10 @@ def cmd_reject(items: List[Item], now: datetime, pr: str, note: Optional[str]) -
         (i for i in items if ticket and i.ref == ticket.parent), None
     )
     if parent and parent.item_id:
-        gh_graphql(SET_FIELD, project=PROJECT_ID, item=parent.item_id,
-                   field=STATUS_FIELD_ID, option=_option_id(STATUS_FIELD_ID, "Building"))
+        if parent.status != "Building":
+            gh_graphql(SET_FIELD, project=PROJECT_ID, item=parent.item_id,
+                       field=STATUS_FIELD_ID,
+                       option=_option_id(STATUS_FIELD_ID, "Building"))
         gh_graphql(SET_FIELD, project=PROJECT_ID, item=parent.item_id,
                    field=CLASS_FIELD_ID, option=_option_id(CLASS_FIELD_ID, "Broken"))
         print("{} -> Building / Broken".format(parent.ref))
@@ -17159,20 +17195,8 @@ def _read_batched_pr_snapshots(
 
 
 def _latest_verdict_from_comments(comments: object) -> Optional[Dict]:
-    """Return the newest structured verdict from an already-read comment tail.
-
-    The batch asks for each comment's ``author { login }`` so that
-    ``_verdict_from_comment`` can skip untrusted authors (#1787).
-    """
-    if not isinstance(comments, list):
-        return None
-    for row in reversed(comments):
-        if not isinstance(row, dict):
-            continue
-        found = _verdict_from_comment(row)
-        if found:
-            return found
-    return None
+    """Resolve an already-read comment tail with the merge gate's head rule."""
+    return _latest_verdict_for_reviewed_head(comments)
 
 
 def _pr_rows_for_ref(
@@ -17324,6 +17348,62 @@ def ticket_branch_index(repo: str) -> Tuple[Set[str], bool]:
     return refs, truncated
 
 
+def _merge_batched_pr_reads(
+    open_read: BatchedPRRead, history: BatchedPRRead
+) -> BatchedPRRead:
+    """Combine the open-PR read with the closed-and-merged history read.
+
+    ``ticket_pr_facts`` asks for the two separately so only the open rows
+    carry comment tails (#1986), but every consumer below it expects the
+    single all-states snapshot it used to get. Rows return to CREATED_AT
+    descending, the order ``_batched_pr_query`` asks GitHub for, so the
+    newest row for a ticket branch is still the first one. Branch refs come
+    from the open read, the only one that asks for them.
+    """
+    repos = sorted(set(open_read.rows_by_repo) | set(history.rows_by_repo))
+    rows_by_repo: Dict[str, Tuple[Dict[str, object], ...]] = {}
+    for repo in repos:
+        # A PR merged between the two reads is returned by both, once open and
+        # once merged. The history read happens second, so its row is the later
+        # observation and wins; a row with no number cannot be paired and is
+        # kept as it is.
+        by_number: Dict[object, Dict[str, object]] = {}
+        rows: List[Dict[str, object]] = []
+        for row in list(open_read.rows_by_repo.get(repo, ())) + list(
+            history.rows_by_repo.get(repo, ())
+        ):
+            number = row.get("number")
+            if number is None:
+                rows.append(row)
+                continue
+            if number in by_number:
+                rows[rows.index(by_number[number])] = row
+            else:
+                rows.append(row)
+            by_number[number] = row
+        rows.sort(
+            key=lambda row: str(row.get("createdAt") or ""), reverse=True
+        )
+        rows_by_repo[repo] = tuple(rows)
+    return BatchedPRRead(
+        rows_by_repo=rows_by_repo,
+        branch_refs_by_repo={
+            repo: set(open_read.branch_refs_by_repo.get(repo, set()))
+            for repo in repos
+        },
+        # Either read hitting its bound leaves PR absence unestablished.
+        pr_truncated_by_repo={
+            repo: bool(open_read.pr_truncated_by_repo.get(repo))
+            or bool(history.pr_truncated_by_repo.get(repo))
+            for repo in repos
+        },
+        branches_truncated_by_repo={
+            repo: bool(open_read.branches_truncated_by_repo.get(repo))
+            for repo in repos
+        },
+    )
+
+
 def ticket_pr_facts(
     items: Sequence[Item],
 ) -> Dict[str, Optional[Dict[str, object]]]:
@@ -17334,6 +17414,16 @@ def ticket_pr_facts(
     per ticket or PR. The per-ticket PR form was the single largest GraphQL
     consumer in the system: 68 requests on the board of 2026-09-08, 93 of a
     full brief's 110 points, and it grew with the board (#272).
+
+    The scan is split by state so that only open PRs carry comment tails.
+    Asking for all three states with ``comments(last: 100)`` returned about
+    2 MB and, on the board of 2026-09-29, HTTP 502 or 504 from GitHub on two
+    attempts in three: the 35 s section budget tripped, and every open ticket
+    drew the "scan could not be established" pip (#1985). Verdicts are derived
+    for open rows only, a few lines below, so the history page's tails had no
+    reader. Halving ``PR_GRAPHQL_PR_PAGE_SIZE`` bought the same room once
+    before (#1217); removing the unread payload is the lever that does not
+    need pulling again as the board grows.
 
     An explicit ``None`` means both scans established no PR and no branch. A
     dict carries PR data when present plus ``branch_exists``; a branch without
@@ -17351,15 +17441,27 @@ def ticket_pr_facts(
     if not repos:
         return facts
 
-    snapshot = _read_batched_pr_snapshots(
-        repos,
-        states=("OPEN", "CLOSED", "MERGED"),
-        limit=MERGED_PR_SCAN_LIMIT,
-        include_comments=True,
-        include_reviews=False,
-        include_closing_refs=False,
-        include_refs=True,
-        include_body=True,
+    snapshot = _merge_batched_pr_reads(
+        _read_batched_pr_snapshots(
+            repos,
+            states=("OPEN",),
+            limit=MERGED_PR_SCAN_LIMIT,
+            include_comments=True,
+            include_reviews=False,
+            include_closing_refs=False,
+            include_refs=True,
+            include_body=True,
+        ),
+        _read_batched_pr_snapshots(
+            repos,
+            states=("CLOSED", "MERGED"),
+            limit=MERGED_PR_SCAN_LIMIT,
+            include_comments=False,
+            include_reviews=False,
+            include_closing_refs=False,
+            include_refs=False,
+            include_body=True,
+        ),
     )
     rows_by_ref: Dict[str, List[Dict[str, object]]] = {}
     for repo in repos:
@@ -17643,15 +17745,66 @@ def shape_risk_block(declared: Sequence[str], scan: Sequence[str]) -> str:
 
 
 def parse_shape_risk_record(body: str) -> Optional[Dict[str, List[str]]]:
-    """The runner's risk record, or ``None`` when absent or unreadable.
+    """The runner's risk record, or None when absent or unreadable.
 
-    The newest block wins, as for every runner record, so a marker the
-    shaper quoted in the narrative above cannot outrank the runner's own.
-    A record predating the declared field treats it as an empty list.
+    The runner writes this record immediately before its provenance trailer.
+    Copied plan text can put an older provenance block after that trailer, so
+    choose the newest timestamped provenance rather than the last marker in
+    body order, then read only the risk block directly before it. Older
+    records without a declared field continue to treat it as an empty list.
     """
-    found = _marked_json(body, SHAPE_RISK_MARKER)
-    if found is None:
+    if not isinstance(body, str):
         return None
+    provenance_line = re.compile(
+        r"(?m)^[ \t]*" + re.escape(PROVENANCE_MARKER) + r"[ \t]*\r?$"
+    )
+    provenance_candidates = []
+    for match in provenance_line.finditer(body):
+        marker_at = match.start() + len(match.group(0)) - len(PROVENANCE_MARKER)
+        parsed = _marked_json_block_at(body, PROVENANCE_MARKER, marker_at)
+        if parsed is None:
+            continue
+        provenance, _ = parsed
+        if provenance.get("voice") not in PROVENANCE_VOICES:
+            continue
+        raw_at = provenance.get("at")
+        if not isinstance(raw_at, str):
+            continue
+        try:
+            stamp = datetime.fromisoformat(raw_at.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if stamp.tzinfo is None or stamp.utcoffset() is None:
+            continue
+        provenance_candidates.append((stamp.astimezone(timezone.utc),
+                                      match.start()))
+    if not provenance_candidates:
+        return None
+
+    # Position breaks a timestamp tie in favor of the last copy, which is how
+    # existing bodies with quoted provenance and the runner trailer are laid
+    # out. A copied trailer with an older `at` cannot steal the boundary just
+    # by being appended later.
+    _, provenance_start = max(provenance_candidates)
+    risk_line = re.compile(
+        r"(?m)^[ \t]*" + re.escape(SHAPE_RISK_MARKER) + r"[ \t]*\r?$"
+    )
+    risk_markers = list(risk_line.finditer(body, 0, provenance_start))
+    if not risk_markers:
+        return None
+
+    risk_match = risk_markers[-1]
+    risk_marker_at = (
+        risk_match.start() + len(risk_match.group(0))
+        - len(SHAPE_RISK_MARKER)
+    )
+    parsed = _marked_json_block_at(body, SHAPE_RISK_MARKER, risk_marker_at)
+    if parsed is None:
+        return None
+    found, risk_block = parsed
+    if body[risk_marker_at + len(risk_block):provenance_start].strip():
+        return None
+
     declared = found.get("declared", [])
     scan = found.get("scan")
     if not (isinstance(declared, list)
@@ -17680,7 +17833,11 @@ def _shaped_risk_holds(item: Item, body: str) -> bool:
     if item.risk != "escalated" or not body.strip():
         return True
     record = parse_shape_risk_record(body)
-    if record is None or record["declared"] or not record["scan"]:
+    if record is None:
+        return True
+    # Trust the runner's typed decision before parsing prose: an unclosed
+    # fence above the record can hide its rendered Risk rationale.
+    if record["declared"] or not record["scan"]:
         return True
     return bool(plan_declared_risks(body))
 

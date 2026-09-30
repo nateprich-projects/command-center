@@ -144,6 +144,35 @@ def test_park_sets_status_closes_not_planned_then_posts_the_reason(monkeypatch):
     assert funnel.parse_provenance(posted)["run"] == "run-42"
 
 
+def test_reparking_an_already_parked_item_skips_the_status_write(monkeypatch):
+    target = funnel.Item(
+        repo="nateprich/beta",
+        number=42,
+        title="A project already stopped",
+        url="https://github.com/nateprich/beta/issues/42",
+        state="CLOSED",
+        status="Parked",
+        item_id="project-item-42",
+    )
+    calls = []
+
+    def refuse_status_write(*args, **kwargs):
+        pytest.fail("a same-value Status mutation was attempted")
+
+    def run_gh(args, **kwargs):
+        calls.append(tuple(args))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(funnel, "gh_graphql", refuse_status_write)
+    monkeypatch.setattr(funnel, "_option_id", refuse_status_write)
+    monkeypatch.setattr(funnel, "_run_gh", run_gh)
+
+    assert funnel.cmd_park([target], datetime(2026, 9, 21, tzinfo=timezone.utc),
+                           target.ref, "Still stopped") == 0
+
+    assert [call[2] for call in calls] == ["close", "comment"]
+
+
 def test_park_with_wake_date_records_status_reason_and_instruction(monkeypatch):
     target = funnel.Item(
         repo="nateprich/beta",

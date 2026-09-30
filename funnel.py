@@ -3072,6 +3072,7 @@ def projected_pull_order(
     finished: Collection[str] = (),
     in_review: Collection[str] = (),
     recent_starts: Sequence[Optional[str]] = (),
+    repo_readiness: Optional[Mapping[str, MemberRepoReadiness]] = None,
 ) -> List[str]:
     """Every ticket's projected turn, found by running ``next_ticket`` forward.
 
@@ -3089,6 +3090,9 @@ def projected_pull_order(
     fourth start takes one, and a tier-1 Bug showed first on pulls that pass
     it over. ``recent_starts`` is ``recent_ticket_starts``'s answer, and each
     turn that is a new start joins it with the class ``begin`` records.
+    ``repo_readiness`` is the same snapshot used by ``begin`` and
+    ``startable()``; a withheld ticket takes no projected turn and adds no
+    start to that history.
 
     Work already under way -- a claim, a PR in review (``in_review``), a
     human or Claude Code step -- queues with everything else under the same
@@ -3163,7 +3167,8 @@ def projected_pull_order(
         # No claim is left on the copies, so the WIP cap never binds and
         # this is the pick a free lane gets.
         chosen = next_ticket(sim, now, blocked=waiting_on_nate,
-                             backed_off=held, recent_starts=history)
+                             backed_off=held, recent_starts=history,
+                             repo_readiness=repo_readiness)
         if chosen is None and held:
             held = {}
             continue
@@ -14709,6 +14714,7 @@ def cmd_queue(
             paused=_backed_off_work(items, now, rows=heartbeat_rows),
             finished=finished, in_review=in_review,
             recent_starts=recent_ticket_starts(heartbeat_rows),
+            repo_readiness=repo_readiness,
         ))
     }
     tickets.sort(key=lambda item: turn.get(item.ref, len(turn)))

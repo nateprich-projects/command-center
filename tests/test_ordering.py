@@ -1932,6 +1932,78 @@ def test_a_bug_free_board_pulls_exactly_as_it_did_before_the_bug_turn_order():
 # takes it, not where ``startable()`` alone would rank it.
 
 
+def _readiness_bug_board():
+    """An ineligible tier-1 Bug ahead of a startable tier-3 Bug."""
+    rows = [
+        tier_project(TOOLING, 1, "Building", "Bug", days=12),
+        tier_ticket(TOOLING, 2, 1, days=12),
+        tier_project(HOBBY, 3, "Building", "Bug", days=10),
+        tier_ticket(HOBBY, 4, 3, days=10),
+    ]
+    for parent, child in ((5, 6), (7, 8), (9, 10)):
+        rows += [
+            tier_project(HOBBY, parent, "Building", "Improve"),
+            tier_ticket(HOBBY, child, parent),
+        ]
+    readiness = {
+        TOOLING: funnel.MemberRepoReadiness(
+            TOOLING, topic=True, ci_workflow=False,
+            stock_labels=(), dependabot=False,
+        ),
+        HOBBY: funnel.MemberRepoReadiness(
+            HOBBY, topic=True, ci_workflow=True,
+            stock_labels=(), dependabot=False,
+        ),
+    }
+    return rows, readiness
+
+
+def test_projection_gives_no_turn_or_start_to_repo_readiness_withheld_work():
+    rows, readiness = _readiness_bug_board()
+
+    # The projection must not count the readiness-withheld tier-1 Bug as a
+    # start; one-in-four and then three Improvements give this hand-worked order.
+    assert funnel.projected_pull_order(
+        rows, NOW, recent_starts=[], repo_readiness=readiness
+    ) == [
+        HOBBY + "#4", HOBBY + "#6", HOBBY + "#8", HOBBY + "#10",
+    ]
+
+
+def test_begin_still_withholds_repo_readiness_blocked_tickets():
+    rows, readiness = _readiness_bug_board()
+
+    assert next_ticket(
+        rows, NOW, repo_readiness=readiness, recent_starts=[]
+    ).ref == HOBBY + "#4"
+    assert funnel.readiness_blockers(rows, repo_readiness=readiness) == [
+        {"ref": TOOLING + "#2", "repo": TOOLING,
+         "reasons": ["no CI workflow"]},
+    ]
+
+
+def test_queue_lists_the_readiness_bug_on_the_turn_begin_takes_it(
+    monkeypatch, capsys
+):
+    rows, readiness = _readiness_bug_board()
+    monkeypatch.setattr(funnel, "finished_by_comments_runs", lambda _items: set())
+    monkeypatch.setattr(funnel, "_backoff_rows", lambda: [])
+    monkeypatch.setattr(
+        funnel, "_backed_off_work", lambda _items, _now, rows=None: {}
+    )
+    monkeypatch.setattr(funnel, "recent_ticket_starts", lambda _rows: [])
+
+    assert funnel.cmd_queue(
+        rows, NOW, repo_readiness=readiness, pr_facts={}
+    ) == 0
+    listed = capsys.readouterr().out.split("Startable by Codex", 1)[1]
+
+    assert [
+        int(line.split(HOBBY + "#", 1)[1].split()[0])
+        for line in listed.splitlines() if HOBBY + "#" in line
+    ] == [4, 6, 8, 10]
+
+
 def _successive_starts(rows, history):
     """What one lane starts, pull after pull, found without the projection.
 

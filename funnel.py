@@ -12340,10 +12340,10 @@ def _dashboard_ticket(
         "title": item.title,
         "url": item.url,
         "state": item.state,
-        # Where this ticket sits in the engineers' own queue: 0 is the ticket
-        # the next run takes. None means it is not startable — closed, blocked,
-        # or already sitting in review. The order is `startable()`'s, never a
-        # second opinion computed here.
+        # `queue_rank` is the displayed rank in `startable()`'s order. Begin
+        # also applies the one-in-four Bug turn: finite work, then pinned work,
+        # then the startable Bug in the highest repo tier, oldest in that tier.
+        # None means not startable — closed, blocked, or already in review.
         "queue_rank": queue_rank,
         "blockers": list(blockers),
         "blocked_until": (
@@ -14749,7 +14749,10 @@ def cmd_queue(
               "cannot be excluded, so the list below may name work that is "
               "already done.".format(pr_facts_unavailable))
 
-    print("\nStartable by Codex ({}), ladder order:".format(len(tickets)))
+    print(
+        "\nStartable by Codex ({}), start order "
+        "(Bug turn: one in four; tier then oldest):".format(len(tickets))
+    )
     _print_queue_section(
         tickets,
         lambda item, prefix: "{}{:<24} {:<34} {}".format(

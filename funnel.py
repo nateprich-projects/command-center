@@ -489,6 +489,7 @@ REGRESSION_PREFIX = "Regression from PR #"
 #: Reasons are durable parking artifacts. The sibling brief command reads this
 #: fixed marker back from issue comments, so it is a shared contract.
 PARK_COMMENT_PREFIX = "**Parked:** "
+SEND_BACK_COMMENT_PREFIX = "Send-back to Ideas: "
 
 #: A dated park records the prior Project Status on its own fixed header line.
 #: The brief and the future wake path share this parser contract.
@@ -15795,6 +15796,76 @@ def cmd_park(items: List[Item], now: datetime, ref: str, reason: str,
     return 0
 
 
+def cmd_send_back(items: List[Item], now: datetime, ref: str, reason: str,
+                  confirmed: bool = False, run: Optional[str] = None,
+                  agent: Optional[str] = None,
+                  instruction: Optional[str] = None) -> int:
+    """Return a Shaped project to Ideas on Nate's explicit instruction."""
+    if not isinstance(reason, str) or not reason.strip():
+        raise GitHubError("send-back requires a non-empty reason")
+    if not isinstance(instruction, str) or not instruction.strip():
+        raise GitHubError(
+            "send-back requires a verbatim Nate instruction; agents may not "
+            "send work back on their own"
+        )
+
+    item = find(items, ref)
+    if not item.item_id:
+        raise GitHubError("{} is not in the Project".format(item.ref))
+
+    # A FunnelSession can reuse a Project snapshot across commands. Send-back
+    # changes a human gate, so the guard must use GitHub's current Status.
+    fresh_items = load_project_items_by_refs([item.ref])
+    fresh = fresh_items[0] if fresh_items else None
+    if fresh is None or not fresh.item_id:
+        raise GitHubError(
+            "{} is no longer in the Project; cannot send it back".format(item.ref)
+        )
+    if fresh.ref != item.ref:
+        raise GitHubError(
+            "fresh Project read did not match {}".format(item.ref)
+        )
+    if fresh.status != "Shaped":
+        raise GitHubError(
+            "refusing send-back for {}: fresh Status is {}; only Shaped items "
+            "can return to Ideas".format(item.ref, fresh.status or "missing")
+        )
+
+    comment_body = SEND_BACK_COMMENT_PREFIX + reason
+    if not confirmed:
+        print("would move {} from Shaped to Ideas".format(item.ref))
+        print(comment_body)
+        print("\nNothing was changed. Re-run with --yes to send it back.")
+        return 1
+
+    refusal = _write_status(fresh, "Ideas", now)
+    if refusal is not None:
+        raise GitHubError(refusal)
+
+    # Keep an already-loaded FunnelSession aligned with the confirmed write,
+    # without changing the plan body or any routing fields.
+    item.status = fresh.status
+    item.status_since = fresh.status_since
+    item.status_updated_at = fresh.status_updated_at
+    item.status_events = fresh.status_events
+
+    comment = _run_gh(
+        ["gh", "issue", "comment", str(item.number), "--repo", item.repo,
+         "--body", append_provenance(
+             comment_body, "nate-relayed", at=now,
+             run=run, agent=agent, instruction=instruction)],
+        capture_output=True, text=True,
+    )
+    if comment.returncode != 0:
+        raise GitHubError(
+            "moved {} to Ideas, but could not post its send-back reason: {}"
+            .format(item.ref, comment.stderr.strip())
+        )
+
+    print("{} → Ideas\n{}".format(item.ref, comment_body))
+    return 0
+
+
 def _hold_refusal(item: Item) -> Optional[str]:
     """Why ``item`` cannot be held at Accept, or ``None`` when it can (#1724).
 
@@ -20601,6 +20672,15 @@ def _parking_reason(value: str) -> str:
     return reason
 
 
+def _send_back_reason(value: str) -> str:
+    """Reject blank send-back reasons while preserving the supplied text."""
+    if not isinstance(value, str) or not value.strip():
+        raise argparse.ArgumentTypeError(
+            "a non-empty send-back reason is required"
+        )
+    return value
+
+
 def _parking_wake_date(value: str) -> date:
     """Require a future calendar date before loading or writing to GitHub."""
     if not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", value):
@@ -20945,6 +21025,31 @@ def main(argv: Optional[Sequence[str]] = None, *,
     park.add_argument(
         "--agent", default=None,
         help="agent that wrote the comment; otherwise read the heartbeat spool",
+    )
+    send_back = sub.add_parser(
+        "send-back",
+        help="return a Shaped project to Ideas with Nate's reason — dry run without --yes",
+    )
+    send_back.add_argument("ref", help="issue number, owner/repo#number, or URL")
+    send_back.add_argument(
+        "--reason", required=True, type=_send_back_reason,
+        help="Nate's reason for returning the plan to Ideas (required)",
+    )
+    send_back.add_argument(
+        "--instruction", required=True, type=_verbatim_instruction,
+        help="verbatim Nate instruction authorizing this send-back",
+    )
+    send_back.add_argument(
+        "--yes", action="store_true", dest="confirmed",
+        help="write Status and comment; without this the command is a dry run",
+    )
+    send_back.add_argument(
+        "--run", default=None,
+        help="heartbeat run id; otherwise infer a unique open local start",
+    )
+    send_back.add_argument(
+        "--agent", default=None,
+        help="agent relaying Nate's instruction; otherwise read the heartbeat spool",
     )
     answer_gates = sub.add_parser(
         "answer-gates",
@@ -21370,6 +21475,11 @@ def main(argv: Optional[Sequence[str]] = None, *,
             return cmd_park(items, now, args.ref, args.reason,
                             args.run, args.agent, args.wake_date,
                             args.instruction)
+        if args.command == "send-back":
+            return cmd_send_back(
+                items, now, args.ref, args.reason, args.confirmed,
+                args.run, args.agent, args.instruction,
+            )
         if args.command == "answer-gates":
             return cmd_answer_gates(items, now, args.ref, args.answer,
                                     args.decider, args.run, args.agent)

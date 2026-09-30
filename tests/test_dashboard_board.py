@@ -655,8 +655,9 @@ def test_a_roster_naming_muse_alone_gives_muse_its_work_back(monkeypatch):
 # The board is what comes next (Nate, 2026-09-24): "The dashboard should
 # simply be an accurate representation of what comes next, not a string of
 # contrived rules to make it appear to be an accurate representation."
-# ``projected_pull_order`` runs ``startable()`` forward; projects and their
-# open rows follow its turns, and what it never reaches sinks below.
+# ``projected_pull_order`` runs begin's picks forward, including the one-in-four
+# Bug turn: finite work, then pins, then Bug by repo tier and oldest. Projects
+# and their open rows follow its turns, and what it never reaches sinks below.
 
 def _titles(found):
     return [row["title"] for row in found]

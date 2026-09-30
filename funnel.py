@@ -3101,8 +3101,9 @@ def projected_pull_order(
     (Nate, 2026-09-24). Each round takes the ticket ``next_ticket`` would
     hand a lane, counts it done, and lifts what that frees: a native edge on
     it, a labelled block whose every condition has now cleared, and a project
-    ref once all of that project's tickets are done. A Ready project moves to
-    Building on its first turn, as ``claim`` would move it.
+    ref once all of that project's tickets are done. A real projected start
+    moves a Ready project to Building, as ``claim`` would. A human or Claude
+    Code step in a Ready Bug project is shown as under way but does not commit it.
 
     The pick is ``next_ticket``'s own, so Bugs take the turns their share
     gives them (#1878). Before this each round took ``startable()``'s first,
@@ -3136,6 +3137,21 @@ def projected_pull_order(
     """
     sim = [copy.copy(item) for item in items]
     by_ref = {item.ref: item for item in sim}
+
+    def is_unclaimable_ready_bug_step(item: Item) -> bool:
+        parent = by_ref.get(item.parent or "")
+        return (
+            parent is not None
+            and parent.status == "Ready"
+            and parent.klass == "Bug"
+            and item.needs in ("human", "claude-code-environment")
+        )
+
+    # Capture before clearing Needs below; these turns cannot commit a Ready
+    # Bug project because neither agent can claim them as a start.
+    unclaimable_ready_steps = {
+        item.ref for item in sim if is_unclaimable_ready_bug_step(item)
+    }
     under_way = set(in_review)
     for item in sim:
         if item.needs in ("human", "claude-code-environment"):
@@ -3170,7 +3186,10 @@ def projected_pull_order(
         if parent is None:
             return
         parent.children_done += 1
-        if parent.status == "Ready":
+        if (
+            parent.status == "Ready"
+            and item.ref not in unclaimable_ready_steps
+        ):
             parent.status = "Building"
         if (
             parent.state == "OPEN"
@@ -12441,10 +12460,10 @@ def _dashboard_ticket(
         "title": item.title,
         "url": item.url,
         "state": item.state,
-        # Where this ticket sits in the engineers' own queue: 0 is the ticket
-        # the next run takes. None means it is not startable — closed, blocked,
-        # or already sitting in review. The order is `startable()`'s, never a
-        # second opinion computed here.
+        # `queue_rank` is the displayed rank in `startable()`'s order. Begin
+        # also applies the one-in-four Bug turn: finite work, then pinned work,
+        # then the startable Bug in the highest repo tier, oldest in that tier.
+        # None means not startable — closed, blocked, or already in review.
         "queue_rank": queue_rank,
         "blockers": list(blockers),
         "blocked_until": (
@@ -14851,7 +14870,10 @@ def cmd_queue(
               "cannot be excluded, so the list below may name work that is "
               "already done.".format(pr_facts_unavailable))
 
-    print("\nStartable by Codex ({}), ladder order:".format(len(tickets)))
+    print(
+        "\nStartable by Codex ({}), start order "
+        "(Bug turn: one in four; tier then oldest):".format(len(tickets))
+    )
     _print_queue_section(
         tickets,
         lambda item, prefix: "{}{:<24} {:<34} {}".format(

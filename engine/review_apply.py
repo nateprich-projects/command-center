@@ -426,7 +426,7 @@ def load_merge_items(repo: str, pr_fact: Optional[dict]) -> list:
         None)
     if parent is not None:
         subjects.append(parent)
-    funnel.hydrate_item_details(items, subjects)
+    funnel.hydrate_item_details(items, subjects, include_history=True)
     return items
 
 

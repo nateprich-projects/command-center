@@ -490,7 +490,7 @@ def _dispatch_recording(monkeypatch, record):
     monkeypatch.setattr(funnel, "report_api_cost", lambda **kw: None)
     monkeypatch.setattr(funnel, "report_graphql_spend", lambda: None)
 
-    def hydrate(items, candidates=None):
+    def hydrate(items, candidates=None, **kwargs):
         record.append(("hydrate", len(items)))
         for item in items:
             item.status_since = datetime(2020, 1, 2, tzinfo=timezone.utc)

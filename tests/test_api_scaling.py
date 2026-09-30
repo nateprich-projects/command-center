@@ -811,6 +811,24 @@ def test_the_split_pr_scan_keeps_the_newest_row_first(monkeypatch):
     assert open_row["verdict"]["verdict"] == "approved"
 
 
+def test_missing_created_at_ticket_fact_matches_single_all_states_read(monkeypatch):
+    """A missing timestamp must not let the open-read row win the tie.
+
+    The single all-states read reported merged PR #50 first for this branch;
+    the split reads must report the same ticket fact when neither row has a
+    ``createdAt`` field.
+    """
+    merged = _pr_row(50, state="MERGED", created_at=None)
+    opened = _pr_row(49, state="OPEN", created_at=None)
+    merged.pop("createdAt")
+    opened.pop("createdAt")
+    _split_pr_scan(monkeypatch, {"OPEN": (opened,), "MERGED": (merged,)})
+
+    facts = funnel.ticket_pr_facts([_item(11, parent=10)])
+
+    assert facts.rows_by_ref["{}#11".format(REPO)][0]["number"] == 50
+
+
 def test_a_pr_merged_between_the_two_reads_is_kept_once_as_merged():
     """The split introduces a race the single all-states read could not have.
 

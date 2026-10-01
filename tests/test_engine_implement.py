@@ -5721,3 +5721,62 @@ def test_unavailable_prior_fix_scan_is_explicit_and_best_effort(
         repo=PUBLIC_REPO, prior_fixes=None,
     )
     assert "- prior fix scan: not run\n" in block
+
+
+@pytest.mark.parametrize(("repo", "merged_suite"), [
+    (PUBLIC_REPO, False),
+    (PUBLIC_REPO, True),
+    ("owner/private-repo", False),
+    ("owner/private-repo", True),
+])
+def test_finish_done_missing_test_command_releases_and_finishes_errored(
+        tmp_path, monkeypatch, repo, merged_suite):
+    _, clone = make_clone(tmp_path)
+    _stub_claim_state(monkeypatch, "owned")
+    missing = str(tmp_path / "missing-test-command")
+    if merged_suite:
+        (clone / "pyproject.toml").write_text(
+            '[tool.command-center]\ntest = "{}"\n'.format(missing)
+        )
+        test_commands = None
+    else:
+        test_commands = [[missing]]
+    (clone / "implemented.txt").write_text("done\n")
+    monkeypatch.setattr(implement, "fetch_ticket",
+                        lambda found, number: ticket(number, repo))
+    effects = {"released": [], "finished": []}
+
+    try:
+        implement.finish_done(
+            answer(), run="run-42", repo=repo, cwd=clone,
+            test_commands=test_commands,
+            release=effects["released"].append,
+            heartbeat_finish=lambda *args: effects["finished"].append(args),
+            pr_effect=lambda *args: pytest.fail(
+                "a missing test command cannot open a PR"),
+            comment_effect=lambda *args, **kwargs: None,
+        )
+    except Exception as exc:
+        raised = exc
+    else:
+        raised = None
+
+    assert isinstance(raised, implement.ImplementError)
+    assert not isinstance(raised, OSError)
+    assert effects["released"] == [repo + "#42"]
+    (finished,) = effects["finished"]
+    assert finished[:3] == ("codex", "run-42", "errored")
+    assert finished[3].split(" | ", 1)[0] == "test command could not start"
+    assert missing not in finished[3]
+    assert not finished[3].startswith("tests failed:")
+    assert finished[4] == repo + "#42"
+
+
+def test_run_tests_missing_executable_uses_fixed_start_failure(tmp_path):
+    missing = str(tmp_path / "missing-test-command")
+
+    with pytest.raises(implement.TestCommandStartError) as caught:
+        implement.run_tests(tmp_path, [[missing]])
+
+    assert str(caught.value) == "test command could not start"
+    assert missing not in str(caught.value)

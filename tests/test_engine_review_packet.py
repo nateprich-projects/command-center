@@ -2361,6 +2361,71 @@ def test_collect_fetches_each_closing_ticket_once(monkeypatch):
     assert found["ticket"]["number"] == 131
 
 
+def _collect_with_closing_states(monkeypatch, states, pr_state="OPEN"):
+    """Collect a ticket/131 PR whose closing refs carry the given states."""
+    view = pr_view(headRefName="ticket/131", state=pr_state,
+                   closingIssuesReferences=[{"number": number}
+                                            for number in states])
+    monkeypatch.setattr(review, "fetch_pr", lambda repo, pr: view)
+    monkeypatch.setattr(review, "fetch_diff", lambda repo, pr: "diff text")
+    monkeypatch.setattr(
+        review, "fetch_ticket",
+        lambda repo, number: ticket(number=number,
+                                    ref=repo + "#" + str(number),
+                                    state=states.get(number, "OPEN")))
+    monkeypatch.setattr(
+        review, "fetch_plan_md", lambda repo: ("# design record", False))
+    monkeypatch.setattr(review, "fetch_open_prs", lambda repo: [])
+    monkeypatch.setattr(review, "fetch_merged_prs", lambda repo: [])
+    monkeypatch.setattr(review, "fetch_ci_runs", lambda repo, branch: [])
+    monkeypatch.setattr(review, "fetch_verdict", lambda repo, pr: None)
+    monkeypatch.setattr(
+        review, "fetch_pr_comments", lambda repo, pr: empty_pr_comments())
+    return review.collect(REPO, 132, items_loader=lambda: [])
+
+
+def test_an_open_pr_is_not_judged_against_a_closed_prior_fix(monkeypatch):
+    """#2068: `- rewrites prior fix: #1964` in the evidence block is a
+    GitHub closing keyword, so PR #2047 for #2035 was judged against
+    #1964's Accept. A closed ticket is never this PR's spec."""
+    found = _collect_with_closing_states(
+        monkeypatch, {131: "OPEN", 1964: "CLOSED"})
+    assert [entry["number"] for entry in found["tickets"]] == [131]
+
+
+def test_an_open_pr_closing_two_open_tickets_keeps_both(monkeypatch):
+    found = _collect_with_closing_states(
+        monkeypatch, {131: "OPEN", 129: "OPEN"})
+    assert [entry["number"] for entry in found["tickets"]] == [131, 129]
+
+
+def test_a_closed_branch_ticket_is_never_dropped(monkeypatch):
+    found = _collect_with_closing_states(monkeypatch, {131: "CLOSED"})
+    assert [entry["number"] for entry in found["tickets"]] == [131]
+
+
+def test_a_merged_pr_keeps_its_closed_closing_tickets(monkeypatch):
+    """Replays of merged PRs keep today's packet."""
+    found = _collect_with_closing_states(
+        monkeypatch, {131: "CLOSED", 129: "CLOSED"}, pr_state="MERGED")
+    assert [entry["number"] for entry in found["tickets"]] == [131, 129]
+
+
+def test_fetch_ticket_reads_the_ticket_state(monkeypatch):
+    asked = []
+
+    def fake_json(*args):
+        asked.append(args)
+        return {"number": 9, "state": "CLOSED", "parent": None}
+
+    monkeypatch.setattr(review.funnel, "_gh_json", fake_json)
+    monkeypatch.setattr(review, "fetch_parent_comments",
+                        lambda repo, number, parent: parent)
+    found = review.fetch_ticket(REPO, 9)
+    assert "state" in asked[0][-1].split(",")
+    assert found["state"] == "CLOSED"
+
+
 def test_collect_without_closing_refs_fetches_only_the_branch_ticket(
         monkeypatch):
     monkeypatch.setattr(review, "fetch_pr", lambda repo, pr: pr_view())

@@ -117,6 +117,35 @@ def test_newer_model_is_recorded_once_across_repeated_runs(monkeypatch, tmp_path
     assert len(nightly_watch.recent_entries(NOW, path=record)["model_releases"]) == 1
 
 
+def test_each_newer_model_gets_its_own_brief_entry(monkeypatch, tmp_path):
+    models = {"openai": ("gpt-5.6-sol", "gpt-5.6-mini")}
+    _in_use(monkeypatch, models)
+    monkeypatch.setattr(
+        nightly_watch.price_watch,
+        "watch_in_use",
+        lambda *args, **kwargs: price_watch.WatchResult(),
+    )
+    record = tmp_path / "watch.jsonl"
+
+    result = nightly_watch.run(
+        now=NOW,
+        record_path=record,
+        env_file=tmp_path / "missing.env",
+        environ={"OPENAI_API_KEY": "fixture-key"},
+        current_models=models,
+        fetcher=_fetcher(RELEASE_FIXTURE["openai"]),
+    )
+
+    assert {
+        (event["provider"], event["current_model"], event["newer_model"])
+        for event in result.model_releases
+    } == {
+        ("openai", "gpt-5.6-sol", "gpt-5.7-sol"),
+        ("openai", "gpt-5.6-mini", "gpt-5.7-mini"),
+    }
+    assert len(nightly_watch.recent_entries(NOW, path=record)["model_releases"]) == 2
+
+
 @pytest.mark.parametrize(
     ("failed_url", "failed_source"),
     [

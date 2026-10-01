@@ -396,6 +396,40 @@ def test_begin_reports_bounded_cannot_complete_before_starting_a_ticket(
     assert funnel._ACTIVE_BEGIN_ENVELOPE is None
 
 
+def test_main_keeps_begin_envelope_active_during_project_load(
+    monkeypatch, capsys,
+):
+    _allow_local_preflight(monkeypatch, {"windows": {}})
+
+    def member_repos(after_first_response=None):
+        if after_first_response is not None:
+            after_first_response({
+                "rateLimit": {"cost": 1, "remaining": 5_000,
+                              "resetAt": "later"},
+            })
+        return ["nateprich-projects/command-center"]
+
+    monkeypatch.setattr(funnel, "member_repos", member_repos)
+    loaded_envelopes = []
+
+    def refuse_during_load(**_kwargs):
+        loaded_envelopes.append(funnel._ACTIVE_BEGIN_ENVELOPE)
+        assert isinstance(funnel._ACTIVE_BEGIN_ENVELOPE,
+                          funnel.BeginWorkEnvelope)
+        raise funnel.BeginCannotComplete()
+
+    monkeypatch.setattr(funnel, "load_items", refuse_during_load)
+
+    assert funnel.main(
+        ["begin", "--agent", "codex", "--tier", "standard"],
+    ) == 0
+
+    result = json.loads(capsys.readouterr().out)
+    assert len(loaded_envelopes) == 1
+    assert result["do"] == "stop"
+    assert result["why"] == funnel.BEGIN_CANNOT_COMPLETE_REASON
+
+
 def test_begin_work_envelope_counts_preflight_calls_before_running_gh(
     monkeypatch,
 ):
@@ -416,6 +450,53 @@ def test_begin_work_envelope_counts_preflight_calls_before_running_gh(
 
     assert len(commands) == 1
     assert envelope.preflight_calls == 1
+
+
+def test_cmd_begin_refuses_before_claim_when_detail_reserve_exceeds_envelope(
+    monkeypatch,
+):
+    project, ticket = _ticket(7, 6)
+    envelope = funnel.BeginWorkEnvelope(limit=100)
+    monkeypatch.setattr(funnel, "_ACTIVE_BEGIN_ENVELOPE", envelope)
+    monkeypatch.setattr(funnel, "ticket_pr_facts", lambda _items: {})
+    monkeypatch.setattr(funnel, "reconcile_approved_merges",
+                        lambda *args: [])
+    monkeypatch.setattr(funnel, "reconcile_auto_closeable_projects",
+                        lambda *args: [])
+    monkeypatch.setattr(funnel, "reconcile_closed_items",
+                        lambda *args: [])
+    monkeypatch.setattr(funnel, "reconcile_parked_wakes",
+                        lambda *args: [])
+    monkeypatch.setattr(funnel, "reconcile_closed_claims",
+                        lambda *args: [])
+    monkeypatch.setattr(funnel, "clear_satisfied_blocks",
+                        lambda *args, **kwargs: [])
+    monkeypatch.setattr(funnel, "clear_answered_decline_routes",
+                        lambda *args, **kwargs: [])
+    monkeypatch.setattr(funnel, "awaiting_review", lambda *args, **kwargs: set())
+    monkeypatch.setattr(funnel, "_backoff_rows", lambda: [])
+    monkeypatch.setattr(funnel, "next_ticket_for_tier",
+                        lambda *args, **kwargs: ticket)
+    monkeypatch.setattr(funnel, "read_lock", lambda _item: None)
+    calls = []
+    monkeypatch.setattr(
+        funnel, "claim_ticket",
+        lambda *args, **kwargs: calls.append("claim_ticket"),
+    )
+    monkeypatch.setattr(
+        funnel, "write_lock",
+        lambda *args, **kwargs: calls.append("write_lock"),
+    )
+
+    with pytest.raises(funnel.BeginCannotComplete):
+        funnel.cmd_begin(
+            [project, ticket], NOW, "codex", "standard", False,
+            _preflight=({"agent": "codex", "run": "run-id"},
+                        {"windows": {}}),
+            _pr_facts={},
+        )
+
+    assert calls == []
 
 
 @pytest.mark.parametrize("gate", ["pace", "idle"])

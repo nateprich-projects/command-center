@@ -45,13 +45,6 @@ jobs:
       - name: Install pytest
         run: python3 -m pip install --quiet pytest
 
-      - name: Run quota hold tests 20 times on hobby-linux
-        run: |
-          for run in {1..20}; do
-            echo "test_muse_quota_hold run ${run}/20"
-            python3 -m pytest tests/test_muse_quota_hold.py -q
-          done
-
       - name: Run the suite
         run: python3 -m pytest tests/ -q
 
@@ -60,3 +53,27 @@ jobs:
 
       - name: Check dashboard JavaScript
         run: npm --prefix dashboard test
+
+  quota-hold-20x:
+    name: quota hold tests 20 times (hobby-linux)
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: [self-hosted, linux, x64, hobby-linux]
+    concurrency:
+      group: quota-hold-20x-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install pytest
+        run: python3 -m pip install --quiet pytest
+
+      - name: Run quota hold tests 20 times
+        run: |
+          for run in {1..20}; do
+            echo "test_muse_quota_hold run ${run}/20"
+            python3 -m pytest tests/test_muse_quota_hold.py -q
+          done

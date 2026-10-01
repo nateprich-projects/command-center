@@ -101,6 +101,49 @@ def _allow_begin(monkeypatch):
     monkeypatch.setattr(funnel, "member_repos", member_repos)
 
 
+def _allow_local_preflight(monkeypatch, reading):
+    monkeypatch.setattr(
+        funnel, "_start_begin_heartbeat",
+        lambda agent, tier=None: "run-id",
+    )
+    monkeypatch.setattr(
+        funnel, "_codex_settings_check",
+        lambda: {"ok": True, "effective": {"model": "fixture"},
+                 "automation": None},
+    )
+    monkeypatch.setattr(funnel, "_codex_memory_reset", lambda _job: "reset")
+    monkeypatch.setattr(usage, "read_agent", lambda *_args: reading)
+    monkeypatch.setattr(
+        usage, "pace", lambda *_args, **_kwargs: {"over_pace": False}
+    )
+
+
+def _deny_preflight_project_reads(monkeypatch):
+    def denied(name):
+        def call(*_args, **_kwargs):
+            pytest.fail("run preflight unexpectedly called {}".format(name))
+        return call
+
+    for name in (
+        "member_repos", "load_items", "_load_begin_items",
+        "_load_minimal_startable_view", "hydrate_item_details", "gh_graphql",
+        "startable_listing", "_order_startable_items",
+        "_run_bounded_subprocess",
+    ):
+        monkeypatch.setattr(funnel, name, denied(name))
+    monkeypatch.setattr(funnel.subprocess, "run", denied("subprocess.run"))
+
+    real_clock = funnel.time
+
+    class NoTimeoutClock:
+        def __getattr__(self, name):
+            if name in ("monotonic", "perf_counter", "sleep", "time"):
+                return denied("time." + name)
+            return getattr(real_clock, name)
+
+    monkeypatch.setattr(funnel, "time", NoTimeoutClock())
+
+
 def _begin(monkeypatch, capsys, *, breakdown):
     _allow_begin(monkeypatch)
     monkeypatch.setattr(funnel, "reconcile_approved_merges", lambda *args: [])
@@ -375,6 +418,7 @@ def test_main_loads_the_project_after_begin_gates_pass(
 ):
     """A passing preflight still reaches the normal queue and WIP checks."""
     events = []
+    load_args = []
     monkeypatch.setattr(
         funnel,
         "_start_begin_heartbeat",
@@ -405,11 +449,13 @@ def test_main_loads_the_project_after_begin_gates_pass(
         return []
 
     monkeypatch.setattr(funnel, "member_repos", member_repos)
-    monkeypatch.setattr(
-        funnel,
-        "load_items",
-        lambda include_details=True: events.append("load") or [],
-    )
+
+    def load_items(**kwargs):
+        events.append("load")
+        load_args.append(kwargs)
+        return []
+
+    monkeypatch.setattr(funnel, "load_items", load_items)
     monkeypatch.setattr(funnel, "repo_readiness_for_items", lambda items: {})
     monkeypatch.setattr(
         funnel,
@@ -430,6 +476,11 @@ def test_main_loads_the_project_after_begin_gates_pass(
     assert events[-1][0] == "begin"
     assert events[-1][2][0]["gate"] == "ok"
     assert "begin_load.member_repos" in events[-1][3]
+    assert len(load_args) == 1
+    assert load_args[0]["include_details"] is False
+    assert load_args[0]["scope"] == "begin"
+    assert load_args[0]["include_startable"] is True
+    assert load_args[0]["startable_agent"] == "codex"
 
 
 def test_main_stands_down_before_loading_the_project_when_reserve_is_low(
@@ -519,6 +570,32 @@ def test_begin_preflight_uses_the_capped_engineering_floor(monkeypatch):
         "codex", "standard", None,
         {"rateLimit": {"remaining": 826}},
     ) is None
+
+
+def test_run_preflight_uses_local_gates_without_ordering_or_timeout_work(
+    monkeypatch,
+):
+    reading = {"windows": {}}
+    _allow_local_preflight(monkeypatch, reading)
+    _deny_preflight_project_reads(monkeypatch)
+
+    out, result = funnel._begin_preflight(NOW, "codex", False, "standard")
+
+    assert out["gate"] == "ok"
+    assert result == reading
+
+
+def test_run_preflight_stops_on_missing_budget_before_project_reads(monkeypatch):
+    _allow_local_preflight(monkeypatch, None)
+    _deny_preflight_project_reads(monkeypatch)
+
+    out, reading = funnel._begin_preflight(
+        NOW, "codex", False, "standard"
+    )
+
+    assert reading is None
+    assert out["gate"] == "unknown"
+    assert out["do"] == "stop"
 
 
 def test_main_treats_a_structured_empty_window_as_a_clean_reserve_stop(
@@ -1970,6 +2047,36 @@ def test_codex_begin_does_not_plant_a_branch_for_an_already_claimed_ticket(
     assert result["do"] == "stop"
     assert "work" not in result
     assert writes == []
+
+
+def test_begin_rechecks_a_stale_claim_projection_before_claiming(
+        monkeypatch, capsys):
+    project, ticket = _ticket(88, 84)
+    # The filtered listing can carry a claim that has since expired. A fresh
+    # claim read returning no value is authoritative, so the ticket can start.
+    ticket.in_motion_since = NOW - funnel.LOCK_TTL - timedelta(seconds=1)
+
+    result, writes = _implementing_begin(
+        monkeypatch, capsys, [project, ticket],
+        current_claims={ticket.ref: None},
+    )
+
+    assert result["do"] == "ticket"
+    assert result["work"]["ref"] == ticket.ref
+    assert writes[0][0] == ticket.ref and writes[0][1] is not None
+
+
+def test_begin_claims_ticket_when_live_claim_is_missing(monkeypatch, capsys):
+    project, ticket = _ticket(89, 84)
+
+    result, writes = _implementing_begin(
+        monkeypatch, capsys, [project, ticket],
+        current_claims={ticket.ref: None},
+    )
+
+    assert result["do"] == "ticket"
+    assert result["work"]["ref"] == ticket.ref
+    assert writes[0][0] == ticket.ref and writes[0][1] is not None
 
 
 def test_ticket_branch_facts_failure_stops_with_an_error_gate(

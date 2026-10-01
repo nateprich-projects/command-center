@@ -3847,7 +3847,7 @@ def fetch_ticket(repo: str, number: int) -> dict:
     """
     data = funnel._gh_json(
         "gh", "issue", "view", str(number), "--repo", repo, "--json",
-        "number,title,url,body,parent,comments")
+        "number,title,url,body,parent,comments,state")
     if not data:
         raise funnel.GitHubError(
             "could not read ticket {}#{}".format(repo, number))
@@ -4013,12 +4013,21 @@ def collect(repo: Optional[str], pr_number: int, *,
     if ticket is not None:
         tickets.append(ticket)
         seen.add((resolved, ticket.get("number")))
+    pr_open = str(pr_view.get("state") or "").upper() == "OPEN"
     for closing_repo, closing_number in closing_ticket_refs(
             pr_view, resolved):
         if (closing_repo, closing_number) in seen:
             continue
         seen.add((closing_repo, closing_number))
-        tickets.append(fetch_ticket(closing_repo, closing_number))
+        closing = fetch_ticket(closing_repo, closing_number)
+        # An open PR cannot close a closed issue, so a closed one is never
+        # its spec. Evidence lines such as "rewrites prior fix: #N" are
+        # GitHub closing keywords, and judging the PR against that earlier
+        # ticket's Accept rejected PR #2047 for #1964's work (#2068). Merged
+        # and closed PRs keep their full list, so replays read as before.
+        if pr_open and str(closing.get("state") or "").upper() == "CLOSED":
+            continue
+        tickets.append(closing)
 
     # The PR supplies the bounded ticket refs. Reuse the existing by-ref
     # Project loader, then read the filtered regression set for the packet's

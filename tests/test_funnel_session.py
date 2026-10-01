@@ -75,6 +75,89 @@ def test_begin_session_loader_accepts_compact_rows_and_timing_context():
     }
 
 
+def test_begin_refreshes_a_cached_session_view_through_the_shared_loader(
+    monkeypatch,
+):
+    old_item = _view_item(7)
+    old = funnel.ScopedItems(
+        [old_item], scope="full",
+        startable_candidates=[old_item], startable_items=[old_item],
+        startable_agent="codex",
+    )
+    fresh = funnel.ScopedItems(
+        [_view_item(7)], scope="begin", startable_candidates=[],
+        startable_items=[], startable_agent="muse",
+    )
+    new_full = funnel.ScopedItems(
+        [_view_item(7), _view_item(8)], scope="full",
+        startable_candidates=[], startable_items=[], startable_agent="codex",
+    )
+    scopes = []
+    load_args = []
+    begun = []
+    reviewed = []
+    queued = []
+
+    def loader(**kwargs):
+        scopes.append(kwargs.get("scope"))
+        load_args.append(dict(kwargs))
+        if kwargs.get("scope") == "begin":
+            return fresh
+        return old if len(load_args) == 1 else new_full
+
+    monkeypatch.setattr(
+        funnel, "_begin_preflight",
+        lambda now, agent, idle, tier=None: ({"agent": agent}, {}),
+    )
+    monkeypatch.setattr(
+        funnel, "_begin_api_reserve_preflight", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(funnel, "_begin_role_refusal", lambda *args: None)
+
+    def member_repos(after_first_response=None):
+        if after_first_response is not None:
+            after_first_response({"rateLimit": {"cost": 1, "remaining": 5000}})
+        return [_VIEW_REPO]
+
+    monkeypatch.setattr(funnel, "member_repos", member_repos)
+    monkeypatch.setattr(
+        funnel, "cmd_next_review",
+        lambda items, tier: reviewed.append(items) or 0,
+    )
+    monkeypatch.setattr(
+        funnel, "cmd_queue",
+        lambda items, now, repo_readiness=None: queued.append(items) or 0,
+    )
+    monkeypatch.setattr(funnel, "repo_readiness_for_items", lambda items: {})
+    monkeypatch.setattr(
+        funnel, "cmd_begin", lambda items, *args, **kwargs:
+        begun.append(items) or 0,
+    )
+    monkeypatch.setattr(funnel, "report_api_cost", lambda *args, **kwargs: None)
+    monkeypatch.setattr(funnel, "report_graphql_spend", lambda: None)
+
+    session = funnel.FunnelSession(loader=loader)
+    assert session.dispatch(["next-review", "--tier", "standard"])[0] == 0
+    assert session.items is old
+    assert session.dispatch([
+        "begin", "--agent", "muse", "--tier", "escalated", "--role", "review"
+    ])[0] == 0
+    assert session.dispatch(["queue"])[0] == 0
+
+    assert scopes == [None, "begin", None]
+    assert begun == [fresh]
+    assert reviewed == [old]
+    assert queued == [new_full]
+    assert session.items is new_full
+    assert funnel.items_scope(session.items) == "full"
+    assert load_args[0]["include_details"] is False
+    assert load_args[1]["include_details"] is False
+    assert load_args[1]["include_startable"] is True
+    assert load_args[2]["include_details"] is True
+    assert load_args[2]["include_startable"] is True
+    assert load_args[2]["scope"] is None
+
+
 def test_main_accepts_the_session_view_without_loading_the_project_again(
     monkeypatch,
 ):
@@ -822,6 +905,8 @@ def test_the_begin_loader_tags_its_view_and_the_full_load_does_not(
                         lambda items, members, timings: [])
     view = funnel.load_items(include_details=False,
                              member_repo_names=[_VIEW_REPO], scope="begin")
+    assert isinstance(view, funnel.ScopedItems)
+    assert view.scope == "begin"
     assert funnel.items_scope(view) == "begin"
     assert [item.ref for item in view] == [_VIEW_REPO + "#7"]
     assert funnel.items_scope([]) == "full"

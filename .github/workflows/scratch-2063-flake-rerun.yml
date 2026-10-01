@@ -1,0 +1,63 @@
+name: scratch-2063-flake-rerun
+
+# Scratch evidence for #2063 only. Lives on scratch/2063-flake-rerun, never merged.
+
+on:
+  push:
+    branches: [scratch/2063-flake-rerun]
+
+permissions:
+  contents: read
+
+env:
+  T_SINGLE: tests/test_muse_quota_hold.py::test_the_implementer_parks_the_ticket_instead_of_erroring_it
+  T_FILE: tests/test_muse_quota_hold.py
+  PYTHONPATH: .github/scratch2063
+
+jobs:
+  default-basetemp:
+    runs-on: [self-hosted, linux, x64, hobby-linux]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install pytest
+        run: python3 -m pip install --quiet pytest
+      - name: Host facts
+        run: |
+          echo "runner=$RUNNER_NAME host=$(hostname) user=$(id -un) nproc=$(nproc)"
+          /bin/bash --version | head -1
+          python3 -m pytest --version
+          uptime
+      - name: Trap probe (bound-watcher subshell vs parent EXIT trap)
+        run: |
+          for d in 0 0.001 0.01 0.05 0.2; do
+            hits=0
+            for i in $(seq 1 40); do
+              if DELAY=$d /bin/bash .github/scratch2063/trapprobe.sh 2>&1 | grep -q CHILD-RAN-CLEANUP; then hits=$((hits+1)); fi
+            done
+            echo "TRAPPROBE delay=$d child-ran-parent-cleanup=$hits/40"
+          done
+      - name: Single test x20 (default basetemp)
+        run: bash .github/scratch2063/rerun.sh single-default 20 "$T_SINGLE" default
+      - name: File x5 (default basetemp)
+        run: bash .github/scratch2063/rerun.sh file-default 5 "$T_FILE" default
+      - name: Single test x20 under CPU load (default basetemp)
+        run: bash .github/scratch2063/rerun.sh single-default-load 20 "$T_SINGLE" default load
+
+  unique-basetemp:
+    runs-on: [self-hosted, linux, x64, hobby-linux]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install pytest
+        run: python3 -m pip install --quiet pytest
+      - name: Single test x20 (unique basetemp)
+        run: bash .github/scratch2063/rerun.sh single-unique 20 "$T_SINGLE" unique
+      - name: File x5 (unique basetemp)
+        run: bash .github/scratch2063/rerun.sh file-unique 5 "$T_FILE" unique
+      - name: Single test x20 under CPU load (unique basetemp)
+        run: bash .github/scratch2063/rerun.sh single-unique-load 20 "$T_SINGLE" unique load

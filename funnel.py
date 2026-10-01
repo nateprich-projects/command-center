@@ -13851,6 +13851,32 @@ def blocked_step_reason(
     return "; ".join(reasons) if reasons else None
 
 
+def _step_has_parked_parent(
+    item: Item, by_ref: Mapping[str, Item]
+) -> bool:
+    """Whether a Needs step belongs to a Parked Project row."""
+    parent = by_ref.get(item.parent or "")
+    return parent is not None and parent.status == "Parked"
+
+
+def _needs_step_candidates(
+    items: Iterable[Item],
+    by_ref: Mapping[str, Item],
+    needs: str,
+) -> List[Item]:
+    """Return open Needs steps eligible for either output list."""
+    return sorted(
+        (
+            item for item in items
+            if item.state == "OPEN"
+            and item.parent is not None
+            and item.needs == needs
+            and not _step_has_parked_parent(item, by_ref)
+        ),
+        key=lambda item: (item.repo, item.number),
+    )
+
+
 def _blocked_step_refs(item: Item, by_ref: Mapping[str, Item]) -> List[str]:
     """Return stable blocker references for one withheld Needs step."""
     refs: List[str] = []
@@ -13890,16 +13916,11 @@ def human_step_items(items: Iterable[Item]) -> List[Item]:
     """
     rows = list(items)
     by_ref = {item.ref: item for item in rows}
-    return sorted(
-        (
-            item for item in rows
-            if item.state == "OPEN"
-            and item.parent is not None
-            and item.needs == "human"
-            and blocked_step_reason(item, by_ref) is None
-        ),
-        key=lambda item: (item.repo, item.number),
-    )
+    candidates = _needs_step_candidates(rows, by_ref, "human")
+    return [
+        item for item in candidates
+        if blocked_step_reason(item, by_ref) is None
+    ]
 
 
 def _human_step_item_json(
@@ -13934,16 +13955,11 @@ def blocked_human_step_items(items: Iterable[Item]) -> List[Item]:
     """Open human-step tickets withheld by a native or label block."""
     rows = list(items)
     by_ref = {item.ref: item for item in rows}
-    return sorted(
-        (
-            item for item in rows
-            if item.state == "OPEN"
-            and item.parent is not None
-            and item.needs == "human"
-            and blocked_step_reason(item, by_ref) is not None
-        ),
-        key=lambda item: (item.repo, item.number),
-    )
+    candidates = _needs_step_candidates(rows, by_ref, "human")
+    return [
+        item for item in candidates
+        if blocked_step_reason(item, by_ref) is not None
+    ]
 
 
 def blocked_human_step_json(
@@ -13962,16 +13978,13 @@ def machine_local_step_items(items: Iterable[Item]) -> List[Item]:
     """Open child issues whose work needs Claude Code's local environment."""
     rows = list(items)
     by_ref = {item.ref: item for item in rows}
-    return sorted(
-        (
-            item for item in rows
-            if item.state == "OPEN"
-            and item.parent is not None
-            and item.needs == "claude-code-environment"
-            and blocked_step_reason(item, by_ref) is None
-        ),
-        key=lambda item: (item.repo, item.number),
+    candidates = _needs_step_candidates(
+        rows, by_ref, "claude-code-environment"
     )
+    return [
+        item for item in candidates
+        if blocked_step_reason(item, by_ref) is None
+    ]
 
 
 def machine_local_step_json(
@@ -13988,16 +14001,13 @@ def blocked_machine_local_step_items(items: Iterable[Item]) -> List[Item]:
     """Open Claude-local tickets withheld by a native or label block."""
     rows = list(items)
     by_ref = {item.ref: item for item in rows}
-    return sorted(
-        (
-            item for item in rows
-            if item.state == "OPEN"
-            and item.parent is not None
-            and item.needs == "claude-code-environment"
-            and blocked_step_reason(item, by_ref) is not None
-        ),
-        key=lambda item: (item.repo, item.number),
+    candidates = _needs_step_candidates(
+        rows, by_ref, "claude-code-environment"
     )
+    return [
+        item for item in candidates
+        if blocked_step_reason(item, by_ref) is not None
+    ]
 
 
 def blocked_machine_local_step_json(

@@ -85,8 +85,16 @@ def test_send_back_reproduction_ensures_needs_shaping_label(monkeypatch):
         event for event in events
         if event[0] == "gh" and event[1][:3] == ("gh", "issue", "edit")
     ]
+    status_write_index = next(
+        index for index, event in enumerate(events) if event[0] == "graphql"
+    )
+    label_write_index = next(
+        index for index, event in enumerate(events)
+        if event[0] == "gh" and event[1][:3] == ("gh", "issue", "edit")
+    )
     assert fresh_reads == [(item.ref,)]
     assert len(label_writes) == 1
+    assert status_write_index < label_write_index
     assert label_writes[0][1][-2:] == ("--add-label", "needs-shaping")
     assert fresh.status == "Ideas"
     assert fresh.labels == ["blocked", "needs-shaping"]

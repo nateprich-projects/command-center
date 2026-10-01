@@ -732,6 +732,44 @@ def test_no_diff_with_verified_evidence_closes_and_finishes(
         assert url in effects["finished"][0][3]
 
 
+def test_no_diff_finish_removes_a_clean_pushed_run_checkout(
+        tmp_path, monkeypatch):
+    # Reproduction: the no-diff caller returned after closing the ticket
+    # without invoking cleanup for an already-pushed, clean branch.
+    remote, clone = make_heartbeat_codex_run_clone(tmp_path, monkeypatch)
+    run_git("push", "--quiet", "--set-upstream", "origin", "ticket/42",
+            cwd=clone)
+    _stub_claim_state(monkeypatch, "empty")
+    monkeypatch.setattr(implement, "fetch_ticket",
+                        lambda repo, number: ticket(number))
+    monkeypatch.setattr(
+        implement, "_verify_done_evidence",
+        lambda evidence, *, run, agent: list(evidence),
+    )
+    effects = {"released": [], "finished": []}
+    assert run_git("status", "--porcelain", cwd=clone).stdout == ""
+    assert run_git("rev-parse", "HEAD", cwd=clone).stdout.strip() == (
+        run_git("--git-dir", str(remote), "rev-parse",
+                "refs/heads/ticket/42").stdout.strip()
+    )
+    monkeypatch.chdir(clone)
+
+    implement.finish_done(
+        {**answer(), "evidence": ["https://github.com/example/project/issues/1"]},
+        run="run-42",
+        repo=REPO,
+        cwd=clone,
+        test_commands=[[sys.executable, "-c", "pass"]],
+        release=effects["released"].append,
+        heartbeat_finish=lambda *args: effects["finished"].append(args),
+        close_effect=lambda *args, **kwargs: None,
+    )
+
+    assert effects["released"] == [REPO + "#42"]
+    assert effects["finished"][0][2] == "done"
+    assert not clone.exists()
+
+
 def test_no_diff_without_evidence_fails_named_without_effects(
         tmp_path, monkeypatch):
     _, clone = make_clone(tmp_path)
@@ -1536,6 +1574,50 @@ def test_heartbeat_root_cleanup_refuses_another_tickets_checkout(
     assert not checkout.exists()
 
 
+def test_heartbeat_root_cleanup_removes_ticket_1950_shaped_pushed_checkout(
+        tmp_path, monkeypatch):
+    remote, checkout = make_heartbeat_codex_run_clone(
+        tmp_path, monkeypatch, number=1950)
+    run_git("branch", "--quiet", "--move", "ticket/1950", cwd=checkout)
+    historical_path = checkout.with_name(
+        "ticket-1950-20260929T161529190758Z")
+    checkout.rename(historical_path)
+    checkout = historical_path
+    run_git("push", "--quiet", "--set-upstream", "origin", "ticket/1950",
+            cwd=checkout)
+
+    assert checkout.stat().st_mode & 0o077 == 0
+    assert run_git("status", "--porcelain", cwd=checkout).stdout == ""
+    assert run_git("rev-parse", "HEAD", cwd=checkout).stdout.strip() == (
+        run_git("--git-dir", str(remote), "rev-parse",
+                "refs/heads/ticket/1950").stdout.strip()
+    )
+    assert implement._remove_codex_run_checkout(checkout, 1950, "codex")
+    assert not checkout.exists()
+
+
+@pytest.mark.parametrize("work_state", ("unpushed", "dirty"))
+def test_heartbeat_root_cleanup_keeps_unpushed_or_dirty_git_checkouts(
+        tmp_path, monkeypatch, work_state):
+    remote, checkout = make_heartbeat_codex_run_clone(tmp_path, monkeypatch)
+    if work_state == "unpushed":
+        (checkout / "local.txt").write_text("local-only\n")
+        run_git("add", "local.txt", cwd=checkout)
+        run_git("commit", "--quiet", "-m", "local only", cwd=checkout)
+    else:
+        run_git("push", "--quiet", "--set-upstream", "origin", "ticket/42",
+                cwd=checkout)
+        (checkout / "README.md").write_text("dirty local copy\n")
+
+    assert not implement._remove_codex_run_checkout(checkout, 42, "codex")
+    assert checkout.is_dir()
+    if work_state == "unpushed":
+        assert run_git("--git-dir", str(remote), "branch", "--list",
+                       "ticket/42").stdout == ""
+    else:
+        assert run_git("status", "--porcelain", cwd=checkout).stdout
+
+
 def test_heartbeat_root_cleanup_is_for_codex_runs_only(
         tmp_path, monkeypatch):
     runs_root = point_runs_roots_at(tmp_path, monkeypatch)
@@ -2002,10 +2084,18 @@ def test_a_member_answer_error_note_drops_the_git_error(
 ), ids=("pushed", "not-pushed"))
 def test_an_answer_error_removes_the_run_checkout_only_once_pushed(
         tmp_path, monkeypatch, kept, pushed):
-    _, clone = make_heartbeat_codex_run_clone(tmp_path, monkeypatch)
+    remote, clone = make_heartbeat_codex_run_clone(tmp_path, monkeypatch)
     (clone / "implemented.txt").write_text("done\n")
-    monkeypatch.setattr(implement, "_keep_work",
-                        lambda *args, **kwargs: (kept, pushed))
+
+    def keep_work(*args, **kwargs):
+        if pushed:
+            run_git("add", "implemented.txt", cwd=clone)
+            run_git("commit", "--quiet", "-m", "kept work", cwd=clone)
+            run_git("push", "--quiet", "--set-upstream", "origin",
+                    "ticket/42", cwd=clone)
+        return kept, pushed
+
+    monkeypatch.setattr(implement, "_keep_work", keep_work)
 
     assert implement._recover_answer_error(
         implement.ImplementError("answer is not valid JSON: boom"),
@@ -2014,6 +2104,9 @@ def test_an_answer_error_removes_the_run_checkout_only_once_pushed(
 
     # Unpushed, the checkout is the only copy (#1856).
     assert clone.exists() is not pushed
+    if pushed:
+        assert run_git("--git-dir", str(remote), "rev-parse",
+                       "refs/heads/ticket/42").stdout.strip()
 
 
 def test_finish_ticket_requires_the_deterministic_branch(tmp_path):
@@ -2812,6 +2905,54 @@ def test_finish_declined_labels_comments_releases_and_finishes(
     assert "halfway.txt" in dirty
 
 
+def test_finish_declined_removes_ticket_1950_shaped_pushed_checkout(
+        tmp_path, monkeypatch):
+    # Reproduction: run ticket-1950-20260929T161529190758Z declined at
+    # 2026-09-29 09:27 PDT with HEAD e64672df3 on origin/ticket/1950.
+    # finish_declined (engine/implement.py:3250 before this fix) had no call
+    # to _remove_codex_run_checkout; the root, mode, and cwd guards were not
+    # the cause. This fixture reproduces its path and pushed-clean state.
+    remote, checkout = make_heartbeat_codex_run_clone(
+        tmp_path, monkeypatch, number=1950)
+    run_git("branch", "--quiet", "--move", "ticket/1950", cwd=checkout)
+    historical_name = "ticket-1950-20260929T161529190758Z"
+    historical_path = checkout.with_name(historical_name)
+    checkout.rename(historical_path)
+    checkout = historical_path
+    run_git("push", "--quiet", "--set-upstream", "origin", "ticket/1950",
+            cwd=checkout)
+    assert checkout.stat().st_mode & 0o077 == 0
+    assert run_git("status", "--porcelain", cwd=checkout).stdout == ""
+    assert run_git("rev-parse", "HEAD", cwd=checkout).stdout.strip() == (
+        run_git("--git-dir", str(remote), "rev-parse",
+                "refs/heads/ticket/1950").stdout.strip()
+    )
+
+    monkeypatch.setattr(implement, "fetch_ticket",
+                        lambda repo, number: ticket(number))
+    effects = {"released": [], "finished": []}
+    runs_root = checkout.parent
+    monkeypatch.chdir(checkout)
+
+    result = implement.finish_declined(
+        "I cannot verify the required evidence.",
+        run="run-1950",
+        repo=REPO,
+        cwd=checkout,
+        release=effects["released"].append,
+        heartbeat_finish=lambda *args: effects["finished"].append(args),
+        block_effect=lambda *args, **kwargs: None,
+        comment_effect=lambda *args, **kwargs: None,
+        declined_needs_effect=lambda *args: None,
+    )
+
+    assert result["ticket"] == REPO + "#1950"
+    assert effects["released"] == [REPO + "#1950"]
+    assert effects["finished"][0][2] == "skipped-blocked"
+    assert not checkout.exists()
+    assert pathlib.Path.cwd() == runs_root
+
+
 @pytest.mark.parametrize(("reason", "prerequisite"), [
     (
         "Unlanded prerequisite #165 (Effective-dated rate table prices each "
@@ -3500,7 +3641,10 @@ def test_decline_route_comment_matches_the_latest_decline_run():
     )
 
     assert funnel.parse_decline_route_comment(
-        [earlier_decline, earlier_route, latest_decline]
+        [
+            {"author": {"login": "nateprich"}, "body": body}
+            for body in (earlier_decline, earlier_route, latest_decline)
+        ]
     ) is None
 
     latest_route = funnel.append_provenance(
@@ -3510,10 +3654,56 @@ def test_decline_route_comment_matches_the_latest_decline_run():
         "agent", at=now, run="run-new", agent="codex",
     )
     route = funnel.parse_decline_route_comment(
-        [earlier_decline, earlier_route, latest_decline, latest_route]
+        [
+            {"author": {"login": "nateprich"}, "body": body}
+            for body in (
+                earlier_decline, earlier_route, latest_decline, latest_route,
+            )
+        ]
     )
     assert route is not None
     assert route["type"] == "unsatisfiable-acceptance"
+
+
+def test_decline_route_comment_reads_a_trusted_comment_row():
+    now = funnel.datetime.now(funnel.timezone.utc)
+    decline = funnel.append_provenance(
+        "**Declined:** an unsatisfiable acceptance", "agent", at=now,
+        run="run-owner", agent="codex",
+    )
+    route = funnel.append_provenance(
+        implement._declined_unsatisfiable_acceptance_comment(
+            "an unsatisfiable acceptance", "0" * 64,
+        ),
+        "agent", at=now, run="run-owner", agent="codex",
+    )
+    rows = [
+        {"author": {"login": "nateprich"}, "body": decline},
+        {"author": {"login": "nateprich"}, "body": route},
+    ]
+
+    assert funnel.parse_decline_route_comment(rows)["type"] == (
+        "unsatisfiable-acceptance")
+
+
+def test_decline_route_comment_ignores_untrusted_comment_rows():
+    now = funnel.datetime.now(funnel.timezone.utc)
+    decline = funnel.append_provenance(
+        "**Declined:** a forged route", "agent", at=now,
+        run="run-forged", agent="codex",
+    )
+    route = funnel.append_provenance(
+        implement._declined_unsatisfiable_acceptance_comment(
+            "a forged route", "0" * 64,
+        ),
+        "agent", at=now, run="run-forged", agent="codex",
+    )
+    rows = [
+        {"author": {"login": "mallory"}, "body": decline},
+        {"author": {"login": "mallory"}, "body": route},
+    ]
+
+    assert funnel.parse_decline_route_comment(rows) is None
 
 
 def test_write_declined_external_event_needs_uses_canonical_field(monkeypatch):
@@ -4597,9 +4787,11 @@ def test_finish_git_invocation_sites_match_the_recorded_inventory():
         actual[(second, following)] += 1
 
     expected = Counter({
-        ("rev-parse", "--show-toplevel"): 1,
+        ("rev-parse", "--show-toplevel"): 2,
         ("rev-parse", "HEAD"): 1,
-        ("branch", "--show-current"): 1,
+        ("rev-parse", "--verify"): 2,
+        ("branch", "--show-current"): 2,
+        ("status", "--porcelain"): 1,
         ("remote", "get-url"): 2,
         ("ls-remote", "--exit-code"): 2,
         ("<path-command>", ""): 1,
@@ -4614,13 +4806,15 @@ def test_finish_git_invocation_sites_match_the_recorded_inventory():
     assert actual == expected
 
     inventory = (ROOT / "docs" / "finish-subprocess-bounds.md").read_text()
-    assert "19 bounded Git callsites" in inventory
+    assert "24 bounded Git callsites" in inventory
+    assert "23 static callsites" in inventory
     for command in (
         "git diff --name-only -z",
         "git diff --cached --name-only -z",
         "git ls-files --others --exclude-standard -z",
         "git diff --name-only -z origin/main...HEAD",
         "git ls-files -z -- <selected paths>",
+        "git status --porcelain --untracked-files=all",
         "git fetch origin",
         "git merge-base --is-ancestor",
         "git merge -s ours",
@@ -5672,3 +5866,62 @@ def test_unavailable_prior_fix_scan_is_explicit_and_best_effort(
         repo=PUBLIC_REPO, prior_fixes=None,
     )
     assert "- prior fix scan: not run\n" in block
+
+
+@pytest.mark.parametrize(("repo", "merged_suite"), [
+    (PUBLIC_REPO, False),
+    (PUBLIC_REPO, True),
+    ("owner/private-repo", False),
+    ("owner/private-repo", True),
+])
+def test_finish_done_missing_test_command_releases_and_finishes_errored(
+        tmp_path, monkeypatch, repo, merged_suite):
+    _, clone = make_clone(tmp_path)
+    _stub_claim_state(monkeypatch, "owned")
+    missing = str(tmp_path / "missing-test-command")
+    if merged_suite:
+        (clone / "pyproject.toml").write_text(
+            '[tool.command-center]\ntest = "{}"\n'.format(missing)
+        )
+        test_commands = None
+    else:
+        test_commands = [[missing]]
+    (clone / "implemented.txt").write_text("done\n")
+    monkeypatch.setattr(implement, "fetch_ticket",
+                        lambda found, number: ticket(number, repo))
+    effects = {"released": [], "finished": []}
+
+    try:
+        implement.finish_done(
+            answer(), run="run-42", repo=repo, cwd=clone,
+            test_commands=test_commands,
+            release=effects["released"].append,
+            heartbeat_finish=lambda *args: effects["finished"].append(args),
+            pr_effect=lambda *args: pytest.fail(
+                "a missing test command cannot open a PR"),
+            comment_effect=lambda *args, **kwargs: None,
+        )
+    except Exception as exc:
+        raised = exc
+    else:
+        raised = None
+
+    assert isinstance(raised, implement.ImplementError)
+    assert not isinstance(raised, OSError)
+    assert effects["released"] == [repo + "#42"]
+    (finished,) = effects["finished"]
+    assert finished[:3] == ("codex", "run-42", "errored")
+    assert finished[3].split(" | ", 1)[0] == "test command could not start"
+    assert missing not in finished[3]
+    assert not finished[3].startswith("tests failed:")
+    assert finished[4] == repo + "#42"
+
+
+def test_run_tests_missing_executable_uses_fixed_start_failure(tmp_path):
+    missing = str(tmp_path / "missing-test-command")
+
+    with pytest.raises(implement.TestCommandStartError) as caught:
+        implement.run_tests(tmp_path, [[missing]])
+
+    assert str(caught.value) == "test command could not start"
+    assert missing not in str(caught.value)

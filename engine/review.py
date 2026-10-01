@@ -347,14 +347,14 @@ query($owner: String!, $name: String!, $number: Int!,
   repository(owner: $owner, name: $name) {
     pullRequest(number: $number) {
       issueComments: comments(first: 100, after: $issueCursor) {
-        nodes { author { login } body createdAt }
+        nodes { author { login } body createdAt url }
         pageInfo { hasNextPage endCursor }
       }
       reviewThreads(first: 100, after: $threadCursor) {
         nodes {
           id
           comments(first: 100) {
-            nodes { author { login } body createdAt }
+            nodes { author { login } body createdAt url }
             pageInfo { hasNextPage endCursor }
           }
         }
@@ -371,7 +371,7 @@ query($threadId: ID!, $cursor: String) {
   node(id: $threadId) {
     ... on PullRequestReviewThread {
       comments(first: 100, after: $cursor) {
-        nodes { author { login } body createdAt }
+        nodes { author { login } body createdAt url }
         pageInfo { hasNextPage endCursor }
       }
     }
@@ -764,15 +764,19 @@ def ticket_comments(rows: Optional[Sequence[dict]]) -> List[Dict]:
         elif not isinstance(author, str):
             author = None
         if not funnel.trusted_comment(row):
-            shaped.append({
+            entry = {
                 "author": author,
                 "created_at": row.get("createdAt") or row.get("created_at"),
                 "voice": "unknown",
                 "body": funnel.untrusted_comment_placeholder(row),
-            })
+            }
+            url = row.get("url")
+            if isinstance(url, str) and url.strip():
+                entry["url"] = url.strip()
+            shaped.append(entry)
             continue
         body = row.get("body") or ""
-        provenance = funnel.parse_provenance(body)
+        provenance = funnel.parse_provenance(row)
         voice = provenance.get("voice") if provenance else "unknown"
         for _, block in funnel._marked_json_blocks(
                 body, funnel.PROVENANCE_MARKER):
@@ -782,12 +786,16 @@ def ticket_comments(rows: Optional[Sequence[dict]]) -> List[Dict]:
             body = body[:TICKET_COMMENT_BODY_LIMIT] + (
                 "\n…[truncated {} chars]".format(
                     len(body) - TICKET_COMMENT_BODY_LIMIT))
-        shaped.append({
+        entry = {
             "author": author,
             "created_at": row.get("createdAt") or row.get("created_at"),
             "voice": voice,
             "body": body,
-        })
+        }
+        url = row.get("url")
+        if isinstance(url, str) and url.strip():
+            entry["url"] = url.strip()
+        shaped.append(entry)
     shaped.sort(key=lambda entry: entry.get("created_at") or "")
     kept = shaped[-TICKET_COMMENT_LIMIT:]
     # Keep the latest rows, but preserve Nate's decisions even when older
@@ -2530,14 +2538,25 @@ def _shape_pr_comment(row: dict, kind: str) -> Dict[str, Any]:
     login = author.get("login") if isinstance(author, dict) else None
     if not isinstance(login, str) or not login:
         login = "unknown"
+    url = row.get("url")
+    comment_url = url.strip() if isinstance(url, str) and url.strip() else None
     if not funnel.trusted_comment(row):
-        return {
+        shaped = {
             "kind": kind,
             "author": login,
             "created_at": created_at,
             "body": funnel.untrusted_comment_placeholder(row, created_at),
+            "voice": "unknown",
             "withheld": True,
         }
+        if comment_url is not None:
+            shaped["url"] = comment_url
+        return shaped
+    provenance = funnel.parse_provenance(row)
+    voice = provenance.get("voice") if provenance else "unknown"
+    for _, block in funnel._marked_json_blocks(
+            body, funnel.PROVENANCE_MARKER):
+        body = body.replace(block, "")
     body = body.strip()
     if len(body) > PR_COMMENT_BODY_LIMIT:
         body = body[:PR_COMMENT_BODY_LIMIT] + (
@@ -2547,7 +2566,10 @@ def _shape_pr_comment(row: dict, kind: str) -> Dict[str, Any]:
         "author": login,
         "created_at": created_at,
         "body": body,
+        "voice": voice,
     }
+    if comment_url is not None:
+        shaped["url"] = comment_url
     if RUN_EVIDENCE_MARKER in body:
         payload = parse_run_evidence_comment(body)
         shaped["run_evidence"] = (

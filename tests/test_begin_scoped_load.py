@@ -1115,3 +1115,85 @@ def test_more_than_twenty_missing_refs_take_another_request(monkeypatch):
 
     assert [len(_anchor_filters(query))
             for query, _variables in board.anchor_calls] == [20, 5]
+
+
+def test_large_begin_project_refuses_without_partial_rows_or_hydration(
+    monkeypatch,
+):
+    envelope = funnel.BeginWorkEnvelope(limit=60)
+    monkeypatch.setattr(funnel, "_ACTIVE_BEGIN_ENVELOPE", envelope)
+    monkeypatch.setattr(funnel, "BEGIN_DETAIL_WORK_RESERVE", 5)
+
+    class LargeOpenBoard:
+        def __init__(self):
+            self.rows = [_node(index + 1) for index in range(100)]
+            self.requested_sizes = []
+
+        def __call__(self, query, **variables):
+            assert "StartableItem" in query
+            assert funnel.ITEM_QUERY != query
+            aliases = re.findall(
+                r"(\w+): items\(first: (\d+), after: \$(\w+)Cursor",
+                query,
+            )
+            before = envelope.used
+            envelope.consume(preflight_calls=1)
+            assert sum(int(size) for _alias, size, _cursor in aliases) <= (
+                envelope.limit - before - 1
+                - funnel.BEGIN_DETAIL_WORK_RESERVE
+            )
+            self.requested_sizes.extend(
+                int(size) for _alias, size, _cursor in aliases
+            )
+            project = {}
+            for alias, size_text, cursor_name in aliases:
+                size = int(size_text)
+                offset = int(variables.get(cursor_name) or 0)
+                rows = (
+                    self.rows[offset:offset + size]
+                    if alias == "open" else []
+                )
+                has_next = alias == "open" and offset + len(rows) < len(self.rows)
+                project[alias] = _page(
+                    rows,
+                    str(offset + len(rows)) if has_next else None,
+                )
+            return {
+                "rateLimit": {"cost": 3, "remaining": 4000,
+                              "resetAt": "later"},
+                "user": {"projectV2": project},
+            }
+
+    board = LargeOpenBoard()
+    monkeypatch.setattr(funnel, "gh_graphql", board)
+    monkeypatch.setattr(
+        funnel,
+        "hydrate_item_details",
+        lambda *_args, **_kwargs: pytest.fail(
+            "large begin load must refuse before detail hydration"
+        ),
+    )
+
+    with pytest.raises(funnel.BeginCannotComplete):
+        funnel.load_items(
+            member_repo_names=[REPO],
+            scope="begin",
+            include_startable=True,
+            include_details=False,
+        )
+
+    assert board.requested_sizes
+    assert envelope.used <= envelope.limit - funnel.BEGIN_DETAIL_WORK_RESERVE
+    assert envelope.listed_items < len(board.rows)
+
+
+def test_begin_detail_reserve_covers_selected_ticket_and_gate_fields():
+    ticket = funnel._from_node(_node(1, children_total=50))
+    gate = funnel._from_node(_node(2, children_total=50))
+    assert ticket is not None and gate is not None
+
+    assert funnel.begin_detail_hydration_work(
+        [ticket, gate], [ticket, gate]
+    ) == funnel.BEGIN_DETAIL_WORK_RESERVE
+    assert "timelineItems(last: 60" in funnel.ITEM_DETAILS_QUERY
+    assert "subIssues(first: 50)" in funnel.ITEM_DETAILS_QUERY

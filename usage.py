@@ -349,24 +349,29 @@ MUSE_WEEKLY_RESERVE = round(
 #: now runs to Sunday or to next Thursday is what that Sunday's panel
 #: reading settles. _(Nate, 2026-09-24: "Update it tonight".)_
 #:
-#: **The #1341 override lapsed at that Sunday reset, and the brake closed on
-#: a pricing gap (#1842).** The window resetting 2026-10-05 00:00 UTC opened
-#: with this meter pricing muse-spark-1.3-contributor at the standard card:
-#: $42.42 at standard against $3.09 at its own card. At 12:45 PDT on Monday
-#: 2026-09-28 it read $42.58, 21.29% of the $200 cap, and projected 101.21%,
-#: so every Muse lane and review-replay stopped. The panel read 3%. This
-#: pairing takes the panel's figure, as every pairing does. The pricing-model
-#: update is separate work, and this override lapses at the reset whether or
-#: not that has landed. _(Nate, 2026-09-28: "please turn off the Muse brake
-#: for now. Muse is showing 3% on the website, we just haven't updated the
-#: pricing model yet so the brake is activating incorrectly.")_
-MUSE_PACE_OVERRIDE = {
-    "issue": 1842,
+#: **The #1842 standard-card cap is replaced with the fresh own-card
+#: pairing.** On Tue 2026-09-29 at 20:55 PDT the panel read 15% and
+#: `usage.py muse` held $15.98 at own-card prices. All four same-window
+#: readings on #1673 fit a $108-$110 cap within the panel's 1-point
+#: resolution; use the recorded $109 cap for the window resetting
+#: 2026-10-05 00:00 UTC. The pairing is recorded for prerequisite #1994:
+#: https://github.com/nateprich-projects/command-center/issues/1673#issuecomment-5903766309
+#:
+#: Use the first panel reading in each new window as a fresh pairing. If a
+#: fresh same-timestamp panel used-percent exceeds the own-card meter's
+#: implied used-percent by more than 2 percentage points, restore standard-card
+#: pricing.
+#: Keep the standard-card total as an ungated diagnostic.
+#: _(Nate, #1994; implementation #1995.)_
+MUSE_PACE_OWN_CARD_CAP_V2 = {
+    "issue": 1995,
     "resets_at": 1791158400.0,  # 2026-10-05 00:00 UTC, Sunday 17:00 PDT
-    "panel_used_percent": 3.0,
-    "meter_dollars": 42.58,
+    "panel_displayed_percent": 15.0,
+    "meter_dollars": 15.98,
+    "cap_dollars": 109.0,
     "ceiling_percent": 100.0,
 }
+MUSE_PACE_OVERRIDE = MUSE_PACE_OWN_CARD_CAP_V2
 
 
 def muse_pace_override(resets_at: float, now: float) -> Optional[Dict]:
@@ -384,8 +389,7 @@ def muse_pace_override(resets_at: float, now: float) -> Optional[Dict]:
     until = float(override["resets_at"])
     if now >= until or float(resets_at) != until:
         return None
-    cap = round(float(override["meter_dollars"]) * 100.0
-                / float(override["panel_used_percent"]), 2)
+    cap = float(override["cap_dollars"])
     found = {
         "issue": override["issue"],
         "until": until,
@@ -776,24 +780,20 @@ def read_muse(now: float) -> Optional[Dict]:
     calls. A provider event with an unreadable timestamp or quantity fails
     closed rather than silently undercounting.
 
-    **The gated total prices everything at the standard card, whatever
-    model actually ran**, and that is deliberate rather than an oversight
-    (#1302).
+    **The gated anchored total and 72-hour rate price each call at the
+    configured model's own card.** `standard_card_dollars` and each model's
+    `dollars_at_standard` remain ungated diagnostics. The current window's
+    own-card ceiling is the versioned panel pairing above.
 
-    The $200 ceiling was calibrated from a 429 at $214.02 in a window
-    where every session was on the standard model, and that anchored
-    total matched the account panel to 0.22 of a point. A price-shaped
-    window and a token-shaped one are indistinguishable from that
-    evidence, because there was only one card in play.
+    The base $200 ceiling was calibrated from a 429 at $214.02 in a window
+    where every session was on the standard model; that one-card reading did
+    not settle contributor pricing. The current window uses the fresh 15%
+    panel / $15.98 own-card pairing, with a $109 cap that fits all four
+    same-window readings within the panel's 1-point resolution.
 
-    Pricing contributor sessions at the contributor card assumes
-    price-shaped. If the window is token-shaped, the meter then reads far
-    below what it is tracking, the pace brake never trips, and the lanes
-    walk into the provider's refusal — the 2026-09-19 outage, rebuilt on
-    purpose. Leaving them at the standard card is what they cost here
-    today, so the brake does not move; the only cost is forfeiting a
-    discount nobody has measured yet. #1304 reads the panel and settles
-    it, and ``by_model`` is what it reads.
+    The $200 base ceiling remains calibrated from the 2026-09-19 provider
+    refusal. A dated pairing replaces it only for its named window; use the
+    first panel reading in the next window as a fresh pairing.
     """
     resets_at = muse_window_start(now) + SEVEN_DAY
     # #1341: one window is priced from the account panel instead of the card,
@@ -804,6 +804,7 @@ def read_muse(now: float) -> Optional[Dict]:
     rate_cutoff = now - MUSE_RATE_LOOKBACK
     oldest = min(cutoff, rate_cutoff)
     spent = 0.0
+    standard_spent = 0.0
     trailing = 0.0
     calls = 0
     seen_usage_ids = set()
@@ -873,13 +874,6 @@ def read_muse(now: float) -> Optional[Dict]:
 
             standard_rates = _muse_rates(muse_model.STANDARD_MODEL)
             for recorded_at, tokens, run_id in pending:
-                cost = _muse_price(tokens, standard_rates)
-                if recorded_at >= rate_cutoff:
-                    trailing += cost
-                if recorded_at < cutoff:
-                    continue
-                spent += cost
-                calls += 1
                 model_id = run_models.get(run_id)
                 if model_id is None and len(set(run_models.values())) == 1:
                     # One model in the file and an unjoined record: the
@@ -887,14 +881,22 @@ def read_muse(now: float) -> Optional[Dict]:
                     model_id = next(iter(run_models.values()))
                 if model_id is None:
                     model_id = MUSE_MODEL_UNKNOWN
+                standard_cost = _muse_price(tokens, standard_rates)
+                own_card_cost = _muse_price(tokens, _muse_rates(model_id))
+                if recorded_at >= rate_cutoff:
+                    trailing += own_card_cost
+                if recorded_at < cutoff:
+                    continue
+                spent += own_card_cost
+                standard_spent += standard_cost
+                calls += 1
                 row = by_model.setdefault(
                     model_id,
                     {"calls": 0, "dollars_at_standard": 0.0,
                      "dollars_at_own_card": 0.0})
                 row["calls"] += 1
-                row["dollars_at_standard"] += cost
-                row["dollars_at_own_card"] += _muse_price(
-                    tokens, _muse_rates(model_id))
+                row["dollars_at_standard"] += standard_cost
+                row["dollars_at_own_card"] += own_card_cost
         except OSError:
             continue
 
@@ -907,6 +909,7 @@ def read_muse(now: float) -> Optional[Dict]:
         return None
 
     spent = round(spent, 6)
+    standard_spent = round(standard_spent, 6)
     trailing = round(trailing, 6)
     cap =override["cap_dollars"] if override else MUSE_WEEKLY_CAP_DOLLARS
     used_percent = round(100.0 * spent / cap, 2)
@@ -919,6 +922,7 @@ def read_muse(now: float) -> Optional[Dict]:
         "source": "muse",
         "captured_at": now,
         "spent_dollars": spent,
+        "standard_card_dollars": standard_spent,
         "cap_dollars": cap,
         "windows": {
             "seven_day": {
@@ -942,17 +946,8 @@ def read_muse(now: float) -> Optional[Dict]:
                 "calls": calls,
             }
         },
-        # What the window holds, per model, for #1304 to read against the
-        # account panel. `spent_dollars` above is the gated number and is
-        # the standard-card total; nothing here changes it.
-        #
-        # Both prices are carried per model on purpose. The difference
-        # between them is the whole size of the question: if the weekly
-        # window discounts contributor calls, `own_card` is what it
-        # actually cost and `standard` is the over-read the gate is
-        # currently paying for; if it does not, `standard` was right all
-        # along and `own_card` is the trap that would have been walked
-        # into.
+        # `spent_dollars` above is the gated own-card total. Keep the
+        # standard-card total and per-model values for diagnosis only.
         "by_model": {
             model_id: {
                 "calls": row["calls"],

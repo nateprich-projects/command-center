@@ -21,6 +21,7 @@ import shlex
 import stat
 import subprocess
 import sys
+import time
 import uuid
 
 import pytest
@@ -67,7 +68,7 @@ ANSWER = json.dumps({"done": True, "summary": "Did the thing.",
                      "departures": ["Did not do the other thing."]})
 
 FUNNEL_STUB = (
-    "import os, pathlib, sys\n"
+    "import os, pathlib, sys, time\n"
     "root = pathlib.Path(__file__).parent\n"
     "command = sys.argv[1] if len(sys.argv) > 1 else ''\n"
     "with (root / 'funnel.calls').open('a') as fh:\n"
@@ -78,7 +79,11 @@ FUNNEL_STUB = (
     "    (root / 'begin.session_id').write_text(os.environ.get('MUSE_SESSION_ID', ''))\n"
     "    print((root / 'begin.json').read_text(), end='')\n"
     "elif command == 'session-stop':\n"
-    "    pass\n"
+    "    started = os.environ.get('SESSION_STOP_STARTED')\n"
+    "    if started:\n"
+    "        pathlib.Path(started).write_text('started')\n"
+    "        release = pathlib.Path(os.environ['SESSION_STOP_RELEASE'])\n"
+    "        while not release.exists(): time.sleep(0.01)\n"
     "elif command == 'release':\n"
     "    pass\n"
     "else:\n"
@@ -103,13 +108,18 @@ PACKET_STUB = (
 )
 
 FINISH_STUB = (
-    "import os, pathlib, sys\n"
+    "import os, pathlib, sys, time\n"
     "root = pathlib.Path(__file__).parent\n"
     "with (root / 'finish.calls').open('a') as fh:\n"
     "    fh.write(os.getcwd() + ' :: ' + ' '.join(sys.argv[1:]) + '\\n')\n"
     "args = sys.argv[1:]\n"
     "answer = args[args.index('--answer-file') + 1]\n"
     "(root / 'finish.answer').write_text(pathlib.Path(answer).read_text())\n"
+    "block = os.environ.get('FINISH_BLOCK_MARKER')\n"
+    "if block:\n"
+    "    pathlib.Path(block).write_text('entered')\n"
+    "    release = pathlib.Path(os.environ['FINISH_RELEASE_MARKER'])\n"
+    "    while not release.exists(): time.sleep(0.01)\n"
     "if os.environ.get('FINISH_STATUS', '0') != '0':\n"
     "    sys.stderr.write(os.environ.get('FINISH_ERROR', 'finish failed'))\n"
     "    raise SystemExit(1)\n"
@@ -141,6 +151,9 @@ MUSE_STUB = (
     "done\n"
     "test -n \"$workspace\" && test -s \"$prompt_file\"\n"
     "cp \"$prompt_file\" \"$MUSE_PROMPT.$n\"\n"
+    "if [[ -n \"${MUSE_WAIT_FOR_FILE:-}\" ]]; then\n"
+    "  while [[ ! -e \"$MUSE_WAIT_FOR_FILE\" ]]; do /bin/sleep 0.01; done\n"
+    "fi\n"
     "if [[ -n \"${MUSE_SLEEP:-}\" ]]; then exec sleep \"$MUSE_SLEEP\"; fi\n"
     "git -C \"$workspace\" branch --show-current > \"$MUSE_BRANCH.$n\"\n"
     "git -C \"$workspace\" rev-parse --abbrev-ref '@{u}' > \"$MUSE_UPSTREAM.$n\" "
@@ -212,7 +225,7 @@ def _seed_remote(base, *, ticket_branch=False):
 def _stubbed_runner(tmp_path, begin, *, packet=None, bound_seconds=20,
                     gh_status=0, muse_body=None, gh_body=None,
                     routine_body=None, ticket_branch=False, extra_env=None,
-                    muse_model_body=None):
+                    muse_model_body=None, wait=True):
     """Run the implementer against stub funnel/heartbeat/packet/finish/gh/muse.
 
     The fixture remote is real git, so the runner's fetch, branch inspection,
@@ -269,14 +282,25 @@ def _stubbed_runner(tmp_path, begin, *, packet=None, bound_seconds=20,
     )
     if extra_env:
         env.update(extra_env)
-    proc = subprocess.run(
-        ["/bin/bash", str(SCRIPT), "escalated", "max"],
-        env=env,
-        stdin=subprocess.DEVNULL,
-        capture_output=True,
-        text=True,
-        timeout=bound_seconds + 25,
-    )
+    command = ["/bin/bash", str(SCRIPT), "escalated", "max"]
+    if wait:
+        proc = subprocess.run(
+            command,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=bound_seconds + 25,
+        )
+    else:
+        proc = subprocess.Popen(
+            command,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
     return proc, repo
 
 
@@ -648,6 +672,87 @@ def test_the_wall_clock_bound_kills_the_process_group_and_finishes_errored(
     )
     assert "release example/widgets#42" in (repo / "funnel.calls").read_text()
     assert not list((tmp_path / "workspaces").iterdir())
+
+
+@pytest.mark.parametrize(
+    ("script", "indent", "parent_trap"),
+    (
+        ("scripts/muse-implement", "  ", "trap cleanup EXIT"),
+        ("scripts/muse-review-engine", "    ", "trap cleanup EXIT"),
+    ),
+)
+def test_bound_watcher_disarms_exit_before_starting_its_timer(
+        script, indent, parent_trap):
+    source = (ROOT / script).read_text()
+
+    assert parent_trap in source
+    assert "(\n{}trap - EXIT\n{}sleep \"$BOUND_SECONDS\" &".format(
+        indent, indent) in source
+
+
+def test_watcher_exit_does_not_run_parent_cleanup_while_parent_is_alive(
+        tmp_path):
+    session_stop_started = tmp_path / "session-stop.started"
+    session_stop_release = tmp_path / "session-stop.release"
+    finish_started = tmp_path / "finish.started"
+    finish_release = tmp_path / "finish.release"
+    watcher_sleep_ready = tmp_path / "watcher-sleep.ready"
+    sleep_bin = tmp_path / "sleep-bin"
+    sleep_bin.mkdir()
+    _executable(
+        sleep_bin / "sleep",
+        "#!/bin/bash\n"
+        "if [[ \"$1\" == '20' ]]; then\n"
+        "    /bin/sleep 0.1\n"
+        "    : > \"$WATCHER_SLEEP_READY\"\n"
+        "fi\n"
+        "exec /bin/sleep \"$@\"\n",
+    )
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), bound_seconds=20, wait=False,
+        extra_env={
+            "PATH": str(sleep_bin) + os.pathsep + os.environ["PATH"],
+            "MUSE_WAIT_FOR_FILE": str(watcher_sleep_ready),
+            "WATCHER_SLEEP_READY": str(watcher_sleep_ready),
+            "SESSION_STOP_STARTED": str(session_stop_started),
+            "SESSION_STOP_RELEASE": str(session_stop_release),
+            "FINISH_BLOCK_MARKER": str(finish_started),
+            "FINISH_RELEASE_MARKER": str(finish_release),
+        },
+    )
+    workspace = None
+    stdout = stderr = ""
+    try:
+        deadline = time.monotonic() + 10
+        while (not finish_started.exists()
+               and not session_stop_started.exists()
+               and proc.poll() is None
+               and time.monotonic() < deadline):
+            time.sleep(0.01)
+
+        args = (repo / "muse.args.1").read_text().splitlines()
+        workspace = pathlib.Path(
+            args[args.index("--workspace") + 1]
+        )
+        assert proc.poll() is None, "the parent exited before the observation"
+        assert finish_started.exists(), (
+            "the watcher ran the parent's EXIT cleanup before the parent "
+            "reached finish-ticket"
+        )
+        assert not session_stop_started.exists(), (
+            "parent session cleanup ran when the watcher exited"
+        )
+        assert workspace.is_dir(), (
+            "parent cleanup removed the workspace before parent exit"
+        )
+    finally:
+        session_stop_release.touch()
+        finish_release.touch()
+        stdout, stderr = proc.communicate(timeout=30)
+
+    assert proc.returncode == 0, stderr or stdout
+    assert _calls(repo, "funnel").count("session-stop") == 1
+    assert not workspace.exists(), "parent cleanup runs after parent exit"
 
 
 def test_a_fresh_workspace_resolves_uid_and_pushes_over_ssh(tmp_path):

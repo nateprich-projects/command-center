@@ -747,6 +747,7 @@ call_model_files() {
   fi
   local muse_pid=$!
   (
+    trap - EXIT
     sleep "$BOUND_SECONDS" &
     sleep_pid=$!
     trap 'kill "$sleep_pid" 2>/dev/null; exit 0' TERM

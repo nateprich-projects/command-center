@@ -496,6 +496,7 @@ killed_marker="$(mktemp "${TMPDIR:-/tmp}/muse-implement-killed.XXXXXX")"
 rm -f "$killed_marker"
 
 (
+  trap - EXIT
   sleep "$BOUND_SECONDS" &
   sleep_pid=$!
   trap 'kill "$sleep_pid" 2>/dev/null; exit 0' TERM

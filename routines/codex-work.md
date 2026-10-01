@@ -1,13 +1,12 @@
 # Codex routine — one ticket per run
 
-Paste this into a **Codex Scheduled** task; tier and schedule live outside
-it.
+Paste into a **Codex Scheduled** task; keep tier and schedule external.
 
-Configure the sandbox with write access only to Codex’s per-session directory
-and `~/.claude/command-center-heartbeat`. Give
-`/Users/nateprich/.claude/command-center-run` read-and-execute access only,
-except that its `codex-runs/` subtree is writable. Only sandbox
-configuration may name the runtime root’s resolved target.
+Sandbox writes are limited to Codex’s per-session directory and
+`~/.claude/command-center-heartbeat`. Grant
+`/Users/nateprich/.claude/command-center-run` read-and-execute access only;
+its `codex-runs/` subtree is writable. Only sandbox configuration may name
+the runtime root’s resolved target.
 
 Never invoke the Codex CLI headlessly.
 
@@ -18,39 +17,35 @@ Run `python3 /Users/nateprich/.claude/command-center-run/funnel.py begin --agent
 output, keep reading that same exec session until the process exits.
 Never treat that yield as a failure, and never invoke `begin` again.
 
-After `begin` exits and before acting on `do`, run the daily SSD archive helper
-only when its JSON has `gate: "ok"`:
+After `begin`, run the SSD archive helper only when its JSON has `gate: "ok"`:
 
 ```sh
 python3 /Users/nateprich/.claude/command-center-run/session_log_archive.py
 ```
 
-Skip it for every other gate, then follow that gate's outcome. The helper acts
-only during the 03:00–03:59 local hour; an unmounted SSD is reported as a skip
-with a successful exit. Keep this call in the app-hosted Codex routine, never
+Skip it for every other gate. It runs only 03:00–03:59 local; unmounted SSD
+skips cleanly. Keep it app-hosted, never
 in the launchd run-keeper.
 
-Work one ticket, then stop. When `do` is `stop`, finish the printed `run` with
-the gate’s outcome (`over` is `skipped-over-pace`, `unknown` is
-`skipped-usage-unknown`, `reserve` is `skipped-api-reserve`,
-`config` is `config-drift`, otherwise `nothing-to-do`) and stop.
+Work one ticket, then stop. When `do` is `stop`, finish `run`: `over`→
+`skipped-over-pace`; `unknown`→`skipped-usage-unknown`; `reserve`→
+`skipped-api-reserve`; `config`→`config-drift`; else `nothing-to-do`.
 
 When `do` is `ticket`, the ticket is already claimed. Treat `packet` as the
-implementation evidence: read its ticket, parent plan, current-head verdict,
+implementation evidence: read ticket, parent plan, current-head verdict,
 blocking list, and prior-run digest. Treat `vendor` as binding.
 
 Clone `packet.repo` into an owner-only (`0700`) directory under runtime root’s
 `codex-runs/` subtree, named `ticket-<number>-<YYYYMMDDTHHMMSSffffffZ>` (UTC stamp:
 `python3 -c 'import datetime;print(datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%S%fZ"))'`).
-Work on `ticket/<number>` from `origin/main`. Inspect existing
-`origin/ticket/<number>` branch before resetting or continuing; never discard
-unknown work. A rejected verdict at the current head requires a new pushed head
-addressing every blocking item. Keep scratch and build files inside this
-checkout. `finish-ticket` removes it; if a push fails, it leaves the directory
-for diagnosis.
+Work on `ticket/<number>` from `origin/main`. Inspect `origin/ticket/<number>`
+before resetting or continuing; preserve unknown work. A rejected current-head
+verdict needs a new pushed head addressing every blocker. Keep scratch/build
+files inside. `finish-ticket` removes it; if a push fails, it leaves the
+directory for diagnosis.
 
-Implement only what the ticket and plan require. Do not change project `Status`
-or `Class`, merge, or repair unrelated defects.
+Implement only ticket/plan scope. Do not change project `Status`/`Class`, merge,
+or fix unrelated defects.
 
 - Test at the ticket's named seams (else the public interface), one behaviour each.
 - A `Reproduction:` first Accept item: write that test first and see it fail.

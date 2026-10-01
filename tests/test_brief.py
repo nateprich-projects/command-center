@@ -1979,6 +1979,48 @@ def test_brief_surfaces_recent_effective_dated_price_changes(
     assert brief["price_changes"][0]["effective_date"] == "2026-07-30T00:00:00Z"
 
 
+def test_brief_surfaces_recent_model_watch_releases_and_faults(
+    monkeypatch, capsys, tmp_path
+):
+    record = tmp_path / "model-watch.jsonl"
+    record.write_text(json.dumps({
+        "recorded_at": (NOW - timedelta(days=1)).isoformat(),
+        "model_releases": [{
+            "provider": "openai",
+            "current_model": "gpt-5.6-sol",
+            "newer_model": "gpt-5.7-sol",
+        }],
+        "watch_faults": [{
+            "source": "release",
+            "provider": "anthropic",
+            "kind": "could-not-check",
+            "reason": "no model catalogue response",
+        }],
+    }) + "\n")
+    monkeypatch.setattr(funnel.nightly_watch, "WATCH_RECORD_PATH", record)
+    _make_brief_readers_safe(monkeypatch)
+    monkeypatch.setattr(funnel, "connector_gate_answers", lambda *args, **kwargs: [])
+    monkeypatch.setattr(funnel, "api_cost", lambda: {})
+    monkeypatch.setattr(funnel, "graphql_caller_spend", lambda: {})
+
+    assert funnel.cmd_brief([], NOW) == 0
+    brief = json.loads(capsys.readouterr().out)
+
+    assert brief["model_releases"] == [{
+        "provider": "openai",
+        "current_model": "gpt-5.6-sol",
+        "newer_model": "gpt-5.7-sol",
+        "recorded_at": (NOW - timedelta(days=1)).isoformat().replace("+00:00", "Z"),
+    }]
+    assert brief["watch_faults"] == [{
+        "source": "release",
+        "provider": "anthropic",
+        "kind": "could-not-check",
+        "reason": "no model catalogue response",
+        "recorded_at": (NOW - timedelta(days=1)).isoformat().replace("+00:00", "Z"),
+    }]
+
+
 def test_brief_places_measured_api_cost_in_documented_timings_map(monkeypatch, capsys):
     item = funnel.Item(
         repo="nateprich/beta", number=94, title="API metrics project",

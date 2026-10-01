@@ -612,6 +612,8 @@ def test_repo_row_fails_without_a_ticket():
 
 TOO_LARGE = "diff too large to review: deliver the ticket in smaller slices"
 DIFF_HEAD = "diff --git a/big.py b/big.py\n"
+DIFF_CAP_EXEMPT_PATH = "dashboard/fixtures/execution_metrics.json"
+DIFF_CAP_BACKTEST = ROOT / "tests" / "fixtures" / "diff_cap_backtest_20261001.json"
 
 
 def diff_of(size, fill="+"):
@@ -625,6 +627,82 @@ def files_diff(text, *omitted):
     diff.omitted_patches = len(omitted)
     diff.omitted_paths = list(omitted)
     return diff
+
+
+def diff_section(path, size):
+    """A synthetic Git diff section with an exact UTF-8 byte length."""
+    header = "diff --git a/{0} b/{0}\n".format(path)
+    header_bytes = len(header.encode("utf-8"))
+    assert size >= header_bytes + 1
+    return header + "+" * (size - header_bytes - 1) + "\n"
+
+
+@pytest.mark.parametrize(
+    ("pr_number", "fixture_bytes", "reviewable_bytes", "total_bytes"),
+    [
+        # Captured from GitHub `gh pr diff` section bytes on 2026-10-01.
+        (1543, 820310, 19937, 840247),
+        (1544, 244128, 60492, 304620),
+        (1556, 184101, 27627, 211728),
+    ],
+)
+def test_diff_row_passes_fixture_heavy_pr_reproductions(
+        pr_number, fixture_bytes, reviewable_bytes, total_bytes):
+    diff = (diff_section(DIFF_CAP_EXEMPT_PATH, fixture_bytes)
+            + diff_section("dashboard/reviewable.js", reviewable_bytes))
+
+    assert len(diff.encode("utf-8")) == total_bytes
+    assert fixture_bytes + reviewable_bytes == total_bytes
+    assert total_bytes > review.DIFF_LIMIT_BYTES
+    assert review.precheck_diff({"diff": diff}) == []
+
+
+@pytest.mark.parametrize(
+    ("reviewable_bytes", "expected"),
+    [(153600, []), (153601, [TOO_LARGE])],
+)
+def test_diff_row_counts_only_reviewable_bytes_in_a_mixed_diff(
+        reviewable_bytes, expected):
+    diff = (diff_section(DIFF_CAP_EXEMPT_PATH, 200000)
+            + diff_section("dashboard/reviewable.js", reviewable_bytes))
+
+    assert review.precheck_diff({"diff": diff}) == expected
+
+
+def test_diff_row_keeps_other_fixture_paths_in_the_count():
+    diff = diff_section("dashboard/fixtures/other.json", 200000)
+    assert review.precheck_diff({"diff": diff}) == [TOO_LARGE]
+
+
+def test_diff_row_replays_last_589_merged_prs_from_github():
+    backtest = json.loads(DIFF_CAP_BACKTEST.read_text(encoding="utf-8"))
+    assert backtest["window"]["count"] == 589
+    assert len(backtest["prs"]) == 589
+    expected_changed = [1543, 1544, 1556, 1639]
+    assert backtest["changed_prs"] == expected_changed
+
+    changed = []
+    for row in backtest["prs"]:
+        total_bytes = row["total_bytes"]
+        fixture_bytes = row["fixture_bytes"]
+        if fixture_bytes:
+            diff = diff_section(DIFF_CAP_EXEMPT_PATH, fixture_bytes)
+            reviewable_bytes = total_bytes - fixture_bytes
+            if reviewable_bytes:
+                diff += diff_section("dashboard/reviewable.js",
+                                     reviewable_bytes)
+        else:
+            diff = diff_section("dashboard/reviewable.js", total_bytes)
+
+        before = total_bytes > backtest["cap_bytes"]
+        after = TOO_LARGE in review.precheck_diff({"diff": diff})
+        if before != after:
+            changed.append(row["number"])
+
+    assert sorted(changed) == expected_changed
+    assert all(
+        next(row for row in backtest["prs"] if row["number"] == number)
+        ["fixture_bytes"] > 0 for number in changed)
 
 
 def test_diff_row_rejects_a_diff_over_150_kb_and_passes_one_at_it():

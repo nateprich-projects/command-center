@@ -166,6 +166,58 @@ def test_successful_brief_spools_without_changing_stdout(
     assert snapshot["generated_at"] == json.loads(expected)["generated_at"]
 
 
+def test_brief_carries_prior_pr_facts_into_the_board_snapshot(
+    monkeypatch, tmp_path, capsys
+):
+    spool = tmp_path / "dashboard-spool"
+    spool.mkdir()
+    captured_at = datetime.now(timezone.utc) - timedelta(hours=5)
+    project = _item(
+        7, "Building", children_total=1,
+        status_since=datetime.now(timezone.utc) - timedelta(days=7),
+    )
+    child = _item(8, None, parent=project.ref)
+    prior = {
+        "generated_at": captured_at.isoformat(),
+        "board": {"columns": [{"items": [{"tickets": [{
+            "ref": child.ref,
+            "state": "OPEN",
+            "pr": "approved",
+            "pr_number": 17,
+        }]}]}]},
+    }
+    (spool / "brief-1-aaaaaaaaaaaaaaaa.json").write_text(
+        json.dumps(prior), encoding="utf-8",
+    )
+    monkeypatch.setenv(funnel.DASHBOARD_SPOOL_ENV, str(spool))
+    monkeypatch.setattr(funnel, "load_items", lambda: [project, child])
+    monkeypatch.setattr(funnel, "ticket_pr_facts", lambda _items: {})
+    monkeypatch.setattr(funnel, "_backoff_rows", lambda: [])
+    published_at = datetime.now(timezone.utc)
+    expected = _brief_output(generated_at=published_at.isoformat())
+
+    def fake_cmd_brief(items, now, **kwargs):
+        print(expected)
+        return 0
+
+    monkeypatch.setattr(funnel, "cmd_brief", fake_cmd_brief)
+
+    assert funnel.main(["brief"]) == 0
+    capsys.readouterr()
+
+    snapshots = [json.loads(path.read_text()) for path in spool.glob("*.json")]
+    snapshot = max(snapshots, key=lambda value: value["generated_at"])
+    building = next(
+        column for column in snapshot["board"]["columns"]
+        if column["stage"] == "Building"
+    )
+    ticket_row = building["items"][0]["tickets"][0]
+    assert ticket_row["pr_stale"] is True
+    assert ticket_row["pr_stale_state"] == "approved"
+    assert ticket_row["pr_stale_age"] == "5h"
+    assert building["items"][0]["pips"] == ["stale"]
+
+
 def test_the_spooled_board_shows_the_bug_turns_begin_takes(
     monkeypatch, tmp_path, capsys
 ):

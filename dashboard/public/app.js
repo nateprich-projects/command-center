@@ -183,11 +183,23 @@ function shortRepo(value) {
 function pipState(ticket) {
   if (!ticket || typeof ticket !== "object") return "open";
   if (ticket.state !== "OPEN") return "closed";
+  if (ticket.pr_stale === true) return "stale";
+  if (ticket.pr_unknown === true || ticket.pr === "unknown") return "unknown";
   if (ticket.pr === "approved") return "approved";
   if (ticket.pr === "changes requested") return "changes-requested";
   if (ticket.pr === "submitted" || ticket.pr === "merged") return "submitted";
   if (ticket.blocked) return ticket.blocked_by_siblings ? "queued" : "blocked";
   return "open";
+}
+
+function priorPrAgeLabel(ticket) {
+  if (ticket?.pr_stale !== true || typeof ticket.pr_stale_age !== "string") {
+    return null;
+  }
+  const state = typeof ticket.pr_stale_state === "string"
+    ? ` ${ticket.pr_stale_state}`
+    : " PR fact";
+  return element("span", "pr-stale-age", `stale${state} · ${ticket.pr_stale_age}`);
 }
 
 function rowTier(tickets) {
@@ -271,6 +283,16 @@ function pips(item, tickets, closed, total) {
     }
   }
   if (bar.childElementCount) wrap.append(bar);
+  const staleAges = [];
+  for (const ticket of rows) {
+    if (!ticket || ticket.pr_stale !== true) continue;
+    if (typeof ticket.pr_stale_age === "string") {
+      staleAges.push(ticket.pr_stale_age);
+    }
+  }
+  if (staleAges.length) {
+    wrap.append(element("span", "pr-stale-age pr-stale-summary", `stale ${staleAges.join(", ")}`));
+  }
   if (Number.isFinite(closed) && Number.isFinite(total) && total > 0) {
     wrap.append(element("span", "pip-count", `${closed}/${total}`));
   }
@@ -412,12 +434,17 @@ function classChip(value) {
 }
 
 function ticketRow(ticket) {
-  const row = gridRow("div", `ticket ticket-${pipState(ticket)}`);
-  row.append(cell("cell-twisty", element("i", `pip pip-${pipState(ticket)}`)));
+  const state = pipState(ticket);
+  const row = gridRow("div", `ticket ticket-${state}`);
+  const pip = element("i", `pip pip-${state}`);
+  const staleLabel = priorPrAgeLabel(ticket);
+  if (staleLabel) pip.title = staleLabel.textContent;
+  row.append(cell("cell-twisty", pip));
 
   const title = element("div", "cell cell-title cell-child");
   title.append(element("span", "child-rule"));
   title.append(link(`#${ticket.number} ${ticket.title || ""}`, ticket.url, "ticket-title"));
+  if (staleLabel) title.append(staleLabel);
   if (ticket.blocked) title.append(blockedChip(ticket));
   const hold = holdChip(ticket);
   if (hold) title.append(hold);
@@ -572,6 +599,8 @@ function phoneRow(item, inheritedClass) {
   const title = element("span", "phone-title");
   if (state) title.append(element("i", `pip pip-${state}`));
   title.append(link(phoneTitle(item), item && item.url, "phone-title-link"));
+  const staleLabel = priorPrAgeLabel(item);
+  if (staleLabel) title.append(staleLabel);
   summary.append(title);
   summary.append(element("span", "phone-repo", phoneRepo(item) || "—"));
   const classCell = element("span", "phone-class");

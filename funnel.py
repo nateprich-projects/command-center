@@ -3829,8 +3829,7 @@ def render_comment_voice(row: object) -> str:
     """
     if not trusted_comment(row):
         return "{} (not the owner account)".format(untrusted_comment_author(row))
-    body = row.get("body") if isinstance(row, Mapping) else None
-    return render_voice(body if isinstance(body, str) else "")
+    return render_voice(row)
 
 
 def _verdict_from_comment(row: Mapping[str, object]) -> Optional[Dict]:
@@ -3852,8 +3851,14 @@ def _verdict_from_comment(row: Mapping[str, object]) -> Optional[Dict]:
     return verdict
 
 
-def parse_provenance(body: str) -> Optional[Dict]:
-    """The provenance fields carried by one comment, or None if malformed."""
+def parse_provenance(body: object) -> Optional[Dict]:
+    """Read provenance text or a trusted comment row, failing closed."""
+    if isinstance(body, Mapping):
+        if not trusted_comment(body):
+            return None
+        body = body.get("body")
+    if not isinstance(body, str):
+        return None
     found = _marked_json(body, PROVENANCE_MARKER)
     if found is None or found.get("voice") not in PROVENANCE_VOICES:
         return None
@@ -3971,12 +3976,19 @@ def parse_caused_by(body: str) -> List[str]:
     return result
 
 
-def parse_origin_override(body: str) -> Optional[Dict]:
+def parse_origin_override(body: object) -> Optional[Dict]:
     """Return an authorised origin override, or None when it fails closed.
 
     Anyone may ask that an item be shaped with Nate. Only a marker carrying a
-    Nate provenance voice may hand an item to agents for unattended shaping.
+    trusted comment or issue body may carry the marker. Only a marker carrying
+    a Nate provenance voice may hand an item to agents for unattended shaping.
     """
+    if isinstance(body, Mapping):
+        if not trusted_comment(body):
+            return None
+        body = body.get("body")
+    if not isinstance(body, str):
+        return None
     found = _marked_json(body, ORIGIN_OVERRIDE_MARKER)
     if found is None or found.get("target") not in ORIGIN_OVERRIDE_TARGETS:
         return None
@@ -4279,15 +4291,22 @@ def parse_decline_comment(bodies: Iterable[str]) -> Optional[str]:
 
 
 def parse_decline_route_comment(
-    bodies: Iterable[str],
+    rows: Iterable[object],
 ) -> Optional[Dict[str, object]]:
-    """Read the durable route belonging to the newest agent decline."""
-    rows = list(bodies)
-    latest_run = None
-    for body in reversed(rows):
-        if not isinstance(body, str) or not body.startswith(DECLINED_PREFIX):
+    """Read the newest decline route from trusted comment rows only."""
+    comments = []
+    for row in rows:
+        if not isinstance(row, Mapping) or not trusted_comment(row):
             continue
-        provenance = parse_provenance(body)
+        body = row.get("body")
+        if isinstance(body, str):
+            comments.append((row, body))
+
+    latest_run = None
+    for row, body in reversed(comments):
+        if not body.startswith(DECLINED_PREFIX):
+            continue
+        provenance = parse_provenance(row)
         if (
             provenance is not None
             and provenance.get("voice") == "agent"
@@ -4299,14 +4318,11 @@ def parse_decline_route_comment(
     if latest_run is None:
         return None
 
-    for body in reversed(rows):
-        if (
-            not isinstance(body, str)
-            or DECLINE_ROUTING_REVIEW_MARKER not in body
-        ):
+    for row, body in reversed(comments):
+        if DECLINE_ROUTING_REVIEW_MARKER not in body:
             continue
         record = _marked_json(body, DECLINE_ROUTING_REVIEW_MARKER)
-        provenance = parse_provenance(body)
+        provenance = parse_provenance(row)
         if (
             not isinstance(record, dict)
             or not isinstance(record.get("decline_excerpt"), str)
@@ -4596,8 +4612,14 @@ def append_caused_by(body: str, refs: Iterable[str],
     return "{}\n\n{}".format(body, caused_by_block(refs, at=at))
 
 
-def render_voice(body: str) -> str:
+def render_voice(body: object) -> str:
     """Render the four-value voice contract, failing closed when needed."""
+    if isinstance(body, Mapping):
+        if not trusted_comment(body):
+            return UNATTRIBUTED
+        body = body.get("body")
+    if not isinstance(body, str):
+        return UNATTRIBUTED
     found = parse_provenance(body)
     if found is None:
         return UNATTRIBUTED
@@ -5696,7 +5718,7 @@ def connector_gate_answers(
             verb = _connector_gate_verb(comment)
             if verb is None:
                 continue
-            provenance = parse_provenance(body)
+            provenance = parse_provenance(comment)
             if not isinstance(provenance, dict):
                 continue
             instruction = provenance.get("instruction")
@@ -17352,7 +17374,10 @@ def _load_block_comment(item: Item) -> None:
     # Only the owner account's comments carry them (#1788); anyone can
     # comment on a public repository, and an outsider's copy of any of these
     # would block, unblock or re-route real work.
-    comments = trusted_comments(payload["comments"])
+    comments = [
+        row for row in payload["comments"]
+        if isinstance(row, Mapping) and trusted_comment(row)
+    ]
     bodies = [comment.get("body") or "" for comment in comments]
     item.unparseable_block_comments = unparseable_block_comment_lines(bodies)
     item.block_event = None
@@ -17366,7 +17391,7 @@ def _load_block_comment(item: Item) -> None:
         ) = parsed
     item.needs_decision = parse_needs_decision_comment(bodies)
     item.decline_reason = parse_decline_comment(bodies)
-    item.decline_route = parse_decline_route_comment(bodies)
+    item.decline_route = parse_decline_route_comment(payload["comments"])
     for body in reversed(bodies):
         record = parse_satisfied_block_comment(body)
         if record is not None:

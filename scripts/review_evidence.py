@@ -251,6 +251,10 @@ def _run_one(root: pathlib.Path, argv: Sequence[str],
             implement.run_tests(root, commands=[list(argv)])
         else:
             implement.run_tests(root, commands=[list(argv)], timeout=timeout)
+    except implement.TestCommandStartError:
+        # Preserve the failure kind so the finish can use its fixed,
+        # path-free heartbeat reason.
+        raise
     except implement.CommandTimeoutError as exc:
         if timeout is not None:
             raise
@@ -416,8 +420,15 @@ def _merge_and_run(worktree, head_sha: str, base_sha: str) -> dict:
                for argv in commands]
     record["commands"] = entries
     for argv, entry in zip(commands, entries):
-        passed, output, timed_out = _run_one(
-            merge_root, argv, capture_timeout_output=True)
+        try:
+            passed, output, timed_out = _run_one(
+                merge_root, argv, capture_timeout_output=True)
+        except implement.TestCommandStartError:
+            entry["result"] = "fail"
+            entry["start_failed"] = True
+            record["result"] = "fail"
+            record["blocking"] = True
+            break
         entry["result"] = "pass" if passed else "fail"
         if passed:
             continue

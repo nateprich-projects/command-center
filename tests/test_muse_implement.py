@@ -688,6 +688,76 @@ def test_bound_watcher_disarms_exit_before_starting_its_timer(
     assert parent_trap in source
     assert "(\n{}trap - EXIT\n{}sleep \"$BOUND_SECONDS\" &".format(
         indent, indent) in source
+    cleanup_start = source.index("cleanup() {")
+    cleanup_body = source[cleanup_start + len("cleanup() {"):]
+    first_statement = next(
+        line.strip() for line in cleanup_body.splitlines() if line.strip()
+    )
+    assert first_statement == '[[ "${BASHPID:-$$}" == "$$" ]] || return 0'
+
+
+def test_inherited_cleanup_in_watcher_subshell_leaves_parent_artifacts(
+        tmp_path):
+    source = (ROOT / "scripts/muse-implement").read_text()
+    cleanup_start = source.index("cleanup() {")
+    cleanup_end = source.index("\n}", cleanup_start) + 2
+    cleanup = source[cleanup_start:cleanup_end]
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "funnel.py").write_text(
+        "import os, pathlib, sys\n"
+        "if sys.argv[1:] == ['session-stop']:\n"
+        "    with pathlib.Path(os.environ['SESSION_STOP_LOG']).open('a') as f:\n"
+        "        f.write('session-stop\\n')\n"
+    )
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    packet = tmp_path / "packet"
+    prompt = tmp_path / "prompt"
+    diag = tmp_path / "diag"
+    stderr = tmp_path / "stderr"
+    answer = tmp_path / "answer"
+    for path in (packet, prompt, diag, stderr, answer):
+        path.write_text("")
+    session_stop_log = tmp_path / "session-stop.log"
+
+    shell = "\n".join((
+        "set -e",
+        cleanup,
+        "REPO={}".format(shlex.quote(str(repo))),
+        "MUSE_STDERR_FILE={}".format(shlex.quote(str(stderr))),
+        "PACKET_FILE={}".format(shlex.quote(str(packet))),
+        "PROMPT_FILE={}".format(shlex.quote(str(prompt))),
+        "DIAG_FILE={}".format(shlex.quote(str(diag))),
+        "ANSWER_HANDOFF={}".format(shlex.quote(str(answer))),
+        "WORKSPACE={}".format(shlex.quote(str(workspace))),
+        "(",
+        r'    if [[ -z "${BASHPID:-}" ]]; then BASHPID=watcher; fi',
+        "    cleanup",
+        ")",
+        '[[ ! -e "$SESSION_STOP_LOG" ]]',
+        '[[ -d "$WORKSPACE" ]]',
+        '[[ -f "$PACKET_FILE" && -f "$PROMPT_FILE" ',
+        '   && -f "$DIAG_FILE" && -f "$ANSWER_HANDOFF" ]]',
+        "cleanup",
+    ))
+    env = os.environ.copy()
+    env["SESSION_STOP_LOG"] = str(session_stop_log)
+    proc = subprocess.run(
+        ["/bin/bash", "-c", shell],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert proc.returncode == 0, proc.stderr or proc.stdout
+    assert session_stop_log.read_text().splitlines() == ["session-stop"]
+    assert not workspace.exists()
+    assert not any(
+        path.exists() for path in (packet, prompt, diag, stderr, answer)
+    )
 
 
 def test_watcher_exit_does_not_run_parent_cleanup_while_parent_is_alive(

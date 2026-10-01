@@ -417,6 +417,7 @@ else
 fi
 
 cleanup() {
+  [[ "${BASHPID:-$$}" == "$$" ]] || return 0
   python3 "$REPO/funnel.py" session-stop >/dev/null 2>&1 || true
   # The directory, not the files: a later call that adds a scratch file must
   # not have to be remembered here to be cleaned up.

@@ -6,6 +6,7 @@ import ast
 import hashlib
 import json
 import pathlib
+import re
 import shlex
 import signal
 import stat
@@ -1572,6 +1573,36 @@ def test_heartbeat_root_cleanup_refuses_another_tickets_checkout(
     assert (checkout / "work.txt").exists()
     assert implement._remove_codex_run_checkout(checkout, 42, "codex")
     assert not checkout.exists()
+
+
+def test_runtime_generated_macos_checkout_is_removed_on_finish(
+        tmp_path, monkeypatch):
+    runtime = (ROOT / "routines" / "codex-work.md").read_text(
+        encoding="utf-8")
+    match = re.search(
+        r"named `ticket-<number>-<YYYYMMDDTHHMMSSffffffZ>` \(UTC stamp:\s*"
+        r"`python3 -c '([^']+)'`\)",
+        runtime,
+    )
+    assert match is not None, "routine must provide a portable Python stamp generator"
+    stamp = subprocess.run(
+        [sys.executable, "-c", match.group(1)], check=True,
+        capture_output=True, text=True,
+    ).stdout.strip()
+    checkout_name = "ticket-42-{}".format(stamp)
+    assert re.fullmatch(r"ticket-42-[0-9]{8}T[0-9]{12}Z", checkout_name)
+
+    runs_root = point_runs_roots_at(tmp_path, monkeypatch)
+    remote, checkout = make_clone(
+        tmp_path, clone_path=runs_root / checkout_name)
+    checkout.chmod(0o700)
+    run_git("push", "--quiet", "--set-upstream", "origin", "ticket/42",
+            cwd=checkout)
+
+    assert implement._remove_codex_run_checkout(checkout, 42, "codex")
+    assert not checkout.exists()
+    assert run_git("--git-dir", str(remote), "rev-parse",
+                   "refs/heads/ticket/42").stdout.strip()
 
 
 def test_heartbeat_root_cleanup_removes_ticket_1950_shaped_pushed_checkout(

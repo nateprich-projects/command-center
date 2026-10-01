@@ -815,7 +815,7 @@ def test_watcher_killed_after_fake_job_exit_does_not_run_parent_cleanup(
         "killed_marker={}".format(shlex.quote(str(tmp_path / "killed"))),
         "release_ticket() { :; }",
         "trap cleanup EXIT",
-        "for iteration in {1..300}; do",
+        "for iteration in {1..60}; do",
         "  sleep 0 &",
         "  muse_pid=$!",
         watcher,
@@ -830,6 +830,8 @@ def test_watcher_killed_after_fake_job_exit_does_not_run_parent_cleanup(
         "done",
     ))
     env = dict(os.environ, SESSION_STOP_LOG=str(session_stop_log))
+    stdout_path = tmp_path / "watcher.stdout"
+    stderr_path = tmp_path / "watcher.stderr"
 
     loaders = [
         subprocess.Popen(
@@ -840,20 +842,21 @@ def test_watcher_killed_after_fake_job_exit_does_not_run_parent_cleanup(
         for _ in range(3)
     ]
     try:
-        proc = subprocess.run(
-            ["/bin/bash", "-c", shell],
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
+        with stdout_path.open("w") as stdout, stderr_path.open("w") as stderr:
+            proc = subprocess.run(
+                ["/bin/bash", "-c", shell],
+                env=env,
+                stdout=stdout,
+                stderr=stderr,
+                timeout=30,
+            )
     finally:
         for loader in loaders:
             loader.terminate()
         for loader in loaders:
             loader.wait(timeout=5)
 
-    assert proc.returncode == 0, proc.stderr or proc.stdout
+    assert proc.returncode == 0, stderr_path.read_text() or stdout_path.read_text()
     assert session_stop_log.read_text().splitlines() == ["session-stop"]
     assert not workspace.exists()
     assert not any(

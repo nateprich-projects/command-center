@@ -166,6 +166,113 @@ def test_successful_brief_spools_without_changing_stdout(
     assert snapshot["generated_at"] == json.loads(expected)["generated_at"]
 
 
+def test_pr_scan_timeout_spools_current_sections_with_unknown_pip(
+    monkeypatch, tmp_path, capsys
+):
+    """A PR scan timeout must not keep current brief sections from publishing."""
+    spool = tmp_path / "dashboard-spool"
+    monkeypatch.setenv(funnel.DASHBOARD_SPOOL_ENV, str(spool))
+    project = _item(71, "Building", children_total=1)
+    child = _item(72, None, parent=project.ref)
+    monkeypatch.setattr(funnel, "load_items", lambda: [project, child])
+
+    def timeout(_items):
+        raise TimeoutError("PR scan timed out")
+
+    monkeypatch.setattr(funnel, "ticket_pr_facts", timeout)
+    monkeypatch.setattr(funnel, "_read_outcome_signals", lambda _now: None)
+    monkeypatch.setattr(
+        funnel, "_read_portfolio_metrics", lambda _items, _now: None
+    )
+    monkeypatch.setattr(
+        funnel, "decline_routing_metric",
+        lambda _items, _now: {"status": "available", "declines": 0},
+    )
+    monkeypatch.setattr(funnel, "main_ci_json", lambda: [])
+    monkeypatch.setattr(
+        funnel, "member_issues_without_project_items", lambda _items: {}
+    )
+    monkeypatch.setattr(funnel, "unattended_merges", lambda _now: [])
+    monkeypatch.setattr(funnel, "unattended_approvals", lambda *a, **k: [])
+    monkeypatch.setattr(funnel, "connector_gate_answers", lambda *a, **k: [])
+    monkeypatch.setattr(funnel, "recent_resend_ratio", lambda _now: {})
+    monkeypatch.setattr(funnel, "_dashboard_muse_usage", lambda _now: {})
+
+    assert funnel.main(["brief"]) == 0
+    capsys.readouterr()
+
+    snapshot = _spooled(spool)
+    assert snapshot["brief"]["counts_by_gate"]["Building"] == 1
+    assert snapshot["brief"]["missing"]
+    board_item = next(
+        row for column in snapshot["board"]["columns"]
+        if column["stage"] == "Building"
+        for row in column["items"]
+    )
+    assert board_item["tickets"][0]["pr"] == "unknown"
+    assert "unknown" in board_item["pips"]
+
+
+def test_single_verdict_fetch_failure_keeps_other_pips_current(
+    monkeypatch, tmp_path, capsys
+):
+    """One failed pip read must not discard this run's other dashboard data."""
+    spool = tmp_path / "dashboard-spool"
+    monkeypatch.setenv(funnel.DASHBOARD_SPOOL_ENV, str(spool))
+    project = _item(73, "Building", children_total=2)
+    failed = _item(74, None, parent=project.ref)
+    approved = _item(75, None, parent=project.ref)
+    facts = {
+        failed.ref: {"state": "OPEN", "number": 740},
+        approved.ref: {
+            "state": "OPEN", "number": 750, "headRefOid": "head-750",
+            "verdict": {"verdict": "approved", "head_sha": "head-750"},
+        },
+    }
+    monkeypatch.setattr(funnel, "load_items", lambda: [project, failed, approved])
+    monkeypatch.setattr(funnel, "ticket_pr_facts", lambda _items: facts)
+
+    def fail_one(_repo, number):
+        assert number == 740
+        raise TimeoutError("one pip fetch timed out")
+
+    monkeypatch.setattr(funnel, "latest_verdict", fail_one)
+    monkeypatch.setattr(funnel, "_read_outcome_signals", lambda _now: None)
+    monkeypatch.setattr(
+        funnel, "_read_portfolio_metrics", lambda _items, _now: None
+    )
+    monkeypatch.setattr(
+        funnel, "decline_routing_metric",
+        lambda _items, _now: {"status": "available", "declines": 0},
+    )
+    monkeypatch.setattr(funnel, "main_ci_json", lambda: [])
+    monkeypatch.setattr(
+        funnel, "member_issues_without_project_items", lambda _items: {}
+    )
+    monkeypatch.setattr(funnel, "unattended_merges", lambda _now: [])
+    monkeypatch.setattr(funnel, "unattended_approvals", lambda *a, **k: [])
+    monkeypatch.setattr(funnel, "connector_gate_answers", lambda *a, **k: [])
+    monkeypatch.setattr(funnel, "recent_resend_ratio", lambda _now: {})
+    monkeypatch.setattr(funnel, "_dashboard_authoring_pr_agents", lambda: {})
+    monkeypatch.setattr(funnel, "_dashboard_muse_usage", lambda _now: {})
+
+    assert funnel.main(["brief"]) == 0
+    capsys.readouterr()
+
+    snapshot = _spooled(spool)
+    assert snapshot["brief"]["counts_by_gate"]["Building"] == 1
+    board_item = next(
+        row for column in snapshot["board"]["columns"]
+        if column["stage"] == "Building"
+        for row in column["items"]
+    )
+    by_number = {ticket["number"]: ticket for ticket in board_item["tickets"]}
+    assert by_number[74]["pr"] == "unknown"
+    assert by_number[75]["pr"] == "approved"
+    assert "unknown" in board_item["pips"]
+    assert "approved" in board_item["pips"]
+
+
 def test_the_spooled_board_shows_the_bug_turns_begin_takes(
     monkeypatch, tmp_path, capsys
 ):

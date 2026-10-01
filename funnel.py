@@ -12904,6 +12904,7 @@ def dashboard_board(
             children.setdefault(row.parent, []).append(row)
 
     verdicts: Dict[str, Optional[Dict]] = {}
+    failed_verdict_refs: Set[str] = set()
 
     def verdict_for(ticket: Item) -> Optional[Dict]:
         """Return the batch verdict, with a fixture-only legacy fallback."""
@@ -12916,7 +12917,14 @@ def dashboard_board(
         if ticket.ref in verdicts:
             return verdicts[ticket.ref]
         number = fact.get("number")
-        found = latest_verdict(ticket.repo, number) if number else None
+        try:
+            found = latest_verdict(ticket.repo, number) if number else None
+        except Exception:
+            # A single pip's legacy verdict fallback must not prevent the
+            # current board and its unrelated sections from being published.
+            # That ticket alone reads unknown; this is one bounded attempt.
+            failed_verdict_refs.add(ticket.ref)
+            found = None
         verdicts[ticket.ref] = found
         return found
 
@@ -12970,7 +12978,7 @@ def dashboard_board(
                 # Native edges when there are any, else the refs parsed from
                 # the block comment, so "blocked" always says by what.
                 list(child.open_blockers or child.block_references),
-                known,
+                known and child.ref not in failed_verdict_refs,
                 parent_block if child.state == "OPEN" else None,
                 authoring_for(facts.get(child.ref)),
                 siblings,
@@ -22295,20 +22303,14 @@ def main(argv: Optional[Sequence[str]] = None, *,
                     try:
                         return cache.get_pr_facts(items)
                     except BriefSectionTimeout:
-                        # One retry sharing the section deadline (#1210):
-                        # the section state set by _brief_timed still
-                        # bounds the second attempt, so no extra budget
-                        # is granted. Only retry when time remains.
-                        state = _BRIEF_SECTION_STATE.get()
-                        if (
-                            state is not None
-                            and float(state[1]) - time.monotonic() <= 0
-                        ):
-                            raise
-                        return cache.get_pr_facts(items)
-                    except GitHubError as exc:
+                        # A failed PR read makes these pips unknown. Do not
+                        # wait or retry before the current brief is published.
+                        raise
+                    except Exception as exc:
                         pr_facts_error.append(
-                            "could not read ticket branch facts: {}".format(exc)
+                            "could not read ticket branch facts: {}".format(
+                                _brief_error(exc)
+                            )
                         )
                         for section in BRIEF_PR_FACT_SECTIONS:
                             missing.append({

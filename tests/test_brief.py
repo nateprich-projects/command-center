@@ -2517,48 +2517,10 @@ def test_ticket_pr_facts_section_succeeds_under_the_raised_budget(
     assert degraded == []
 
 
-def test_main_brief_retries_a_pr_facts_timeout_once_within_deadline(
+def test_main_brief_pr_facts_timeout_is_not_retried(
     monkeypatch, capsys
 ):
-    """A first-attempt timeout is retried once sharing the section deadline;
-    when the retry succeeds the dependent sections render instead of
-    reporting missing (#1210)."""
-    item = funnel.Item(
-        repo="nateprich/beta", number=92, title="A ticket",
-        url="https://example.invalid/92", state="OPEN",
-        parent="nateprich/beta#1",
-    )
-    monkeypatch.setattr(funnel, "load_items", lambda: [item])
-    calls = []
-
-    def flaky(_items):
-        calls.append(1)
-        if len(calls) == 1:
-            raise funnel.BriefSectionTimeout(
-                "ticket_pr_facts", "section read timed out"
-            )
-        return {}
-
-    monkeypatch.setattr(funnel, "ticket_pr_facts", flaky)
-
-    assert funnel.main(["brief"]) == 0
-    brief = json.loads(capsys.readouterr().out)
-
-    assert len(calls) == 2
-    assert brief["stranded"] is not None
-    assert brief["in_motion"] is not None
-    assert brief["stale_locks_taken_over"] is not None
-    assert [
-        entry for entry in brief["missing"]
-        if entry["section"] in funnel.BRIEF_PR_FACT_SECTIONS
-    ] == []
-
-
-def test_main_brief_retry_exhausted_still_reports_degraded(
-    monkeypatch, capsys
-):
-    """Two timeouts (first attempt plus the one shared-deadline retry) leave
-    the dependent sections missing and record the degraded section (#1210)."""
+    """A timed-out PR read marks dependent sections unknown on its first try."""
     item = funnel.Item(
         repo="nateprich/beta", number=92, title="A ticket",
         url="https://example.invalid/92", state="OPEN",
@@ -2578,7 +2540,7 @@ def test_main_brief_retry_exhausted_still_reports_degraded(
     assert funnel.main(["brief"]) == 0
     brief = json.loads(capsys.readouterr().out)
 
-    assert len(calls) == 2
+    assert len(calls) == 1
     assert brief["stranded"] is None
     assert brief["in_motion"] is None
     assert brief["stale_locks_taken_over"] is None

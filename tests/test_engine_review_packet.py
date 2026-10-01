@@ -1856,6 +1856,25 @@ def test_shape_ticket_bounds_parent_rejected_excerpt_on_a_line_boundary():
     assert shaped["parent_rejected_excerpt_truncated"] is True
 
 
+def test_parent_rejected_excerpt_uses_the_remaining_ticket_body_budget():
+    remaining = 80
+    parent_body = (
+        "## Rejected\n"
+        "- Keep the current boundary.\n"
+        "- {}\n"
+    ).format("x" * 100)
+    shaped = review.shape_ticket(ticket(
+        body="x" * (review.TICKET_BODY_LIMIT - remaining),
+        parent={"body": parent_body, "comments": []},
+    ))
+
+    excerpt = shaped["parent_rejected_excerpt"]
+    assert len(shaped["body"]) + len(excerpt) <= review.TICKET_BODY_LIMIT
+    assert excerpt.startswith("## Rejected\n- Keep the current boundary.\n")
+    assert excerpt.endswith(review.PARENT_REJECTED_TRUNCATION_MARKER)
+    assert shaped["parent_rejected_excerpt_truncated"] is True
+
+
 def test_shape_ticket_matches_casefolded_rejected_heading_variants():
     body = (
         "# Parent plan\n"

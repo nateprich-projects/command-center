@@ -243,15 +243,15 @@ EVIDENCE_LIMIT_BYTES = 8 * 1024
 #: The block's first fact names the commit its finish pushed, in full.
 EVIDENCE_SHA_RE = re.compile(r"- sha: ([0-9a-f]{40})")
 
-#: A ticket's body is cut at the PR description's bound (#1801). A ticket
-#: body is its spec and comes nowhere near it in practice; the bound only
-#: stops one runaway body, carried in every call's prompt, from flooding it.
+#: A ticket's body is cut at the PR description's bound (#1801). Its
+#: parent's bounded Rejected excerpt shares this per-ticket text budget but
+#: remains a separate field, so carrying it does not add unbounded context.
 TICKET_BODY_LIMIT = PR_BODY_LIMIT
 
 # A parent plan's rejected alternatives are the only prose from its body that
 # enters the review packet (#2020). Keep the excerpt bounded with a visible
-# marker, at a whole line, so a large parent body cannot restore #1474's
-# unbounded packet growth.
+# marker, at a whole line, and charge it to the remaining TICKET_BODY_LIMIT
+# budget so a large parent body cannot restore #1474's unbounded packet growth.
 PARENT_REJECTED_EXCERPT_LIMIT = 2000
 PARENT_REJECTED_TRUNCATION_MARKER = "…[truncated]"
 
@@ -3553,9 +3553,10 @@ def shape_ticket(ticket: Optional[dict]) -> Dict[str, Optional[object]]:
     comments shaped and its bounded Rejected excerpt, and the ticket's newest
     comments with their recorded voices. None reads as the empty ticket a
     ticketless branch gets.
-    The body is cut at TICKET_BODY_LIMIT and each comment list is bounded
-    by ``ticket_comments``, so the context every ticket adds is bounded
-    and marked where cut (#1801); none of it can fail the precheck.
+    The body and parent's Rejected excerpt share TICKET_BODY_LIMIT while
+    staying in separate fields; each comment list is bounded by
+    ``ticket_comments``. The context every ticket adds is bounded and marked
+    where cut (#1801); none of it can fail the precheck.
     """
     if ticket is None:
         return {
@@ -3567,12 +3568,18 @@ def shape_ticket(ticket: Optional[dict]) -> Dict[str, Optional[object]]:
     parent = ticket.get("parent")
     parent_rejected_excerpt = ""
     parent_rejected_excerpt_truncated = False
+    ticket_body = ticket.get("body")
+    ticket_body_budget = (
+        min(len(ticket_body), TICKET_BODY_LIMIT)
+        if isinstance(ticket_body, str) else 0)
     if isinstance(parent, dict):
         parent = dict(parent)
         parent["comments"] = ticket_comments(parent.get("comments"))
         (parent_rejected_excerpt,
          parent_rejected_excerpt_truncated) = _bounded_parent_rejected_excerpt(
-             parent.get("body"))
+             parent.get("body"), limit=max(
+                 0, min(PARENT_REJECTED_EXCERPT_LIMIT,
+                        TICKET_BODY_LIMIT - ticket_body_budget)))
         # Keep the full parent body out of the packet per #1474; only this
         # bounded Rejected excerpt is carried as parent-plan prose.
         parent.pop("body", None)
@@ -3582,7 +3589,7 @@ def shape_ticket(ticket: Optional[dict]) -> Dict[str, Optional[object]]:
         "number": ticket.get("number"),
         "title": ticket.get("title"),
         "url": ticket.get("url"),
-        "body": _bounded_text(ticket.get("body"), TICKET_BODY_LIMIT),
+        "body": _bounded_text(ticket_body, TICKET_BODY_LIMIT),
         "risk": ticket.get("risk"),
         "parent": parent,
         "comments": ticket_comments(ticket.get("comments")),
@@ -3608,12 +3615,16 @@ def _atx_heading(line: str) -> Optional[Tuple[int, str]]:
     return len(match.group("level")), title
 
 
-def _bounded_parent_rejected_excerpt(body: object) -> Tuple[str, bool]:
+def _bounded_parent_rejected_excerpt(
+        body: object,
+        limit: int = PARENT_REJECTED_EXCERPT_LIMIT) -> Tuple[str, bool]:
     """Return the first bounded parent ``Rejected`` section and its cut flag.
 
     Markdown headings inside fenced code are ignored. A same-or-higher ATX
     heading ends the section; deeper headings remain part of it. The visible
-    truncation marker counts inside the 2000-character cap.
+    truncation marker counts inside ``limit``, which is at most
+    ``PARENT_REJECTED_EXCERPT_LIMIT`` and may be reduced by the ticket-body
+    budget.
     """
     if not isinstance(body, str):
         return "", False
@@ -3659,17 +3670,20 @@ def _bounded_parent_rejected_excerpt(body: object) -> Tuple[str, bool]:
 
     section_lines = lines[start:end]
     section = "".join(section_lines)
-    if len(section) <= PARENT_REJECTED_EXCERPT_LIMIT:
+    limit = max(0, min(PARENT_REJECTED_EXCERPT_LIMIT, limit))
+    if len(section) <= limit:
         return section, False
 
     excerpt = ""
     marker = PARENT_REJECTED_TRUNCATION_MARKER
+    if limit < len(marker):
+        return "", True
     for source_line in section_lines:
         candidate = excerpt + source_line
         separator = ("" if not candidate
                      or candidate.endswith(("\n", "\r")) else "\n")
         if (len(candidate) + len(separator) + len(marker)
-                > PARENT_REJECTED_EXCERPT_LIMIT):
+                > limit):
             break
         excerpt = candidate
 

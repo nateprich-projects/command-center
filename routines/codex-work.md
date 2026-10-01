@@ -18,6 +18,18 @@ Run `python3 /Users/nateprich/.claude/command-center-run/funnel.py begin --agent
 output, keep reading that same exec session until the process exits.
 Never treat that yield as a failure, and never invoke `begin` again.
 
+After `begin` exits and before acting on `do`, run the daily SSD archive helper
+only when its JSON has `gate: "ok"`:
+
+```sh
+python3 /Users/nateprich/.claude/command-center-run/session_log_archive.py
+```
+
+Skip it for every other gate, then follow that gate's outcome. The helper acts
+only during the 03:00–03:59 local hour; an unmounted SSD is reported as a skip
+with a successful exit. Keep this call in the app-hosted Codex routine, never
+in the launchd run-keeper.
+
 Work one ticket, then stop. When `do` is `stop`, finish the printed `run` with
 the gate’s outcome (`over` is `skipped-over-pace`, `unknown` is
 `skipped-usage-unknown`, `reserve` is `skipped-api-reserve`,

@@ -1574,6 +1574,28 @@ def test_heartbeat_root_cleanup_refuses_another_tickets_checkout(
     assert not checkout.exists()
 
 
+def test_heartbeat_root_cleanup_removes_ticket_1950_shaped_pushed_checkout(
+        tmp_path, monkeypatch):
+    remote, checkout = make_heartbeat_codex_run_clone(
+        tmp_path, monkeypatch, number=1950)
+    run_git("branch", "--quiet", "--move", "ticket/1950", cwd=checkout)
+    historical_path = checkout.with_name(
+        "ticket-1950-20260929T161529190758Z")
+    checkout.rename(historical_path)
+    checkout = historical_path
+    run_git("push", "--quiet", "--set-upstream", "origin", "ticket/1950",
+            cwd=checkout)
+
+    assert checkout.stat().st_mode & 0o077 == 0
+    assert run_git("status", "--porcelain", cwd=checkout).stdout == ""
+    assert run_git("rev-parse", "HEAD", cwd=checkout).stdout.strip() == (
+        run_git("--git-dir", str(remote), "rev-parse",
+                "refs/heads/ticket/1950").stdout.strip()
+    )
+    assert implement._remove_codex_run_checkout(checkout, 1950, "codex")
+    assert not checkout.exists()
+
+
 @pytest.mark.parametrize("work_state", ("unpushed", "dirty"))
 def test_heartbeat_root_cleanup_keeps_unpushed_or_dirty_git_checkouts(
         tmp_path, monkeypatch, work_state):
@@ -2883,39 +2905,52 @@ def test_finish_declined_labels_comments_releases_and_finishes(
     assert "halfway.txt" in dirty
 
 
-def test_finish_declined_removes_a_clean_pushed_run_checkout(
+def test_finish_declined_removes_ticket_1950_shaped_pushed_checkout(
         tmp_path, monkeypatch):
-    # Declines also ended without invoking cleanup, which multiplied clean
-    # checkouts when a ticket was re-offered.
-    remote, clone = make_heartbeat_codex_run_clone(tmp_path, monkeypatch)
-    run_git("push", "--quiet", "--set-upstream", "origin", "ticket/42",
-            cwd=clone)
+    # Reproduction: run ticket-1950-20260929T161529190758Z declined at
+    # 2026-09-29 09:27 PDT with HEAD e64672df3 on origin/ticket/1950.
+    # finish_declined (engine/implement.py:3250 before this fix) had no call
+    # to _remove_codex_run_checkout; the root, mode, and cwd guards were not
+    # the cause. This fixture reproduces its path and pushed-clean state.
+    remote, checkout = make_heartbeat_codex_run_clone(
+        tmp_path, monkeypatch, number=1950)
+    run_git("branch", "--quiet", "--move", "ticket/1950", cwd=checkout)
+    historical_name = "ticket-1950-20260929T161529190758Z"
+    historical_path = checkout.with_name(historical_name)
+    checkout.rename(historical_path)
+    checkout = historical_path
+    run_git("push", "--quiet", "--set-upstream", "origin", "ticket/1950",
+            cwd=checkout)
+    assert checkout.stat().st_mode & 0o077 == 0
+    assert run_git("status", "--porcelain", cwd=checkout).stdout == ""
+    assert run_git("rev-parse", "HEAD", cwd=checkout).stdout.strip() == (
+        run_git("--git-dir", str(remote), "rev-parse",
+                "refs/heads/ticket/1950").stdout.strip()
+    )
+
     monkeypatch.setattr(implement, "fetch_ticket",
                         lambda repo, number: ticket(number))
     effects = {"released": [], "finished": []}
-    assert run_git("status", "--porcelain", cwd=clone).stdout == ""
-    assert run_git("--git-dir", str(remote), "rev-parse",
-                   "refs/heads/ticket/42").stdout.strip() == (
-        run_git("rev-parse", "HEAD", cwd=clone).stdout.strip()
-    )
-    monkeypatch.chdir(clone)
+    runs_root = checkout.parent
+    monkeypatch.chdir(checkout)
 
     result = implement.finish_declined(
-        "I could not verify the required evidence.",
-        run="run-42",
+        "I cannot verify the required evidence.",
+        run="run-1950",
         repo=REPO,
-        cwd=clone,
+        cwd=checkout,
         release=effects["released"].append,
         heartbeat_finish=lambda *args: effects["finished"].append(args),
         block_effect=lambda *args, **kwargs: None,
         comment_effect=lambda *args, **kwargs: None,
-        declined_needs_effect=lambda url, ref: None,
+        declined_needs_effect=lambda *args: None,
     )
 
-    assert result["ticket"] == REPO + "#42"
-    assert effects["released"] == [REPO + "#42"]
+    assert result["ticket"] == REPO + "#1950"
+    assert effects["released"] == [REPO + "#1950"]
     assert effects["finished"][0][2] == "skipped-blocked"
-    assert not clone.exists()
+    assert not checkout.exists()
+    assert pathlib.Path.cwd() == runs_root
 
 
 @pytest.mark.parametrize(("reason", "prerequisite"), [

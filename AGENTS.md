@@ -217,10 +217,10 @@ wrong.
   stay on the private model, as does any repository not named. A test holds tier 2 off
   the list. The five private repositories on it are Nate's deliberate override of the
   §6.2 FAIL in `docs/meta-model-api-tos-aup-1095.md`. The pace gate prices each call at
-  its model's own card and keeps the standard-card total as an ungated diagnostic. Pair
-  each new window at its first panel tick; restore standard-card pricing if a fresh
-  same-timestamp panel-used percentage is more than 2 percentage points above the
-  own-card meter's implied used percentage.
+  its model's own card and keeps the standard-card total as an ungated diagnostic. Use
+  the first panel reading in each new window as a fresh pairing; restore
+  standard-card pricing if a fresh same-timestamp panel-used percentage is more
+  than 2 percentage points above the own-card meter's implied used percentage.
   _(Nate, 2026-09-26, #1570: "So tier 1 and tier 3, but not tier 2.")_
 
   **`--approval-mode never` is not a guard.** Measured 2026-09-07: it does **not** fail

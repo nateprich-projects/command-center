@@ -349,28 +349,29 @@ MUSE_WEEKLY_RESERVE = round(
 #: now runs to Sunday or to next Thursday is what that Sunday's panel
 #: reading settles. _(Nate, 2026-09-24: "Update it tonight".)_
 #:
-#: **The #1842 standard-card cap is replaced with the first new-window
-#: own-card pairing.** At 23:16 PDT on 2026-09-27, the panel had just ticked
-#: from 1% to 2%; use its 1.5% midpoint with $2.19 own-card spend. That gives
-#: a $146.00 cap for the window resetting 2026-10-05 00:00 UTC. The measurement
-#: is recorded on #1673 for prerequisite #1994:
+#: **The #1842 standard-card cap is replaced with the fresh own-card
+#: pairing.** On Tue 2026-09-29 at 20:55 PDT the panel read 15% and
+#: `usage.py muse` held $15.98 at own-card prices. All four same-window
+#: readings on #1673 fit a $108-$110 cap within the panel's 1-point
+#: resolution; use the recorded $109 cap for the window resetting
+#: 2026-10-05 00:00 UTC. The pairing is recorded for prerequisite #1994:
 #: https://github.com/nateprich-projects/command-center/issues/1673#issuecomment-5903766309
 #:
-#: Re-check at the first panel tick in every new window. If a fresh panel
-#: used-percent at the same timestamp is more than 2 percentage points above
-#: the own-card meter's implied used-percent, restore standard-card pricing.
+#: Use the first panel reading in each new window as a fresh pairing. If a
+#: fresh same-timestamp panel used-percent exceeds the own-card meter's
+#: implied used-percent by more than 2 percentage points, restore standard-card
+#: pricing.
 #: Keep the standard-card total as an ungated diagnostic.
 #: _(Nate, #1994; implementation #1995.)_
-MUSE_PACE_OWN_CARD_CAP_V1 = {
+MUSE_PACE_OWN_CARD_CAP_V2 = {
     "issue": 1995,
     "resets_at": 1791158400.0,  # 2026-10-05 00:00 UTC, Sunday 17:00 PDT
-    "panel_previous_percent": 1.0,
-    "panel_displayed_percent": 2.0,
-    "panel_used_percent": 1.5,
-    "meter_dollars": 2.19,
+    "panel_displayed_percent": 15.0,
+    "meter_dollars": 15.98,
+    "cap_dollars": 109.0,
     "ceiling_percent": 100.0,
 }
-MUSE_PACE_OVERRIDE = MUSE_PACE_OWN_CARD_CAP_V1
+MUSE_PACE_OVERRIDE = MUSE_PACE_OWN_CARD_CAP_V2
 
 
 def muse_pace_override(resets_at: float, now: float) -> Optional[Dict]:
@@ -388,8 +389,7 @@ def muse_pace_override(resets_at: float, now: float) -> Optional[Dict]:
     until = float(override["resets_at"])
     if now >= until or float(resets_at) != until:
         return None
-    cap = round(float(override["meter_dollars"]) * 100.0
-                / float(override["panel_used_percent"]), 2)
+    cap = float(override["cap_dollars"])
     found = {
         "issue": override["issue"],
         "until": until,
@@ -787,13 +787,13 @@ def read_muse(now: float) -> Optional[Dict]:
 
     The base $200 ceiling was calibrated from a 429 at $214.02 in a window
     where every session was on the standard model; that one-card reading did
-    not settle contributor pricing. The first-tick pairing for the current
-    window does: the panel's 1.5% midpoint was paired with $2.19 at own-card
-    prices, within the panel's 1-point resolution.
+    not settle contributor pricing. The current window uses the fresh 15%
+    panel / $15.98 own-card pairing, with a $109 cap that fits all four
+    same-window readings within the panel's 1-point resolution.
 
     The $200 base ceiling remains calibrated from the 2026-09-19 provider
-    refusal. A dated pairing replaces it only for its named window; take a
-    fresh first-tick panel pairing for the next window.
+    refusal. A dated pairing replaces it only for its named window; use the
+    first panel reading in the next window as a fresh pairing.
     """
     resets_at = muse_window_start(now) + SEVEN_DAY
     # #1341: one window is priced from the account panel instead of the card,

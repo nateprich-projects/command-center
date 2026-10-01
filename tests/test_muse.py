@@ -302,6 +302,9 @@ def test_the_flat_ceiling_still_stops_whatever_the_projection(tmp_path, monkeypa
 # early should fail the tests below, not the collection of this module.
 OVERRIDE_RESET = 1791158400.0  # 2026-10-05 00:00 UTC
 IN_OVERRIDE = OVERRIDE_RESET - 3 * 86400.0
+PAIR_AT = datetime.datetime(
+    2026, 9, 30, 3, 55, tzinfo=datetime.timezone.utc).timestamp()
+PAIR_DAYS_LEFT = (OVERRIDE_RESET - PAIR_AT) / 86400.0
 
 
 def test_the_override_names_the_window_resetting_sunday_2026_10_04():
@@ -314,35 +317,44 @@ def test_the_override_names_the_window_resetting_sunday_2026_10_04():
 
 
 def test_the_override_prices_the_window_from_the_panel(tmp_path, monkeypatch):
-    """The first new-window tick was 2% after 1%, paired with $2.19 own-card
-    spend; the 1.5% midpoint sets a $146 cap for this window."""
+    """The 15% panel / $15.98 own-card pairing supports the selected $109 cap."""
+    cap = usage.MUSE_PACE_OWN_CARD_CAP_V2["cap_dollars"]
+    assert usage.MUSE_PACE_OWN_CARD_CAP_V2["panel_displayed_percent"] == 15.0
+    assert usage.MUSE_PACE_OWN_CARD_CAP_V2["meter_dollars"] == 15.98
+    assert cap == 109.0
+
+    # Four independent same-window measurements from #1994; integer panel
+    # readings represent a one-point interval around each displayed value.
+    for panel_percent, meter_dollars in (
+            (2.0, 2.19), (3.0, 3.25), (12.0, 13.53), (15.0, 15.98)):
+        lower_cap = 100.0 * meter_dollars / (panel_percent + 0.5)
+        upper_cap = 100.0 * meter_dollars / (panel_percent - 0.5)
+        assert lower_cap <= cap <= upper_cap
+
     reading, verdict, _ = _projected(
-        tmp_path, monkeypatch, spent=2.19, trailing=2.19,
-        days_left=6.7388888889, at=IN_OVERRIDE)
+        tmp_path, monkeypatch, spent=15.98, trailing=15.98,
+        days_left=PAIR_DAYS_LEFT, at=PAIR_AT)
     window = reading["windows"]["seven_day"]
-    assert usage.MUSE_PACE_OWN_CARD_CAP_V1["panel_previous_percent"] == 1.0
-    assert usage.MUSE_PACE_OWN_CARD_CAP_V1["panel_displayed_percent"] == 2.0
-    assert usage.MUSE_PACE_OWN_CARD_CAP_V1["meter_dollars"] == 2.19
-    assert reading["cap_dollars"] == pytest.approx(146.0)
-    assert window["cap_dollars"] == pytest.approx(146.0)
-    assert window["used_percent"] == pytest.approx(1.5, abs=0.01)
-    assert window["projected_percent"] == pytest.approx(4.87, abs=0.02)
+    assert reading["cap_dollars"] == pytest.approx(109.0)
+    assert window["cap_dollars"] == pytest.approx(109.0)
+    assert window["spent_dollars"] == pytest.approx(15.98)
+    assert window["used_percent"] == pytest.approx(14.66, abs=0.01)
+    assert window["projected_percent"] == pytest.approx(38.30, abs=0.02)
     assert window["override"] == {"issue": 1995, "until": OVERRIDE_RESET}
 
     weekly = verdict["windows"][0]
     assert verdict["band"] == "ok"
     assert not verdict["over_pace"]
     assert weekly["allowed_percent"] == 100.0
-    # $4.50 of $146.00.
-    assert weekly["reserve"] == pytest.approx(3.08)
+    # $4.50 of $109.00.
+    assert weekly["reserve"] == pytest.approx(4.13)
     assert weekly["override"]["issue"] == 1995
 
 
-@pytest.mark.parametrize("spent, over", [(141.4, False), (141.6, True)])
+@pytest.mark.parametrize("spent, over", [(104.49, False), (104.51, True)])
 def test_the_override_stops_at_100_less_one_session(tmp_path, monkeypatch,
                                                      spent, over):
-    """Used plus $4.50 of $146.00 (3.08%) against 100, strictly: $141.40
-    reads 96.85% and is admitted, $141.60 reads 96.99% and is not."""
+    """The unchanged reserve rule admits below $104.50 and stops above it."""
     _, verdict, _ = _projected(
         tmp_path, monkeypatch, spent=spent, trailing=spent, days_left=2.0,
         at=IN_OVERRIDE)
@@ -360,6 +372,7 @@ REOPENED_OVERRIDE = {
     "resets_at": REOPENED_RESET,
     "panel_used_percent": 86.0,
     "meter_dollars": 120.91,
+    "cap_dollars": 140.59,
     "ceiling_percent": 100.0,
     "reopened_at": REOPENED,
 }
@@ -568,6 +581,19 @@ def test_the_gated_total_prices_each_model_at_its_own_card(
         pytest.approx(0.8366)
     assert reading["own_card_dollars"] == pytest.approx(0.8366)
     assert reading["standard_card_dollars"] == pytest.approx(1.590)
+
+
+def test_reproduction_mixed_model_gate_uses_the_own_card_sum(
+        tmp_path, monkeypatch):
+    """Mixed standard/contributor calls gate against their own-card sum."""
+    reading = _mixed_window(tmp_path, monkeypatch)
+
+    # Independent expected amount for these two calls; standard-card pricing
+    # reads $1.590 for the same fixture and fails this reproduction.
+    assert reading["spent_dollars"] == pytest.approx(0.8366)
+    assert reading["spent_dollars"] == pytest.approx(
+        sum(row["dollars_at_own_card"]
+            for row in reading["by_model"].values()))
 
 
 def test_the_72_hour_projection_uses_own_card_spend(tmp_path, monkeypatch):

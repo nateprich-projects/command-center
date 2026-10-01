@@ -359,6 +359,65 @@ def test_begin_prints_a_transient_json_envelope_when_project_load_is_truncated(
     )
 
 
+def test_begin_reports_bounded_cannot_complete_before_starting_a_ticket(
+    monkeypatch, capsys,
+):
+    _allow_local_preflight(monkeypatch, {"windows": {}})
+
+    def member_repos(after_first_response=None):
+        if after_first_response is not None:
+            after_first_response({
+                "rateLimit": {"cost": 1, "remaining": 5_000,
+                              "resetAt": "later"},
+            })
+        return ["nateprich-projects/command-center"]
+
+    def over_envelope(**_kwargs):
+        raise funnel.BeginCannotComplete()
+
+    monkeypatch.setattr(funnel, "member_repos", member_repos)
+    monkeypatch.setattr(
+        funnel, "cmd_begin",
+        lambda *_args, **_kwargs: pytest.fail(
+            "cannot-complete must stop before ticket selection"
+        ),
+    )
+
+    assert funnel.main(
+        ["begin", "--agent", "codex", "--tier", "standard"],
+        _items_loader=over_envelope,
+    ) == 0
+
+    result = json.loads(capsys.readouterr().out)
+    assert result["gate"] == "ok"
+    assert result["do"] == "stop"
+    assert result["why"] == funnel.BEGIN_CANNOT_COMPLETE_REASON
+    assert "work" not in result
+    assert funnel._ACTIVE_BEGIN_ENVELOPE is None
+
+
+def test_begin_work_envelope_counts_preflight_calls_before_running_gh(
+    monkeypatch,
+):
+    funnel.reset_api_usage()
+    envelope = funnel.BeginWorkEnvelope(limit=1)
+    monkeypatch.setattr(funnel, "_ACTIVE_BEGIN_ENVELOPE", envelope)
+    commands = []
+
+    def run(command, **_kwargs):
+        commands.append(command)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(funnel, "_run_bounded_subprocess", run)
+    funnel._run_gh(["gh", "api", "graphql", "-f", "query={viewer{login}}"])
+
+    with pytest.raises(funnel.BeginCannotComplete):
+        funnel._run_gh(["gh", "api", "graphql", "-f", "query={viewer{login}}"])
+
+    assert len(commands) == 1
+    assert envelope.preflight_calls == 1
+
+
 @pytest.mark.parametrize("gate", ["pace", "idle"])
 def test_main_applies_begin_gates_before_loading_the_project(
     monkeypatch, capsys, gate

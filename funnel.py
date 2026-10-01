@@ -64,6 +64,12 @@ REPO = "nateprich-projects/command-center"
 # cannot turn one opening command into an unbounded request burst.
 BEGIN_FETCH_POOL_SIZE = 4
 
+# Begin spends one fixed envelope across Project rows, preflight GitHub calls,
+# and the detail fields reserved for a selected ticket. Keeping the accounting
+# here prevents separate page and hydration caps from adding up to an unbounded
+# opening read.
+BEGIN_WORK_ENVELOPE_LIMIT = 2048
+
 # The local checks deliberately keep their paths as module-level values. Tests
 # can point them at a temporary checkout and home directory without ever
 # reading the real ~/.claude.
@@ -9804,6 +9810,7 @@ BEGIN_ITEM_CONNECTIONS: Tuple[Tuple[str, str], ...] = (
 def _begin_item_query(
     aliases: Sequence[str], extra_field: str = "",
     minimal_startable: bool = False,
+    page_sizes: Optional[Mapping[str, int]] = None,
 ) -> str:
     """One aliased Project query carrying only the named begin connections.
 
@@ -9831,7 +9838,8 @@ def _begin_item_query(
         "        pageInfo {{ hasNextPage endCursor }}\n"
         "        nodes {{ ...{fragment} }}\n"
         "      }}\n".format(
-            alias=alias, size=PROJECT_ITEM_PAGE_SIZE,
+            alias=alias,
+            size=(page_sizes or {}).get(alias, PROJECT_ITEM_PAGE_SIZE),
             query=json.dumps(filters[alias]),
             fragment=(
                 "StartableItem"
@@ -9892,6 +9900,7 @@ def _project_item_ref_filter(ref: str) -> str:
 
 def _project_item_refs_query(
     refs: Sequence[str], node_fields: str = ITEM_NODE_FIELDS,
+    page_size: int = PROJECT_REF_PAGE_SIZE,
 ) -> str:
     """One Project query with a filtered connection per ref, ``r0`` onward."""
     if not refs or len(refs) > PROJECT_REF_ALIASES_PER_REQUEST:
@@ -9905,7 +9914,7 @@ def _project_item_refs_query(
         "        pageInfo {{ hasNextPage endCursor }}\n"
         "        nodes {{ ...ProjectRefItem }}\n"
         "      }}\n".format(
-            index=index, size=PROJECT_REF_PAGE_SIZE,
+            index=index, size=page_size,
             query=json.dumps(_project_item_ref_filter(ref)),
         )
         for index, ref in enumerate(refs)
@@ -10060,6 +10069,27 @@ def read_issue_comments(repo: str, number: int) -> List[Dict[str, object]]:
 # fetched below only for the candidate items a caller has kept after its cheap
 # checks; they do not belong on every Project row.
 PROJECT_ITEM_DETAIL_BATCH_SIZE = 100
+BEGIN_DETAIL_TIMELINE_ITEMS_MAX = 60
+BEGIN_DETAIL_CHILD_ITEMS_MAX = 50
+BEGIN_DETAIL_MAX_SELECTED_ITEMS = 2
+BEGIN_DETAIL_HISTORY_FIELDS_PER_EVENT_MAX = 5
+BEGIN_DETAIL_BASE_FIELDS_PER_ITEM = 4  # id, content, body, timelineItems
+BEGIN_DETAIL_CHILD_FIELDS_PER_ITEM = 3  # id, content, subIssues
+BEGIN_DETAIL_CHILD_FIELDS_PER_CHILD = 2  # createdAt, closedAt
+BEGIN_DETAIL_FIELDS_PER_ITEM_MAX = (
+    BEGIN_DETAIL_BASE_FIELDS_PER_ITEM
+    + BEGIN_DETAIL_TIMELINE_ITEMS_MAX
+    * BEGIN_DETAIL_HISTORY_FIELDS_PER_EVENT_MAX
+    + BEGIN_DETAIL_CHILD_FIELDS_PER_ITEM
+    + BEGIN_DETAIL_CHILD_ITEMS_MAX * BEGIN_DETAIL_CHILD_FIELDS_PER_CHILD
+)
+BEGIN_DETAIL_QUERY_OVERHEAD = 4  # one request plus rateLimit's three fields
+# One detail batch covers the selected ticket and, when needed, its decline
+# gate. This is the worst-case reserve used while listing the Project.
+BEGIN_DETAIL_WORK_RESERVE = (
+    BEGIN_DETAIL_MAX_SELECTED_ITEMS * BEGIN_DETAIL_FIELDS_PER_ITEM_MAX
+    + BEGIN_DETAIL_QUERY_OVERHEAD
+)
 
 ITEM_DETAILS_QUERY = """
 query($ids: [ID!]!, $childIds: [ID!]!) {
@@ -10069,7 +10099,7 @@ query($ids: [ID!]!, $childIds: [ID!]!) {
       id
       content {
         ... on Issue {
-          timelineItems(last: 60, itemTypes: [PROJECT_V2_ITEM_STATUS_CHANGED_EVENT, LABELED_EVENT, UNLABELED_EVENT]) {
+          timelineItems(last: {timeline_max}, itemTypes: [PROJECT_V2_ITEM_STATUS_CHANGED_EVENT, LABELED_EVENT, UNLABELED_EVENT]) {
             nodes {
               __typename
               ... on ProjectV2ItemStatusChangedEvent {
@@ -10092,7 +10122,7 @@ query($ids: [ID!]!, $childIds: [ID!]!) {
       id
       content {
         ... on Issue {
-          subIssues(first: 50) {
+          subIssues(first: {children_max}) {
             nodes { createdAt closedAt }
           }
         }
@@ -10100,7 +10130,11 @@ query($ids: [ID!]!, $childIds: [ID!]!) {
     }
   }
 }
-"""
+""".replace(
+    "{timeline_max}", str(BEGIN_DETAIL_TIMELINE_ITEMS_MAX)
+).replace(
+    "{children_max}", str(BEGIN_DETAIL_CHILD_ITEMS_MAX)
+)
 
 # GitHub's CLI does not pass an empty list variable, so a detail batch with no
 # child-bearing rows uses this timeline-only form instead of sending an invalid
@@ -10114,7 +10148,7 @@ query($ids: [ID!]!) {
       id
       content {
         ... on Issue {
-          timelineItems(last: 60, itemTypes: [PROJECT_V2_ITEM_STATUS_CHANGED_EVENT, LABELED_EVENT, UNLABELED_EVENT]) {
+          timelineItems(last: {timeline_max}, itemTypes: [PROJECT_V2_ITEM_STATUS_CHANGED_EVENT, LABELED_EVENT, UNLABELED_EVENT]) {
             nodes {
               __typename
               ... on ProjectV2ItemStatusChangedEvent {
@@ -10133,7 +10167,9 @@ query($ids: [ID!]!) {
     }
   }
 }
-"""
+""".replace(
+    "{timeline_max}", str(BEGIN_DETAIL_TIMELINE_ITEMS_MAX)
+)
 
 
 def _item_detail_request(
@@ -10189,6 +10225,68 @@ class GitHubError(RuntimeError):
         super().__init__(message)
         self.transient = transient
         self.request_id = request_id
+
+
+BEGIN_CANNOT_COMPLETE_REASON = (
+    "cannot-complete: begin exceeded its fixed {}-unit work envelope; "
+    "no ticket was started"
+).format(BEGIN_WORK_ENVELOPE_LIMIT)
+
+
+class BeginCannotComplete(RuntimeError):
+    """The bounded begin view cannot be completed inside its work envelope."""
+
+    def __init__(self):
+        super().__init__(BEGIN_CANNOT_COMPLETE_REASON)
+
+
+class BeginWorkEnvelope:
+    """Count begin's listed rows, hydrated fields, and preflight API calls."""
+
+    def __init__(self, limit: int = BEGIN_WORK_ENVELOPE_LIMIT):
+        self.limit = limit
+        self.listed_items = 0
+        self.hydrated_fields = 0
+        self.preflight_calls = 0
+        self._lock = threading.Lock()
+
+    @property
+    def used(self) -> int:
+        with self._lock:
+            return (
+                self.listed_items
+                + self.hydrated_fields
+                + self.preflight_calls
+            )
+
+    @property
+    def remaining(self) -> int:
+        return self.limit - self.used
+
+    def consume(
+        self, *, listed_items: int = 0, hydrated_fields: int = 0,
+        preflight_calls: int = 0,
+    ) -> None:
+        amounts = (listed_items, hydrated_fields, preflight_calls)
+        if any(amount < 0 for amount in amounts):
+            raise ValueError("begin envelope amounts cannot be negative")
+        with self._lock:
+            if self.used_unlocked() + sum(amounts) > self.limit:
+                raise BeginCannotComplete()
+            self.listed_items += listed_items
+            self.hydrated_fields += hydrated_fields
+            self.preflight_calls += preflight_calls
+
+    def used_unlocked(self) -> int:
+        """Read the counters while the caller holds ``_lock``."""
+        return (
+            self.listed_items
+            + self.hydrated_fields
+            + self.preflight_calls
+        )
+
+
+_ACTIVE_BEGIN_ENVELOPE: Optional[BeginWorkEnvelope] = None
 
 
 class BeginReserveStop(RuntimeError):
@@ -10627,7 +10725,8 @@ def _budget_exhaustion_signal() -> Optional[Tuple[int, str]]:
 def reset_api_usage() -> None:
     """Start a fresh per-command API measurement."""
     global _GRAPHQL_COST_READS, _PROJECT_ITEM_PAGE_COUNT
-    global _PROJECT_ITEM_ROW_COUNT
+    global _PROJECT_ITEM_ROW_COUNT, _ACTIVE_BEGIN_ENVELOPE
+    _ACTIVE_BEGIN_ENVELOPE = None
     _API_USAGE.update({"graphql_calls": 0, "cli_calls": 0, "refused_exhausted": 0})
     _GRAPHQL_SPEND.update(
         {"calls": 0, "cost": 0, "remaining": None, "reset_at": None}
@@ -10691,6 +10790,8 @@ def _run_gh(args: Sequence[str], **kwargs):
     """
     command = _frozen_ticket_create_command(list(args))
     _refuse_if_exhausted(command)
+    if _ACTIVE_BEGIN_ENVELOPE is not None:
+        _ACTIVE_BEGIN_ENVELOPE.consume(preflight_calls=1)
     if command[:3] == ["gh", "api", "graphql"]:
         _API_USAGE["graphql_calls"] += 1
     else:
@@ -11349,6 +11450,53 @@ def hydrate_item_details(
                 )
 
 
+def begin_detail_hydration_work(
+    items: Sequence[Item], candidates: Iterable[Item],
+) -> int:
+    """Upper-bound the selected item's body, history, and child fields.
+
+    The detail query is deliberately small and has fixed timeline and child
+    page sizes. Reserve its maximum before the ticket claim so an oversized
+    Project cannot be partially read and then start work without its packet.
+    """
+    by_id = {
+        item.item_id: item
+        for item in items
+        if isinstance(item.item_id, str) and item.item_id
+    }
+    selected: List[Item] = []
+    seen: Set[str] = set()
+    for item in candidates:
+        item_id = item.item_id
+        if (
+            isinstance(item_id, str)
+            and item_id in by_id
+            and item_id not in seen
+        ):
+            selected.append(by_id[item_id])
+            seen.add(item_id)
+    if not selected:
+        return 0
+
+    fields = 0
+    for item in selected:
+        fields += (
+            BEGIN_DETAIL_BASE_FIELDS_PER_ITEM
+            + BEGIN_DETAIL_TIMELINE_ITEMS_MAX
+            * BEGIN_DETAIL_HISTORY_FIELDS_PER_EVENT_MAX
+        )
+        if item.children_total > 0:
+            fields += (
+                BEGIN_DETAIL_CHILD_FIELDS_PER_ITEM
+                + min(
+                    BEGIN_DETAIL_CHILD_ITEMS_MAX,
+                    item.children_total,
+                ) * BEGIN_DETAIL_CHILD_FIELDS_PER_CHILD
+            )
+    batches = math.ceil(len(selected) / PROJECT_ITEM_DETAIL_BATCH_SIZE)
+    return fields + batches * BEGIN_DETAIL_QUERY_OVERHEAD
+
+
 def hydrate_regression_history(items: Sequence[Item]) -> None:
     """Read Status history for regression items that arrived without it.
 
@@ -11445,6 +11593,28 @@ BEGIN_ITEM_PREDICATES: Dict[str, Callable[[Item], bool]] = {
 }
 
 
+def _begin_listing_page_sizes(
+    aliases: Sequence[str], envelope: Optional[BeginWorkEnvelope],
+) -> Optional[Dict[str, int]]:
+    """Fit the next filtered Project page inside the shared work envelope."""
+    if envelope is None:
+        return None
+    # Reserve the selected ticket and optional decline-gate detail read before
+    # spending the envelope on Project rows. One unit is also reserved for the
+    # GraphQL request that will return this page.
+    capacity = envelope.remaining - BEGIN_DETAIL_WORK_RESERVE - 1
+    if capacity < len(aliases):
+        raise BeginCannotComplete()
+    base, extra = divmod(capacity, len(aliases))
+    return {
+        alias: min(
+            PROJECT_ITEM_PAGE_SIZE,
+            base + (1 if index < extra else 0),
+        )
+        for index, alias in enumerate(aliases)
+    }
+
+
 def _begin_project_from_response(response: object) -> dict:
     user = response.get("user") if isinstance(response, dict) else None
     if not isinstance(user, dict) or "projectV2" not in user:
@@ -11539,6 +11709,9 @@ def _load_begin_items(
     block_comment_seconds = 0.0
     try:
         while paging:
+            page_sizes = _begin_listing_page_sizes(
+                paging, _ACTIVE_BEGIN_ENVELOPE
+            )
             variables: Dict[str, object] = {
                 "login": PROJECT_OWNER, "number": PROJECT_NUMBER,
             }
@@ -11551,6 +11724,7 @@ def _load_begin_items(
                     paging,
                     shape_field if first_request else "",
                     minimal_startable=minimal_startable,
+                    page_sizes=page_sizes,
                 ),
                 **variables,
             )
@@ -11561,11 +11735,13 @@ def _load_begin_items(
             first_request = False
             project = _begin_project_from_response(response)
             still_paging: List[str] = []
+            listed_rows = 0
             for alias in paging:
                 nodes, has_next, cursor = _begin_connection_page(
                     project, alias
                 )
                 _PROJECT_ITEM_ROW_COUNT += len(nodes)
+                listed_rows += len(nodes)
                 for node in nodes:
                     try:
                         item = _from_node(node)
@@ -11600,6 +11776,8 @@ def _load_begin_items(
                     seen_cursors[alias].add(cursor)
                     cursors[alias] = cursor
                     still_paging.append(alias)
+            if _ACTIVE_BEGIN_ENVELOPE is not None:
+                _ACTIVE_BEGIN_ENVELOPE.consume(listed_items=listed_rows)
             paging = still_paging
         if require_open and open_rows == 0:
             raise GitHubError(
@@ -11725,20 +11903,46 @@ def _load_project_items_by_refs(
     """Fetch Project items through one exact-ref connection per issue."""
     global _PROJECT_ITEM_PAGE_COUNT, _PROJECT_ITEM_ROW_COUNT
     found: Dict[str, Item] = {}
-    for start in range(0, len(refs), PROJECT_REF_ALIASES_PER_REQUEST):
-        batch = refs[start:start + PROJECT_REF_ALIASES_PER_REQUEST]
+    start = 0
+    while start < len(refs):
+        batch_size = min(
+            PROJECT_REF_ALIASES_PER_REQUEST, len(refs) - start
+        )
+        page_size = PROJECT_REF_PAGE_SIZE
+        if _ACTIVE_BEGIN_ENVELOPE is not None:
+            capacity = (
+                _ACTIVE_BEGIN_ENVELOPE.remaining
+                - BEGIN_DETAIL_WORK_RESERVE - 1
+            )
+            if capacity < 1:
+                raise BeginCannotComplete()
+            batch_size = min(batch_size, capacity)
+            page_size = min(
+                PROJECT_REF_PAGE_SIZE,
+                max(1, capacity // batch_size),
+            )
+        batch = refs[start:start + batch_size]
         _PROJECT_ITEM_PAGE_COUNT += 1
         response = gh_graphql(
-            _project_item_refs_query(batch, node_fields=node_fields),
+            _project_item_refs_query(
+                batch, node_fields=node_fields, page_size=page_size
+            ),
             login=PROJECT_OWNER, number=PROJECT_NUMBER,
         )
         project = _begin_project_from_response(response)
+        listed_rows = 0
+        pages = []
         for index, ref in enumerate(batch):
             alias = "r{}".format(index)
             nodes, has_next, _cursor = _begin_connection_page(
                 project, alias
             )
             _PROJECT_ITEM_ROW_COUNT += len(nodes)
+            listed_rows += len(nodes)
+            pages.append((ref, nodes, has_next))
+        if _ACTIVE_BEGIN_ENVELOPE is not None:
+            _ACTIVE_BEGIN_ENVELOPE.consume(listed_items=listed_rows)
+        for ref, nodes, has_next in pages:
             match = None
             for node in nodes:
                 try:
@@ -11763,6 +11967,7 @@ def _load_project_items_by_refs(
             ):
                 _load_block_comment(match)
             found[ref] = match
+        start += len(batch)
     return found
 
 
@@ -12622,8 +12827,8 @@ def _dashboard_item(
 #: only on its siblings is "queued"; it and "blocked" share one run, ordered
 #: by ``_dashboard_pip_order``.
 PIP_PROGRESS_ORDER = (
-    "closed", "approved", "changes-requested", "submitted", "unknown",
-    "open", "queued", "blocked",
+    "closed", "approved", "changes-requested", "submitted", "stale",
+    "unknown", "open", "queued", "blocked",
 )
 _PIP_BLOCKED_STATES = ("queued", "blocked")
 
@@ -12632,6 +12837,10 @@ def _dashboard_pip_state(ticket: Mapping[str, object]) -> str:
     """The furthest state one ticket has reached, for its bar segment."""
     if ticket.get("state") != "OPEN":
         return "closed"
+    if ticket.get("pr_stale"):
+        return "stale"
+    if ticket.get("pr_unknown"):
+        return "unknown"
     pr = ticket.get("pr")
     if pr == "approved":
         return "approved"
@@ -12810,6 +13019,7 @@ def dashboard_board(
     authoring_pr_agents: Optional[Mapping[str, Iterable[str]]] = None,
     backed_off: Optional[Mapping[str, Mapping[str, object]]] = None,
     recent_starts: Sequence[Optional[str]] = (),
+    pr_display_overrides: Optional[Mapping[str, Mapping[str, object]]] = None,
 ) -> Dict[str, List[Dict[str, object]]]:
     """Build the ordered parent-project board for one already-loaded brief.
 
@@ -12836,6 +13046,7 @@ def dashboard_board(
     max_time = datetime.max.replace(tzinfo=timezone.utc)
 
     facts = dict(pr_facts or {})
+    display_overrides = pr_display_overrides or {}
     authoring = authoring_pr_agents or {}
     # The brief returns an empty mapping both when nothing has a PR and when
     # the scan failed, so it says which through ``pr_facts_known``. A caller
@@ -12972,8 +13183,9 @@ def dashboard_board(
             )
         siblings_of = list(children.get(parent.ref, ()))
         siblings = {child.ref for child in siblings_of}
-        return [
-            _dashboard_ticket(
+
+        def render_ticket(child: Item) -> Dict[str, object]:
+            row = _dashboard_ticket(
                 child,
                 facts.get(child.ref),
                 verdict_for(child),
@@ -12999,6 +13211,24 @@ def dashboard_board(
                 paused_rows.get(child.ref) if child.state == "OPEN" else None,
                 child.ref in finished and child.state == "OPEN",
             )
+            override = display_overrides.get(child.ref)
+            if isinstance(override, Mapping):
+                if override.get("status") == "stale":
+                    row["pr_stale"] = True
+                    row["pr_stale_state"] = override.get("pr")
+                    row["pr_stale_age"] = override.get("age")
+                    captured_at = override.get("captured_at")
+                    if isinstance(captured_at, str):
+                        row["pr_stale_captured_at"] = captured_at
+                    number = override.get("pr_number")
+                    if isinstance(number, int) and not isinstance(number, bool):
+                        row["pr_stale_number"] = number
+                elif override.get("status") == "unknown":
+                    row["pr_unknown"] = True
+            return row
+
+        return [
+            render_ticket(child)
             for child in sorted(siblings_of, key=ticket_key)
         ]
 
@@ -19371,6 +19601,7 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
     recorded is one the watchdog reads as never having happened, so the record
     comes before the decision, not after it.
     """
+    global _ACTIVE_BEGIN_ENVELOPE
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import heartbeat
 
@@ -19409,6 +19640,8 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
     def attempt_reconcile(step, func, *args):
         try:
             return func(*args)
+        except BeginCannotComplete:
+            raise
         except GitHubError as exc:
             text, transient = _github_error_text(exc)
             reconcile_errors.append({
@@ -19432,6 +19665,14 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
             pr_facts = _begin_load_timed(
                 timings, "ticket_pr_facts", lambda: ticket_pr_facts(items)
             )
+    except BeginCannotComplete:
+        out.update(
+            do="stop",
+            gate="ok",
+            why=BEGIN_CANNOT_COMPLETE_REASON,
+        )
+        print(json.dumps(out, indent=2))
+        return 0
     except GitHubError as exc:
         out.update(
             do="stop",
@@ -19557,6 +19798,14 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
         while ticket is not None:
             try:
                 current_claim = read_lock(ticket)
+            except BeginCannotComplete:
+                out.update(
+                    do="stop",
+                    gate="ok",
+                    why=BEGIN_CANNOT_COMPLETE_REASON,
+                )
+                ticket = None
+                break
             except GitHubError as exc:
                 out.update(
                     do="stop",
@@ -19665,22 +19914,30 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
                 out["queue"] = "empty"
                 _record_queue_empty(agent, out.get("run"), tier)
         else:
+            detail_candidates = [ticket]
+            route = ticket.decline_route
+            if (
+                isinstance(route, dict)
+                and route.get("type") == "pending-gate-answer"
+            ):
+                gate_ref = route.get("gate_ref")
+                gate = next((item for item in items
+                             if item.ref == gate_ref), None)
+                if gate is not None and gate is not ticket:
+                    detail_candidates.append(gate)
+            if _ACTIVE_BEGIN_ENVELOPE is not None:
+                _ACTIVE_BEGIN_ENVELOPE.consume(
+                    hydrated_fields=begin_detail_hydration_work(
+                        items, detail_candidates
+                    )
+                )
+                # Selection is complete. The reserved detail fields cover the
+                # one post-claim refresh and all later work is ticket work.
+                _ACTIVE_BEGIN_ENVELOPE = None
             refusal = claim_ticket(items, now, ticket, pr_facts=pr_facts)
             if refusal is not None:
                 out.update(do="stop", why=refusal)
             else:
-                detail_candidates = [ticket]
-                route = ticket.decline_route
-                if (
-                    isinstance(route, dict)
-                    and route.get("type") == "pending-gate-answer"
-                ):
-                    gate_ref = route.get("gate_ref")
-                    gate = next((item for item in items
-                                 if item.ref == gate_ref), None)
-                    if gate is not None and gate is not ticket:
-                        detail_candidates.append(gate)
-
                 detail_error = None
                 try:
                     if _detail_loader is not None:
@@ -20077,6 +20334,19 @@ def _begin_error_envelope(agent: str, error: GitHubError) -> None:
         "why": why,
         "transient": transient,
     }, indent=2))
+
+
+def _begin_cannot_complete_envelope(
+    out: Mapping[str, object],
+) -> None:
+    """Return a bounded stop response when begin cannot finish its view."""
+    result = dict(out)
+    result.update(
+        gate="ok",
+        do="stop",
+        why=BEGIN_CANNOT_COMPLETE_REASON,
+    )
+    print(json.dumps(result, indent=2))
 
 
 def _reserve_verdict(do: object) -> Optional[Dict[str, object]]:
@@ -21900,6 +22170,7 @@ def main(argv: Optional[Sequence[str]] = None, *,
             parser.error(refusal)
 
     global _ACTIVE_HEARTBEAT_RUN, _ACTIVE_HEARTBEAT_AGENT
+    global _ACTIVE_BEGIN_ENVELOPE
     _ACTIVE_HEARTBEAT_RUN = getattr(args, "run", None)
     _ACTIVE_HEARTBEAT_AGENT = getattr(args, "agent", None)
 
@@ -21907,6 +22178,12 @@ def main(argv: Optional[Sequence[str]] = None, *,
     # repeated `main()` calls in tests from blending two commands' readings.
     if _reset_api_usage:
         reset_api_usage()
+    else:
+        _ACTIVE_BEGIN_ENVELOPE = None
+    if args.command == "begin":
+        _ACTIVE_BEGIN_ENVELOPE = BeginWorkEnvelope(
+            BEGIN_WORK_ENVELOPE_LIMIT
+        )
     now = datetime.now(timezone.utc)
     if args.command == "session-server":
         return serve_session(args.parent_pid)
@@ -21952,12 +22229,14 @@ def main(argv: Optional[Sequence[str]] = None, *,
         begin_preflight = _begin_preflight(
             now, args.agent, args.idle, args.tier)
         if begin_preflight[1] is None:
+            _ACTIVE_BEGIN_ENVELOPE = None
             print(json.dumps(begin_preflight[0], indent=2))
             return 0
         role_refusal = _begin_role_refusal(
             args.agent, args.tier, args.caller_role)
         if role_refusal is not None:
             begin_preflight[0].update(role_refusal)
+            _ACTIVE_BEGIN_ENVELOPE = None
             print(json.dumps(begin_preflight[0], indent=2))
             return 0
         begin_timings = {}
@@ -21998,7 +22277,13 @@ def main(argv: Optional[Sequence[str]] = None, *,
                 begin_preflight[0].get("run"),
                 begin_preflight[0]["why"],
             )
+            _ACTIVE_BEGIN_ENVELOPE = None
             print(json.dumps(begin_preflight[0], indent=2))
+            return 0
+        except BeginCannotComplete:
+            begin_preflight[0]["timings"] = begin_timings
+            _ACTIVE_BEGIN_ENVELOPE = None
+            _begin_cannot_complete_envelope(begin_preflight[0])
             return 0
         except GitHubError as exc:
             if _budget_exhaustion_signal() is not None:
@@ -22013,8 +22298,10 @@ def main(argv: Optional[Sequence[str]] = None, *,
                         begin_preflight[0].get("run"),
                         begin_preflight[0]["why"],
                     )
+                    _ACTIVE_BEGIN_ENVELOPE = None
                     print(json.dumps(begin_preflight[0], indent=2))
                     return 0
+            _ACTIVE_BEGIN_ENVELOPE = None
             _begin_error_envelope(args.agent, exc)
             return 2
 
@@ -22038,6 +22325,13 @@ def main(argv: Optional[Sequence[str]] = None, *,
         _items = None
     try:
         if _items is not None:
+            if (
+                args.command == "begin"
+                and _ACTIVE_BEGIN_ENVELOPE is not None
+            ):
+                _ACTIVE_BEGIN_ENVELOPE.consume(
+                    listed_items=len(_items)
+                )
             if args.command in ("begin", "queue"):
                 listing_agent = (
                     args.agent if args.command == "begin" else "codex"
@@ -22121,6 +22415,25 @@ def main(argv: Optional[Sequence[str]] = None, *,
                 )
 
             begin_detail_loader = hydrate_begin_candidates
+        if (
+            args.command == "begin"
+            and _ACTIVE_BEGIN_ENVELOPE is not None
+            and _ACTIVE_BEGIN_ENVELOPE.listed_items == 0
+        ):
+            # Test and adapter loaders may provide the rows directly instead
+            # of reading through the instrumented Project connections.
+            _ACTIVE_BEGIN_ENVELOPE.consume(listed_items=len(items))
+    except BeginCannotComplete:
+        if args.command == "begin":
+            _ACTIVE_BEGIN_ENVELOPE = None
+            if begin_preflight is not None:
+                if begin_timings is not None:
+                    begin_preflight[0]["timings"] = begin_timings
+                _begin_cannot_complete_envelope(begin_preflight[0])
+            else:
+                _begin_cannot_complete_envelope({"agent": args.agent})
+            return 0
+        raise
     except GitHubError as exc:
         if args.command == "brief":
             print(json.dumps({
@@ -22132,6 +22445,7 @@ def main(argv: Optional[Sequence[str]] = None, *,
             }, indent=2))
             return 0
         if args.command == "begin":
+            _ACTIVE_BEGIN_ENVELOPE = None
             _begin_error_envelope(args.agent, exc)
             return 2
         print("funnel: {}".format(exc), file=sys.stderr)
@@ -22268,10 +22582,21 @@ def main(argv: Optional[Sequence[str]] = None, *,
                     _pr_facts_error=begin_pr_facts_error,
                     _pr_facts_elapsed=begin_pr_facts_elapsed,
                 )
-            return cmd_begin(
-                items, now, args.agent, args.tier, args.idle,
-                args.breakdown, **begin_kwargs
-            )
+            try:
+                return cmd_begin(
+                    items, now, args.agent, args.tier, args.idle,
+                    args.breakdown, **begin_kwargs
+                )
+            except BeginCannotComplete:
+                if begin_preflight is not None:
+                    if begin_timings is not None:
+                        begin_preflight[0]["timings"] = begin_timings
+                    _begin_cannot_complete_envelope(begin_preflight[0])
+                else:
+                    _begin_cannot_complete_envelope({"agent": args.agent})
+                return 0
+            finally:
+                _ACTIVE_BEGIN_ENVELOPE = None
         if args.command == "next-review":
             return cmd_next_review(items, args.tier)
         if args.command == "review":
@@ -22458,6 +22783,33 @@ def main(argv: Optional[Sequence[str]] = None, *,
                         recent_starts = recent_ticket_starts(heartbeat_rows)
                     except Exception:
                         recent_starts = []
+                    pr_display_overrides: Dict[str, Dict[str, object]] = {}
+                    try:
+                        # Local to the display snapshot path: merge and review
+                        # continue to read only the live GitHub fact helpers.
+                        from dashboard.prior_facts import (
+                            dashboard_pr_display_overrides,
+                        )
+
+                        pr_display_overrides = dashboard_pr_display_overrides(
+                            _dashboard_spool_dir(),
+                            [
+                                item.ref for item in items
+                                if item.parent is not None
+                                and item.state == "OPEN"
+                            ],
+                            pr_facts,
+                            live_facts_known=not pr_facts_missing,
+                            now=now,
+                        )
+                    except Exception as exc:
+                        # The prior brief is only a display buffer. If it
+                        # cannot be read, keep the live or unknown board intact.
+                        print(
+                            "funnel: could not read prior dashboard PR facts: "
+                            "{}".format(exc),
+                            file=sys.stderr,
+                        )
                     write_dashboard_snapshot(
                         brief_payload,
                         dashboard_board(
@@ -22466,6 +22818,7 @@ def main(argv: Optional[Sequence[str]] = None, *,
                             authoring_pr_agents=authoring_pr_agents,
                             backed_off=backed_off,
                             recent_starts=recent_starts,
+                            pr_display_overrides=pr_display_overrides,
                         ),
                         generated_at,
                         usage={
@@ -22488,8 +22841,20 @@ def main(argv: Optional[Sequence[str]] = None, *,
         if args.command == "queue":
             return cmd_queue(items, now, repo_readiness=repo_readiness)
         return cmd_brief(items, now, pr_facts=ticket_pr_facts(items))
+    except BeginCannotComplete:
+        if args.command == "begin":
+            _ACTIVE_BEGIN_ENVELOPE = None
+            if begin_preflight is not None:
+                if begin_timings is not None:
+                    begin_preflight[0]["timings"] = begin_timings
+                _begin_cannot_complete_envelope(begin_preflight[0])
+            else:
+                _begin_cannot_complete_envelope({"agent": args.agent})
+            return 0
+        raise
     except GitHubError as exc:
         if args.command == "begin":
+            _ACTIVE_BEGIN_ENVELOPE = None
             _begin_error_envelope(args.agent, exc)
             return 2
         print("funnel: {}".format(exc), file=sys.stderr)

@@ -32,6 +32,7 @@ SYSCTL="${COMMAND_CENTER_SENTINEL_SYSCTL:-/usr/sbin/sysctl}"
 UPTIME="${COMMAND_CENTER_SENTINEL_UPTIME:-/usr/bin/uptime}"
 READINESS_FILE="${COMMAND_CENTER_KEEPER_READINESS_FILE:-keeper-readiness.log}"
 LAUNCHCTL="${COMMAND_CENTER_KEEPER_LAUNCHCTL:-/bin/launchctl}"
+KEEPER_DATE="${COMMAND_CENTER_KEEPER_DATE:-/bin/date}"
 # A booted-out label takes a moment to leave launchd, longer when a run was in
 # flight, and a bootstrap issued before it has gone fails with an input/output
 # error (#1196).  Wait for it, bounded, and retry a bootstrap that still fails.
@@ -135,6 +136,15 @@ case "$reap_fields" in
   "reap_sets="*" reap_procs="*" reap_failed="*" reap_fault="*) ;;
   *) reap_fields="reap_sets=unknown reap_procs=unknown reap_failed=unknown reap_fault=reaper-error" ;;
 esac
+
+# This keeper fires every five minutes. Run the retention pass once daily at
+# 03:00 local time, using the same schedule surface and internal drive only.
+if [ -f "$REPO/session_log_compress.py" ] && \
+   [ "$("$KEEPER_DATE" +%H%M 2>/dev/null || true)" = "0300" ]; then
+  if ! PYTHONDONTWRITEBYTECODE=1 python3 "$REPO/session_log_compress.py"; then
+    echo "run-keeper: session-log compression pass failed" >&2
+  fi
+fi
 
 health_line="timestamp=$timestamp user_processes=$user_processes maxprocperuid=$maxprocperuid load_1=$load_1 load_5=$load_5 load_15=$load_15 codex=$(has_process_family codex) claude=$(has_process_family claude) muse=$(has_process_family muse) $reap_fields"
 

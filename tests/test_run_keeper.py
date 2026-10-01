@@ -295,12 +295,11 @@ def test_keeper_records_an_unreadable_process_table_as_a_fault(tmp_path):
 
 
 def make_install_remote(tmp_path: Path) -> tuple[Path, Path, Path]:
-    """A heartbeat remote whose main also carries what the keeper installs."""
+    """A heartbeat remote with keeper install files and its runtime helpers."""
     bare, checkout = make_heartbeat_remote(tmp_path)
     seed = tmp_path / "seed"
-    # Only what the keeper installs: the routine it derives prompts from and
-    # the plists it copies. The prompt logic is embedded in the keeper
-    # script itself and needs nothing else from the checkout.
+    # The routine and plists the keeper installs, plus the runtime modules its
+    # retention pass uses.
     dst = seed / "routines" / "codex-work.md"
     dst.parent.mkdir(parents=True, exist_ok=True)
     dst.write_bytes((ROOT / "routines" / "codex-work.md").read_bytes())
@@ -308,6 +307,10 @@ def make_install_remote(tmp_path: Path) -> tuple[Path, Path, Path]:
         dst = seed / "launchd" / plist.name
         dst.parent.mkdir(parents=True, exist_ok=True)
         dst.write_bytes(plist.read_bytes())
+    for name in (
+        "session_log_compress.py", "usage.py", "session_logs.py", "muse_model.py"
+    ):
+        (seed / name).write_bytes((ROOT / name).read_bytes())
     run_git("-C", str(seed), "add", "-A")
     run_git("-C", str(seed), "commit", "-m", "keeper install files")
     run_git("-C", str(seed), "push", "origin", "main")
@@ -421,10 +424,14 @@ def keeper_env(checkout: Path, home: Path, tools: Path, launchctl: Path) -> dict
     return env
 
 
-def run_keeper(checkout: Path, home: Path, tools: Path, launchctl: Path):
+def run_keeper(checkout: Path, home: Path, tools: Path, launchctl: Path,
+               extra_env=None):
+    env = keeper_env(checkout, home, tools, launchctl)
+    if extra_env:
+        env.update(extra_env)
     return subprocess.run(
         [str(SCRIPT)],
-        env=keeper_env(checkout, home, tools, launchctl),
+        env=env,
         capture_output=True,
         text=True,
     )
@@ -796,3 +803,110 @@ def test_keeper_reports_plist_drift_without_recoping_it(tmp_path):
         "files": "launchd/" + PUBLISHER_PLIST,
         "reload_pending": "-",
     }
+
+
+def test_keeper_compresses_only_old_closed_eligible_session_logs(tmp_path):
+    import gzip
+    import time
+
+    bare, checkout, _seed = make_install_remote(tmp_path)
+    home = tmp_path / "home"
+    tools, _launchctl_log = make_tools(tmp_path)
+    write_executable(tools / "date", "printf '%s\\n' 0300\n")
+    write_executable(
+        tools / "lsof",
+        """
+found=0
+for path in "$@"; do
+  case "$path" in
+    *live*) printf 'n%s\\0\\n' "$path"; found=1 ;;
+  esac
+done
+[ "$found" = 1 ] && exit 0
+exit 1
+""",
+    )
+
+    now = time.time()
+    muse_root = home / ".local" / "share" / "muse" / "sessions"
+    codex_root = home / ".codex" / "sessions"
+    claude_root = home / ".claude" / "projects"
+    repetitive = (b'{"payload":"retention fixture"}\n' * 1000)
+
+    def write_fixture(path: Path, content: bytes, mtime: float) -> bytes:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+        os.utime(path, (mtime, mtime))
+        return content
+
+    old_muse = muse_root / "2026" / "09" / "01" / "old" / "session.jsonl"
+    current_muse = muse_root / "2026" / "09" / "28" / "current" / "session.jsonl"
+    live_muse = muse_root / "2026" / "08" / "01" / "live" / "session.jsonl"
+    existing_muse = muse_root / "2026" / "08" / "01" / "existing" / "session.jsonl"
+    old_muse_bytes = write_fixture(
+        old_muse, repetitive, now - 21 * 24 * 60 * 60
+    )
+    current_muse_bytes = write_fixture(current_muse, repetitive, now - 60)
+    live_muse_bytes = write_fixture(
+        live_muse, repetitive, now - 30 * 24 * 60 * 60
+    )
+    existing_muse_bytes = write_fixture(
+        existing_muse, repetitive, now - 30 * 24 * 60 * 60
+    )
+    with gzip.open(str(existing_muse) + ".gz", "wb") as compressed:
+        compressed.write(existing_muse_bytes)
+
+    def rollout(path: Path, source: str, mtime: float) -> bytes:
+        content = (
+            '{"type":"session_meta","payload":{"thread_source":"%s"}}\n'
+            % source
+        ).encode() + repetitive
+        return write_fixture(path, content, mtime)
+
+    fifteen_days_ago = now - 15 * 24 * 60 * 60
+    old_automation = codex_root / "2026" / "09" / "16" / "automation.jsonl"
+    user_rollout = codex_root / "2026" / "09" / "16" / "user.jsonl"
+    recent_automation = codex_root / "2026" / "09" / "30" / "recent.jsonl"
+    live_automation = codex_root / "2026" / "09" / "16" / "live.jsonl"
+    claude_transcript = claude_root / "project" / "old.jsonl"
+    old_automation_bytes = rollout(old_automation, "automation", fifteen_days_ago)
+    user_bytes = rollout(user_rollout, "user", fifteen_days_ago)
+    recent_bytes = rollout(recent_automation, "automation", now - 1 * 24 * 60 * 60)
+    live_bytes = rollout(live_automation, "automation", fifteen_days_ago)
+    claude_bytes = write_fixture(claude_transcript, repetitive, now - 90 * 24 * 60 * 60)
+
+    # The stub reports these append handles as live so the compressor must
+    # leave them raw even with old mtimes.
+    with live_muse.open("ab") as _live_muse_handle, live_automation.open(
+        "ab"
+    ) as _live_codex_handle:
+        result = run_keeper(
+            checkout,
+            home,
+            tools,
+            tools / "launchctl",
+            extra_env={
+                "COMMAND_CENTER_KEEPER_DATE": str(tools / "date"),
+                "COMMAND_CENTER_SESSION_LOG_LSOF": str(tools / "lsof"),
+            },
+        )
+
+    assert result.returncode == 0, result.stderr
+
+    old_muse_gz = Path(str(old_muse) + ".gz")
+    assert not old_muse.exists()
+    assert gzip.decompress(old_muse_gz.read_bytes()) == old_muse_bytes
+    assert old_muse_gz.stat().st_size < len(old_muse_bytes)
+    assert current_muse.read_bytes() == current_muse_bytes
+    assert live_muse.read_bytes() == live_muse_bytes
+    assert existing_muse.read_bytes() == existing_muse_bytes
+    assert Path(str(existing_muse) + ".gz").exists()
+
+    automation_gz = Path(str(old_automation) + ".gz")
+    assert not old_automation.exists()
+    assert gzip.decompress(automation_gz.read_bytes()) == old_automation_bytes
+    assert automation_gz.stat().st_size < len(old_automation_bytes)
+    assert user_rollout.read_bytes() == user_bytes
+    assert recent_automation.read_bytes() == recent_bytes
+    assert live_automation.read_bytes() == live_bytes
+    assert claude_transcript.read_bytes() == claude_bytes

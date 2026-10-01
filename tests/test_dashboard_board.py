@@ -557,6 +557,7 @@ def test_carried_pr_pip_is_stale_while_live_board_ownership_stays_unchanged():
             REPO + "#11": {
                 "status": "stale", "pr": "approved", "pr_number": 7,
                 "age": "5h",
+                "captured_at": "2026-09-15T07:00:00+00:00",
             },
             REPO + "#12": {"status": "unknown"},
         },
@@ -571,6 +572,9 @@ def test_carried_pr_pip_is_stale_while_live_board_ownership_stays_unchanged():
     assert by_number[11]["pr_stale"] is True
     assert by_number[11]["pr_stale_state"] == "approved"
     assert by_number[11]["pr_stale_age"] == "5h"
+    assert by_number[11]["pr_stale_captured_at"] == (
+        "2026-09-15T07:00:00+00:00"
+    )
     assert by_number[11]["pr_stale_number"] == 7
     assert by_number[11]["owner"] == funnel.OWNER_CODEX
     assert by_number[11]["queue_rank"] == 0

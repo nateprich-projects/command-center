@@ -12979,6 +12979,9 @@ def dashboard_board(
                     row["pr_stale"] = True
                     row["pr_stale_state"] = override.get("pr")
                     row["pr_stale_age"] = override.get("age")
+                    captured_at = override.get("captured_at")
+                    if isinstance(captured_at, str):
+                        row["pr_stale_captured_at"] = captured_at
                     number = override.get("pr_number")
                     if isinstance(number, int) and not isinstance(number, bool):
                         row["pr_stale_number"] = number

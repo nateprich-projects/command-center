@@ -94,8 +94,22 @@ def test_partial_live_gaps_carry_per_ticket_but_known_absence_stays_fresh():
         "pr": "changes requested",
         "pr_number": 13,
         "age": "5h",
+        "captured_at": captured_at.isoformat(),
     }
     assert overrides["repo#4"] == {"status": "unknown"}
+
+
+def test_branch_only_live_fact_is_not_replaced_by_a_carried_pr():
+    overrides = carry_forward_display_facts(
+        ["repo#1"],
+        {"repo#1": {"headRefName": "ticket/8", "branch_exists": True}},
+        live_facts_known=True,
+        captured_at=NOW - timedelta(hours=5),
+        prior_facts={"repo#1": {"pr": "approved"}},
+        now=NOW,
+    )
+
+    assert overrides == {}
 
 
 def test_total_live_failure_uses_recent_prior_facts():
@@ -113,6 +127,59 @@ def test_total_live_failure_uses_recent_prior_facts():
         "pr": "submitted",
         "pr_number": 7,
         "age": "2h",
+        "captured_at": (NOW - timedelta(hours=2)).isoformat(),
+    }
+
+
+def test_consecutive_failed_briefs_keep_the_original_capture_age(tmp_path):
+    spool = tmp_path
+    original_capture = NOW - timedelta(hours=3)
+    first_failure = NOW - timedelta(hours=2)
+    second_failure = NOW - timedelta(hours=1)
+    (spool / "brief-live.json").write_text(
+        json.dumps(_entry(
+            original_capture.isoformat(),
+            [_ticket("repo#1", "submitted", 7)],
+        )),
+        encoding="utf-8",
+    )
+
+    def fail_at(captured_at, now):
+        overrides = dashboard_pr_display_overrides(
+            spool, ["repo#1"], {}, live_facts_known=False, now=now,
+        )
+        override = overrides["repo#1"]
+        failed_ticket = _ticket("repo#1", None)
+        failed_ticket.update({
+            "pr_stale": True,
+            "pr_stale_state": override["pr"],
+            "pr_stale_age": override["age"],
+            "pr_stale_captured_at": override["captured_at"],
+            "pr_stale_number": override.get("pr_number"),
+        })
+        (spool / ("brief-{}.json".format(captured_at.hour))).write_text(
+            json.dumps(_entry(captured_at.isoformat(), [failed_ticket])),
+            encoding="utf-8",
+        )
+        return override
+
+    first = fail_at(first_failure, first_failure)
+    assert first["age"] == "1h"
+    assert first["captured_at"] == original_capture.isoformat()
+
+    second = fail_at(second_failure, second_failure)
+    assert second["age"] == "2h"
+    assert second["captured_at"] == original_capture.isoformat()
+
+    third = dashboard_pr_display_overrides(
+        spool, ["repo#1"], {}, live_facts_known=False, now=NOW,
+    )
+    assert third["repo#1"] == {
+        "status": "stale",
+        "pr": "submitted",
+        "pr_number": 7,
+        "age": "3h",
+        "captured_at": original_capture.isoformat(),
     }
 
 

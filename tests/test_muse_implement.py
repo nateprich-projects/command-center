@@ -760,69 +760,105 @@ def test_inherited_cleanup_in_watcher_subshell_leaves_parent_artifacts(
     )
 
 
-def test_watcher_exit_does_not_run_parent_cleanup_while_parent_is_alive(
+def test_watcher_killed_after_fake_job_exit_does_not_run_parent_cleanup(
         tmp_path):
-    session_stop_started = tmp_path / "session-stop.started"
-    session_stop_release = tmp_path / "session-stop.release"
-    finish_started = tmp_path / "finish.started"
-    finish_release = tmp_path / "finish.release"
-    watcher_sleep_ready = tmp_path / "watcher-sleep.ready"
-    sleep_bin = tmp_path / "sleep-bin"
-    sleep_bin.mkdir()
-    _executable(
-        sleep_bin / "sleep",
-        "#!/bin/bash\n"
-        "if [[ \"$1\" == '20' ]]; then\n"
-        "    /bin/sleep 0.1\n"
-        "    : > \"$WATCHER_SLEEP_READY\"\n"
-        "fi\n"
-        "exec /bin/sleep \"$@\"\n",
-    )
-    proc, repo = _stubbed_runner(
-        tmp_path, _begin(), bound_seconds=20, wait=False,
-        extra_env={
-            "PATH": str(sleep_bin) + os.pathsep + os.environ["PATH"],
-            "MUSE_WAIT_FOR_FILE": str(watcher_sleep_ready),
-            "WATCHER_SLEEP_READY": str(watcher_sleep_ready),
-            "SESSION_STOP_STARTED": str(session_stop_started),
-            "SESSION_STOP_RELEASE": str(session_stop_release),
-            "FINISH_BLOCK_MARKER": str(finish_started),
-            "FINISH_RELEASE_MARKER": str(finish_release),
-        },
-    )
-    workspace = None
-    stdout = stderr = ""
-    try:
-        deadline = time.monotonic() + 10
-        while (not finish_started.exists()
-               and not session_stop_started.exists()
-               and proc.poll() is None
-               and time.monotonic() < deadline):
-            time.sleep(0.01)
+    """Exercise the real watcher/cleanup blocks across the fork/first-line race.
 
-        args = (repo / "muse.args.1").read_text().splitlines()
-        workspace = pathlib.Path(
-            args[args.index("--workspace") + 1]
+    The immediate fake-job exit makes the parent kill each watcher as soon as
+    it starts. Bash 5.2 can run the inherited EXIT trap before the watcher's
+    first statement under load; the cleanup owner guard must keep that from
+    touching the live parent's artifacts.
+    """
+    source = (ROOT / "scripts/muse-implement").read_text()
+    cleanup_start = source.index("cleanup() {")
+    cleanup_end = source.index("\n}", cleanup_start) + 2
+    cleanup = source[cleanup_start:cleanup_end]
+    watcher_start = source.index(
+        '\n(\n  trap - EXIT\n  sleep "$BOUND_SECONDS" &',
+        source.index('killed_marker='),
+    )
+    watcher_end = source.index("\n) &", watcher_start) + len("\n) &")
+    watcher = source[watcher_start + 1:watcher_end]
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    session_stop_log = tmp_path / "session-stop.log"
+    (repo / "funnel.py").write_text(
+        "import os, pathlib, sys\n"
+        "if sys.argv[1:] == ['session-stop']:\n"
+        "    with pathlib.Path(os.environ['SESSION_STOP_LOG']).open('a') as f:\n"
+        "        f.write('session-stop\\n')\n"
+    )
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    packet = tmp_path / "packet"
+    prompt = tmp_path / "prompt"
+    diag = tmp_path / "diag"
+    stderr_file = tmp_path / "stderr"
+    answer = tmp_path / "answer"
+    for path in (packet, prompt, diag, stderr_file, answer):
+        path.write_text("")
+
+    shell = "\n".join((
+        "set -u",
+        cleanup,
+        "REPO={}".format(shlex.quote(str(repo))),
+        "MUSE_STDERR_FILE={}".format(shlex.quote(str(stderr_file))),
+        "PACKET_FILE={}".format(shlex.quote(str(packet))),
+        "PROMPT_FILE={}".format(shlex.quote(str(prompt))),
+        "DIAG_FILE={}".format(shlex.quote(str(diag))),
+        "ANSWER_HANDOFF={}".format(shlex.quote(str(answer))),
+        "WORKSPACE={}".format(shlex.quote(str(workspace))),
+        "BOUND_SECONDS=30",
+        "TIER=standard",
+        "BEGIN_RUN=test-run",
+        "killed_marker={}".format(shlex.quote(str(tmp_path / "killed"))),
+        "release_ticket() { :; }",
+        "trap cleanup EXIT",
+        "for iteration in {1..300}; do",
+        "  sleep 0 &",
+        "  muse_pid=$!",
+        watcher,
+        "  bound_pid=$!",
+        '  wait "$muse_pid"',
+        '  kill "$bound_pid" 2>/dev/null || true',
+        '  wait "$bound_pid" 2>/dev/null || true',
+        '  if [[ -e "$SESSION_STOP_LOG" || ! -d "$WORKSPACE" ]]; then',
+        '    echo "watcher ran parent cleanup in iteration $iteration" >&2',
+        "    exit 1",
+        "  fi",
+        "done",
+    ))
+    env = dict(os.environ, SESSION_STOP_LOG=str(session_stop_log))
+
+    loaders = [
+        subprocess.Popen(
+            [sys.executable, "-c", "while True: pass"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
         )
-        assert proc.poll() is None, "the parent exited before the observation"
-        assert finish_started.exists(), (
-            "the watcher ran the parent's EXIT cleanup before the parent "
-            "reached finish-ticket"
-        )
-        assert not session_stop_started.exists(), (
-            "parent session cleanup ran when the watcher exited"
-        )
-        assert workspace.is_dir(), (
-            "parent cleanup removed the workspace before parent exit"
+        for _ in range(3)
+    ]
+    try:
+        proc = subprocess.run(
+            ["/bin/bash", "-c", shell],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
         )
     finally:
-        session_stop_release.touch()
-        finish_release.touch()
-        stdout, stderr = proc.communicate(timeout=30)
+        for loader in loaders:
+            loader.terminate()
+        for loader in loaders:
+            loader.wait(timeout=5)
 
-    assert proc.returncode == 0, stderr or stdout
-    assert _calls(repo, "funnel").count("session-stop") == 1
-    assert not workspace.exists(), "parent cleanup runs after parent exit"
+    assert proc.returncode == 0, proc.stderr or proc.stdout
+    assert session_stop_log.read_text().splitlines() == ["session-stop"]
+    assert not workspace.exists()
+    assert not any(
+        path.exists() for path in (packet, prompt, diag, stderr_file, answer)
+    )
 
 
 def test_a_fresh_workspace_resolves_uid_and_pushes_over_ssh(tmp_path):

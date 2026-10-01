@@ -12041,6 +12041,8 @@ def load_items(
                     begin_items, details, include_history=True
                 ),
             )
+        # Keep the scope on the actual list; FunnelSession uses this tag to
+        # decide whether a later command can reuse the view or must load all.
         return ScopedItems(
             begin_items,
             scope="begin",
@@ -18962,14 +18964,17 @@ def claude_window_refusal(local: datetime) -> Optional[str]:
 def _begin_preflight(
     now: datetime, agent: str, idle: bool, tier: Optional[str] = None
 ) -> Tuple[Dict[str, object], Optional[Dict[str, object]]]:
-    """Start a run and apply the local gates before reading Project state.
+    """Apply only run-level local gates before reading Project state.
 
     ``load_items`` is the expensive part of an otherwise empty poll.  Usage
     and idle are local facts, so a refusal must happen before the Project list
     query; ``#655`` measured the old baseline at 42 API calls and 47 GraphQL
     points.  The selected run keeps the exact same reading for later shaping
     decisions.  ``None`` for the reading means the preflight produced a stop
-    envelope, not that a caller may guess at headroom.
+    envelope, not that a caller may guess at headroom.  Project listing
+    belongs to the shared ``load_items(scope="begin")`` path after this gate
+    passes.  Candidate hydration and ordering stay in their shared post-load
+    paths; keep all three out of this preflight.
     """
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import usage
@@ -22652,12 +22657,13 @@ def _run_bounded_subprocess(command: Sequence[str], **kwargs):
 
 
 class FunnelSession:
-    """Serve one run's commands from one in-memory Project read.
+    """Serve one run's commands from its in-memory Project reads.
 
     This is deliberately a per-run session, not a cache or a daemon. The
-    Project is loaded lazily on the first command so a ``begin`` claim still
-    reads GitHub at claim time. Later commands in the same Muse run reuse the
-    already-loaded objects and their locally updated mutation state.
+    Project is loaded lazily on the first command. Each ``begin`` also refreshes
+    the minimal view after its local gates so claim selection uses current
+    GitHub state. Other commands reuse the loaded objects and their locally
+    updated mutation state when the view serves them.
     """
 
     def __init__(self, loader=None):
@@ -22689,17 +22695,22 @@ class FunnelSession:
         include_startable: bool = False,
         startable_agent: str = "codex",
     ) -> List[Item]:
-        """Load once per session, or again when the cached read is a
-        narrower view than this command asked for.
+        """Load once per session, refreshing the view for each begin attempt.
 
         ``main`` asks with ``scope="begin"`` for ``begin`` and with no scope
-        otherwise. A cached full read serves either; a cached begin view
-        serves only a begin-scoped ask, and a full ask replaces it, along with
-        any local mutation state, by a fresh read of GitHub (#1591). A full
-        read loaded without history by a cheaper first command is hydrated
-        once, in place, by the first later command that reads history
-        (PROJECT_LOAD_READS_HISTORY).
+        otherwise. A cached begin view can serve other begin-scoped consumers,
+        while an actual begin attempt refreshes through the minimal shared
+        loader. A full ask replaces a narrow view, along with any local
+        mutation state, by a fresh read of GitHub (#1591). A full read loaded
+        without history by a cheaper first command is hydrated once, in place,
+        by the first later command that reads history (PROJECT_LOAD_READS_HISTORY).
         """
+        if self._command == "begin":
+            # A begin may claim work, so its minimal Project view must come
+            # from this attempt's post-preflight shared load, not a snapshot
+            # retained from an earlier command in the session.
+            self.items = None
+            self._history_pending = False
         if self.items is not None and (
             scope == "begin" or items_scope(self.items) == "full"
         ):
@@ -22773,7 +22784,11 @@ class FunnelSession:
                 self._command = argv[0] if argv else None
                 # A view still owed its history goes back through the loader,
                 # which hydrates it when this command reads history.
-                current = None if self._history_pending else self.items
+                current = (
+                    None
+                    if self._history_pending or self._command == "begin"
+                    else self.items
+                )
                 if stdin is None:
                     code = main(list(argv), _items=current,
                                 _items_loader=self._load_items,

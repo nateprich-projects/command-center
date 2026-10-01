@@ -95,6 +95,13 @@ class MergedSuiteError(ImplementError):
     """
 
 
+class TestCommandStartError(ImplementError):
+    """The resolved test command could not be started."""
+
+    def __init__(self):
+        super().__init__("test command could not start")
+
+
 class MergeConflictError(ImplementError):
     """The ticket's work does not merge with origin/main (#1804)."""
 
@@ -1028,10 +1035,15 @@ def run_tests(root: pathlib.Path,
         bound = (COMPILE_COMMAND_TIMEOUT_SECONDS
                  if _is_compile_command(argv)
                  else TEST_COMMAND_TIMEOUT_SECONDS)
-        _run(
-            argv, cwd=root, env=env,
-            timeout=bound if timeout is None else min(bound, timeout),
-        )
+        try:
+            _run(
+                argv, cwd=root, env=env,
+                timeout=bound if timeout is None else min(bound, timeout),
+            )
+        except OSError:
+            # The resolved executable can belong to a private repository.
+            # Keep its path out of the public heartbeat note.
+            raise TestCommandStartError() from None
         rendered.append(shlex.join(argv))
     return rendered, source
 
@@ -1050,7 +1062,7 @@ def _review_evidence():
     return module
 
 
-def _merged_failure(record: dict) -> MergedSuiteError:
+def _merged_failure(record: dict) -> ImplementError:
     """The error for a merged run that fails where main does not.
 
     It names the command that stopped the plan and the failing ids: those
@@ -1059,6 +1071,9 @@ def _merged_failure(record: dict) -> MergedSuiteError:
     counts only failures main does not share, which is what fails the
     finish.
     """
+    if any(entry.get("start_failed") is True
+           for entry in record["commands"]):
+        return TestCommandStartError()
     timed_out = [entry for entry in record["commands"]
                  if entry.get("timed_out") is True]
     if timed_out:
@@ -2570,6 +2585,12 @@ def _failure_note(exc: ImplementError, kept: str = "", *, repo: str) -> str:
     line -- go to the ticket in its own repository through
     ``_failure_comment``, where the next run's packet reads them.
     """
+    if isinstance(exc, TestCommandStartError):
+        note = str(exc)
+        if kept:
+            note += " | " + (
+                kept if _is_public_repo(repo) else _member_kept(kept))
+        return note
     text = str(exc)
     if text.startswith("tests timed out:"):
         public = _is_public_repo(repo)

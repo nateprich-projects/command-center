@@ -265,6 +265,11 @@ PARENT_REJECTED_TRUNCATION_MARKER = "…[truncated]"
 DIFF_LIMIT_BYTES = 150 * 1024
 DIFF_TOO_LARGE_REASON = (
     "diff too large to review: deliver the ticket in smaller slices")
+#: Generated fixture bytes do not spend the review cap; the diff remains
+#: present for the judges. Keep this an explicit path list, not a pattern.
+DIFF_CAP_EXEMPT_PATHS = frozenset({
+    "dashboard/fixtures/execution_metrics.json",
+})
 
 #: How many of the files a diff could not show its rejection names; the rest
 #: are counted. The reason is recorded in the verdict comment twice (its JSON
@@ -1412,13 +1417,16 @@ def precheck_diff(packet: dict) -> List[str]:
     ``diff_truncated``: every files-API rebuild sets that flag, including
     the clipped-compare fallback that leaves nothing out. Binaries and
     generated lockfiles are named in the diff, not omitted, so they never
-    count. The reason names the files, which reach only the verdict
+    count as missing text. The named generated fixture stays in the diff
+    for review, but its bytes do not spend the size cap. The reason names
+    omitted files, which reach only the verdict
     comment on the PR in its own repository; the runner's heartbeat note,
     the public record, carries the reason count alone.
     """
     reasons = []
     diff = packet.get("diff")
-    if isinstance(diff, str) and len(diff.encode("utf-8")) > DIFF_LIMIT_BYTES:
+    if isinstance(diff, str) \
+            and _diff_bytes_for_cap(diff) > DIFF_LIMIT_BYTES:
         reasons.append(DIFF_TOO_LARGE_REASON)
     omitted = packet.get("diff_omitted_files")
     if isinstance(omitted, int) and not isinstance(omitted, bool) \
@@ -1436,6 +1444,26 @@ def precheck_diff(packet: dict) -> List[str]:
             files = ", ".join(named)
         reasons.append("diff incomplete: {}".format(files))
     return reasons
+
+
+def _diff_bytes_for_cap(diff: str) -> int:
+    """Count diff bytes except sections for exact named generated paths.
+
+    Bytes outside a recognized file section stay counted. If a section header
+    cannot be parsed, that section stays counted too, so malformed input cannot
+    hide reviewable diff bytes.
+    """
+    counted = 0
+    exempt_section = False
+    for line in diff.splitlines(keepends=True):
+        if line.startswith("diff --git "):
+            old_path, new_path = _diff_header_paths(line.rstrip("\r\n"))
+            exempt_section = any(
+                path in DIFF_CAP_EXEMPT_PATHS
+                for path in (old_path, new_path) if path is not None)
+        if not exempt_section:
+            counted += len(line.encode("utf-8"))
+    return counted
 
 
 def precheck(packet: dict) -> Dict[str, object]:

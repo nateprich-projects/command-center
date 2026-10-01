@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime
+import gzip
 import json
 import os
 import pathlib
@@ -570,6 +571,32 @@ def test_the_gated_total_is_the_standard_card_whatever_model_ran(
     assert reading["spent_dollars"] == pytest.approx(2 * one_call)
     assert reading["windows"]["seven_day"]["spent_dollars"] == \
         pytest.approx(2 * one_call)
+
+
+def test_gzipped_muse_journal_matches_the_raw_reader(
+        tmp_path, monkeypatch):
+    records = [
+        _muse_model_record(NOW - 100, "run-1", STANDARD),
+        _muse_record(NOW - 80, input_tokens=1_000_000,
+                     cached_tokens=800_000, output_tokens=100_000,
+                     usage_id="u1", run_id="run-1"),
+    ]
+    _muse_fixture(tmp_path, monkeypatch, records, mtime=NOW)
+    journal = (tmp_path / "2026" / "09" / "18" / "session"
+               / "session.jsonl")
+    raw_reading = usage.read_muse(NOW)
+
+    compressed = journal.with_name("session.jsonl.gz")
+    with journal.open("rb") as source, gzip.open(compressed, "wb") as target:
+        target.write(source.read())
+    journal.unlink()
+    os.utime(compressed, (NOW, NOW))
+
+    compressed_reading = usage.read_muse(NOW)
+    assert compressed_reading == raw_reading
+    # Independent arithmetic: 200k fresh input at $1.25/M, 800k cached at
+    # $0.15/M, and 100k output at $4.25/M totals $0.795.
+    assert compressed_reading["spent_dollars"] == pytest.approx(0.795)
 
 
 def test_the_breakdown_counts_calls_and_dollars_per_model(

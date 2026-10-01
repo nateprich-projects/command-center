@@ -16318,7 +16318,7 @@ def cmd_send_back(items: List[Item], now: datetime, ref: str, reason: str,
                   confirmed: bool = False, run: Optional[str] = None,
                   agent: Optional[str] = None,
                   instruction: Optional[str] = None) -> int:
-    """Return a Shaped project to Ideas on Nate's explicit instruction."""
+    """Return a Shaped project to Ideas, ready for reshaping."""
     if not isinstance(reason, str) or not reason.strip():
         raise GitHubError("send-back requires a non-empty reason")
     if not isinstance(instruction, str) or not instruction.strip():
@@ -16360,12 +16360,41 @@ def cmd_send_back(items: List[Item], now: datetime, ref: str, reason: str,
     if refusal is not None:
         raise GitHubError(refusal)
 
-    # Keep an already-loaded FunnelSession aligned with the confirmed write,
-    # without changing the plan body or any routing fields.
+    # Record the confirmed Status write before the label write. If that
+    # separate GitHub mutation fails, the next run can reconcile from GitHub
+    # and this session still reflects the Status that did succeed.
     item.status = fresh.status
     item.status_since = fresh.status_since
     item.status_updated_at = fresh.status_updated_at
     item.status_events = fresh.status_events
+    item.labels = list(fresh.labels)
+
+    if "needs-shaping" not in fresh.labels:
+        label_error = None
+        for _attempt in range(2):
+            try:
+                edit = _run_gh(
+                    ["gh", "issue", "edit", str(item.number), "--repo",
+                     item.repo, "--add-label", "needs-shaping"],
+                    capture_output=True, text=True,
+                )
+            except (OSError, subprocess.SubprocessError, GitHubError) as exc:
+                label_error = str(exc)
+                continue
+            if edit.returncode == 0:
+                fresh.labels.append("needs-shaping")
+                label_error = None
+                break
+            label_error = (
+                (getattr(edit, "stderr", None) or "").strip()
+                or "gh exited with status {}".format(edit.returncode)
+            )
+        if label_error is not None:
+            raise GitHubError(
+                "moved {} to Ideas, but could not add needs-shaping after "
+                "one retry: {}".format(item.ref, label_error)
+            )
+        item.labels = list(fresh.labels)
 
     comment = _run_gh(
         ["gh", "issue", "comment", str(item.number), "--repo", item.repo,
@@ -18251,12 +18280,16 @@ def review_queue(
 
 
 def shapeable_idea(items: Sequence[Item], tier: Optional[str],
-                   reading: Dict) -> Optional[Item]:
+                   reading: Dict,
+                   skipped: Optional[List[Dict[str, str]]] = None
+                   ) -> Optional[Item]:
     """Return the first idea this run may shape, or ``None``.
 
     Shaping starts new work, so it is the last optional job after review and
     breakdown. The ordering itself stays in ``ideas()``; this function only
     filters that shared order through the existing tier and headroom rules.
+    Ideas with children are ineligible here; ``shape.apply_shape`` keeps its
+    fresh-read refusal as a backstop for children added after this selection.
 
     Each tier shapes its own ideas: an escalated run is offered the
     first escalated-tier idea, a standard run the first standard-tier
@@ -18276,6 +18309,13 @@ def shapeable_idea(items: Sequence[Item], tier: Optional[str],
             recorded_risk if recorded_risk in RISK_OPTIONS else "escalated"
         )
         if tier is not None and needed != tier:
+            continue
+        if getattr(item, "children_total", 0) > 0:
+            if skipped is not None:
+                skipped.append({
+                    "ref": item.ref,
+                    "reason": "with-children",
+                })
             continue
         return item
     return None
@@ -19822,10 +19862,35 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
     pending = [entry for entry in pending
                if entry.ref not in review_backed_off]
     review_phase_boundary("shape_queue")
+    shape_skipped: List[Dict[str, str]] = []
     shape_item = shapeable_idea(
         [entry for entry in items if entry.ref not in review_backed_off],
-        tier, reading,
+        tier, reading, shape_skipped,
     )
+    if shape_skipped:
+        out["shape_skipped"] = shape_skipped
+        for row in shape_skipped:
+            print(
+                "run outcome: skipped-stale-shape ref={} reason={}".format(
+                    row["ref"], row["reason"]
+                ),
+                file=sys.stderr,
+            )
+        run = out.get("run")
+        if run:
+            try:
+                heartbeat.record_event(
+                    agent, str(run), "skipped-stale-shape",
+                    queue="shape", skipped=shape_skipped,
+                    note="shape picker skipped Ideas items with children",
+                )
+            except Exception as exc:
+                print(
+                    "heartbeat: could not record shape picker skip: {}".format(
+                        exc
+                    ),
+                    file=sys.stderr,
+                )
     withheld_issue_jobs = [
         row for row in review_backed_off.values()
         if row["ref"] in {

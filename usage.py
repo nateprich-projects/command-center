@@ -34,6 +34,7 @@ import time
 import urllib.request
 
 import muse_model
+import session_logs
 from datetime import timezone
 from typing import Dict, List, Optional, Tuple
 
@@ -807,7 +808,7 @@ def read_muse(now: float) -> Optional[Dict]:
     calls = 0
     seen_usage_ids = set()
     by_model: Dict[str, Dict[str, float]] = {}
-    journals = glob.glob(MUSE_SESSIONS)
+    journals = session_logs.paths(MUSE_SESSIONS, "muse")
 
     for path in journals:
         try:
@@ -821,7 +822,7 @@ def read_muse(now: float) -> Optional[Dict]:
             # 2026-09-22 across 4,904 provider records: zero unmatched.
             run_models: Dict[str, str] = {}
             pending = []
-            with open(path, errors="replace") as handle:
+            with session_logs.open_text(path, errors="replace") as handle:
                 for line in handle:
                     # The usage test comes first, and a line that is a
                     # usage attribution is never also read as a model

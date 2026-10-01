@@ -1577,6 +1577,54 @@ def test_brief_surfaces_open_human_steps_outside_the_decision_queue(
     assert funnel.awaiting_decision([human_step]) == []
 
 
+def test_parked_parent_steps_are_withheld_from_every_step_section(
+    monkeypatch, capsys
+):
+    parked_parent = funnel.Item(
+        repo="nateprich/beta", number=1904, title="Parked project",
+        url="https://example.invalid/1904", state="OPEN", status="Parked",
+        klass="Broken",
+    )
+    human = funnel.Item(
+        repo="nateprich/beta", number=1926, title="Human step",
+        url="https://example.invalid/1926", state="OPEN",
+        parent=parked_parent.ref, needs="human",
+    )
+    blocked_human = funnel.Item(
+        repo="nateprich/beta", number=1927, title="Blocked human step",
+        url="https://example.invalid/1927", state="OPEN",
+        parent=parked_parent.ref, needs="human", labels=["blocked"],
+    )
+    machine_local = funnel.Item(
+        repo="nateprich/beta", number=1932, title="Machine-local step",
+        url="https://example.invalid/1932", state="OPEN",
+        parent=parked_parent.ref, needs="claude-code-environment",
+    )
+    blocked_machine_local = funnel.Item(
+        repo="nateprich/beta", number=1933, title="Blocked machine-local step",
+        url="https://example.invalid/1933", state="OPEN",
+        parent=parked_parent.ref, needs="claude-code-environment",
+        labels=["blocked"],
+    )
+    items = [
+        parked_parent, human, blocked_human, machine_local,
+        blocked_machine_local,
+    ]
+
+    assert funnel.human_step_items(items) == []
+    assert funnel.blocked_human_step_items(items) == []
+    assert funnel.machine_local_step_items(items) == []
+    assert funnel.blocked_machine_local_step_items(items) == []
+
+    monkeypatch.setattr(funnel, "unattended_merges", lambda now: [])
+    assert funnel.cmd_brief(items, NOW) == 0
+    brief = json.loads(capsys.readouterr().out)
+    assert brief["human_steps"] == []
+    assert brief["blocked_human_steps"] == []
+    assert brief["machine_local_steps"] == []
+    assert brief["blocked_machine_local_steps"] == []
+
+
 def test_brief_separates_blocked_human_and_machine_local_steps(
     monkeypatch, capsys
 ):

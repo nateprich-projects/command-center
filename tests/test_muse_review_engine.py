@@ -4243,6 +4243,49 @@ def test_the_judges_are_told_how_to_weigh_the_implement_runs_evidence(
     assert "If `unavailable`, say so; judge as usual." in question
 
 
+def test_the_routine_tells_the_reviewer_how_to_weigh_prior_fixes_and_weakened_tests():
+    """#1852 (plan #1837, ticket 3): the review prompt names the two new
+    evidence signals and the standard for a cited `met` and a named block."""
+    prompt = " ".join(ROUTINE.read_text().split("\n---\n", 1)[1].split())
+    for sentence in (
+        "If `evidence` says the diff rewrites fix #N, confirm it still "
+        "prevents that fix's failure; cite its test.",
+        "A `test_weakening` entry no ticket or Departure authorises is "
+        "blocking.",
+        "So is `passes-on-base` on any other ticket.",
+        "A `met` cites the changed line doing the work.",
+        "its file, the input, the path through the diff and the wrong outcome",
+    ):
+        assert sentence in prompt, sentence
+
+
+def test_the_judges_are_told_how_to_weigh_prior_fixes_and_weakened_tests(
+        tmp_path):
+    """#1852: every judge call carries the same rules in its header, not
+    only the routine's question, and a non-reproduction-first ticket's
+    `passes-on-base` is weighed rather than blocking."""
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), _packet(),
+        answers=_review_answers(_judge_answer()))
+
+    assert proc.returncode == 0, proc.stderr
+    judge = (repo / "muse.prompt.2").read_text()
+    framing = " ".join(judge.split("The assigned requirements are:", 1)[0]
+                       .split())
+    for sentence in (
+        "On any other ticket `reproduction: passes-on-base` is weighed, not "
+        "blocking.",
+        "If `evidence` has a `rewrites prior fix: #N` line, confirm the diff "
+        "still prevents that fix's failure and cite its test",
+        "A deleted, skipped or weakened test in `test_weakening` that no "
+        "ticket or Departure authorises is blocking",
+        "A met result cites the changed line that does the work; an unmet "
+        "result names the input, the path through the diff and the wrong "
+        "outcome.",
+    ):
+        assert sentence in framing, sentence
+
+
 def test_the_requirement_list_is_kept_where_the_judges_will_read_it(tmp_path):
     proc, repo = _with_probe(
         tmp_path, begin=_begin(), packet=_packet(),

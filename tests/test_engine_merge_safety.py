@@ -23,6 +23,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 import funnel  # noqa: E402
+from dashboard import prior_facts as display_pr_facts  # noqa: E402
 from engine import merge_safety  # noqa: E402
 from funnel import Item  # noqa: E402
 
@@ -237,6 +238,33 @@ def test_the_read_completes_without_loading_any_reporting_section(monkeypatch):
     # Two GitHub reads and in-memory checks, all fixture-local: anything
     # near the brief's multi-minute budget means a reporting section crept in.
     assert elapsed < 5.0
+
+
+def test_merge_gate_reads_the_live_pr_accessor_not_display_carry_forward(
+        monkeypatch):
+    comments = [{"body": verdict(), "author": {"login": "nateprich"}}]
+    live_fact = pr(number=5, comments=comments)
+    live_fact["verdict"] = funnel._latest_verdict_from_comments(comments)
+    reads = []
+
+    def read_live_fact(repo, number, **kwargs):
+        reads.append((repo, number, kwargs))
+        return dict(live_fact)
+
+    def reject_display_read(*args, **kwargs):
+        raise AssertionError("merge gate read display-only carried PR facts")
+
+    monkeypatch.setattr(funnel, "_pr_fact_for_number", read_live_fact)
+    sabotage_reporting(monkeypatch)
+    for name in ("dashboard_pr_display_overrides",
+                 "carry_forward_display_facts", "read_prior_pr_facts",
+                 "prior_pr_carry_forward_enabled"):
+        monkeypatch.setattr(display_pr_facts, name, reject_display_read)
+
+    found = merge_safety.read(REPO, 5, items(), NOW)
+
+    assert reads == [(REPO, 5, {"include_comments": True})]
+    assert found["safe"] is True
 
 
 # -- structural guarantees ----------------------------------------------------

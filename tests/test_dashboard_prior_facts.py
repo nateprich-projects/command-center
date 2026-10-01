@@ -230,7 +230,22 @@ def test_runtime_disable_flag_turns_off_carry_forward_and_can_be_removed(tmp_pat
 
 
 def test_merge_and_review_decisions_do_not_import_prior_display_facts():
-    tree = ast.parse(pathlib.Path(funnel.__file__).read_text(encoding="utf-8"))
+    funnel_tree = ast.parse(pathlib.Path(funnel.__file__).read_text(
+        encoding="utf-8"))
+    merge_safety_path = ROOT / "engine" / "merge_safety.py"
+    merge_safety_tree = ast.parse(merge_safety_path.read_text(encoding="utf-8"))
+
+    display_reader_names = {
+        "dashboard_pr_display_overrides",
+        "carry_forward_display_facts",
+        "read_prior_pr_facts",
+        "prior_pr_carry_forward_enabled",
+        "pr_stale",
+        "pr_stale_state",
+        "pr_stale_age",
+        "pr_stale_captured_at",
+        "pr_stale_number",
+    }
 
     def imports_prior_facts(node):
         return any(
@@ -248,12 +263,27 @@ def test_merge_and_review_decisions_do_not_import_prior_display_facts():
             for child in ast.walk(node)
         )
 
-    functions = {
-        node.name: node for node in ast.walk(tree)
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-    }
+    def references_display_facts(node):
+        return any(
+            (isinstance(child, ast.Name)
+             and child.id in display_reader_names)
+            or (isinstance(child, ast.Attribute)
+                and child.attr in display_reader_names)
+            or (isinstance(child, ast.Constant)
+                and child.value in display_reader_names)
+            for child in ast.walk(node)
+        )
+
+    def top_level_functions(tree):
+        return {
+            node.name: node for node in tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        }
+
+    functions = top_level_functions(funnel_tree)
+    merge_safety_functions = top_level_functions(merge_safety_tree)
     prior_imports = [
-        node for node in ast.walk(tree)
+        node for node in ast.walk(funnel_tree)
         if isinstance(node, (ast.Import, ast.ImportFrom))
         and imports_prior_facts(node)
     ]
@@ -265,8 +295,17 @@ def test_merge_and_review_decisions_do_not_import_prior_display_facts():
         if isinstance(node, ast.If)
         and ast.unparse(node.test) == "args.command == 'brief'"
     ]
-    assert any(
-        prior_imports[0] in ast.walk(block) for block in brief_blocks
+    assert any(prior_imports[0] in ast.walk(block) for block in brief_blocks)
+
+    decision_functions = [
+        functions[name]
+        for name in ("cmd_merge", "merge_blockers", "review_queue")
+    ] + [merge_safety_functions["read"]]
+    assert not any(
+        imports_prior_facts(node)
+        for node in ast.walk(merge_safety_tree)
+        if isinstance(node, (ast.Import, ast.ImportFrom))
     )
-    for name in ("cmd_merge", "merge_blockers", "review_queue"):
-        assert not imports_prior_facts(functions[name])
+    for function in decision_functions:
+        assert not imports_prior_facts(function)
+        assert not references_display_facts(function)

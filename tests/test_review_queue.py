@@ -13,6 +13,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 import funnel  # noqa: E402
+from dashboard import prior_facts as display_pr_facts  # noqa: E402
 
 REPO = "nateprich/beta"
 
@@ -541,3 +542,28 @@ def test_the_rollup_reader_is_the_one_the_review_engine_uses():
 
     for rollup in (RUNNING, GREEN, RED, [], [{"context": "ci", "state": "PENDING"}]):
         assert review.ci_state(rollup) == funnel.ci_rollup_state(rollup)
+
+
+def test_review_queue_reads_live_ticket_pr_facts_not_display_carry_forward(
+        monkeypatch):
+    ticket = _ticket(1)
+    facts = _wire(monkeypatch, [_row(10, 1, "2026-09-10T05:00:00Z")])
+    reads = []
+
+    def read_live_facts(items):
+        reads.append([item.ref for item in items])
+        return facts
+
+    def reject_display_read(*args, **kwargs):
+        raise AssertionError("review queue read display-only carried PR facts")
+
+    monkeypatch.setattr(funnel, "ticket_pr_facts", read_live_facts)
+    for name in ("dashboard_pr_display_overrides",
+                 "carry_forward_display_facts", "read_prior_pr_facts",
+                 "prior_pr_carry_forward_enabled"):
+        monkeypatch.setattr(display_pr_facts, name, reject_display_read)
+
+    queue = funnel.review_queue([ticket])
+
+    assert reads == [[ticket.ref]]
+    assert [entry["pr"] for entry in queue] == [10]

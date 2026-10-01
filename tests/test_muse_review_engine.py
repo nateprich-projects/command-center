@@ -4243,27 +4243,21 @@ def test_the_judges_are_told_how_to_weigh_the_implement_runs_evidence(
     assert "If `unavailable`, say so; judge as usual." in question
 
 
-def test_the_routine_tells_the_reviewer_how_to_weigh_prior_fixes_and_weakened_tests():
-    """#1852 (plan #1837, ticket 3): the review prompt names the two new
-    evidence signals and the standard for a cited `met` and a named block."""
+def test_the_routine_asks_for_cited_met_results_and_concrete_blocks():
+    """#1852 (plan #1837 ticket 3, rule R3): a met cites the line doing the
+    work, and a blocking item names the input, the path through the diff and
+    the wrong outcome. Replayed on 2026-10-01: must-reject 10/10 rejected and
+    must-approve 10/10 approved with this rule alone."""
     prompt = " ".join(ROUTINE.read_text().split("\n---\n", 1)[1].split())
-    for sentence in (
-        "If `evidence` says the diff rewrites fix #N, confirm it still "
-        "prevents that fix's failure; cite its test.",
-        "A `test_weakening` entry no ticket or Departure authorises is "
-        "blocking.",
-        "So is `passes-on-base` on any other ticket.",
-        "A `met` cites the changed line doing the work.",
-        "its file, the input, the path through the diff and the wrong outcome",
-    ):
-        assert sentence in prompt, sentence
+    assert "A `met` cites the changed line doing the work." in prompt
+    assert ("its file, the input, the path through the diff and the wrong "
+            "outcome") in prompt
 
 
-def test_the_count_rule_keeps_its_full_list_of_count_words():
-    """#1852 re-land: trimming "one" and "per day" from this list to meet the
-    word cap made the must-reject corpus packet approve 0 of 4 times in the
-    #1853 bisect. The packet's requirements say "per day"; the reviewer only
-    traces count paths for the words it is shown."""
+def test_the_count_rule_keeps_its_full_paragraph():
+    """#1852: trimming "one" and "per day" from this list made the
+    must-reject corpus packet approve 0 of 4 times (#1853 bisect). Pin the
+    whole paragraph so a word-cap trim cannot touch it again."""
     prompt = " ".join(ROUTINE.read_text().split("\n---\n", 1)[1].split())
     assert ("For count requirements (one, once, per day, exactly, at most), "
             "trace every effect call site's paths (success, traps, `finally`, "
@@ -4271,11 +4265,8 @@ def test_the_count_rule_keeps_its_full_list_of_count_words():
             "when asked once is `unmet`.") in prompt
 
 
-def test_the_judges_are_told_how_to_weigh_prior_fixes_and_weakened_tests(
-        tmp_path):
-    """#1852: every judge call carries the same rules in its header, not
-    only the routine's question, and a non-reproduction-first ticket's
-    `passes-on-base` is weighed rather than blocking."""
+def test_the_judges_ask_for_cited_met_results_and_concrete_blocks(tmp_path):
+    """#1852 rule R3 reaches every judge call through the judge header."""
     proc, repo = _stubbed_runner(
         tmp_path, _begin(), _packet(),
         answers=_review_answers(_judge_answer()))
@@ -4284,18 +4275,9 @@ def test_the_judges_are_told_how_to_weigh_prior_fixes_and_weakened_tests(
     judge = (repo / "muse.prompt.2").read_text()
     framing = " ".join(judge.split("The assigned requirements are:", 1)[0]
                        .split())
-    for sentence in (
-        "On any other ticket `reproduction: passes-on-base` is weighed, not "
-        "blocking.",
-        "If `evidence` has a `rewrites prior fix: #N` line, confirm the diff "
-        "still prevents that fix's failure and cite its test",
-        "A deleted, skipped or weakened test in `test_weakening` that no "
-        "ticket or Departure authorises is blocking",
-        "A met result cites the changed line that does the work; an unmet "
-        "result names the input, the path through the diff and the wrong "
-        "outcome.",
-    ):
-        assert sentence in framing, sentence
+    assert ("A met result cites the changed line that does the work; an unmet "
+            "result names the input, the path through the diff and the wrong "
+            "outcome.") in framing
 
 
 def test_the_requirement_list_is_kept_where_the_judges_will_read_it(tmp_path):

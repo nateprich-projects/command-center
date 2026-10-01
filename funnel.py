@@ -16295,7 +16295,7 @@ def cmd_send_back(items: List[Item], now: datetime, ref: str, reason: str,
                   confirmed: bool = False, run: Optional[str] = None,
                   agent: Optional[str] = None,
                   instruction: Optional[str] = None) -> int:
-    """Return a Shaped project to Ideas on Nate's explicit instruction."""
+    """Return a Shaped project to Ideas, ready for reshaping."""
     if not isinstance(reason, str) or not reason.strip():
         raise GitHubError("send-back requires a non-empty reason")
     if not isinstance(instruction, str) or not instruction.strip():
@@ -16337,12 +16337,41 @@ def cmd_send_back(items: List[Item], now: datetime, ref: str, reason: str,
     if refusal is not None:
         raise GitHubError(refusal)
 
-    # Keep an already-loaded FunnelSession aligned with the confirmed write,
-    # without changing the plan body or any routing fields.
+    # Record the confirmed Status write before the label write. If that
+    # separate GitHub mutation fails, the next run can reconcile from GitHub
+    # and this session still reflects the Status that did succeed.
     item.status = fresh.status
     item.status_since = fresh.status_since
     item.status_updated_at = fresh.status_updated_at
     item.status_events = fresh.status_events
+    item.labels = list(fresh.labels)
+
+    if "needs-shaping" not in fresh.labels:
+        label_error = None
+        for _attempt in range(2):
+            try:
+                edit = _run_gh(
+                    ["gh", "issue", "edit", str(item.number), "--repo",
+                     item.repo, "--add-label", "needs-shaping"],
+                    capture_output=True, text=True,
+                )
+            except (OSError, subprocess.SubprocessError, GitHubError) as exc:
+                label_error = str(exc)
+                continue
+            if edit.returncode == 0:
+                fresh.labels.append("needs-shaping")
+                label_error = None
+                break
+            label_error = (
+                (getattr(edit, "stderr", None) or "").strip()
+                or "gh exited with status {}".format(edit.returncode)
+            )
+        if label_error is not None:
+            raise GitHubError(
+                "moved {} to Ideas, but could not add needs-shaping after "
+                "one retry: {}".format(item.ref, label_error)
+            )
+        item.labels = list(fresh.labels)
 
     comment = _run_gh(
         ["gh", "issue", "comment", str(item.number), "--repo", item.repo,

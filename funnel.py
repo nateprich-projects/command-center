@@ -13420,6 +13420,24 @@ def _dashboard_muse_usage(now_epoch: float) -> Optional[Dict[str, object]]:
     return row
 
 
+def _dashboard_claude_usage(now_epoch: float) -> Optional[Dict[str, object]]:
+    """Return only the signed-in Claude org's raw weekly fields."""
+    try:
+        import usage
+
+        sample = usage.read_claude_plan_weekly_sample(now_epoch)
+    except Exception:
+        return None
+    if not isinstance(sample, Mapping):
+        return None
+    sample_usage = sample.get("u")
+    if not isinstance(sample_usage, Mapping) or "sd" not in sample_usage:
+        return None
+    if "t" not in sample:
+        return None
+    return {"u": {"sd": sample_usage["sd"]}, "t": sample["t"]}
+
+
 def write_dashboard_snapshot(
     brief: Mapping[str, object],
     board: Mapping[str, object],
@@ -22810,6 +22828,12 @@ def main(argv: Optional[Sequence[str]] = None, *,
                             "{}".format(exc),
                             file=sys.stderr,
                         )
+                    snapshot_usage = {
+                        "muse": _dashboard_muse_usage(now.timestamp()),
+                        "claude": _dashboard_claude_usage(now.timestamp()),
+                    }
+                    if snapshot_usage["claude"] is None:
+                        del snapshot_usage["claude"]
                     write_dashboard_snapshot(
                         brief_payload,
                         dashboard_board(
@@ -22821,11 +22845,7 @@ def main(argv: Optional[Sequence[str]] = None, *,
                             pr_display_overrides=pr_display_overrides,
                         ),
                         generated_at,
-                        usage={
-                            "muse": _dashboard_muse_usage(
-                                now.timestamp()
-                            ),
-                        },
+                        usage=snapshot_usage,
                     )
                 except Exception as exc:
                     # The dashboard is downstream instrumentation. A missing

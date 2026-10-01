@@ -12,6 +12,7 @@ import pytest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 import funnel  # noqa: E402
+import usage as usage_module  # noqa: E402
 
 
 REPO = "nateprich/beta"
@@ -68,6 +69,122 @@ def stub_github(monkeypatch, item, fresh):
     monkeypatch.setattr(funnel, "gh_graphql", graphql)
     monkeypatch.setattr(funnel.subprocess, "run", run)
     return events, fresh_reads
+
+
+def test_send_back_reproduction_ensures_needs_shaping_label(monkeypatch):
+    item = shaped_item()
+    fresh = shaped_item(status="Shaped", labels=["blocked"])
+    events, fresh_reads = stub_github(monkeypatch, item, fresh)
+
+    assert funnel.main([
+        "send-back", item.ref, "--reason", REASON, "--instruction", INSTRUCTION,
+        "--yes", "--run", "run-42", "--agent", "codex",
+    ]) == 0
+
+    label_writes = [
+        event for event in events
+        if event[0] == "gh" and event[1][:3] == ("gh", "issue", "edit")
+    ]
+    status_write_index = next(
+        index for index, event in enumerate(events) if event[0] == "graphql"
+    )
+    label_write_index = next(
+        index for index, event in enumerate(events)
+        if event[0] == "gh" and event[1][:3] == ("gh", "issue", "edit")
+    )
+    assert fresh_reads == [(item.ref,)]
+    assert len(label_writes) == 1
+    assert status_write_index < label_write_index
+    assert label_writes[0][1][-2:] == ("--add-label", "needs-shaping")
+    assert fresh.status == "Ideas"
+    assert fresh.labels == ["blocked", "needs-shaping"]
+
+
+def test_relabelled_send_back_fixture_is_accepted_by_shaping_input(monkeypatch):
+    relabelled = shaped_item(status="Ideas", labels=["needs-shaping"])
+    monkeypatch.setattr(usage_module, "shaping_allowed", lambda reading: True)
+
+    assert funnel.shapeable_idea([relabelled], "escalated", {}) is relabelled
+
+
+def test_send_back_preserves_existing_needs_shaping_and_blocked(monkeypatch):
+    labels = ["needs-shaping", "blocked"]
+    item = shaped_item(labels=labels)
+    fresh = shaped_item(status="Shaped", labels=labels.copy())
+    events, _fresh_reads = stub_github(monkeypatch, item, fresh)
+
+    assert funnel.main([
+        "send-back", item.ref, "--reason", REASON, "--instruction", INSTRUCTION,
+        "--yes",
+    ]) == 0
+
+    label_writes = [
+        event for event in events
+        if event[0] == "gh" and event[1][:3] == ("gh", "issue", "edit")
+    ]
+    assert label_writes == []
+    assert fresh.labels == labels
+    assert item.labels == labels
+
+
+def test_send_back_retries_needs_shaping_write_once(monkeypatch):
+    item = shaped_item()
+    fresh = shaped_item(status="Shaped")
+    stub_github(monkeypatch, item, fresh)
+    original_run = funnel.subprocess.run
+    label_writes = []
+
+    def fail_first_label_write(args, **kwargs):
+        if args[:3] == ["gh", "issue", "edit"]:
+            label_writes.append(tuple(args))
+            if len(label_writes) == 1:
+                return SimpleNamespace(
+                    returncode=1, stdout="", stderr="temporary failure"
+                )
+        return original_run(args, **kwargs)
+
+    monkeypatch.setattr(funnel.subprocess, "run", fail_first_label_write)
+
+    assert funnel.main([
+        "send-back", item.ref, "--reason", REASON, "--instruction", INSTRUCTION,
+        "--yes",
+    ]) == 0
+
+    assert len(label_writes) == 2
+    assert fresh.labels == ["needs-shaping"]
+    assert item.labels == ["needs-shaping"]
+
+
+def test_send_back_fails_loudly_after_label_retry_and_keeps_ideas(monkeypatch, capsys):
+    item = shaped_item()
+    fresh = shaped_item(status="Shaped")
+    events, _fresh_reads = stub_github(monkeypatch, item, fresh)
+    original_run = funnel.subprocess.run
+    label_writes = []
+
+    def fail_label_write(args, **kwargs):
+        if args[:3] == ["gh", "issue", "edit"]:
+            label_writes.append(tuple(args))
+            return SimpleNamespace(
+                returncode=1, stdout="", stderr="label service unavailable"
+            )
+        return original_run(args, **kwargs)
+
+    monkeypatch.setattr(funnel.subprocess, "run", fail_label_write)
+
+    assert funnel.main([
+        "send-back", item.ref, "--reason", REASON, "--instruction", INSTRUCTION,
+        "--yes",
+    ]) == 2
+
+    assert len(label_writes) == 2
+    assert fresh.status == "Ideas"
+    assert item.status == "Ideas"
+    assert "could not add needs-shaping after one retry" in capsys.readouterr().err
+    assert not any(
+        event[0] == "gh" and event[1][:3] == ("gh", "issue", "comment")
+        for event in events
+    )
 
 
 def test_send_back_reproduction_moves_fresh_shaped_item_and_posts_reason(monkeypatch):

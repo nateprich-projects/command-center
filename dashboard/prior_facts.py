@@ -16,7 +16,6 @@ from typing import Dict, Iterable, Mapping, Optional, Tuple
 MAX_PRIOR_AGE = timedelta(hours=24)
 DISABLE_CARRY_FORWARD_FLAG = "disable-pr-carry-forward"
 PR_STATES = frozenset({"approved", "changes requested", "merged", "submitted"})
-LIVE_PR_STATES = frozenset({"OPEN", "CLOSED", "MERGED"})
 
 
 def _timestamp(value: object) -> Optional[datetime]:
@@ -65,7 +64,11 @@ def _prior_ticket_facts(payload: object) -> Dict[str, Dict[str, object]]:
                 if not isinstance(ticket, Mapping):
                     continue
                 ref = ticket.get("ref")
-                state = ticket.get("pr")
+                stale = ticket.get("pr_stale") is True
+                state = (
+                    ticket.get("pr_stale_state") if stale
+                    else ticket.get("pr")
+                )
                 if (
                     not isinstance(ref, str)
                     or not isinstance(state, str)
@@ -73,9 +76,21 @@ def _prior_ticket_facts(payload: object) -> Dict[str, Dict[str, object]]:
                 ):
                     continue
                 fact: Dict[str, object] = {"pr": state}
-                number = ticket.get("pr_number")
+                number = ticket.get(
+                    "pr_stale_number" if stale else "pr_number"
+                )
                 if isinstance(number, int) and not isinstance(number, bool):
                     fact["pr_number"] = number
+                if stale:
+                    # A failed brief republishes the carried state. Keep its
+                    # original live capture time so each consecutive failure
+                    # ages the same fact instead of renewing it.
+                    original_capture = _timestamp(
+                        ticket.get("pr_stale_captured_at")
+                    )
+                    if original_capture is None:
+                        continue
+                    fact["_captured_at"] = original_capture
                 facts[ref] = fact
     return facts
 
@@ -139,13 +154,11 @@ def _live_fact_is_established(
     if not facts_known or ref not in live_facts:
         return False
     fact = live_facts[ref]
-    if fact is None:
-        # A present None means both PR and branch absence were established.
-        return True
-    if not isinstance(fact, Mapping):
-        return False
-    state = fact.get("state")
-    return isinstance(state, str) and state.upper() in LIVE_PR_STATES
+    # A present None means both PR and branch absence were established. A
+    # non-empty mapping can also establish useful live facts without a PR
+    # state (for example, branch_exists=True). Only the empty mapping is the
+    # truncated-PR form that still permits carry-forward.
+    return not isinstance(fact, Mapping) or bool(fact)
 
 
 def carry_forward_display_facts(
@@ -166,14 +179,25 @@ def carry_forward_display_facts(
     live = live_facts or {}
     previous = prior_facts or {}
     current_at = _utc(now)
-    prior_at = _utc(captured_at)
-    age = current_at - prior_at if current_at is not None and prior_at else None
-    usable_prior = age is not None and timedelta(0) <= age < MAX_PRIOR_AGE
+    default_prior_at = _utc(captured_at)
     overrides: Dict[str, Dict[str, object]] = {}
 
     for ref in ticket_refs:
         if _live_fact_is_established(live, ref, live_facts_known):
             continue
+        prior = previous.get(ref)
+        prior_at = (
+            _utc(prior.get("_captured_at"))
+            if isinstance(prior, Mapping) else None
+        ) or default_prior_at
+        age = (
+            current_at - prior_at
+            if current_at is not None and prior_at is not None else None
+        )
+        usable_prior = (
+            age is not None
+            and timedelta(0) <= age < MAX_PRIOR_AGE
+        )
         prior = previous.get(ref) if usable_prior else None
         state = prior.get("pr") if isinstance(prior, Mapping) else None
         if isinstance(state, str) and state in PR_STATES:
@@ -181,6 +205,7 @@ def carry_forward_display_facts(
                 "status": "stale",
                 "pr": state,
                 "age": _age_label(age),
+                "captured_at": prior_at.isoformat(),
             }
             number = prior.get("pr_number")
             if isinstance(number, int) and not isinstance(number, bool):

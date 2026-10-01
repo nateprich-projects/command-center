@@ -18257,12 +18257,16 @@ def review_queue(
 
 
 def shapeable_idea(items: Sequence[Item], tier: Optional[str],
-                   reading: Dict) -> Optional[Item]:
+                   reading: Dict,
+                   skipped: Optional[List[Dict[str, str]]] = None
+                   ) -> Optional[Item]:
     """Return the first idea this run may shape, or ``None``.
 
     Shaping starts new work, so it is the last optional job after review and
     breakdown. The ordering itself stays in ``ideas()``; this function only
     filters that shared order through the existing tier and headroom rules.
+    Ideas with children are ineligible here; ``shape.apply_shape`` keeps its
+    fresh-read refusal as a backstop for children added after this selection.
 
     Each tier shapes its own ideas: an escalated run is offered the
     first escalated-tier idea, a standard run the first standard-tier
@@ -18282,6 +18286,13 @@ def shapeable_idea(items: Sequence[Item], tier: Optional[str],
             recorded_risk if recorded_risk in RISK_OPTIONS else "escalated"
         )
         if tier is not None and needed != tier:
+            continue
+        if getattr(item, "children_total", 0) > 0:
+            if skipped is not None:
+                skipped.append({
+                    "ref": item.ref,
+                    "reason": "with-children",
+                })
             continue
         return item
     return None
@@ -19828,10 +19839,35 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
     pending = [entry for entry in pending
                if entry.ref not in review_backed_off]
     review_phase_boundary("shape_queue")
+    shape_skipped: List[Dict[str, str]] = []
     shape_item = shapeable_idea(
         [entry for entry in items if entry.ref not in review_backed_off],
-        tier, reading,
+        tier, reading, shape_skipped,
     )
+    if shape_skipped:
+        out["shape_skipped"] = shape_skipped
+        for row in shape_skipped:
+            print(
+                "run outcome: skipped-stale-shape ref={} reason={}".format(
+                    row["ref"], row["reason"]
+                ),
+                file=sys.stderr,
+            )
+        run = out.get("run")
+        if run:
+            try:
+                heartbeat.record_event(
+                    agent, str(run), "skipped-stale-shape",
+                    queue="shape", skipped=shape_skipped,
+                    note="shape picker skipped Ideas items with children",
+                )
+            except Exception as exc:
+                print(
+                    "heartbeat: could not record shape picker skip: {}".format(
+                        exc
+                    ),
+                    file=sys.stderr,
+                )
     withheld_issue_jobs = [
         row for row in review_backed_off.values()
         if row["ref"] in {

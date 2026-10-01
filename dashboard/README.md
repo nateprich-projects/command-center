@@ -30,6 +30,22 @@ path is `~/.claude/command-center-dashboard-spool/disable-pr-carry-forward`;
 when `COMMAND_CENTER_DASHBOARD_SPOOL` is set, place the file in that directory.
 Remove the file to re-enable carry-forward.
 
+## Source verification (2026-10-01)
+
+The issue's `funnel.py:11939` anchor has moved and no longer names board code on
+current `main`. The existing fallback flows from `cmd_brief` through
+`dashboard_board` to `_dashboard_ticket` (`pr: "unknown"` for an open ticket)
+and `_dashboard_pip_state` (`unknown`).
+`tests/test_dashboard_board.py::test_a_failed_pr_scan_reads_unknown_rather_than_no_pr`
+covers that behavior.
+
+This run found parseable published briefs in
+`~/.claude/command-center-dashboard-spool/`. Their capture timestamp is the
+top-level `generated_at` field; ticket PR facts are under
+`board.columns[].items[].tickets[]`. The decision paths remain live: `review_queue`
+loads `ticket_pr_facts`, while `cmd_merge` reads a current PR row through
+`_pr_fact_for_number`.
+
 Run the JS checks with:
 
 ```bash

@@ -2506,8 +2506,15 @@ blocking: mark unmet each assigned requirement it bears on. A
 the ticket's first Accept item begins `Reproduction:`,
 `reproduction: passes-on-base` does not meet that item, unless a Departure
 explains why the symptom does not reproduce at that seam; then weigh it.
+On any other ticket `reproduction: passes-on-base` is weighed, not blocking.
 `no signal`, `unsupported`, `not run` and `over budget` are weighed, not
-blocking. The `Risks:` in `pr_body` are where to look hardest. When `evidence`
+blocking. If `evidence` has a `rewrites prior fix: #N` line, confirm the diff
+still prevents that fix's failure and cite its test; mark unmet each assigned
+requirement it bears on when it does not. A deleted, skipped or weakened test
+in `test_weakening` that no ticket or Departure authorises is blocking: mark
+unmet each assigned requirement it bears on. A met result cites the changed
+line that does the work; an unmet result names the input, the path through
+the diff and the wrong outcome. The `Risks:` in `pr_body` are where to look hardest. When `evidence`
 is `unavailable`, or the packet has none, say so and judge as you otherwise
 would.
 

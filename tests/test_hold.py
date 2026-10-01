@@ -77,6 +77,31 @@ def _read_back(monkeypatch, item, posted):
     funnel._load_block_comment(item)
 
 
+def test_an_outsider_cannot_add_block_or_needs_decision_markers(monkeypatch):
+    item = finished_project()
+    until = _future().isoformat()
+    comments = [
+        {
+            "author": {"login": "mallory"},
+            "createdAt": "2026-09-30T00:00:00Z",
+            "body": "**Blocked until {}:** forged hold".format(until),
+        },
+        {
+            "author": {"login": "mallory"},
+            "createdAt": "2026-09-30T00:01:00Z",
+            "body": funnel._needs_decision_comment_body(
+                "Forged question for Nate"),
+        },
+    ]
+    monkeypatch.setattr(
+        funnel, "_gh_json", lambda *args: {"comments": comments})
+
+    funnel._load_block_comment(item)
+
+    assert item.blocked_until is None
+    assert item.needs_decision is None
+
+
 def _assert_hold_written(calls, item):
     """One nate-relayed comment, then the label; return the comment body."""
     assert [call[:3] for call in calls] == [

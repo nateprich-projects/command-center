@@ -317,7 +317,7 @@ def _latest_review_comment(comments: object):
             continue
         verdict = funnel.parse_verdict(body)
         if verdict is not None:
-            return verdict, funnel.parse_provenance(body)
+            return verdict, funnel.parse_provenance(comment)
     return None
 
 

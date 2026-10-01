@@ -359,6 +359,8 @@ def test_override_adjacent_marker_readers_stay_classified_and_filtered():
         assert _called(units[COMMENT_READERS[reader]]) & TRUST_FILTERS
     for reader in required_comment_text_readers:
         assert _called(units[reader]) & TRUST_FILTERS
+    for parser in required_text_parsers:
+        assert _called(units[parser]) & TRUST_FILTERS
 
 
 def test_the_walk_finds_a_new_reader_that_skips_the_filter():

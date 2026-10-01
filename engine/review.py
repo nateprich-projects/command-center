@@ -776,7 +776,7 @@ def ticket_comments(rows: Optional[Sequence[dict]]) -> List[Dict]:
             shaped.append(entry)
             continue
         body = row.get("body") or ""
-        provenance = funnel.parse_provenance(body)
+        provenance = funnel.parse_provenance(row)
         voice = provenance.get("voice") if provenance else "unknown"
         for _, block in funnel._marked_json_blocks(
                 body, funnel.PROVENANCE_MARKER):
@@ -2552,7 +2552,7 @@ def _shape_pr_comment(row: dict, kind: str) -> Dict[str, Any]:
         if comment_url is not None:
             shaped["url"] = comment_url
         return shaped
-    provenance = funnel.parse_provenance(body)
+    provenance = funnel.parse_provenance(row)
     voice = provenance.get("voice") if provenance else "unknown"
     for _, block in funnel._marked_json_blocks(
             body, funnel.PROVENANCE_MARKER):

@@ -219,11 +219,46 @@ test("a pip carries the ticket's furthest state", () => {
   assert.equal(pipState({ state: "OPEN", pr: "approved" }), "approved");
   assert.equal(pipState({ state: "OPEN", pr: "changes requested" }), "changes-requested");
   assert.equal(pipState({ state: "OPEN", pr: "submitted" }), "submitted");
+  assert.equal(pipState({ state: "OPEN", pr_stale: true }), "stale");
+  assert.equal(pipState({ state: "OPEN", pr_unknown: true }), "unknown");
   assert.equal(pipState({ state: "OPEN", blocked: true }), "blocked");
   assert.equal(
     pipState({ state: "OPEN", blocked: true, blocked_by_siblings: true }), "queued",
   );
   assert.equal(pipState({ state: "OPEN" }), "open");
+});
+
+test("a carried PR fact has a stale pip and visible age on the phone board", () => {
+  const previousDocument = globalThis.document;
+  globalThis.document = new TestDocument();
+  try {
+    const board = renderPhoneBoard([{
+      stage: "Building",
+      items: [{
+        ref: "repo#1",
+        title: "Plan",
+        tickets: [{
+          ref: "repo#2",
+          number: 2,
+          title: "Review PR",
+          state: "OPEN",
+          pr_stale: true,
+          pr_stale_state: "approved",
+          pr_stale_age: "5h",
+        }],
+      }],
+    }]);
+    const staleRow = board.querySelectorAll(".phone-row").find(
+      (row) => row.className.split(/\s+/).includes("phone-row-stale"),
+    );
+
+    assert.ok(staleRow);
+    assert.ok(staleRow.querySelector(".pip")?.className.split(/\s+/).includes("pip-stale"));
+    assert.equal(staleRow.querySelector(".pr-stale-age")?.textContent, "stale approved · 5h");
+  } finally {
+    if (previousDocument === undefined) delete globalThis.document;
+    else globalThis.document = previousDocument;
+  }
 });
 
 test("tier describes open tickets only", () => {

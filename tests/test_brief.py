@@ -1625,6 +1625,45 @@ def test_parked_parent_steps_are_withheld_from_every_step_section(
     assert brief["blocked_machine_local_steps"] == []
 
 
+def test_non_parked_parent_steps_still_split_by_blocked_status():
+    parent = funnel.Item(
+        repo="nateprich/beta", number=1904, title="Building project",
+        url="https://example.invalid/1904", state="OPEN", status="Building",
+        klass="Broken",
+    )
+    human = funnel.Item(
+        repo="nateprich/beta", number=1926, title="Human step",
+        url="https://example.invalid/1926", state="OPEN",
+        parent=parent.ref, needs="human",
+    )
+    blocked_human = funnel.Item(
+        repo="nateprich/beta", number=1927, title="Blocked human step",
+        url="https://example.invalid/1927", state="OPEN",
+        parent=parent.ref, needs="human", labels=["blocked"],
+    )
+    machine_local = funnel.Item(
+        repo="nateprich/beta", number=1932, title="Machine-local step",
+        url="https://example.invalid/1932", state="OPEN",
+        parent=parent.ref, needs="claude-code-environment",
+    )
+    blocked_machine_local = funnel.Item(
+        repo="nateprich/beta", number=1933, title="Blocked machine-local step",
+        url="https://example.invalid/1933", state="OPEN",
+        parent=parent.ref, needs="claude-code-environment",
+        labels=["blocked"],
+    )
+    items = [
+        parent, human, blocked_human, machine_local, blocked_machine_local,
+    ]
+
+    assert funnel.human_step_items(items) == [human]
+    assert funnel.blocked_human_step_items(items) == [blocked_human]
+    assert funnel.machine_local_step_items(items) == [machine_local]
+    assert funnel.blocked_machine_local_step_items(items) == [
+        blocked_machine_local
+    ]
+
+
 def test_brief_separates_blocked_human_and_machine_local_steps(
     monkeypatch, capsys
 ):

@@ -32,8 +32,8 @@ Walk each requirement one at a time against the diff, quoting it. A `met` cites 
 `plan_premises` is context: do not probe premises.
 
 For count requirements (one, once, per day, exactly, at most), trace every
-effect call site's paths (success, traps, `finally`, hooks, retries), counting
-per path in `evidence`; met twice when asked once is `unmet`.
+effect call site's paths (success, traps, `finally`, hooks, retries), putting
+per-path counts in `evidence`; met twice when asked once is `unmet`.
 
 ## The answer
 

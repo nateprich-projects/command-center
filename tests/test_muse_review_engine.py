@@ -4176,7 +4176,10 @@ def test_the_count_rule_keeps_its_full_list_of_count_words():
     #1853 bisect. The packet's requirements say "per day"; the reviewer only
     traces count paths for the words it is shown."""
     prompt = " ".join(ROUTINE.read_text().split("\n---\n", 1)[1].split())
-    assert "(one, once, per day, exactly, at most)" in prompt
+    assert ("For count requirements (one, once, per day, exactly, at most), "
+            "trace every effect call site's paths (success, traps, `finally`, "
+            "hooks, retries), putting per-path counts in `evidence`; met twice "
+            "when asked once is `unmet`.") in prompt
 
 
 def test_the_judges_are_told_how_to_weigh_prior_fixes_and_weakened_tests(

@@ -29,6 +29,7 @@ SHAPE_THREAD_1195 = json.loads(
         encoding="utf-8"))
 
 import funnel  # noqa: E402
+import usage  # noqa: E402
 from engine import shape  # noqa: E402
 from funnel import Item  # noqa: E402
 
@@ -1837,8 +1838,29 @@ def test_apply_refuses_when_fresh_project_item_has_children(
         "Ideas", "Improve", "standard", "none", ["needs-shaping"])
     output = capsys.readouterr().out
     assert "run outcome: skipped-stale-shape" in output
+    assert "reason=with-children" in output
     assert "fresh Status=Ideas" in output
     assert "children=2" in output
+
+
+def test_shape_picker_does_not_reoffer_with_children_idea_on_consecutive_fires(
+        monkeypatch, capsys):
+    item = idea(42, children_total=1)
+    stub_gh(monkeypatch, item)
+    monkeypatch.setattr(usage, "shaping_allowed", lambda reading: True)
+    monkeypatch.setattr(funnel, "ideas", lambda items: [item])
+
+    selected = []
+    for run in ("first-fire", "second-fire"):
+        picked = funnel.shapeable_idea([item], "standard", {})
+        selected.append(picked.ref if picked is not None else None)
+        if picked is not None:
+            assert shape.apply_shape(
+                [picked], NOW, picked.ref, answer(), run=run, agent="muse"
+            ) == 0
+
+    assert selected == [None, None]
+    assert capsys.readouterr().out == ""
 
 
 def test_fresh_shape_facts_read_the_exact_project_item(monkeypatch):

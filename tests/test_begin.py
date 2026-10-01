@@ -2903,7 +2903,8 @@ def test_begin_keeps_review_first_against_same_class_later_jobs(monkeypatch, cap
         lambda items: breakdown_calls.append(items) or [pending],
     )
     monkeypatch.setattr(
-        funnel, "shapeable_idea", lambda items, tier, reading: idea
+        funnel, "shapeable_idea",
+        lambda items, tier, reading, skipped=None: idea,
     )
 
     result = _begin(monkeypatch, capsys, breakdown=True)
@@ -3013,7 +3014,10 @@ def test_review_lane_skips_a_backed_off_breakdown(monkeypatch, capsys):
     )
     monkeypatch.setattr(funnel, "review_queue", lambda items, tier: [])
     monkeypatch.setattr(funnel, "awaiting_breakdown", lambda items: [project])
-    monkeypatch.setattr(funnel, "shapeable_idea", lambda items, tier, reading: None)
+    monkeypatch.setattr(
+        funnel, "shapeable_idea",
+        lambda items, tier, reading, skipped=None: None,
+    )
     monkeypatch.setattr(funnel, "_backed_off_work",
                         lambda items, now: {project.ref: _backoff_row(project.ref)})
     _allow_begin(monkeypatch)
@@ -3126,7 +3130,7 @@ def _reviewer_begin(
     monkeypatch.setattr(
         funnel,
         "shapeable_idea",
-        lambda rows, tier, reading: idea,
+        lambda rows, tier, reading, skipped=None: idea,
     )
     monkeypatch.setattr(funnel, "_ticket_body", lambda repo, number: "")
 
@@ -3594,6 +3598,45 @@ def test_shape_offers_only_the_first_idea_matching_the_run_tier(
         "title": candidates[1].title,
     }
     assert len(calls) == 1
+
+
+def test_shape_picker_skips_with_children_and_records_the_skip(
+        monkeypatch, capsys
+):
+    import heartbeat
+
+    with_children = _idea(36, "Idea with children", "Risk: standard")
+    with_children.children_total = 1
+    next_idea = _idea(37, "Next idea", "Risk: standard")
+    candidates = [with_children, next_idea]
+    events = []
+
+    _allow_begin(monkeypatch)
+    monkeypatch.setattr(funnel, "reconcile_approved_merges", lambda *args: [])
+    monkeypatch.setattr(funnel, "ideas", lambda items: candidates)
+    monkeypatch.setattr(usage, "shaping_allowed", lambda reading: True)
+    monkeypatch.setattr(
+        heartbeat, "record_event",
+        lambda *args, **kwargs: events.append((args, kwargs)) or "pushed",
+    )
+
+    assert funnel.cmd_begin([], NOW, "zcode", "standard", False,
+                            breakdown=True) == 0
+    captured = capsys.readouterr()
+    result = json.loads(captured.out)
+
+    skipped = [{"ref": with_children.ref, "reason": "with-children"}]
+    assert result["do"] == "shape"
+    assert result["work"]["ref"] == next_idea.ref
+    assert result["shape_skipped"] == skipped
+    assert events == [(("zcode", "run-id", "skipped-stale-shape"), {
+        "queue": "shape",
+        "skipped": skipped,
+        "note": "shape picker skipped Ideas items with children",
+    })]
+    assert "run outcome: skipped-stale-shape ref={} reason=with-children".format(
+        with_children.ref
+    ) in captured.err
 
 
 @pytest.mark.parametrize(

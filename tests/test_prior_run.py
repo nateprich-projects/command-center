@@ -7,6 +7,7 @@ it costs as much as redoing the work.
 
 from __future__ import annotations
 
+import gzip
 import json
 import os
 import pathlib
@@ -16,6 +17,7 @@ import sys
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 import prior_run  # noqa: E402
+import session_logs  # noqa: E402
 
 
 def rollout(path, messages, cwd="/tmp/work", stamp="2026-09-05T08:00:00.000Z"):
@@ -69,6 +71,60 @@ def test_the_newest_matching_session_wins(tmp_path):
     os.utime(a, (1, 1))
     found = prior_run.candidates(str(tmp_path / "*.jsonl"), ["issues/42"], 99999)
     assert [os.path.basename(p) for p in found] == ["b.jsonl", "a.jsonl"]
+
+
+def test_codex_rollout_gzip_keeps_the_prior_run_digest(tmp_path):
+    raw = rollout(tmp_path / "rollout.jsonl", [
+        ("user", "Please inspect issue #42."),
+        ("assistant", "I will read the current branch first."),
+    ])
+    raw_digest = prior_run.digest(str(raw))
+    compressed = raw.with_name(raw.name + ".gz")
+    with raw.open("rb") as source, gzip.open(compressed, "wb") as target:
+        target.write(source.read())
+    raw.unlink()
+
+    found = prior_run.candidates(
+        str(tmp_path / "*.jsonl"), ["#42"], 99999, agent="codex")
+    assert found == [str(compressed)]
+    assert prior_run.digest(found[0]) == raw_digest
+    messages = prior_run.digest(found[0])["messages"]
+    assert [message["text"] for message in messages] == [
+        "Please inspect issue #42.",
+        "I will read the current branch first.",
+    ]
+
+
+def test_codex_archive_override_resolves_through_prior_run(
+        tmp_path, monkeypatch):
+    store = tmp_path / "internal" / "sessions"
+    relative = pathlib.Path("2026") / "09" / "30" / "rollout.jsonl"
+    raw = store / relative
+    raw.parent.mkdir(parents=True)
+    rollout(raw, [("user", "Recover the earlier work on issue #73.")])
+    expected = prior_run.digest(str(raw))
+
+    archive_base = tmp_path / "external-archive"
+    archived = archive_base / "codex" / relative
+    archived = archived.with_name(archived.name + ".gz")
+    archived.parent.mkdir(parents=True)
+    with raw.open("rb") as source, gzip.open(archived, "wb") as target:
+        target.write(source.read())
+    raw.unlink()
+
+    monkeypatch.delenv(session_logs.ARCHIVE_ROOT_ENV, raising=False)
+    assert session_logs.archive_root("codex") == (
+        "/Volumes/External SSD/Agent-Logs/codex")
+
+    monkeypatch.setitem(session_logs.STORE_ROOTS, "codex", str(store))
+    monkeypatch.setenv(session_logs.ARCHIVE_ROOT_ENV, str(archive_base))
+    pattern = str(store / "*" / "*" / "*" / "*.jsonl")
+    monkeypatch.setattr(prior_run, "CODEX_SESSIONS", pattern)
+
+    assert session_logs.archive_root("codex") == str(archive_base / "codex")
+    found = prior_run.candidates(pattern, ["#73"], 99999, agent="codex")
+    assert found == [str(archived)]
+    assert prior_run.digest(found[0]) == expected
 
 
 def test_a_session_that_never_mentions_the_ticket_is_not_a_candidate(tmp_path):

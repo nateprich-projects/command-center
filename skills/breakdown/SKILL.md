@@ -96,11 +96,33 @@ sentence in the body, add the `blocked` label, and comment
 
 ## Coverage
 
+### Study tickets
+
+For future breakdowns, each study ticket states its coverage bar. If the plan gives no bar, use 95%. Measure coverage as real records measured divided by intended real records.
+
+If measured coverage is below the bar, stop without posting results as findings and record the miss on the ticket. Close the ticket as blocked, leave the parent in Building, and make the rerun a new ticket under the same parent.
+
 Cover the plan's stated outcome, not its headings. Reread the plan, trace
 setup through dependencies and registration to the usable end state, and map
 each outcome to its tickets. **Anything deliberately left out, say so
 plainly** — silent omission is how a project looks finished while missing a
 third of itself.
+
+## Real-data validation
+
+For future breakdowns, apply this rule when any code ticket reads owner-local
+exports, links records across them, or asserts anything about real shape or
+coverage. In-flight breakdowns finish as ticketed.
+
+By default, the first ticket validates the fixtures against a real sample kept
+in an owner-only subdirectory under the documented runtime root and records
+the observed real shape. It posts a derived fixture-vs-real shape and coverage
+note on the validation ticket. Never commit real data: keep samples, raw records,
+and exports out of Git. Keep member-repository identifying details out of the
+note and this standard.
+
+Code tickets do not start until the validation ticket closes. If validation
+closes as blocked, record the reason and leave the code tickets unstarted.
 
 ## Capability
 

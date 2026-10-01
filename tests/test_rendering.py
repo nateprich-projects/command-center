@@ -132,7 +132,7 @@ def test_queue_keeps_single_repo_output_unchanged(capsys):
         "Waiting on Nate (1), bottom-up:\n"
         "  Building   Improve                  nateprich/beta#1                   1 day              Accept it?\n"
         "\n"
-        "Startable by Codex (1), ladder order:\n"
+        "Startable by Codex (1), start order (Bug turn: one in four; tier then oldest):\n"
         "  New (inherited)          nateprich/beta#3                   issue 3\n"
         "\n"
         "Approved, awaiting breakdown into tickets (1):\n"
@@ -151,7 +151,7 @@ def test_queue_empty_sections_keep_nothing_without_repo_headings(capsys):
         "Waiting on Nate (0), bottom-up:\n"
         "  nothing\n"
         "\n"
-        "Startable by Codex (0), ladder order:\n"
+        "Startable by Codex (0), start order (Bug turn: one in four; tier then oldest):\n"
         "  nothing\n"
     )
     assert "  nateprich/beta:\n" not in output

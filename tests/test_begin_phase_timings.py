@@ -56,7 +56,6 @@ def _patch_review_path(monkeypatch, *, stop_at=None):
     ):
         monkeypatch.setattr(funnel, name, reconcile(name))
 
-    monkeypatch.setattr(funnel, "begin_detail_candidates", lambda *args: [object()])
     monkeypatch.setattr(funnel, "ticket_pr_facts", lambda items: {})
     monkeypatch.setattr(funnel, "review_queue", lambda *args, **kwargs: [])
     monkeypatch.setattr(

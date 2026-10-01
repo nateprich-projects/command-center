@@ -2115,10 +2115,10 @@ REVIEW_IDLE_RETRIES="$(stream_idle_retries "$PACKET_FILE")"
 # `ticket` itself stays whole: the routine names it the branch ticket, and the
 # code that reads `ticket.ref` after the lister reads packet.json, not this
 # copy. Equality is of the whole entry, never its ref. A parent carries no
-# plan text (shape_ticket drops its body), so it never repeats `plan_md`,
-# which is the repository's plan.md. Comments stay as they are: #1801 bounds
-# them when a packet is built. The copy is written beside the packet, in the
-# owner-only run directory (#1240).
+# full body (shape_ticket drops it); its separate bounded `parent_rejected_excerpt`
+# is plan text, not a repeat of `plan_md`, which is the repository's plan.md.
+# Comments stay as they are: #1801 bounds them when a packet is built. The copy
+# is written beside the packet, in the owner-only run directory (#1240).
 LISTER_PACKET_FILE="$RUN_DIR/lister-packet.json"
 if ! python3 - "$PACKET_FILE" "$LISTER_PACKET_FILE" >"$DIAG_FILE" 2>&1 <<'PY'
 import json
@@ -2200,6 +2200,14 @@ unless a ticket asks for it. One checkable claim per entry, in the words of
 the ticket or the plan wherever it states one. Every later judge reads this
 list and nothing else, so a requirement missing here is never checked, and a
 vague one cannot be answered.
+
+Each `ticket` or `tickets` entry may carry `parent_rejected_excerpt`, the
+parent plan's bounded `Rejected` section. For every visible option in that
+field, when the diff touches the behaviour it governs, list it as a
+`Does not break: <the option>` row. These rows must remain rules to preserve,
+not work for the diff to implement. If
+`parent_rejected_excerpt_truncated` is true, use only the visible options and
+do not infer omitted text.
 
 The packet's `pr_body` (the PR description) and `pr_departures` (the entries
 of its Departures section) are the implementer's own claims. You may cite
@@ -2498,8 +2506,15 @@ blocking: mark unmet each assigned requirement it bears on. A
 the ticket's first Accept item begins `Reproduction:`,
 `reproduction: passes-on-base` does not meet that item, unless a Departure
 explains why the symptom does not reproduce at that seam; then weigh it.
+On any other ticket `reproduction: passes-on-base` is weighed, not blocking.
 `no signal`, `unsupported`, `not run` and `over budget` are weighed, not
-blocking. The `Risks:` in `pr_body` are where to look hardest. When `evidence`
+blocking. If `evidence` has a `rewrites prior fix: #N` line, confirm the diff
+still prevents that fix's failure and cite its test; mark unmet each assigned
+requirement it bears on when it does not. A deleted, skipped or weakened test
+in `test_weakening` that no ticket or Departure authorises is blocking: mark
+unmet each assigned requirement it bears on. A met result cites the changed
+line that does the work; an unmet result names the input, the path through
+the diff and the wrong outcome. The `Risks:` in `pr_body` are where to look hardest. When `evidence`
 is `unavailable`, or the packet has none, say so and judge as you otherwise
 would.
 

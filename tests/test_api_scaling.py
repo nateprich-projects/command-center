@@ -293,7 +293,9 @@ def test_project_item_list_is_compact_and_detail_read_is_candidate_bounded(
     assert "subIssues(" not in list_query
     assert "timelineItems(" not in list_query
 
-    funnel.hydrate_item_details(items, [items[0]])
+    funnel.hydrate_item_details(
+        items, [items[0]], include_history=True
+    )
 
     assert len(calls) == 2
     detail_query = " ".join(calls[1][0].split())
@@ -303,6 +305,26 @@ def test_project_item_list_is_compact_and_detail_read_is_candidate_bounded(
     assert "children: nodes(ids: $childIds)" in detail_query
     assert items[0].first_child_created_at is not None
     assert items[0].status_since is not None
+
+
+def test_detail_hydration_is_minimal_by_default(monkeypatch):
+    node = _node(1)
+    node["id"] = "project-item-1"
+    node["content"].pop("body", None)
+    item = funnel._from_node(node)
+    calls = []
+
+    monkeypatch.setattr(
+        funnel, "gh_graphql",
+        lambda query, **variables: calls.append((query, variables)),
+    )
+
+    funnel.hydrate_item_details([item])
+
+    assert calls == []
+    assert item.body_loaded is False
+    assert item.status_since is None
+    assert item.status_events == []
 
 
 def test_shared_startable_candidates_are_filtered_before_hydration(monkeypatch):
@@ -423,7 +445,7 @@ def test_detail_query_only_requests_child_times_for_items_with_children(
 
     monkeypatch.setattr(funnel, "gh_graphql", graphql)
 
-    funnel.hydrate_item_details(items)
+    funnel.hydrate_item_details(items, include_history=True)
 
     assert len(calls) == 1
     query, variables = calls[0]
@@ -441,6 +463,7 @@ def test_item_detail_request_assembles_combined_batch_document():
     query, variables, history_field, child_field = funnel._item_detail_request(
         ["project-item-1", "project-item-2", "project-item-3"],
         ["project-item-1"],
+        include_history=True,
     )
 
     assert query == funnel.ITEM_DETAILS_QUERY
@@ -452,6 +475,102 @@ def test_item_detail_request_assembles_combined_batch_document():
     assert child_field == "children"
     assert "history: nodes(ids: $ids)" in query
     assert "children: nodes(ids: $childIds)" in query
+
+
+def test_item_detail_request_includes_body_only_when_requested():
+    query, variables, history_field, child_field = funnel._item_detail_request(
+        ["project-item-1"], [], include_body=True,
+    )
+
+    assert query != funnel.ITEM_TIMELINE_DETAILS_QUERY
+    assert query.count("          body\n") == 1
+    assert "timelineItems(" in query
+    assert variables == {"ids": ["project-item-1"]}
+    assert history_field == "nodes"
+    assert child_field is None
+
+
+def test_targeted_body_hydration_replaces_a_stale_project_body(monkeypatch):
+    node = _node(2, parent=1)
+    node["id"] = "project-item-2"
+    node["content"]["body"] = "stale body"
+    item = funnel._from_node(node)
+    calls = []
+
+    def graphql(query, **variables):
+        calls.append((query, variables))
+        return {
+            "nodes": [{
+                "id": "project-item-2",
+                "content": {
+                    "body": "fresh body after claim",
+                    "timelineItems": {"nodes": [{
+                        "__typename": "ProjectV2ItemStatusChangedEvent",
+                        "createdAt": "2026-09-09T00:00:00Z",
+                        "previousStatus": "Ready",
+                        "status": "Building",
+                        "project": {"number": funnel.PROJECT_NUMBER},
+                    }]},
+                },
+            }],
+        }
+
+    monkeypatch.setattr(funnel, "gh_graphql", graphql)
+
+    funnel.hydrate_item_details([item], [item], include_body=True)
+
+    assert len(calls) == 1
+    query, variables = calls[0]
+    assert "body" in query
+    assert variables == {"ids": ["project-item-2"]}
+    assert item.body == "fresh body after claim"
+    assert item.body_loaded is True
+    assert item.status_since == funnel.parse_time("2026-09-09T00:00:00Z")
+
+
+def test_body_hydration_fails_when_the_detail_response_misses_the_field(
+    monkeypatch,
+):
+    node = _node(2, parent=1)
+    node["id"] = "project-item-2"
+    item = funnel._from_node(node)
+
+    monkeypatch.setattr(
+        funnel, "gh_graphql",
+        lambda *_args, **_kwargs: {"nodes": [{
+            "id": "project-item-2",
+            "content": {"timelineItems": {"nodes": []}},
+        }]},
+    )
+
+    with pytest.raises(funnel.GitHubError, match="omitted issue body"):
+        funnel.hydrate_item_details([item], [item], include_body=True)
+
+
+def test_body_hydration_keeps_the_existing_id_batch_cap(monkeypatch):
+    nodes = [_node(number) for number in range(1, 102)]
+    for node in nodes:
+        node["id"] = "project-item-{}".format(node["content"]["number"])
+    items = [funnel._from_node(node) for node in nodes]
+    calls = []
+
+    def graphql(query, **variables):
+        calls.append((query, variables))
+        return {"nodes": [{
+            "id": item_id,
+            "content": {
+                "body": "fresh " + item_id,
+                "timelineItems": {"nodes": []},
+            },
+        } for item_id in variables["ids"]]}
+
+    monkeypatch.setattr(funnel, "gh_graphql", graphql)
+
+    funnel.hydrate_item_details(items, include_body=True)
+
+    assert [len(variables["ids"]) for _query, variables in calls] == [100, 1]
+    assert all("body" in query for query, _variables in calls)
+    assert all(item.body == "fresh " + item.item_id for item in items)
 
 
 def test_detail_batches_keep_child_nodes_with_their_history_batch(monkeypatch):
@@ -478,7 +597,7 @@ def test_detail_batches_keep_child_nodes_with_their_history_batch(monkeypatch):
 
     monkeypatch.setattr(funnel, "gh_graphql", graphql)
 
-    funnel.hydrate_item_details(items)
+    funnel.hydrate_item_details(items, include_history=True)
 
     assert len(calls) == 2
     assert calls[0][0] == funnel.ITEM_TIMELINE_DETAILS_QUERY
@@ -527,7 +646,7 @@ def test_timeline_only_detail_query_handles_batches_without_children(
 
     monkeypatch.setattr(funnel, "gh_graphql", graphql)
 
-    funnel.hydrate_item_details(items)
+    funnel.hydrate_item_details(items, include_history=True)
 
     assert len(calls) == 1
     assert "subIssues(" not in calls[0][0]
@@ -581,7 +700,7 @@ def test_time_at_gate_uses_latest_current_project_status_event(monkeypatch):
 
     monkeypatch.setattr(funnel, "gh_graphql", graphql)
 
-    funnel.hydrate_item_details([item])
+    funnel.hydrate_item_details([item], include_history=True)
 
     assert item.status_since == funnel.parse_time("2026-09-09T00:00:00Z")
     assert [event["at"] for event in item.status_events] == [
@@ -809,6 +928,24 @@ def test_the_split_pr_scan_keeps_the_newest_row_first(monkeypatch):
     # The open row still derives its verdict from its own tail.
     open_row = next(row for row in rows if row["state"] == "OPEN")
     assert open_row["verdict"]["verdict"] == "approved"
+
+
+def test_missing_created_at_ticket_fact_matches_single_all_states_read(monkeypatch):
+    """A missing timestamp must not let the open-read row win the tie.
+
+    The single all-states read reported merged PR #50 first for this branch;
+    the split reads must report the same ticket fact when neither row has a
+    ``createdAt`` field.
+    """
+    merged = _pr_row(50, state="MERGED", created_at=None)
+    opened = _pr_row(49, state="OPEN", created_at=None)
+    merged.pop("createdAt")
+    opened.pop("createdAt")
+    _split_pr_scan(monkeypatch, {"OPEN": (opened,), "MERGED": (merged,)})
+
+    facts = funnel.ticket_pr_facts([_item(11, parent=10)])
+
+    assert facts.rows_by_ref["{}#11".format(REPO)][0]["number"] == 50
 
 
 def test_a_pr_merged_between_the_two_reads_is_kept_once_as_merged():

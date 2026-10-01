@@ -994,6 +994,14 @@ def test_packet_carries_every_field():
     assert found["plan_md"] == "# design record"
     assert found["plan_md_missing"] is False
     assert found["diff"].startswith("diff --git")
+    assert found["test_weakening"] == {
+        "deleted_test_functions": {
+            "count": 0, "items": [], "truncated": False},
+        "removed_assert_lines": {
+            "count": 0, "items": [], "truncated": False},
+        "added_skip_or_xfail": {
+            "count": 0, "items": [], "truncated": False},
+    }
     assert found["changed_files"] == ["funnel.py"]
     assert found["ci"]["state"] == "green"
     assert found["ci"]["checks"] == [
@@ -1008,6 +1016,130 @@ def test_packet_carries_every_field():
     assert found["stop_auto_merging"] == STOP_COUNTER
     assert found["collected_at"] == "2026-09-13T00:00:00+00:00"
     json.dumps(found)  # the packet is JSON by contract
+
+
+def test_packet_lists_deleted_test_functions():
+    diff = """diff --git a/tests/test_removed.py b/tests/test_removed.py
+index 1111111..2222222 100644
+--- a/tests/test_removed.py
++++ /dev/null
+@@ -1,2 +0,0 @@
+-def test_removed_behavior():
+-    assert calculate() == 3
+"""
+
+    report = packet(diff=diff)["test_weakening"]["deleted_test_functions"]
+
+    assert report == {
+        "count": 1,
+        "items": ["tests/test_removed.py::test_removed_behavior"],
+        "truncated": False,
+    }
+
+
+def test_packet_lists_removed_assert_lines_from_test_files():
+    diff = """diff --git a/tests/test_values.py b/tests/test_values.py
+index 1111111..2222222 100644
+--- a/tests/test_values.py
++++ b/tests/test_values.py
+@@ -1,3 +1,2 @@
+ def test_value():
+-    assert calculate() == 3
+     assert ready
+diff --git a/engine/values.py b/engine/values.py
+index 1111111..2222222 100644
+--- a/engine/values.py
++++ b/engine/values.py
+@@ -1 +1,0 @@
+-    assert invariant
+"""
+
+    report = packet(diff=diff)["test_weakening"]["removed_assert_lines"]
+
+    assert report == {
+        "count": 1,
+        "items": ["tests/test_values.py: assert calculate() == 3"],
+        "truncated": False,
+    }
+
+
+def test_packet_lists_added_skip_xfail_markers_and_pytest_skip_calls():
+    diff = """diff --git a/tests/test_skip.py b/tests/test_skip.py
+index 1111111..2222222 100644
+--- a/tests/test_skip.py
++++ b/tests/test_skip.py
+@@ -1,0 +1,4 @@
++@pytest.mark.skip(reason="not ready")
++@pytest.mark.skipif(True, reason="platform")
++@pytest.mark.xfail(reason="known issue")
++    pytest.skip("missing fixture")
+"""
+
+    report = packet(diff=diff)["test_weakening"]["added_skip_or_xfail"]
+
+    assert report == {
+        "count": 4,
+        "items": [
+            'tests/test_skip.py: @pytest.mark.skip(reason="not ready")',
+            'tests/test_skip.py: @pytest.mark.skipif(True, reason="platform")',
+            'tests/test_skip.py: @pytest.mark.xfail(reason="known issue")',
+            'tests/test_skip.py: pytest.skip("missing fixture")',
+        ],
+        "truncated": False,
+    }
+
+
+def test_packet_does_not_report_moved_or_renamed_tests_as_deleted():
+    diff = """diff --git a/tests/test_old.py b/tests/test_new.py
+similarity index 100%
+rename from tests/test_old.py
+rename to tests/test_new.py
+--- a/tests/test_old.py
++++ b/tests/test_new.py
+@@ -1,2 +1,2 @@
+-def test_moved():
++def test_moved():
+     assert value == 1
+diff --git a/tests/test_rename.py b/tests/test_rename.py
+index 1111111..2222222 100644
+--- a/tests/test_rename.py
++++ b/tests/test_rename.py
+@@ -1,2 +1,2 @@
+-def test_before_rename():
++def test_after_rename():
+     assert value == 2
+"""
+
+    report = packet(diff=diff)["test_weakening"]["deleted_test_functions"]
+
+    assert report == {"count": 0, "items": [], "truncated": False}
+
+
+def test_packet_caps_each_test_weakening_list_and_keeps_counts():
+    removed = []
+    added = []
+    for index in range(review.TEST_WEAKENING_ITEM_LIMIT + 1):
+        removed.extend([
+            "-def test_removed_{:02d}():".format(index),
+            "-    assert value == {:02d}".format(index),
+        ])
+        added.append(
+            '+    pytest.skip("skip {:02d}")'.format(index))
+    diff = "\n".join([
+        "diff --git a/tests/test_many.py b/tests/test_many.py",
+        "index 1111111..2222222 100644",
+        "--- a/tests/test_many.py",
+        "+++ b/tests/test_many.py",
+        "@@ -1,42 +1,21 @@",
+    ] + removed + added) + "\n"
+
+    report = packet(diff=diff)["test_weakening"]
+
+    for name in ("deleted_test_functions", "removed_assert_lines",
+                 "added_skip_or_xfail"):
+        assert report[name]["count"] == review.TEST_WEAKENING_ITEM_LIMIT + 1
+        assert len(report[name]["items"]) == review.TEST_WEAKENING_ITEM_LIMIT
+        assert report[name]["truncated"] is True
 
 
 def test_packet_ci_section_renders_per_check_conclusions_at_its_head():
@@ -1219,7 +1351,9 @@ def test_packet_without_a_ticket_branch_has_no_ticket_body():
     found = packet(pr_view=view, ticket=None)
     assert found["ticket"] == {
         "ref": None, "number": None, "title": None, "url": None,
-        "body": None, "risk": None, "parent": None, "comments": []}
+        "body": None, "risk": None, "parent": None, "comments": [],
+        "parent_rejected_excerpt": "",
+        "parent_rejected_excerpt_truncated": False}
 
 
 def test_packet_marks_a_missing_plan():
@@ -1227,12 +1361,86 @@ def test_packet_marks_a_missing_plan():
     assert found["plan_md"] == "" and found["plan_md_missing"] is True
 
 
-def test_a_plan_md_over_64k_characters_is_cut_and_marked():
-    """Context is bounded, never rejected (#1801)."""
-    found = packet(plan_md="d" * 65546, verdict=None)
-    assert found["plan_md"] == "d" * 65536 + "\n…[truncated 10 chars]"
-    assert found["precheck"] == {"pass": True, "reasons": []}
-    assert packet(plan_md="d" * 65536)["plan_md"] == "d" * 65536
+def test_current_plan_plus_6000_chars_keeps_verification_status_whole():
+    current_plan = (ROOT / "plan.md").read_text()
+    source = current_plan + "x" * 6000
+    verification_tail = current_plan[
+        current_plan.index("## Verification status"):]
+
+    found = packet(plan_md=source, verdict=None)
+
+    assert found["plan_md"].endswith(verification_tail + "x" * 6000)
+
+
+def test_plan_md_at_or_under_96000_characters_passes_unchanged():
+    assert review.PLAN_MD_LIMIT == 96_000
+    for size in (95_999, 96_000):
+        source = "d" * size
+        assert packet(plan_md=source, verdict=None)["plan_md"] == source
+
+
+@pytest.mark.parametrize(
+    ("filler_size", "omitted", "kept"),
+    [
+        (87_900, ("The problem",),
+         ("Scope and membership", "Surfaces", "Architecture")),
+        (91_000, ("The problem", "Surfaces"),
+         ("Scope and membership", "Architecture")),
+        (93_000, ("The problem", "Surfaces", "Scope and membership"),
+         ("Architecture",)),
+        (95_000, ("The problem", "Surfaces", "Scope and membership",
+                  "Architecture"), ()),
+    ],
+)
+def test_plan_md_drops_named_sections_in_priority_order_before_protected_tail(
+        filler_size, omitted, kept):
+    source = (
+        "## The problem\n" + "p" * 2_000 + "\n"
+        "## Scope and membership\n" + "s" * 2_000 + "\n"
+        "## Surfaces\n" + "u" * 2_000 + "\n"
+        "## Architecture\n" + "a" * 2_000 + "\n"
+        "## The funnel\n" + "f" * filler_size + "\n"
+        "## Decisions settled at build kickoff (2026-09-05)\n"
+        "Keep the settled decisions.\n"
+        "## Verification status\n"
+        "Keep the verification status.\n"
+    )
+
+    found = packet(plan_md=source, verdict=None)["plan_md"]
+
+    for title in omitted:
+        assert f"[section omitted: {title}]" in found
+    for title in kept:
+        assert f"## {title}\n" in found
+        assert f"[section omitted: {title}]" not in found
+    assert "Keep the settled decisions." in found
+    assert "Keep the verification status." in found
+    assert len(found) <= review.PLAN_MD_LIMIT
+
+
+def test_plan_md_continued_growth_drops_other_sections_before_protected_tail():
+    source = (
+        "## The problem\n" + "p" * 500 + "\n"
+        "## Surfaces\n" + "u" * 500 + "\n"
+        "## Scope and membership\n" + "s" * 500 + "\n"
+        "## Architecture\n" + "a" * 500 + "\n"
+        "## The funnel\n" + "f" * 52_000 + "\n"
+        "## Two queues, two orderings\n" + "q" * 51_000 + "\n"
+        "## Decisions settled at build kickoff (2026-09-05)\n"
+        "Keep the settled decisions.\n"
+        "## Verification status\n"
+        "Keep the verification status.\n"
+    )
+
+    found = packet(plan_md=source, verdict=None)["plan_md"]
+
+    for title in ("The problem", "Surfaces", "Scope and membership",
+                  "Architecture", "The funnel"):
+        assert f"[section omitted: {title}]" in found
+    assert "## Two queues, two orderings\n" in found
+    assert "Keep the settled decisions." in found
+    assert "Keep the verification status." in found
+    assert len(found) <= review.PLAN_MD_LIMIT
 
 
 def test_a_ticket_body_over_20000_characters_is_cut_and_marked():
@@ -1592,6 +1800,115 @@ def test_packet_carries_parent_comments_with_the_same_shape_and_caps():
          "voice": "unknown",
          "body": "z" * 4000 + "\n…[truncated 100 chars]"},
     ]
+    json.dumps(found)
+
+
+def test_shape_ticket_extracts_only_the_first_parent_rejected_section():
+    body = (
+        "# Parent plan\n\n"
+        "## Accepted\nKeep this out of the ticket packet.\n\n"
+        "## Rejected\n- Keep the existing boundary.\n"
+        "### Detail\nThis nested heading stays in the section.\n"
+        "## Follow-up\nThis later section is not carried.\n"
+        "## Rejected\nOnly the first matching section is used.\n"
+    )
+
+    shaped = review.shape_ticket(ticket(parent={"body": body, "comments": []}))
+
+    assert shaped["parent_rejected_excerpt"] == (
+        "## Rejected\n- Keep the existing boundary.\n"
+        "### Detail\nThis nested heading stays in the section.\n"
+    )
+    assert shaped["parent_rejected_excerpt_truncated"] is False
+    assert "body" not in shaped["parent"]
+
+
+def test_shape_ticket_returns_an_empty_rejected_excerpt_when_missing():
+    shaped = review.shape_ticket(ticket(parent={
+        "body": (
+            "# Parent plan\n\n"
+            "```markdown\n## Rejected\nThis is an example, not a section.\n````\n"
+            "## Accepted\nKeep this plan choice.\n"
+        ),
+        "comments": [],
+    }))
+
+    assert shaped["parent_rejected_excerpt"] == ""
+    assert shaped["parent_rejected_excerpt_truncated"] is False
+
+
+def test_shape_ticket_bounds_parent_rejected_excerpt_on_a_line_boundary():
+    lines = ["## Rejected\n"] + [
+        "- option {} {}\n".format(index, "x" * 100)
+        for index in range(30)
+    ] + ["## Accepted\nDo not include this section.\n"]
+    body = "# Parent plan\n\n" + "".join(lines)
+
+    shaped = review.shape_ticket(ticket(parent={"body": body, "comments": []}))
+    excerpt = shaped["parent_rejected_excerpt"]
+    marker = review.PARENT_REJECTED_TRUNCATION_MARKER
+    prefix = excerpt[:excerpt.index(marker)]
+
+    assert len(excerpt) <= review.PARENT_REJECTED_EXCERPT_LIMIT
+    assert excerpt.endswith(marker)
+    assert prefix.endswith("\n")
+    assert "".join(lines).startswith(prefix)
+    assert shaped["parent_rejected_excerpt_truncated"] is True
+
+
+def test_parent_rejected_excerpt_uses_the_remaining_ticket_body_budget():
+    remaining = 80
+    parent_body = (
+        "## Rejected\n"
+        "- Keep the current boundary.\n"
+        "- {}\n"
+    ).format("x" * 100)
+    shaped = review.shape_ticket(ticket(
+        body="x" * (review.TICKET_BODY_LIMIT - remaining),
+        parent={"body": parent_body, "comments": []},
+    ))
+
+    excerpt = shaped["parent_rejected_excerpt"]
+    assert len(shaped["body"]) + len(excerpt) <= review.TICKET_BODY_LIMIT
+    assert excerpt.startswith("## Rejected\n- Keep the current boundary.\n")
+    assert excerpt.endswith(review.PARENT_REJECTED_TRUNCATION_MARKER)
+    assert shaped["parent_rejected_excerpt_truncated"] is True
+
+
+def test_shape_ticket_matches_casefolded_rejected_heading_variants():
+    body = (
+        "# Parent plan\n"
+        "# rEjEcTeD ###\n- keep this choice\n"
+        "### Detail\nNested content remains.\n"
+        "# Accepted\nThis follows the same-level heading.\n"
+    )
+
+    shaped = review.shape_ticket(ticket(parent={"body": body, "comments": []}))
+
+    assert shaped["parent_rejected_excerpt"] == (
+        "# rEjEcTeD ###\n- keep this choice\n"
+        "### Detail\nNested content remains.\n"
+    )
+    assert shaped["parent_rejected_excerpt_truncated"] is False
+
+
+def test_packet_wires_parent_rejected_excerpt_and_keeps_other_body_text_out():
+    body = (
+        "# Parent plan\n\n"
+        "## Rejected\n- Keep the bounded, dedicated field.\n\n"
+        "## Accepted\nDo not carry this parent prose.\n"
+    )
+    parent = {"number": 1, "ref": REPO + "#1", "body": body,
+              "comments": []}
+
+    found = packet(ticket=ticket(parent=parent))
+
+    for shaped in (found["ticket"], found["tickets"][0]):
+        assert shaped["parent_rejected_excerpt"] == (
+            "## Rejected\n- Keep the bounded, dedicated field.\n\n")
+        assert shaped["parent_rejected_excerpt_truncated"] is False
+        assert "body" not in shaped["parent"]
+        assert "Accepted" not in shaped["parent_rejected_excerpt"]
     json.dumps(found)
 
 

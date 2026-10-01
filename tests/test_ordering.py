@@ -1932,6 +1932,78 @@ def test_a_bug_free_board_pulls_exactly_as_it_did_before_the_bug_turn_order():
 # takes it, not where ``startable()`` alone would rank it.
 
 
+def _readiness_bug_board():
+    """An ineligible tier-1 Bug ahead of a startable tier-3 Bug."""
+    rows = [
+        tier_project(TOOLING, 1, "Building", "Bug", days=12),
+        tier_ticket(TOOLING, 2, 1, days=12),
+        tier_project(HOBBY, 3, "Building", "Bug", days=10),
+        tier_ticket(HOBBY, 4, 3, days=10),
+    ]
+    for parent, child in ((5, 6), (7, 8), (9, 10)):
+        rows += [
+            tier_project(HOBBY, parent, "Building", "Improve"),
+            tier_ticket(HOBBY, child, parent),
+        ]
+    readiness = {
+        TOOLING: funnel.MemberRepoReadiness(
+            TOOLING, topic=True, ci_workflow=False,
+            stock_labels=(), dependabot=False,
+        ),
+        HOBBY: funnel.MemberRepoReadiness(
+            HOBBY, topic=True, ci_workflow=True,
+            stock_labels=(), dependabot=False,
+        ),
+    }
+    return rows, readiness
+
+
+def test_projection_gives_no_turn_or_start_to_repo_readiness_withheld_work():
+    rows, readiness = _readiness_bug_board()
+
+    # The projection must not count the readiness-withheld tier-1 Bug as a
+    # start; one-in-four and then three Improvements give this hand-worked order.
+    assert funnel.projected_pull_order(
+        rows, NOW, recent_starts=[], repo_readiness=readiness
+    ) == [
+        HOBBY + "#4", HOBBY + "#6", HOBBY + "#8", HOBBY + "#10",
+    ]
+
+
+def test_begin_still_withholds_repo_readiness_blocked_tickets():
+    rows, readiness = _readiness_bug_board()
+
+    assert next_ticket(
+        rows, NOW, repo_readiness=readiness, recent_starts=[]
+    ).ref == HOBBY + "#4"
+    assert funnel.readiness_blockers(rows, repo_readiness=readiness) == [
+        {"ref": TOOLING + "#2", "repo": TOOLING,
+         "reasons": ["no CI workflow"]},
+    ]
+
+
+def test_queue_lists_the_readiness_bug_on_the_turn_begin_takes_it(
+    monkeypatch, capsys
+):
+    rows, readiness = _readiness_bug_board()
+    monkeypatch.setattr(funnel, "finished_by_comments_runs", lambda _items: set())
+    monkeypatch.setattr(funnel, "_backoff_rows", lambda: [])
+    monkeypatch.setattr(
+        funnel, "_backed_off_work", lambda _items, _now, rows=None: {}
+    )
+    monkeypatch.setattr(funnel, "recent_ticket_starts", lambda _rows: [])
+
+    assert funnel.cmd_queue(
+        rows, NOW, repo_readiness=readiness, pr_facts={}
+    ) == 0
+    listed = capsys.readouterr().out.split("Startable by Codex", 1)[1]
+
+    assert [
+        int(line.split(HOBBY + "#", 1)[1].split()[0])
+        for line in listed.splitlines() if HOBBY + "#" in line
+    ] == [4, 6, 8, 10]
+
+
 def _successive_starts(rows, history):
     """What one lane starts, pull after pull, found without the projection.
 
@@ -2039,6 +2111,64 @@ def test_bugs_show_on_the_turns_begin_takes_them(bug_repo, history, expected):
         for ref in funnel.projected_pull_order(
             rows, NOW, recent_starts=history)
     ] == expected
+
+
+@_pytest.mark.parametrize("needs", ["human", "claude-code-environment"])
+@_pytest.mark.parametrize("with_bugs", [False, True],
+                           ids=["bug-free", "with-bugs"])
+def test_unclaimable_ready_step_does_not_commit_sibling_bugs_off_turn(
+    needs, with_bugs,
+):
+    """A human step under a Ready Bug does not commit its Bug siblings.
+
+    Reproduction from origin/main: the Bug-free projection is [2, 11, 13, 15]
+    and begin starts [11, 13, 15]. With sibling Bugs, projection was
+    [2, 3, 4, 11, 13, 15] while begin started [11, 13, 15, 3, 4];
+    promoting the Ready Bug to Building leaked its siblings off-turn.
+    """
+    ready_class = "Bug" if with_bugs else "Improve"
+    ready_children = 3 if with_bugs else 1
+    ready_project = project(1, "Ready", ready_class, children=ready_children)
+    unclaimable = ticket(2, 1, needs=needs)
+    bug_siblings = [ticket(3, 1), ticket(4, 1)] if with_bugs else []
+    newly_unblocked = [
+        (project(parent, "Ready", "Improve"),
+         ticket(number, parent, open_blockers=[unclaimable.ref]))
+        for parent, number in ((10, 11), (12, 13), (14, 15))
+    ]
+    rows = [ready_project, unclaimable, *bug_siblings]
+    for parent, child in newly_unblocked:
+        rows.extend((parent, child))
+
+    history = ["Bug"]
+    projected = funnel.projected_pull_order(
+        rows, NOW, recent_starts=history
+    )
+    expected_projection = [2, 11, 13, 15]
+    expected_begin = [11, 13, 15]
+    if with_bugs:
+        expected_projection += [3, 4]
+        expected_begin += [3, 4]
+    begin_rows = [copy.copy(row) for row in rows]
+    begin_by_ref = {row.ref: row for row in begin_rows}
+    begin_by_ref[unclaimable.ref].state = "CLOSED"
+    begin_parent = begin_by_ref[ready_project.ref]
+    begin_parent.children_done += 1
+    if begin_parent.children_done >= begin_parent.children_total:
+        begin_parent.state = "CLOSED"
+    for row in begin_rows:
+        row.open_blockers = [
+            ref for ref in row.open_blockers if ref != unclaimable.ref
+        ]
+    begin_picks, _moved = _successive_starts(begin_rows, history)
+    projected_numbers = [int(ref.rsplit("#", 1)[1]) for ref in projected]
+    projected_starts = [
+        number for number in projected_numbers if number != unclaimable.number
+    ]
+    begin_numbers = [int(ref.rsplit("#", 1)[1]) for ref in begin_picks]
+    assert projected_starts == begin_numbers
+    assert projected_numbers == expected_projection
+    assert begin_numbers == expected_begin
 
 
 @_pytest.mark.parametrize("under_way", ["claimed", "in review", "human"])

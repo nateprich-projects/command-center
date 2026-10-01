@@ -10199,17 +10199,18 @@ class BeginReserveStop(RuntimeError):
         super().__init__(str(result.get("why") or "begin reserve gate"))
 
 
-# `gh api graphql` occasionally returns a partial JSON document. The CLI
-# reports the same condition as `unexpected end of JSON input` when it cannot
-# decode the response itself. Keep this retry deliberately narrow: a real
-# GraphQL error, an exhausted route, or an ordinary CLI failure must still
-# stop on its first attempt.
+# `gh api graphql` can return a partial JSON document, a reset HTTP/2 stream,
+# or a malformed response body. Keep retries limited to observed response
+# failures: a real GraphQL error, an exhausted route, or an ordinary CLI
+# failure must still stop on its first attempt.
 GRAPHQL_MAX_ATTEMPTS = 3
 GRAPHQL_RETRY_DELAY_SECONDS = 0.5
-GRAPHQL_TRUNCATED_RESPONSE_SIGNALS = (
+GRAPHQL_RETRYABLE_RESPONSE_SIGNALS = (
     "unexpected end of json input",
     "unexpected end of input",
     "unexpected eof",
+    "stream error: stream id",
+    "in string escape code",
 )
 # A gateway error is GitHub's server timing out, not an answer. The batched PR
 # scan runs close to that ~10 s limit, so one 502 or 504 used to fail a whole
@@ -10398,10 +10399,10 @@ def _graphql_request_id(text: object) -> Optional[str]:
     return match.group(1) if match else None
 
 
-def _is_truncated_graphql_text(text: object) -> bool:
-    """Whether CLI text identifies the known partial-response failure."""
+def _is_retryable_graphql_error_text(text: object) -> bool:
+    """Whether CLI text identifies a known transient response failure."""
     lowered = _graphql_text(text).lower()
-    return any(signal in lowered for signal in GRAPHQL_TRUNCATED_RESPONSE_SIGNALS)
+    return any(signal in lowered for signal in GRAPHQL_RETRYABLE_RESPONSE_SIGNALS)
 
 
 def _is_gateway_error_text(text: object) -> bool:
@@ -10827,7 +10828,9 @@ def gh_graphql(query: str, **variables) -> dict:
                 gateway = _is_gateway_error_text(detail)
                 error = GitHubError(
                     detail,
-                    transient=gateway or _is_truncated_graphql_text(stderr),
+                    transient=(
+                        gateway or _is_retryable_graphql_error_text(detail)
+                    ),
                     request_id=request_id or last_request_id,
                 )
                 if not error.transient or attempt + 1 >= GRAPHQL_MAX_ATTEMPTS:

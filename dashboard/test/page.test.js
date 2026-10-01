@@ -4,7 +4,8 @@ import test from "node:test";
 
 import {
   STAGES, age, boardColumns, boardTabCounts, boardTabFromUrl, boardTabUrl, tabColumns,
-  failureState, museUsageText, nextOwner, ownerCell,
+  failureState, museUsageText, claudeUsage, claudeUsageChanged, snapshotNeedsRender,
+  renderUsage, nextOwner, ownerCell,
   phoneState, pipState, projectBlocked, projectHold, holdChip, renderPhoneBoard, ticketHold, unblocksChip,
   repoLabels, repoOf,
   repoOptions, rowTier, shortRepo, visible, renderExecutionTiles, requestMetrics,
@@ -566,10 +567,14 @@ test("the phone progress shows its count once (#994)", async () => {
   assert.match(source, /element\("span", "pip-count", `\$\{closed\}\/\$\{total\}`\)/);
 });
 
-test("the page polls its own snapshot and re-renders only on a new timestamp", async () => {
+test("the page poll refreshes usage age and detects changed provider fields", async () => {
   const source = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
   assert.match(source, /setInterval/);
-  assert.match(source, /generatedAt === lastGeneratedAt/);
+  const poll = source.slice(
+    source.indexOf("async function loadSnapshot("), source.indexOf("\nfunction activateTab("),
+  );
+  assert.match(poll, /snapshotNeedsRender\(lastSnapshot, snapshot, lastGeneratedAt\)/);
+  assert.match(poll, /renderUsage\(snapshot\.usage \|\| \{\}\)/);
   // A hidden tab is not read, so it should not poll.
   assert.match(source, /visibilityState === "hidden"/);
 });
@@ -715,6 +720,88 @@ test("the usage line shows rolling 7-day Muse spend against the cap", () => {
     museUsageText({ spent_dollars: "0.70", cap_dollars: 20.0, used_percent: 3.5 }),
     null,
   );
+});
+
+test("Claude weekly usage shows the exact percentage and recomputed sample age", () => {
+  const now = Date.parse("2026-10-01T19:00:00Z");
+  const sample = new Date(now - 45 * 60 * 1000).toISOString();
+  assert.deepEqual(
+    claudeUsage({ u: { sd: 42.375 }, t: sample }, now),
+    { state: "live", percent: 42.375, ageText: "45m old" },
+  );
+
+  const container = new TestNode("div");
+  const previousDocument = globalThis.document;
+  globalThis.document = {
+    createElement(tagName) { return new TestNode(tagName); },
+    querySelector(selector) {
+      assert.equal(selector, "#usage");
+      return container;
+    },
+  };
+  try {
+    renderUsage({ claude: { u: { sd: 42.375 }, t: sample } }, now);
+    const row = container.querySelectorAll(".usage")[0];
+    assert.equal(row.querySelector(".usage-percent").textContent, "42.375%");
+    assert.equal(row.querySelector(".usage-age").textContent, "45m old");
+    assert.match(row.textContent, /Claude weekly usage/);
+
+    renderUsage({ claude: { u: { sd: 42.375 }, t: sample } }, now + 30 * 60 * 1000);
+    assert.equal(container.querySelector(".usage-age").textContent, "1h old");
+
+    renderUsage({ claude: { u: { sd: 42.375 }, t: now / 1000 - 91 * 60 } }, now);
+    const staleRow = container.querySelectorAll(".usage")[0];
+    assert.match(staleRow.textContent, /Stale/);
+    assert.equal(staleRow.querySelector(".usage-percent"), null);
+
+    renderUsage({}, now);
+    const unavailableRow = container.querySelectorAll(".usage")[0];
+    assert.match(unavailableRow.textContent, /Unavailable/);
+    assert.equal(unavailableRow.querySelector(".usage-fill"), null);
+  } finally {
+    if (previousDocument === undefined) delete globalThis.document;
+    else globalThis.document = previousDocument;
+  }
+});
+
+test("Claude weekly usage is live through 90 minutes, then stale without a percentage", () => {
+  const now = Date.parse("2026-10-01T19:00:00Z");
+  const atLimit = (now - 90 * 60 * 1000) / 1000;
+  assert.equal(claudeUsage({ u: { sd: 42.375 }, t: atLimit }, now).state, "live");
+  assert.deepEqual(
+    claudeUsage({ u: { sd: 42.375 }, t: atLimit - 1 }, now),
+    { state: "stale", ageText: "1h old" },
+  );
+});
+
+test("Claude weekly usage is unavailable when its provider fields are missing or malformed", () => {
+  const now = Date.parse("2026-10-01T19:00:00Z");
+  const validTime = new Date(now).toISOString();
+  assert.deepEqual(claudeUsage(null, now), { state: "unavailable" });
+  assert.deepEqual(claudeUsage({ u: {}, t: validTime }, now), { state: "unavailable" });
+  assert.deepEqual(claudeUsage({ u: { sd: "42" }, t: validTime }, now), { state: "unavailable" });
+  assert.deepEqual(claudeUsage({ u: { sd: 42 }, t: "bad timestamp" }, now), { state: "unavailable" });
+});
+
+test("same-timestamp snapshots re-render when the published Claude sample changes", () => {
+  const previous = {
+    generated_at: "2026-10-01T19:00:00Z",
+    usage: { claude: { u: { sd: 42 }, t: "2026-10-01T18:30:00Z" } },
+  };
+  assert.equal(claudeUsageChanged(previous.usage.claude, {
+    u: { sd: 43 }, t: previous.usage.claude.t,
+  }), true);
+  assert.equal(claudeUsageChanged(previous.usage.claude, {
+    u: previous.usage.claude.u, t: "2026-10-01T18:31:00Z",
+  }), true);
+  assert.equal(snapshotNeedsRender(previous, {
+    generated_at: previous.generated_at,
+    usage: { claude: { u: { sd: 43 }, t: previous.usage.claude.t } },
+  }, previous.generated_at), true);
+  assert.equal(snapshotNeedsRender(previous, {
+    generated_at: previous.generated_at,
+    usage: { claude: { u: { sd: 42 }, t: previous.usage.claude.t } },
+  }, previous.generated_at), false);
 });
 
 test("the usage line renders from the snapshot root, with no 24-hour companion", async () => {

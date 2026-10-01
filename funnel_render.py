@@ -103,6 +103,12 @@ When `price_changes` is non-empty, show each model and token kind with its
 old and new USD-per-million rates and effective date. It is informational,
 not a decision count.
 
+When `model_releases` is non-empty, show each provider with the model in use,
+the newer model the nightly watch saw and when it was recorded. When
+`watch_faults` is non-empty, show each provider, check kind and reason: a
+fault means that check could not run, never that nothing changed. Both are
+informational, not decision counts.
+
 Then `recorded_cause_regressions` and `command_center_ticket_pr_share` as
 portfolio signals: Broken numerator and denominator; ticket-branch numerator,
 merged-PR denominator and percentage. Then `decline_routing`: the four

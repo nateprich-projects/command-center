@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Nightly model watch (#229). Fetches public pricing pages and model catalogues
+  for providers represented in observed session sources. The job records
+  releases and could-not-check faults for funnel brief; it has no TickTick
+  transport and writes no model configuration.
+
+  The calendar fire is 03:10, between the Muse lanes and the 03:20 outcome
+  derivation. launchd owns the schedule; this is a Python job, not a prompt.
+  API credentials are read from the environment or the gitignored working-tree
+  .env by nightly_watch.py. Missing credentials become visible watch faults.
+
+  The canonical copy lives in this repository. launchd refuses symlinked
+  plists, so scripts/install.sh copies it into ~/Library/LaunchAgents.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.nateprich.command-center-nightly-watch</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/python3</string>
+        <string>/Users/nateprich/.claude/command-center-run/nightly_watch.py</string>
+        <string>run</string>
+    </array>
+
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>3</integer>
+        <key>Minute</key>
+        <integer>10</integer>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/nateprich/Library/Logs/command-center-nightly-watch.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/nateprich/Library/Logs/command-center-nightly-watch.err.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>DEVELOPER_DIR</key>
+        <string>/Library/Developer/CommandLineTools</string>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/Users/nateprich/.local/bin</string>
+        <key>HOME</key>
+        <string>/Users/nateprich</string>
+    </dict>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>

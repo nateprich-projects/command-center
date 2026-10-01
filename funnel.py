@@ -47,6 +47,7 @@ from typing import (IO, Any, Callable, Collection, Dict, FrozenSet, Iterable,
 import agent_health as agent_health_module
 from agent_health import assess as assess_agent_health
 from decline_classifier import classify_decline_reason
+import nightly_watch
 import price_watch
 
 # --------------------------------------------------------------------------
@@ -771,6 +772,8 @@ BRIEF_PURE_SECTIONS = frozenset({
     "status_state_mismatches",
     "rejected_merges",
     "price_changes",
+    "model_releases",
+    "watch_faults",
 })
 
 # No brief section feeds a gate any more: the merge gate reads the
@@ -15740,6 +15743,22 @@ def cmd_brief(
         price_changes = section(
             "price_changes", lambda: price_watch.recent_changes(now),
         )
+        recent_watch_cache = None
+
+        def recent_watch_values():
+            nonlocal recent_watch_cache
+            if recent_watch_cache is None:
+                recent_watch_cache = nightly_watch.recent_entries(now)
+            return recent_watch_cache
+
+        model_releases = section(
+            "model_releases",
+            lambda: recent_watch_values()["model_releases"],
+        )
+        watch_faults = section(
+            "watch_faults",
+            lambda: recent_watch_values()["watch_faults"],
+        )
 
         # The reader-bound sections have now had their deadline-bounded turn.
         # These renderers use only the loaded Project items and preloaded PR
@@ -15778,6 +15797,8 @@ def cmd_brief(
         rejected = pure_values["rejected_merges"]
         status_mismatches = pure_values["status_state_mismatches"]
         price_changes = pure_values["price_changes"]
+        model_releases = pure_values["model_releases"]
+        watch_faults = pure_values["watch_faults"]
         pending_wakes = pending_wakes_json(parked)
 
         blocked_comment_errors = [
@@ -15859,6 +15880,8 @@ def cmd_brief(
             "member_issues_without_project_items": orphan_issues,
             "outcome_signals": outcome_signals,
             "price_changes": price_changes,
+            "model_releases": model_releases,
+            "watch_faults": watch_faults,
             "rejected_merges": rejected,
             "degraded": degraded,
             "timings": timings,

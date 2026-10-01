@@ -55,12 +55,14 @@ OUTCOMES_NAME = "com.nateprich.command-center-outcomes-derive.plist"
 #: The hourly execution-metrics derivation (#1278). A Python run on a clock
 #: hour, reading the published snapshot; not a routine schedule.
 METRICS_NAME = "com.nateprich.command-center-metrics-derive.plist"
+NIGHTLY_WATCH_NAME = "com.nateprich.command-center-nightly-watch.plist"
 NAMES = MUSE_SCHEDULE_NAMES + [
     KEEPER_NAME, REMOTE_CONTROL_NAME, PUBLISHER_NAME, DEPLOY_NAME,
-    FF_DEPLOY_NAME, *RUNTIME_DEPLOY_NAMES, OUTCOMES_NAME, METRICS_NAME]
+    FF_DEPLOY_NAME, *RUNTIME_DEPLOY_NAMES, OUTCOMES_NAME, METRICS_NAME,
+    NIGHTLY_WATCH_NAME]
 INSTALL_NAMES = MUSE_SCHEDULE_NAMES + [
     KEEPER_NAME, PUBLISHER_NAME, DEPLOY_NAME, FF_DEPLOY_NAME,
-    *RUNTIME_DEPLOY_NAMES, OUTCOMES_NAME, METRICS_NAME]
+    *RUNTIME_DEPLOY_NAMES, OUTCOMES_NAME, METRICS_NAME, NIGHTLY_WATCH_NAME]
 
 
 def console_reload_hint(name):
@@ -427,6 +429,26 @@ def test_metrics_derivation_runs_hourly_on_the_clock():
     assert args[2:] == ["derive"]
     assert plist["StartCalendarInterval"] == {"Minute": 22}
     assert "StartInterval" not in plist
+
+
+def test_model_watch_runs_daily_on_the_clock():
+    """The provider watch is a daily read job, outside the existing 03:20 fire."""
+    import plistlib
+
+    with (ROOT / "launchd" / NIGHTLY_WATCH_NAME).open("rb") as handle:
+        plist = plistlib.load(handle)
+
+    assert plist["Label"] == NIGHTLY_WATCH_NAME[:-len(".plist")]
+    assert plist["ProgramArguments"] == [
+        "/usr/bin/python3",
+        "/Users/nateprich/.claude/command-center-run/nightly_watch.py",
+        "run",
+    ]
+    assert plist["StartCalendarInterval"] == {"Hour": 3, "Minute": 10}
+    assert "StartInterval" not in plist
+    assert not any(
+        "API_KEY" in name for name in plist.get("EnvironmentVariables", {})
+    )
 
 
 #: Every launchd job runs `/usr/bin/python3`, `/usr/bin/git` or a script that

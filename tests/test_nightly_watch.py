@@ -156,7 +156,12 @@ def test_each_newer_model_gets_its_own_brief_entry(monkeypatch, tmp_path):
 def test_one_failed_capture_is_recorded_while_the_other_check_runs(
     monkeypatch, tmp_path, failed_url, failed_source
 ):
-    models = {"openai": ("gpt-6-luna",)}
+    if failed_source == "pricing":
+        models = {"openai": ("gpt-5.6-sol",)}
+        catalogue = RELEASE_FIXTURE["openai"]
+    else:
+        models = {"openai": ("gpt-6-luna",)}
+        catalogue = {"data": [{"id": "gpt-6-luna"}]}
     _in_use(monkeypatch, models)
     rates = tmp_path / "model_rates.json"
     _write_rate_table(rates)
@@ -167,7 +172,7 @@ def test_one_failed_capture_is_recorded_while_the_other_check_runs(
         env_file=tmp_path / "missing.env",
         environ={"OPENAI_API_KEY": "fixture-key"},
         current_models=models,
-        fetcher=_fetcher({"data": [{"id": "gpt-6-luna"}]}, fail_url=failed_url),
+        fetcher=_fetcher(catalogue, fail_url=failed_url),
         price_path=rates,
     )
 
@@ -175,7 +180,9 @@ def test_one_failed_capture_is_recorded_while_the_other_check_runs(
     assert result.watch_faults[0]["source"] == failed_source
     if failed_source == "pricing":
         assert result.price_result.faults
-        assert result.release_result.clean
+        assert [event["newer_model"] for event in result.model_releases] == [
+            "gpt-5.7-sol"
+        ]
     else:
         assert result.price_result.clean
         assert result.release_result.faults

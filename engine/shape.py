@@ -1344,8 +1344,9 @@ def apply_shape(items: list, now: datetime, ref: str,
     fresh_status, fresh_children = _read_fresh_shape_facts(item)
     if fresh_status != "Ideas" or fresh_children > 0:
         status_label = fresh_status if fresh_status is not None else "missing"
-        print("{} ref={} fresh Status={} children={}".format(
-            SKIPPED_STALE_SHAPE_OUTCOME, item.ref, status_label,
+        reason = "with-children" if fresh_children > 0 else "status-changed"
+        print("{} ref={} reason={} fresh Status={} children={}".format(
+            SKIPPED_STALE_SHAPE_OUTCOME, item.ref, reason, status_label,
             fresh_children,
         ))
         return 0

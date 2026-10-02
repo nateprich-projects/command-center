@@ -17,6 +17,19 @@ from __future__ import annotations
 import subprocess
 import sys
 
+from funnel import GATE_QUESTIONS
+
+#: The questions the funnel watch answers, named from funnel.py's one map of
+#: gate questions (#2134) so a reworded question cannot leave this template
+#: naming the old literal.
+WATCH_GATES_QUESTIONS = (
+    "Since 2026-09-28 (#1891) they are every\n"
+    "`{unblock}`, `{unblock_or_park}` and `{block_unread}` item not waiting\n"
+    "on Nate's hands (the last asked instead when a block's comments could\n"
+    "not be read, #2134), and `{plan}` on an agent-origin Broken or Bug plan\n"
+    "with no open Exposure or Preference question."
+).format(**GATE_QUESTIONS)
+
 RENDER_TEMPLATE = """\
 Render the newest published snapshot's .brief as follows. The snapshot age
 comes from `generated_at`: older than about fifteen minutes is weak evidence
@@ -36,10 +49,7 @@ Then `watch_gates`, whenever non-empty, as its own short list headed as
 answered by the funnel watch: for each, its `class`, `question`, the `title`
 as a link to `url`, and how long it has `waited`. The funnel watch answers
 these; not Nate's decision. Never fold them into the decision list or count
-them in `total_needing_nate`. Since 2026-09-28 (#1891) they are every
-`Unblock?` and `Unblock or park?` item not waiting on Nate's hands, and
-`Is the plan good?` on an agent-origin Broken or Bug plan with no open
-Exposure or Preference question.
+them in `total_needing_nate`. """ + WATCH_GATES_QUESTIONS + """
 
 Then `working_tree_touched`, whenever non-empty, as its own short list. For
 each grouped HEAD transition show `before.head` to `after.head` and every

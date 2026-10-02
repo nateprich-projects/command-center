@@ -401,10 +401,26 @@ SELF_APPROVABLE_CLASSES = frozenset(
 #: would drop at the split (#1845).
 DEFECT_CLASSES = frozenset({"Broken", "Bug"})
 
+#: Every question ``gate_question`` can ask, and the only place its wording
+#: lives (#2134). ``GATES``, ``WATCH_UNBLOCK_QUESTIONS`` and the watch-gates
+#: sentence of ``funnel_render.RENDER_TEMPLATE`` read it from here, so a
+#: reworded question cannot leave a consumer matching the old literal.
+GATE_QUESTIONS = {
+    "plan": "Is the plan good?",
+    "accept": "Accept it?",
+    "breakdown": "Answer the breakdown's question?",
+    # A silent block: nothing named can lift it. Only a project can park.
+    "unblock": "Unblock?",
+    "unblock_or_park": "Unblock or park?",
+    # A block whose comments could not be read: its condition is unknown,
+    # not absent, so it is never asked as a silent block.
+    "block_unread": "Block unread — recheck?",
+}
+
 #: Which stages can wait on a human, and the question each one asks.
 GATES = {
-    "Shaped": "Is the plan good?",
-    "Building": "Accept it?",  # only once every child has closed
+    "Shaped": GATE_QUESTIONS["plan"],
+    "Building": GATE_QUESTIONS["accept"],  # only once every child has closed
 }
 
 #: Bottom-up: clear the decision closest to shipping first. Parking counts as
@@ -1045,6 +1061,37 @@ def _block_date_condition(item: Item) -> Optional[str]:
     return "until {}".format(blocked_until.isoformat())
 
 
+def block_condition(item: Item) -> Optional[str]:
+    """Name what can lift a blocked item's block, or None if nothing can.
+
+    One test for the conditions read from the block comment (#2134), shared
+    by ``gate_question`` and ``is_held_at_accept``:
+
+    - ``unread``: the comments could not be read (``block_comments_error``,
+      as when the GraphQL window runs dry, #1417). The condition is unknown,
+      not absent, so the block must not read as a silent one.
+    - ``event``: a well-formed ``**Blocked until event:**`` spec (#1403).
+    - ``date``: a valid ``**Blocked until YYYY-MM-DD:**`` date, future or
+      passed; one written with issues as well is still a date.
+    - ``reference``: ``**Blocked on #N:**`` issue references.
+
+    None is a silent block, or an item that is not blocked. Native
+    ``blockedBy`` edges are not read here: they are not a comment condition
+    and never suppressed the question.
+    """
+    if not item.is_blocked:
+        return None
+    if item.block_comments_error:
+        return "unread"
+    if item.block_event is not None:
+        return "event"
+    if _item_blocked_until(item) is not None:
+        return "date"
+    if item.block_references:
+        return "reference"
+    return None
+
+
 def gate_question(item: Item) -> Optional[str]:
     """The decision this item is waiting on, or None if it waits on no one."""
     if item.state != "OPEN":
@@ -1065,11 +1112,13 @@ def gate_question(item: Item) -> Optional[str]:
         # A well-formed event spec is also a named condition. Needs:
         # external-event routes the ticket, but cannot suppress the question
         # without that condition attached.
-        if (
-            item.block_event is not None
-            or item.block_references
-            or _item_blocked_until(item) is not None
-        ):
+        # A block whose comments could not be read may be any of those, so
+        # it asks for a re-read instead of asking to unblock what may be a
+        # dated or event-conditioned hold (#2134).
+        condition = block_condition(item)
+        if condition == "unread":
+            return GATE_QUESTIONS["block_unread"]
+        if condition is not None:
             return None
         if item.parent is None and item.needs_decision:
             # An answered Gates question is settled, whatever the comment
@@ -1078,8 +1127,11 @@ def gate_question(item: Item) -> Optional[str]:
             # absent or malformed marker asks exactly as before.
             if parse_gates_answer(item.body) is not None:
                 return None
-            return "Answer the breakdown's question?"
-        return "Unblock?" if item.parent else "Unblock or park?"
+            return GATE_QUESTIONS["breakdown"]
+        return (
+            GATE_QUESTIONS["unblock"] if item.parent
+            else GATE_QUESTIONS["unblock_or_park"]
+        )
     if item.status == "Building":
         # New work, replacements, and Nate-owned improvements stop for
         # acceptance. The same class/origin predicate drives the unattended
@@ -1131,8 +1183,9 @@ def is_held_at_accept(item: Item) -> bool:
     Only a project that would otherwise ask "Accept it?" is held there: open,
     at Building, every ticket closed, and not one that closes itself (the
     unattended close ignores ``blocked``, so such a block holds nothing). A
-    block with no date or issue condition still asks "Unblock or park?", and
-    an event condition is an agent's wait, so both stay blocked work.
+    block with no date or issue condition still asks "Unblock or park?", an
+    event condition is an agent's wait, and an unread block's condition is
+    unknown, so all three stay blocked work (``block_condition``, #2134).
     """
     return (
         item.state == "OPEN"
@@ -1141,10 +1194,7 @@ def is_held_at_accept(item: Item) -> bool:
         and item.is_blocked
         and item.children_all_closed
         and not _can_close_itself(item)
-        and (
-            bool(item.block_references)
-            or _item_blocked_until(item) is not None
-        )
+        and block_condition(item) in ("date", "reference")
     )
 
 
@@ -1199,7 +1249,13 @@ def awaiting_decision(items: Iterable[Item]) -> List[Item]:
 
 #: The questions the funnel watch answers itself (Nate, 2026-09-28, #1891):
 #: a silent block, and the plan question on agent-origin Broken and Bug work.
-WATCH_UNBLOCK_QUESTIONS = frozenset(("Unblock?", "Unblock or park?"))
+#: A block whose comments could not be read is routed exactly as a silent
+#: block was before it had its own question (#2134).
+WATCH_UNBLOCK_QUESTIONS = frozenset((
+    GATE_QUESTIONS["unblock"],
+    GATE_QUESTIONS["unblock_or_park"],
+    GATE_QUESTIONS["block_unread"],
+))
 WATCH_PLAN_CLASSES = frozenset(("Broken", "Bug"))
 
 #: Needs Nate categories that keep an agent-origin Broken or Bug plan with
@@ -1218,7 +1274,8 @@ def watch_owns_gate(
     ``Is the plan good?`` on an agent-origin plan of Class Broken or Bug
     except one whose Needs Nate section still holds an Exposure or Preference
     line. A plan body that was not loaded, or a Needs Nate section that
-    cannot be read, stays with Nate.
+    cannot be read, stays with Nate. ``Block unread — recheck?`` (#2134)
+    is routed as the two silent-block questions are.
 
     This partitions the shared gate question for the brief and queue. A
     Declined marker distinguishes a legacy lane decline that still carries

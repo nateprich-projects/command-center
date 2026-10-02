@@ -81,6 +81,10 @@ consistently:
   `watch_owns_gate`; `gate_question` still asks them, so lanes and sweeps read what
   they read before. _(Nate, 2026-09-28, relayed from an interactive session; #1891:
   "please ensure these stop showing up as needing my review.")_
+  A block whose comments could not be read asks `Block unread — recheck?` instead,
+  because its condition is unknown rather than absent, and is routed exactly as the
+  two Unblock questions are; every gate question's wording lives in one map,
+  `funnel.GATE_QUESTIONS` (#2134). _(agent rule, unconfirmed — advisory)_
 - **"Accept it?" remains the human gate** for work whose class and origin make its
   completion a Nate decision. Whether the thing is worth keeping is not checkable,
   and no agent may decide it.

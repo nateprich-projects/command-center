@@ -9585,10 +9585,25 @@ def check_block_conditions(
                 _dependency_ref(item, value) or str(value).strip()
                 for value in item.open_blockers
             ))
+        elif item.block_reason is None and item.block_comments_error:
+            # Unread, not unparseable: ``check_block_comments`` names the
+            # error, and the block is not stranded (#2135).
+            detail = "block comments unread"
         elif item.block_reason is None:
             detail = "block comment is not parseable"
         else:
             details = []
+            if item.block_event is not None:
+                # A well-formed event wait is a condition, not an absence of
+                # one, now that it is no longer reported as stranded (#2135).
+                details.append(
+                    "until event agent={} job={} outcome={} after={}".format(
+                        item.block_event.get("agent"),
+                        item.block_event.get("job"),
+                        item.block_event.get("outcome"),
+                        item.block_event.get("after"),
+                    )
+                )
             if item.block_references:
                 resolved = [
                     _dependency_ref(item, value) or str(value).strip()
@@ -14695,6 +14710,21 @@ def _abandoned_ticket(blocker: Item, dependent: Item,
     return dependent.parent != blocker.parent
 
 
+def _block_event_can_clear(item: Item) -> bool:
+    """Whether ``clear_satisfied_blocks`` can ever lift this event wait.
+
+    The clear reads GitHub heartbeat finishes only for agents in
+    ``heartbeat.PROVIDERS`` and matches every other agent against no records,
+    so an event naming any other agent (a member repo's own job, say) never
+    lifts. ``satisfied_block_refs`` needs every parsed condition, so nothing
+    beside such an event can lift the block either (#2135).
+    """
+    import heartbeat
+
+    event = item.block_event
+    return isinstance(event, dict) and event.get("agent") in heartbeat.PROVIDERS
+
+
 def unclearable_block(item: Item) -> bool:
     """Whether a blocked item has no condition that can lift it and no asker.
 
@@ -14703,12 +14733,20 @@ def unclearable_block(item: Item) -> bool:
     ``agent`` still gets an Unblock question for the watch; an ordinary
     agent-owned block without that decline marker remains stranded. The
     funnel watch also supports ``claude-code-environment`` blocks.
+
+    The comment conditions are read through ``block_condition`` (#2135), so
+    a well-formed event spec counts as a condition, as it does for the clear
+    (#1451), and a block whose comments could not be read is never called
+    unclearable: its condition is unknown, not absent (#1417's dry window).
+    An event counts only when its agent is one whose heartbeat the clear
+    reads (``_block_event_can_clear``); any other agent's event never lifts.
     """
     if item.state != "OPEN" or not item.is_blocked:
         return False
-    if item.block_references or item.open_blockers:
-        return False
-    if _item_blocked_until(item) is not None:
+    condition = block_condition(item)
+    if condition == "event" and not _block_event_can_clear(item):
+        condition = None
+    if condition is not None or item.open_blockers:
         return False
     if item.needs == "claude-code-environment":
         return False
@@ -15077,6 +15115,200 @@ def _block_cycle_reasons(
     return reasons
 
 
+@dataclass(frozen=True)
+class _StrandFacts:
+    """What the named stranded checks read besides the item itself (#2135).
+
+    Built once per ``stranded_items`` call from the loaded rows, so each
+    check stays a pure function of one item and these shared facts.
+    ``pr_facts`` keeps its three-way meaning: ``None`` means no PR lookups
+    were requested, a missing key means that fact was not fetched, and a
+    ``None`` value is a known absence.
+    """
+
+    by_ref: Dict[str, Item]
+    pr_facts: Optional[Dict[str, Optional[Dict[str, object]]]]
+    stale: FrozenSet[str]
+    cycles: Dict[str, List[str]]
+
+    def pr(self, item: Item) -> Optional[Dict[str, object]]:
+        return None if self.pr_facts is None else self.pr_facts.get(item.ref)
+
+    def pr_known(self, item: Item) -> bool:
+        return self.pr_facts is None or item.ref in self.pr_facts
+
+
+def _strand_facts(
+    rows: Sequence[Item], now: datetime,
+    pr_facts: Optional[Dict[str, Optional[Dict[str, object]]]] = None,
+) -> _StrandFacts:
+    """Derive the shared facts for ``STRANDED_CHECKS`` from loaded rows."""
+    by_ref = {item.ref: item for item in rows}
+    return _StrandFacts(
+        by_ref=by_ref,
+        pr_facts=pr_facts,
+        stale=frozenset(
+            item.ref for item in stale_locks(rows, now, pr_facts=pr_facts)
+        ),
+        cycles=_block_cycle_reasons(rows, by_ref),
+    )
+
+
+def _open_pr_fact(pr: Optional[Dict[str, object]]) -> bool:
+    return isinstance(pr, dict) and str(pr.get("state") or "").upper() == "OPEN"
+
+
+def _strand_open_pr_on_closed_ticket(
+    item: Item, facts: _StrandFacts,
+) -> Optional[str]:
+    """A ticket closed while its PR stayed open. The only check on closed rows."""
+    if (
+        item.state == "CLOSED"
+        and item.parent is not None
+        and _open_pr_fact(facts.pr(item))
+    ):
+        return "open PR on closed ticket"
+    return None
+
+
+def _strand_pr_under_non_building_project(
+    item: Item, facts: _StrandFacts,
+) -> Optional[str]:
+    """An open ticket's open PR whose project is not ``Building``.
+
+    The merge gate refuses it, so it cannot land however good it is. A
+    project that is not loaded is not evidence either way.
+    """
+    if (
+        item.state != "OPEN"
+        or item.parent is None
+        or not _open_pr_fact(facts.pr(item))
+    ):
+        return None
+    parent = facts.by_ref.get(item.parent)
+    if parent is None or parent.status == "Building":
+        return None
+    return (
+        "open PR on open ticket whose project Status is {}; "
+        "merge gate will refuse it".format(parent.status or "unset")
+    )
+
+
+def _strand_approved_conflicting_head(
+    item: Item, facts: _StrandFacts,
+) -> Optional[str]:
+    """An approved current head that cannot merge for a conflict."""
+    pr = facts.pr(item)
+    if (
+        item.state == "OPEN"
+        and _open_pr_fact(pr)
+        and str(pr.get("mergeable") or "").upper() == "CONFLICTING"
+        and _approved_current_head(pr)
+    ):
+        return "approved verdict against an unmergeable branch"
+    return None
+
+
+def _strand_stale_claim(item: Item, facts: _StrandFacts) -> Optional[str]:
+    """A claim past its TTL whose PR is known to be absent."""
+    if (
+        item.state == "OPEN"
+        and item.ref in facts.stale
+        and facts.pr_known(item)
+        and facts.pr(item) is None
+    ):
+        return "claim past its TTL with no PR"
+    return None
+
+
+def _strand_childless_building_project(
+    item: Item, facts: _StrandFacts,
+) -> Optional[str]:
+    """A project at ``Building`` with no tickets to build."""
+    if (
+        item.state == "OPEN"
+        and item.parent is None
+        and item.status == "Building"
+        and not item.children_total
+    ):
+        return "Building project has no tickets"
+    return None
+
+
+def _strand_closed_parent(item: Item, facts: _StrandFacts) -> Optional[str]:
+    """An open ticket under a closed project that was not parked (#1169).
+
+    It has nowhere to go: no gate is watching it, the ladder ranks it through
+    a parent that is finished, and nothing will close it. Parked parents are
+    excluded on purpose — parking is a decision, and its tickets are meant to
+    sit. Detection only; nothing here closes anything.
+    """
+    parent = facts.by_ref.get(item.parent or "")
+    if (
+        item.state == "OPEN"
+        and parent is not None
+        and parent.state != "OPEN"
+        and parent.status != "Parked"
+    ):
+        return "parent {} is closed with Status {}".format(
+            parent.ref, parent.status or "unset"
+        )
+    return None
+
+
+def _strand_finished_upkeep_project(
+    item: Item, facts: _StrandFacts,
+) -> Optional[str]:
+    """A project that has earned its unattended close but is still open."""
+    if _auto_closeable_project(item):
+        return "finished upkeep project not closed"
+    return None
+
+
+def _strand_dead_blocker(item: Item, facts: _StrandFacts) -> Optional[str]:
+    """A native or named blocker that will never close (#1432)."""
+    if item.state != "OPEN":
+        return None
+    dead = _dead_dependency_refs(item, facts.by_ref)
+    if dead:
+        return "blocked on blocker that will never close: {}".format(
+            ", ".join(dead))
+    return None
+
+
+def _strand_unclearable_block(
+    item: Item, facts: _StrandFacts,
+) -> Optional[str]:
+    """A block nothing can lift and nobody is asked about (#1393, #1432)."""
+    if unclearable_block(item):
+        return _unclearable_block_reason(item)
+    return None
+
+
+def _strand_block_cycle(item: Item, facts: _StrandFacts) -> Optional[str]:
+    """A block cycle, reported once on its lowest-numbered member."""
+    if item.state != "OPEN":
+        return None
+    return "; ".join(facts.cycles.get(item.ref, [])) or None
+
+
+#: Every reason ``stranded_items`` can give, one named check each (#2135),
+#: in the order the reasons are joined. Each check guards its own state, so
+#: a closed row reaches only the open-PR-on-closed-ticket check.
+STRANDED_CHECKS: Tuple[Callable[[Item, _StrandFacts], Optional[str]], ...] = (
+    _strand_open_pr_on_closed_ticket,
+    _strand_pr_under_non_building_project,
+    _strand_approved_conflicting_head,
+    _strand_stale_claim,
+    _strand_childless_building_project,
+    _strand_closed_parent,
+    _strand_finished_upkeep_project,
+    _strand_dead_blocker,
+    _strand_unclearable_block,
+    _strand_block_cycle,
+)
+
+
 def stranded_items(
     items: Iterable[Item],
     now: datetime,
@@ -15095,96 +15327,25 @@ def stranded_items(
     ``Building``. Missing CI history is intentionally absent; no fetched fact
     distinguishes that from a PR whose first check is still pending.
 
+    Each reason is one named check in ``STRANDED_CHECKS`` (#2135), which also
+    holds the open ticket under a closed, unparked project (#1169) and the
+    block nothing can lift and nobody is asked about (#1432). An item's
+    reasons are joined in that order.
+
     ``pr_facts`` is optional so the function remains fixture-pure. ``None``
     means the caller has not requested PR lookups and therefore treats a stale
     claim as having no PR; a supplied mapping distinguishes a known no-PR
     result from a fact that was not fetched.
     """
     rows = list(items)
-    by_ref = {item.ref: item for item in rows}
-    stale = {
-        item.ref for item in stale_locks(rows, now, pr_facts=pr_facts)
-    }
-    cycle_reasons = _block_cycle_reasons(rows, by_ref)
+    facts = _strand_facts(rows, now, pr_facts)
     found: List[Dict[str, object]] = []
 
     for item in rows:
-        reasons: List[str] = []
-        pr_known = pr_facts is None or item.ref in pr_facts
-        pr = None if pr_facts is None else pr_facts.get(item.ref)
-
-        if (
-            isinstance(pr, dict)
-            and str(pr.get("state") or "").upper() == "OPEN"
-            and item.parent is not None
-        ):
-            if item.state == "CLOSED":
-                reasons.append("open PR on closed ticket")
-            elif item.state == "OPEN":
-                parent = by_ref.get(item.parent)
-                if parent is not None and parent.status != "Building":
-                    status = parent.status or "unset"
-                    reasons.append(
-                        "open PR on open ticket whose project Status is {}; "
-                        "merge gate will refuse it".format(status)
-                    )
-
-        if item.state != "OPEN":
-            if reasons:
-                found.append({
-                    "ref": item.ref,
-                    "title": item.title,
-                    "url": item.url,
-                    "reason": "; ".join(reasons),
-                })
-            continue
-
-        if (
-            pr
-            and str(pr.get("state") or "").upper() == "OPEN"
-            and str(pr.get("mergeable") or "").upper() == "CONFLICTING"
-            and _approved_current_head(pr)
-        ):
-            reasons.append("approved verdict against an unmergeable branch")
-
-        if item.ref in stale and pr_known and pr is None:
-            reasons.append("claim past its TTL with no PR")
-
-        if item.parent is None and item.status == "Building" and not item.children_total:
-            reasons.append("Building project has no tickets")
-
-        # An open ticket under a closed project has nowhere to go: no gate is
-        # watching it, the ladder ranks it through a parent that is finished,
-        # and nothing will close it. Parked parents are excluded on purpose —
-        # parking is a decision, and its tickets are meant to sit. Detection
-        # only; nothing here closes anything.
-        parent = by_ref.get(item.parent or "")
-        if (
-            parent is not None
-            and parent.state != "OPEN"
-            and parent.status != "Parked"
-        ):
-            reasons.append(
-                "parent {} is closed with Status {}".format(
-                    parent.ref, parent.status or "unset"
-                )
-            )
-
-        if _auto_closeable_project(item):
-            reasons.append("finished upkeep project not closed")
-
-        dead = _dead_dependency_refs(item, by_ref)
-        if dead:
-            reasons.append(
-                "blocked on blocker that will never close: {}".format(
-                    ", ".join(dead))
-            )
-
-        if unclearable_block(item):
-            reasons.append(_unclearable_block_reason(item))
-
-        reasons.extend(cycle_reasons.get(item.ref, []))
-
+        reasons = [
+            reason for reason in (check(item, facts) for check in STRANDED_CHECKS)
+            if reason
+        ]
         if reasons:
             found.append({
                 "ref": item.ref,

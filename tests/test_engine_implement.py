@@ -2321,9 +2321,18 @@ def test_human_step_body_carries_the_reason_as_prose(reason):
            if reason == "a Claude Code environment" else "Nate")
     assert body.rstrip().endswith(
         "Action {} must perform: Approve the OAuth app.".format(who))
-    assert implement.render_human_step_title("Approve the OAuth app") == (
-        "Human step: Approve the OAuth app"
-    )
+
+
+def test_human_step_title_for_needs_human_keeps_human_prefix():
+    assert implement.render_human_step_title(
+        "Approve the OAuth app", needs="human") == (
+            "Human step: Approve the OAuth app")
+
+
+def test_human_step_title_for_claude_code_environment_names_environment():
+    assert implement.render_human_step_title(
+        "Approve the OAuth app", needs="claude-code-environment") == (
+            "Claude Code environment step: Approve the OAuth app")
 
 
 def test_parse_created_number_reads_the_issue_url():
@@ -2427,9 +2436,11 @@ def test_finish_blocked_on_human_files_the_step_for_its_reason(
         breakdown_engine, "write_needs",
         lambda item_id, value, ref: fields.append(
             (item_id, "Needs", value, ref)))
+    titles = []
     bodies = []
 
     def create(repo, parent, title, body, **kwargs):
+        titles.append(title)
         bodies.append(body)
         return {"number": 43, "ref": "{}#43".format(repo),
                 "url": "https://github.com/{}/issues/43".format(repo)}
@@ -2453,6 +2464,9 @@ def test_finish_blocked_on_human_files_the_step_for_its_reason(
     body, = bodies
     actor = "Nate" if needs == "human" else (
         "a Claude Code session on the Mac mini")
+    prefix = ("Claude Code environment step"
+              if needs == "claude-code-environment" else "Human step")
+    assert titles == ["{}: Kickstart the job".format(prefix)]
     assert "Action {} must perform: Kickstart the job.".format(actor) in body
 
 

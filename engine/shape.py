@@ -491,13 +491,6 @@ def _without_proposed_class_lines(plan_markdown: str) -> str:
     )
 
 
-#: The origin-override marker as the model's words may show it (#2138):
-#: ``&lt;!--`` renders as ``<!--`` on GitHub, as in
-#: ``funnel.inert_comment_text``, but no reader takes it for the marker.
-_INERT_ORIGIN_OVERRIDE_MARKER = funnel.ORIGIN_OVERRIDE_MARKER.replace(
-    "<!--", "&lt;!--", 1)
-
-
 def render_plan(answer: Dict) -> str:
     """Render the issue body from validated answer fields.
 
@@ -564,8 +557,11 @@ def render_plan(answer: Dict) -> str:
             lines.append("- {}: {}".format(category, "; ".join(questions)))
     lines.append("")
     # Only model text can hold the marker: no runner line above writes it.
-    return "\n".join(lines).replace(funnel.ORIGIN_OVERRIDE_MARKER,
-                                    _INERT_ORIGIN_OVERRIDE_MARKER)
+    # ``&lt;!--`` renders as ``<!--`` on GitHub, as in
+    # ``funnel.inert_comment_text``, but no reader takes it for the marker.
+    marker = funnel.ORIGIN_OVERRIDE_MARKER
+    return "\n".join(lines).replace(
+        marker, marker.replace("<!--", "&lt;!--", 1))
 
 
 def open_need_categories(answer: Dict) -> List[str]:

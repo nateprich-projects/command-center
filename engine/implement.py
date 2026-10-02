@@ -31,7 +31,7 @@ import subprocess
 import sys
 from collections import Counter
 from datetime import datetime, timezone
-from typing import Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple, Union
 from urllib.parse import urlsplit
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -1472,6 +1472,33 @@ def _working_tree_paths(root: pathlib.Path) -> List[str]:
     return sorted(paths)
 
 
+def _tracked_working_tree_paths(root: pathlib.Path) -> List[str]:
+    """List changes to paths already tracked by the ticket branch."""
+    tracked = set(_git_name_paths(
+        root, ("ls-tree", "-r", "--name-only", "-z", "HEAD")))
+    raw = _run(["git", "diff", "--name-status", "-z", "HEAD"], cwd=root,
+               timeout=LOCAL_GIT_TIMEOUT_SECONDS).stdout
+    fields = raw.split("\0")
+    paths = set()
+    index = 0
+    while index < len(fields):
+        status = fields[index]
+        index += 1
+        if not status:
+            continue
+        if status[0] in ("R", "C"):
+            old, new = fields[index:index + 2]
+            index += 2
+            if old in tracked:
+                paths.update((old, new))
+        else:
+            path = fields[index]
+            index += 1
+            if status[0] != "A" and path in tracked:
+                paths.add(path)
+    return sorted(paths)
+
+
 def _staged_paths(root: pathlib.Path) -> List[str]:
     """List the paths currently in the index, using Git's safe NUL format."""
     return sorted(set(_git_name_paths(
@@ -2451,6 +2478,61 @@ def finish_heartbeat(agent: str, run: str, outcome: str,
         raise ImplementError("heartbeat finish refused run {}".format(run))
 
 
+def _finish_exit(ref: str, *, run: str, agent: str, outcome: str,
+                 note: Union[str, Callable[[], str]],
+                 release: Callable[[str], None],
+                 heartbeat_finish: Callable[[str, str, str, str, str], None],
+                 remove_checkout: Optional[dict] = None,
+                 done: str = "") -> None:
+    """The one tail every finish-ticket exit ends with (#2167).
+
+    It releases this run's claim, then finishes its heartbeat with
+    ``outcome`` and ``note``, each once; nothing else in this module calls
+    either. The caller has already made its own effects (the PR, the close,
+    the comments) and built its note, so the PR still comes before the
+    release; a note that reads GitHub after the release, as a timeout's
+    does, comes as a callable.
+
+    ``remove_checkout`` is the caller's checkout context, passed only where
+    the work is pushed or the checkout may hold nothing unique;
+    ``_remove_codex_run_checkout``'s pushed-and-clean guard still decides.
+    A stray-file refusal or work that was not pushed passes none and keeps
+    the checkout (#1856).
+
+    A superseded run never comes here: ``_record_superseded_finish``
+    records its heartbeat alone, releasing nothing and keeping the checkout.
+
+    A release or heartbeat finish that fails is re-raised naming what the
+    exit had already done (``done``, then the release), so a finish that
+    opened its PR and released its claim before the heartbeat refused the
+    run does not read as though nothing happened. The checkout stays then.
+    """
+    try:
+        release(ref)
+    except SupersededRunError:
+        raise
+    except (funnel.GitHubError, ImplementError, OSError,
+            subprocess.SubprocessError) as exc:
+        if not done:
+            raise
+        raise ImplementError(
+            "{}; already done: {}".format(exc, done)) from exc
+    if callable(note):
+        note = note()
+    try:
+        heartbeat_finish(agent, run, outcome, note, ref)
+    except SupersededRunError:
+        raise
+    except (funnel.GitHubError, ImplementError, OSError,
+            subprocess.SubprocessError) as exc:
+        raise ImplementError("{}; already done: {}".format(
+            exc, ", ".join(part for part in (done, "claim released")
+                           if part))) from exc
+    if remove_checkout is not None:
+        _remove_codex_run_checkout(
+            remove_checkout["root"], remove_checkout["number"], agent)
+
+
 def _bound_work_ref_for_run(run: str, agent: str) -> str:
     """Recover the issued ticket ref when checkout identity lookup timed out."""
     import heartbeat
@@ -2469,30 +2551,41 @@ def _record_command_timeout(
         exc: CommandTimeoutError, *, run: str, agent: str, ref: str,
         release: Callable[[str], None],
         heartbeat_finish: Callable[[str, str, str, str, str], None],
-        work_kept: bool = False) -> None:
-    """Finish a timed-out run without attempting another checkout command."""
+        work_kept: bool = False, context: Optional[dict] = None) -> None:
+    """Finish a timed-out run without attempting another checkout command.
+
+    ``context`` is the checkout, offered for removal once the work was
+    checkpointed (pushed); the CLI's recovery has none to offer.
+    """
     if exc.finish_recorded:
         return
     # Do not repeat either effect if one of them fails part-way through.
     exc.finish_recorded = True
-    release(ref)
     kept_note = "work was checkpointed" if work_kept else "work NOT kept"
-    repo = ref.partition("#")[0]
-    try:
-        repository = funnel._gh_api_json("repos/{}".format(repo))
-    except Exception:
-        # A visibility read that fails is not permission to publish the
-        # command name into the public heartbeat ledger.
-        repository = None
-    command_note = (
-        str(exc)
-        if isinstance(repository, dict)
-        and repository.get("visibility") == "public"
-        else "test command timed out after {:g}s".format(
-            exc.timeout_seconds)
-    )
-    heartbeat_finish(
-        agent, run, "errored", "{}; {}".format(command_note, kept_note), ref,
+
+    def timeout_note() -> str:
+        # Read after the release, as before #2167: a slow visibility read
+        # must not hold the claim.
+        repo = ref.partition("#")[0]
+        try:
+            repository = funnel._gh_api_json("repos/{}".format(repo))
+        except Exception:
+            # A visibility read that fails is not permission to publish the
+            # command name into the public heartbeat ledger.
+            repository = None
+        command_note = (
+            str(exc)
+            if isinstance(repository, dict)
+            and repository.get("visibility") == "public"
+            else "test command timed out after {:g}s".format(
+                exc.timeout_seconds)
+        )
+        return "{}; {}".format(command_note, kept_note)
+
+    _finish_exit(
+        ref, run=run, agent=agent, outcome="errored", note=timeout_note,
+        release=release, heartbeat_finish=heartbeat_finish,
+        remove_checkout=context if work_kept else None,
     )
 
 
@@ -2759,6 +2852,29 @@ def _push_ticket_branch(root: pathlib.Path, branch: str, *, ref: str,
     _run(["git", "push", "--set-upstream", "origin", branch], cwd=root,
          timeout=REMOTE_GIT_TIMEOUT_SECONDS)
 
+
+def _preserve_human_step_work(
+        root: pathlib.Path, number: int, branch: str, *, ref: str,
+        run: Optional[str], agent: str) -> Optional[str]:
+    """Push a tracked-only WIP checkpoint before a human-step side effect."""
+    paths = _tracked_working_tree_paths(root)
+    if not paths:
+        return None
+    stray = [path for path in paths if _is_run_scratch(path)]
+    if stray:
+        raise StrayFileError(stray)
+    _require_current_claim(ref, run, agent)
+    _run(
+        ["git", "commit", "--only", "-m",
+         "[human-step-wip] WIP #{}: preserve tracked work".format(number),
+         "--", *paths],
+        cwd=root, timeout=LOCAL_GIT_TIMEOUT_SECONDS,
+    )
+    _push_ticket_branch(root, branch, ref=ref, run=run, agent=agent)
+    return _run(["git", "rev-parse", "HEAD"], cwd=root,
+                timeout=LOCAL_GIT_TIMEOUT_SECONDS).stdout.strip()
+
+
 def _remove_codex_run_checkout(root: pathlib.Path, number: int,
                                agent: str) -> bool:
     """Remove only this Codex ticket checkout under a runtime codex-runs/.
@@ -2781,7 +2897,8 @@ def _remove_codex_run_checkout(root: pathlib.Path, number: int,
     ``review-evidence-*``, so no guard below can match them; they are
     removed by review_evidence itself.
 
-    Call it only after a finish effect sequence has recorded its outcome.
+    Only ``_finish_exit`` calls it, after the exit's heartbeat finish has
+    recorded its outcome (#2167).
     The branch may have been pushed by this run or an earlier one; an exact
     remote-tip match and a clean tree prove that this checkout holds no unique
     Git work. A stray-file refusal, a ``_keep_work`` failure before its push,
@@ -2958,7 +3075,6 @@ def _recover_answer_error(
         context["root"], context["number"], context["branch"],
         ref=ref, run=run, agent=agent, reason="answer unreadable",
     )
-    release_effect(ref)
     first = str(exc).splitlines()[0] if str(exc) else "unknown answer error"
     note = "answer error: {} | {}".format(first[:200], kept)
     if not _is_public_repo(resolved):
@@ -2966,9 +3082,11 @@ def _recover_answer_error(
         # can quote a failed git command over the checkout's paths (#1796).
         note = _with_markers(note, "answer error: {} | {}".format(
             first[:200], _member_kept(kept)))
-    heartbeat_finish(agent, run, "errored", note, ref)
-    if pushed:
-        _remove_codex_run_checkout(context["root"], context["number"], agent)
+    _finish_exit(
+        ref, run=run, agent=agent, outcome="errored", note=note,
+        release=release_effect, heartbeat_finish=heartbeat_finish,
+        remove_checkout=context if pushed else None,
+    )
     return True
 
 
@@ -3015,21 +3133,21 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
     except SupersededRunError:
         raise
     except StrayFileError as exc:
-        release_effect(ref)
-        heartbeat_finish(
-            agent, run, "errored", _stray_note(exc, repo=resolved), ref)
         # The note asks for the scratch to be removed and the work
         # re-staged, and the work may be pushed nowhere: keep the checkout
         # (#1856).
+        _finish_exit(
+            ref, run=run, agent=agent, outcome="errored",
+            note=_stray_note(exc, repo=resolved),
+            release=release_effect, heartbeat_finish=heartbeat_finish,
+        )
         raise
     except CommandTimeoutError as exc:
         _record_command_timeout(
             exc, run=run, agent=agent, ref=ref, release=release_effect,
             heartbeat_finish=heartbeat_finish, work_kept=checkpointed,
+            context=context,
         )
-        if checkpointed:
-            _remove_codex_run_checkout(
-                context["root"], context["number"], agent)
         raise
     except ImplementError as exc:
         # A failed checkpoint or test must not strand the run. Retry saving
@@ -3058,7 +3176,6 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
                 posted = True
             except (funnel.GitHubError, OSError, subprocess.SubprocessError):
                 posted = False
-        release_effect(ref)
         if conflict:
             note = _conflict_note(exc, kept, repo=resolved)
         elif phase == "tests":
@@ -3071,10 +3188,11 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
             note = _checkpoint_note(exc, kept, repo=resolved)
         if posted is False:
             note += " | failing tests NOT posted to the ticket"
-        heartbeat_finish(agent, run, "errored", note, ref)
-        if pushed:
-            _remove_codex_run_checkout(
-                context["root"], context["number"], agent)
+        _finish_exit(
+            ref, run=run, agent=agent, outcome="errored", note=note,
+            release=release_effect, heartbeat_finish=heartbeat_finish,
+            remove_checkout=context if pushed else None,
+        )
         raise
     try:
         if _working_tree_paths(context["root"]):
@@ -3091,14 +3209,15 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
             close_effect(
                 resolved, context["number"], cwd=context["root"],
             )
-            release_effect(ref)
             note = "no-diff close as completed; verified evidence: {}".format(
                 ", ".join(evidence))
             if extra_note:
                 note += "; " + extra_note.strip()
-            heartbeat_finish(agent, run, "done", note, ref)
-            _remove_codex_run_checkout(
-                context["root"], context["number"], agent)
+            _finish_exit(
+                ref, run=run, agent=agent, outcome="done", note=note,
+                release=release_effect, heartbeat_finish=heartbeat_finish,
+                remove_checkout=context, done="ticket closed as completed",
+            )
             return {"number": context["number"], "url": ticket["url"],
                     "closed": True}
         # Re-read immediately before pushing so a ticket branch never carries
@@ -3118,21 +3237,21 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
     except SupersededRunError:
         raise
     except StrayFileError as exc:
-        release_effect(ref)
-        heartbeat_finish(
-            agent, run, "errored", _stray_note(exc, repo=resolved), ref)
         # The note asks for the scratch to be removed and the work
         # re-staged, and the work may be pushed nowhere: keep the checkout
         # (#1856).
+        _finish_exit(
+            ref, run=run, agent=agent, outcome="errored",
+            note=_stray_note(exc, repo=resolved),
+            release=release_effect, heartbeat_finish=heartbeat_finish,
+        )
         raise
     except CommandTimeoutError as exc:
         _record_command_timeout(
             exc, run=run, agent=agent, ref=ref, release=release_effect,
             heartbeat_finish=heartbeat_finish, work_kept=checkpointed,
+            context=context,
         )
-        if checkpointed:
-            _remove_codex_run_checkout(
-                context["root"], context["number"], agent)
         raise
     prior_base = (
         merged.get("base") if isinstance(merged, dict) else "origin/main"
@@ -3145,7 +3264,6 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
             sha=pushed, merged=merged, reproduction=reproduced,
             repo=resolved, prior_fixes=prior_fixes))
     pr = pr_effect(resolved, context, ticket, body)
-    release_effect(ref)
     note = "PR #{}".format(pr["number"])
     if test_source is not None:
         note += " (tests: {})".format(
@@ -3156,9 +3274,18 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
         note += "; " + tested
     if extra_note:
         note += "; " + extra_note.strip()
-    heartbeat_finish(agent, run, "done", note, ref)
-    _remove_codex_run_checkout(context["root"], context["number"], agent)
+    _finish_exit(
+        ref, run=run, agent=agent, outcome="done", note=note,
+        release=release_effect, heartbeat_finish=heartbeat_finish,
+        remove_checkout=context, done="PR #{} is open".format(pr["number"]),
+    )
     return pr
+
+
+def _human_step_wip_note(branch: str, sha: str, reason: str) -> str:
+    return ("\n\nPreserved tracked work on `{}` in WIP commit `{}`. "
+            "Human-block reason: `{}`.").format(branch, sha, reason)
+
 
 def finish_blocked_on_human(
         blocked: dict, *, run: str, agent: str = "codex",
@@ -3184,9 +3311,10 @@ def finish_blocked_on_human(
         extra_note: Optional[str] = None) -> dict:
     """File the human step, block the ticket, release, and finish. No PR.
 
-    No test run, commit, or push happens here. After recording the finish, the
-    guarded cleanup removes a checkout only if its clean Git head already
-    matches the ticket's remote branch; unpushed or dirty work stays (#1856).
+    No test run or PR happens here. A Codex run first pushes tracked dirty
+    work in a marked WIP commit; failure aborts before the human-step effects.
+    After recording the finish, guarded cleanup removes a checkout only if its
+    clean Git head matches the ticket's remote branch; other work stays (#1856).
     A failure after the sub-issue exists names it, so the retry starts
     from GitHub's truth rather than filing a second one. The step's Needs
     follows its reason: ``session_needs_effect`` for a step a Claude Code
@@ -3210,6 +3338,11 @@ def finish_blocked_on_human(
         raise ImplementError(
             "blocked_on_human needs the ticket's parent to file the "
             "human step under")
+    wip_sha = None
+    if agent == "codex":
+        wip_sha = _preserve_human_step_work(
+            context["root"], context["number"], context["branch"],
+            ref=ref, run=run, agent=agent)
     # Read before filing: a lane filed a second step for one ticket after Nate
     # closed the first as not planned, re-blocking the ticket he had unblocked.
     # Matching is on the ticket number the step names, never on the action's
@@ -3224,7 +3357,8 @@ def finish_blocked_on_human(
             heartbeat_finish=heartbeat_finish, block_effect=block_effect,
             comment_effect=comment_effect, comments_effect=comments_effect,
             head_effect=head_effect, route_needs_effect=route_needs_effect,
-            human_needs_effect=human_needs_effect, extra_note=extra_note)
+            human_needs_effect=human_needs_effect, extra_note=extra_note,
+            wip_sha=wip_sha)
     step_needs = HUMAN_STEP_NEEDS[blocked["reason"]]
     title = render_human_step_title(
         blocked["action"], needs=step_needs)
@@ -3240,21 +3374,29 @@ def finish_blocked_on_human(
             needs_effect(created["url"], created["ref"])
         block_effect(resolved, context["number"],
                      blocked_by=created["number"], cwd=context["root"])
+        blocked_comment = (
+            "**Blocked on #{}:** Complete the human step before resuming "
+            "this ticket.".format(created["number"]))
+        if wip_sha is not None:
+            blocked_comment += _human_step_wip_note(
+                context["branch"], wip_sha, blocked["reason"])
         comment_effect(
             resolved, context["number"],
-            "**Blocked on #{}:** Complete the human step before resuming "
-            "this ticket.".format(created["number"]),
+            blocked_comment,
             run=run, agent=agent, cwd=context["root"])
     except funnel.GitHubError as exc:
         raise funnel.GitHubError(
             "{} (already created: {})".format(exc, created["ref"]))
-    release_effect(ref)
     note = "stopped: human step filed as #{}; ticket blocked; no PR opened".format(
         created["number"])
     if extra_note:
         note += "; " + extra_note.strip()
-    heartbeat_finish(agent, run, "skipped-human-step", note, ref)
-    _remove_codex_run_checkout(context["root"], context["number"], agent)
+    _finish_exit(
+        ref, run=run, agent=agent, outcome="skipped-human-step", note=note,
+        release=release_effect, heartbeat_finish=heartbeat_finish,
+        remove_checkout=context,
+        done="human step {} filed".format(created["ref"]),
+    )
     return {"ticket": ref,
             "human_step": {"number": created["number"],
                            "ref": created["ref"],
@@ -3272,7 +3414,7 @@ def _finish_closed_human_step(
         head_effect: Callable[[pathlib.Path, str], Optional[str]],
         route_needs_effect: Callable[[str, str], None],
         human_needs_effect: Callable[[str, str], None],
-        extra_note: Optional[str]) -> dict:
+        extra_note: Optional[str], wip_sha: Optional[str]) -> dict:
     """Route a ticket whose step Nate closed as not planned; file nothing.
 
     Routed like an accept-body conflict: Needs stays with the agents and a
@@ -3289,16 +3431,22 @@ def _finish_closed_human_step(
     if routed_for_closed_step(comments_effect(resolved, number), step_ref,
                               head):
         human_needs_effect(ticket["url"], ref)
-        comment_effect(resolved, number,
-                       render_closed_step_hold(step_ref, head),
+        hold_comment = render_closed_step_hold(step_ref, head)
+        if wip_sha is not None:
+            hold_comment += _human_step_wip_note(
+                context["branch"], wip_sha, blocked["reason"])
+        comment_effect(resolved, number, hold_comment,
                        run=run, agent=agent, cwd=root)
         routed = "human"
         outcome = "already routed at this head; Needs human"
     else:
         route_needs_effect(ticket["url"], ref)
         try:
-            comment_effect(resolved, number,
-                           render_closed_step_route(step_ref, head, blocked),
+            route_comment = render_closed_step_route(step_ref, head, blocked)
+            if wip_sha is not None:
+                route_comment += _human_step_wip_note(
+                    context["branch"], wip_sha, blocked["reason"])
+            comment_effect(resolved, number, route_comment,
                            run=run, agent=agent, cwd=root)
             routed = "review"
             outcome = "routed to review and shaping"
@@ -3307,13 +3455,15 @@ def _finish_closed_human_step(
             block_effect(resolved, number, cwd=root)
             routed = "blocked"
             outcome = "review routing failed; ticket left blocked"
-    release(ref)
     note = "human step not filed: {} was closed as not planned; {}".format(
         step_ref, outcome)
     if extra_note:
         note += "; " + extra_note.strip()
-    heartbeat_finish(agent, run, "skipped-blocked", note, ref)
-    _remove_codex_run_checkout(root, number, agent)
+    _finish_exit(
+        ref, run=run, agent=agent, outcome="skipped-blocked", note=note,
+        release=release, heartbeat_finish=heartbeat_finish,
+        remove_checkout=context, done=outcome,
+    )
     return {"ticket": ref, "closed_human_step": step_ref, "routed": routed}
 
 
@@ -3353,13 +3503,14 @@ def finish_declined(
             resolved, context["number"], reason,
             run=run, agent=agent, cwd=context["root"],
         )
-        release_effect(ref)
         note = "closed as completed: allowed defer-note proof"
         if extra_note:
             note += "; " + extra_note.strip()
-        heartbeat_finish(agent, run, "done", note, ref)
-        _remove_codex_run_checkout(
-            context["root"], context["number"], agent)
+        _finish_exit(
+            ref, run=run, agent=agent, outcome="done", note=note,
+            release=release_effect, heartbeat_finish=heartbeat_finish,
+            remove_checkout=context, done="ticket closed as completed",
+        )
         return {"ticket": ref, "declined": reason}
     accept_conflict_routed = (
         decline_class == "accept-body-conflict" and decline_target is not None
@@ -3470,7 +3621,6 @@ def finish_declined(
             declined_needs_effect(ticket["url"], ref)
             block_effect(resolved, context["number"], cwd=context["root"])
             routing_failed = True
-    release_effect(ref)
     first = reason.splitlines()[0] if reason else "no reason given"
     if len(first) > 200:
         first = first[:197].rstrip() + "..."
@@ -3503,8 +3653,11 @@ def finish_declined(
         note += "; review routing failed; ticket left blocked"
     if extra_note:
         note += "; " + extra_note.strip()
-    heartbeat_finish(agent, run, "skipped-blocked", note, ref)
-    _remove_codex_run_checkout(context["root"], context["number"], agent)
+    _finish_exit(
+        ref, run=run, agent=agent, outcome="skipped-blocked", note=note,
+        release=release_effect, heartbeat_finish=heartbeat_finish,
+        remove_checkout=context, done="decline recorded on the ticket",
+    )
     return {"ticket": ref, "declined": reason}
 
 

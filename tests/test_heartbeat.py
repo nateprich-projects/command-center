@@ -118,6 +118,28 @@ def test_read_github_strict_refuses_malformed_jsonl(monkeypatch):
         heartbeat.read_github_strict("codex")
 
 
+def test_read_brief_treats_only_missing_remote_and_local_files_as_empty(
+        monkeypatch, tmp_path):
+    def missing(*args, **kwargs):
+        raise heartbeat.HeartbeatError("gh: HTTP 404: Not Found")
+
+    monkeypatch.setattr(heartbeat, "gh", missing)
+    monkeypatch.setattr(heartbeat, "SPOOL_DIR", str(tmp_path))
+
+    assert heartbeat.read_brief("codex") == []
+
+    spooled = {"agent": "codex", "phase": "finish", "run": "local"}
+    heartbeat._spool("codex", spooled)
+    assert heartbeat.read_brief("codex") == [spooled]
+
+    def unavailable(*args, **kwargs):
+        raise heartbeat.HeartbeatError("GitHub connection failed")
+
+    monkeypatch.setattr(heartbeat, "gh", unavailable)
+    with pytest.raises(heartbeat.HeartbeatError, match="connection failed"):
+        heartbeat.read_brief("codex")
+
+
 def test_muse_auth_outage_state_opens_only_for_auth_failure_and_closes_on_probe():
     auth_failure = {
         "agent": "muse", "phase": "finish", "outcome": "errored",

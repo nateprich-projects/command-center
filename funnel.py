@@ -47,6 +47,28 @@ from typing import (IO, Any, Callable, Collection, Dict, FrozenSet, Iterable,
 import agent_health as agent_health_module
 from agent_health import assess as assess_agent_health
 from decline_classifier import classify_decline_reason
+# The block, decision and decline headers and their single-comment parsers
+# have one owner (#2165); funnel.py keeps the row-level reading.
+from block_record import (  # noqa: F401 -- re-exported under the old names
+    BLOCK_COMMENT_PREFIX,
+    BLOCK_COMMENT_RE,
+    BLOCK_EVENT_COMMENT_PREFIX,
+    BLOCK_EVENT_COMMENT_RE,
+    BLOCK_EVENT_KIND_HEADER_RE,
+    BLOCK_FENCED_PAYLOAD_RE,
+    DECLINED_PREFIX,
+    NEEDS_DECISION_PREFIX,
+    NEEDS_DECISION_RE,
+    _parse_block_comment_details,
+    _parse_block_comment_header,
+    _parse_block_event_spec,
+    _unconditioned_event_reason,
+    _unique_json_object,
+    inert_comment_text,
+    parse_block_comment,
+    parse_decline_comment,
+    unparseable_block_comment_lines,
+)
 import nightly_watch
 import price_watch
 
@@ -544,46 +566,10 @@ SELF_APPROVED_LINE = re.compile(
     re.IGNORECASE | re.MULTILINE,
 )
 
-#: A blocked comment names an optional, knowable condition after this marker.
-#: The parser below owns the rest of the fixed header shape.
-BLOCK_COMMENT_PREFIX = "**Blocked"
-BLOCK_COMMENT_RE = re.compile(
-    r"\A" + re.escape(BLOCK_COMMENT_PREFIX)
-    + r"(?: until (?P<blocked_until>[0-9]{4}-[0-9]{2}-[0-9]{2}))?"
-      r"(?: on (?P<references>#[0-9]+(?: and #[0-9]+)*))?:\*\*"
-)
-
-#: A blocked ticket may wait on the one event kind the queue understands.
-#: The body after this header must be a strict fenced JSON spec.
-BLOCK_EVENT_COMMENT_PREFIX = "**Blocked until event:**"
-BLOCK_EVENT_COMMENT_RE = re.compile(
-    r"\A" + re.escape(BLOCK_EVENT_COMMENT_PREFIX)
-    + r"[ \t]*\r?\n(?:[ \t]*\r?\n)?[ \t]*```json[ \t]*\r?\n"
-      r"(?P<event_spec>.*?)\r?\n[ \t]*```[ \t]*(?:\r?\n|$)",
-    re.DOTALL,
-)
-BLOCK_EVENT_KIND_HEADER_RE = re.compile(
-    r"\A\*\*Blocked until (?P<kind>[^:\r\n]+):\*\*"
-)
-BLOCK_FENCED_PAYLOAD_RE = re.compile(
-    r"\A[ \t]*\r?\n(?:[ \t]*\r?\n)?[ \t]*```[^\r\n]*\r?\n"
-    r".*?\r?\n[ \t]*```[ \t]*(?:\r?\n|$)",
-    re.DOTALL,
-)
-
-#: A breakdown can leave a project waiting on Nate's answer. The header is
-#: deliberately strict and anchored just like the ordinary block header so a
-#: quoted or embedded sentence cannot become a gate question by accident.
-NEEDS_DECISION_PREFIX = "**Needs a decision:**"
-NEEDS_DECISION_RE = re.compile(
-    r"\A" + re.escape(NEEDS_DECISION_PREFIX)
-    + r"[ \t]+(?P<question>.+)", flags=re.DOTALL
-)
-
-#: The implement runner's decline record (``finish_declined``). It names a
-#: reason in prose, not a condition the funnel can clear, so readers show it
-#: and ``stranded_items`` flags the block until a parseable one replaces it.
-DECLINED_PREFIX = "**Declined:**"
+#: The four block-record header kinds (``**Blocked[ until/on ...]:**``,
+#: ``**Blocked until event:**``, ``**Needs a decision:**`` and
+#: ``**Declined:**``) live in ``block_record.py`` and are imported above
+#: under their old names (#2165).
 
 #: Broken is observed, not latent (#1832). A Broken capture carries its
 #: evidence on this line in the issue body, and `promote` posts it as a comment
@@ -730,6 +716,13 @@ BRIEF_SECTION_BUDGETS = {
     "stale_locks_taken_over": 0.25,
     "maintenance_load": 0.25,
     "disposal": 0.25,
+    # The former resend_ratio section read codex and zcode together in
+    # 1.86–3.61 s (ticket #2132). Give each provider up to that observed pair
+    # maximum; the four-provider pass stays inside the 120 s brief envelope.
+    "heartbeat_claude": 4.0,
+    "heartbeat_codex": 4.0,
+    "heartbeat_muse": 4.0,
+    "heartbeat_zcode": 4.0,
     "resend_ratio": 3.0,
     "unattended_merges": 3.0,
     "unattended_approvals": 49.0,
@@ -3801,30 +3794,8 @@ def checks_still_running(checks: Sequence[dict]) -> bool:
 
 _LINE_LEADING_MARKER_RE = re.compile(r"(?m)^[ \t]*<!-- command-center-")
 
-#: Every line break ``str.splitlines`` honours, with the blanks around it.
-_COMMENT_LINE_BREAK_RE = re.compile(
-    r"\s*[\n\r\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029]\s*")
-
-
-def inert_comment_text(text: object) -> str:
-    """Model text made safe to write outside a JSON block in a comment (#1798).
-
-    A runner comment is the owner's own, so the author filter (#1787, #1788)
-    trusts all of it, the model's words it echoes included: a blocking or
-    unsure item, a decline reason, a question. A blocking reason once carried
-    a line-leading ``<!-- command-center-review -->`` and a JSON block, and
-    the owner's rejection read as an approval (#1797). Line breaks collapse to
-    one space, so the text never begins a line or opens a fence, and ``<!--``
-    becomes ``&lt;!--``, so it holds no marker even mid-line. GitHub renders
-    the entity as ``<!--``, so a reader still sees every word. One pass is
-    enough: neither replacement can put a ``<!--`` together.
-
-    Text inside a JSON block needs none of this: ``json.dumps`` escapes the
-    line breaks, and a marker quoted there is content (#1688).
-    """
-    cleaned = _COMMENT_LINE_BREAK_RE.sub(
-        " ", "" if text is None else str(text)).strip()
-    return cleaned.replace("<!--", "&lt;!--")
+# ``inert_comment_text`` lives in ``block_record.py`` with the headers whose
+# model words it makes safe, and is imported above under its old name (#2165).
 
 
 def _marked_json_block_at(
@@ -4386,123 +4357,9 @@ def answered_gates_body(body: str, answer: str, decider: str,
     return updated
 
 
-def _unique_json_object(pairs: List[Tuple[str, object]]) -> Dict[str, object]:
-    """Reject ambiguous JSON objects instead of silently taking the last key."""
-    result: Dict[str, object] = {}
-    for key, value in pairs:
-        if key in result:
-            raise ValueError("duplicate JSON key")
-        result[key] = value
-    return result
-
-
-def _parse_block_event_spec(raw: str) -> Optional[Dict[str, str]]:
-    """Return the one supported event spec, or None for malformed input."""
-    try:
-        spec = json.loads(raw, object_pairs_hook=_unique_json_object)
-    except (TypeError, ValueError):
-        return None
-    if not isinstance(spec, dict) or set(spec) != {
-        "agent", "job", "outcome", "after"
-    }:
-        return None
-    if (
-        not isinstance(spec["agent"], str)
-        or not spec["agent"].strip()
-        or not isinstance(spec["job"], str)
-        or not spec["job"].strip()
-        or spec["outcome"] != "errored"
-        or not isinstance(spec["after"], str)
-        or parse_time(spec["after"]) is None
-    ):
-        return None
-    return spec
-
-
-def _unconditioned_event_reason(body: str) -> Optional[str]:
-    """Keep malformed or unknown event forms as unconditioned block reasons."""
-    header = BLOCK_EVENT_KIND_HEADER_RE.match(body)
-    if header is None:
-        return None
-    if re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", header.group("kind")):
-        return None
-    suffix = body[header.end():]
-    payload = BLOCK_FENCED_PAYLOAD_RE.match(suffix)
-    if payload is not None:
-        suffix = suffix[payload.end():]
-    return suffix.strip()
-
-
-def _parse_block_comment_header(
-    body: str,
-) -> Optional[Tuple[re.Match, Optional[date], Optional[Dict[str, str]]]]:
-    """Return a block header and its validated date or event condition."""
-    event_match = BLOCK_EVENT_COMMENT_RE.match(body)
-    if event_match is not None:
-        event = _parse_block_event_spec(event_match.group("event_spec"))
-        if event is None:
-            return None
-        return event_match, None, event
-
-    match = BLOCK_COMMENT_RE.match(body)
-    if match is None:
-        return None
-    raw_date = match.group("blocked_until")
-    if raw_date is None:
-        return match, None, None
-    try:
-        blocked_until = date.fromisoformat(raw_date)
-    except ValueError:
-        # The regex establishes the shape; the date parser establishes that
-        # the calendar date actually exists (for example, no February 30).
-        return None
-    return match, blocked_until, None
-
-
-def _parse_block_comment_details(
-    bodies: Iterable[str],
-) -> Optional[Tuple[List[str], Optional[date], str, Optional[Dict[str, str]]]]:
-    """Return the newest parseable block's refs, date, reason and event."""
-    for body in reversed(list(bodies)):
-        if not isinstance(body, str):
-            continue
-        parsed_header = _parse_block_comment_header(body)
-        if parsed_header is None:
-            reason = _unconditioned_event_reason(body)
-            if reason is not None:
-                return [], None, reason, None
-            continue
-        match, blocked_until, event = parsed_header
-        references = match.groupdict().get("references")
-        return (
-            references.split(" and ") if references else [],
-            blocked_until,
-            body[match.end():].strip(),
-            event,
-        )
-    return None
-
-
-def parse_block_comment(
-    bodies: Iterable[str],
-) -> Optional[Tuple[List[str], Optional[date], str]]:
-    """Return the newest parseable block comment's refs, date and reason.
-
-    The header is deliberately strict and anchored at the start of the body so
-    an old or embedded mention cannot accidentally become a condition.
-    """
-    parsed = _parse_block_comment_details(bodies)
-    return parsed[:3] if parsed is not None else None
-
-
-def parse_decline_comment(bodies: Iterable[str]) -> Optional[str]:
-    """Return the newest decline record's first line of reason, if any."""
-    for body in reversed(list(bodies)):
-        if not isinstance(body, str) or not body.startswith(DECLINED_PREFIX):
-            continue
-        reason = body[len(DECLINED_PREFIX):].strip()
-        return reason.splitlines()[0].strip() if reason else ""
-    return None
+# The single-comment block and decline parsers (``parse_block_comment``,
+# ``parse_decline_comment``, ``unparseable_block_comment_lines`` and their
+# helpers) live in ``block_record.py`` and are imported above (#2165).
 
 
 def parse_decline_route_comment(
@@ -4601,21 +4458,6 @@ def parse_satisfied_block_comment(body: str) -> Optional[Dict[str, object]]:
     ):
         return None
     return found
-
-
-def unparseable_block_comment_lines(bodies: Iterable[str]) -> List[str]:
-    """Return first lines that look like block comments but fail the parser."""
-    findings: List[str] = []
-    for body in bodies:
-        if not isinstance(body, str):
-            continue
-        if not body.lstrip().startswith(BLOCK_COMMENT_PREFIX):
-            continue
-        if _parse_block_comment_header(body) is not None:
-            continue
-        lines = body.splitlines()
-        findings.append(lines[0] if lines else body)
-    return findings
 
 
 def _heartbeat_context(run: Optional[str], agent: Optional[str]):
@@ -9641,10 +9483,25 @@ def check_block_conditions(
                 _dependency_ref(item, value) or str(value).strip()
                 for value in item.open_blockers
             ))
+        elif item.block_reason is None and item.block_comments_error:
+            # Unread, not unparseable: ``check_block_comments`` names the
+            # error, and the block is not stranded (#2135).
+            detail = "block comments unread"
         elif item.block_reason is None:
             detail = "block comment is not parseable"
         else:
             details = []
+            if item.block_event is not None:
+                # A well-formed event wait is a condition, not an absence of
+                # one, now that it is no longer reported as stranded (#2135).
+                details.append(
+                    "until event agent={} job={} outcome={} after={}".format(
+                        item.block_event.get("agent"),
+                        item.block_event.get("job"),
+                        item.block_event.get("outcome"),
+                        item.block_event.get("after"),
+                    )
+                )
             if item.block_references:
                 resolved = [
                     _dependency_ref(item, value) or str(value).strip()
@@ -14751,6 +14608,21 @@ def _abandoned_ticket(blocker: Item, dependent: Item,
     return dependent.parent != blocker.parent
 
 
+def _block_event_can_clear(item: Item) -> bool:
+    """Whether ``clear_satisfied_blocks`` can ever lift this event wait.
+
+    The clear reads GitHub heartbeat finishes only for agents in
+    ``heartbeat.PROVIDERS`` and matches every other agent against no records,
+    so an event naming any other agent (a member repo's own job, say) never
+    lifts. ``satisfied_block_refs`` needs every parsed condition, so nothing
+    beside such an event can lift the block either (#2135).
+    """
+    import heartbeat
+
+    event = item.block_event
+    return isinstance(event, dict) and event.get("agent") in heartbeat.PROVIDERS
+
+
 def unclearable_block(item: Item) -> bool:
     """Whether a blocked item has no condition that can lift it and no asker.
 
@@ -14759,12 +14631,20 @@ def unclearable_block(item: Item) -> bool:
     ``agent`` still gets an Unblock question for the watch; an ordinary
     agent-owned block without that decline marker remains stranded. The
     funnel watch also supports ``claude-code-environment`` blocks.
+
+    The comment conditions are read through ``block_condition`` (#2135), so
+    a well-formed event spec counts as a condition, as it does for the clear
+    (#1451), and a block whose comments could not be read is never called
+    unclearable: its condition is unknown, not absent (#1417's dry window).
+    An event counts only when its agent is one whose heartbeat the clear
+    reads (``_block_event_can_clear``); any other agent's event never lifts.
     """
     if item.state != "OPEN" or not item.is_blocked:
         return False
-    if item.block_references or item.open_blockers:
-        return False
-    if _item_blocked_until(item) is not None:
+    condition = block_condition(item)
+    if condition == "event" and not _block_event_can_clear(item):
+        condition = None
+    if condition is not None or item.open_blockers:
         return False
     if item.needs == "claude-code-environment":
         return False
@@ -15133,6 +15013,200 @@ def _block_cycle_reasons(
     return reasons
 
 
+@dataclass(frozen=True)
+class _StrandFacts:
+    """What the named stranded checks read besides the item itself (#2135).
+
+    Built once per ``stranded_items`` call from the loaded rows, so each
+    check stays a pure function of one item and these shared facts.
+    ``pr_facts`` keeps its three-way meaning: ``None`` means no PR lookups
+    were requested, a missing key means that fact was not fetched, and a
+    ``None`` value is a known absence.
+    """
+
+    by_ref: Dict[str, Item]
+    pr_facts: Optional[Dict[str, Optional[Dict[str, object]]]]
+    stale: FrozenSet[str]
+    cycles: Dict[str, List[str]]
+
+    def pr(self, item: Item) -> Optional[Dict[str, object]]:
+        return None if self.pr_facts is None else self.pr_facts.get(item.ref)
+
+    def pr_known(self, item: Item) -> bool:
+        return self.pr_facts is None or item.ref in self.pr_facts
+
+
+def _strand_facts(
+    rows: Sequence[Item], now: datetime,
+    pr_facts: Optional[Dict[str, Optional[Dict[str, object]]]] = None,
+) -> _StrandFacts:
+    """Derive the shared facts for ``STRANDED_CHECKS`` from loaded rows."""
+    by_ref = {item.ref: item for item in rows}
+    return _StrandFacts(
+        by_ref=by_ref,
+        pr_facts=pr_facts,
+        stale=frozenset(
+            item.ref for item in stale_locks(rows, now, pr_facts=pr_facts)
+        ),
+        cycles=_block_cycle_reasons(rows, by_ref),
+    )
+
+
+def _open_pr_fact(pr: Optional[Dict[str, object]]) -> bool:
+    return isinstance(pr, dict) and str(pr.get("state") or "").upper() == "OPEN"
+
+
+def _strand_open_pr_on_closed_ticket(
+    item: Item, facts: _StrandFacts,
+) -> Optional[str]:
+    """A ticket closed while its PR stayed open. The only check on closed rows."""
+    if (
+        item.state == "CLOSED"
+        and item.parent is not None
+        and _open_pr_fact(facts.pr(item))
+    ):
+        return "open PR on closed ticket"
+    return None
+
+
+def _strand_pr_under_non_building_project(
+    item: Item, facts: _StrandFacts,
+) -> Optional[str]:
+    """An open ticket's open PR whose project is not ``Building``.
+
+    The merge gate refuses it, so it cannot land however good it is. A
+    project that is not loaded is not evidence either way.
+    """
+    if (
+        item.state != "OPEN"
+        or item.parent is None
+        or not _open_pr_fact(facts.pr(item))
+    ):
+        return None
+    parent = facts.by_ref.get(item.parent)
+    if parent is None or parent.status == "Building":
+        return None
+    return (
+        "open PR on open ticket whose project Status is {}; "
+        "merge gate will refuse it".format(parent.status or "unset")
+    )
+
+
+def _strand_approved_conflicting_head(
+    item: Item, facts: _StrandFacts,
+) -> Optional[str]:
+    """An approved current head that cannot merge for a conflict."""
+    pr = facts.pr(item)
+    if (
+        item.state == "OPEN"
+        and _open_pr_fact(pr)
+        and str(pr.get("mergeable") or "").upper() == "CONFLICTING"
+        and _approved_current_head(pr)
+    ):
+        return "approved verdict against an unmergeable branch"
+    return None
+
+
+def _strand_stale_claim(item: Item, facts: _StrandFacts) -> Optional[str]:
+    """A claim past its TTL whose PR is known to be absent."""
+    if (
+        item.state == "OPEN"
+        and item.ref in facts.stale
+        and facts.pr_known(item)
+        and facts.pr(item) is None
+    ):
+        return "claim past its TTL with no PR"
+    return None
+
+
+def _strand_childless_building_project(
+    item: Item, facts: _StrandFacts,
+) -> Optional[str]:
+    """A project at ``Building`` with no tickets to build."""
+    if (
+        item.state == "OPEN"
+        and item.parent is None
+        and item.status == "Building"
+        and not item.children_total
+    ):
+        return "Building project has no tickets"
+    return None
+
+
+def _strand_closed_parent(item: Item, facts: _StrandFacts) -> Optional[str]:
+    """An open ticket under a closed project that was not parked (#1169).
+
+    It has nowhere to go: no gate is watching it, the ladder ranks it through
+    a parent that is finished, and nothing will close it. Parked parents are
+    excluded on purpose — parking is a decision, and its tickets are meant to
+    sit. Detection only; nothing here closes anything.
+    """
+    parent = facts.by_ref.get(item.parent or "")
+    if (
+        item.state == "OPEN"
+        and parent is not None
+        and parent.state != "OPEN"
+        and parent.status != "Parked"
+    ):
+        return "parent {} is closed with Status {}".format(
+            parent.ref, parent.status or "unset"
+        )
+    return None
+
+
+def _strand_finished_upkeep_project(
+    item: Item, facts: _StrandFacts,
+) -> Optional[str]:
+    """A project that has earned its unattended close but is still open."""
+    if _auto_closeable_project(item):
+        return "finished upkeep project not closed"
+    return None
+
+
+def _strand_dead_blocker(item: Item, facts: _StrandFacts) -> Optional[str]:
+    """A native or named blocker that will never close (#1432)."""
+    if item.state != "OPEN":
+        return None
+    dead = _dead_dependency_refs(item, facts.by_ref)
+    if dead:
+        return "blocked on blocker that will never close: {}".format(
+            ", ".join(dead))
+    return None
+
+
+def _strand_unclearable_block(
+    item: Item, facts: _StrandFacts,
+) -> Optional[str]:
+    """A block nothing can lift and nobody is asked about (#1393, #1432)."""
+    if unclearable_block(item):
+        return _unclearable_block_reason(item)
+    return None
+
+
+def _strand_block_cycle(item: Item, facts: _StrandFacts) -> Optional[str]:
+    """A block cycle, reported once on its lowest-numbered member."""
+    if item.state != "OPEN":
+        return None
+    return "; ".join(facts.cycles.get(item.ref, [])) or None
+
+
+#: Every reason ``stranded_items`` can give, one named check each (#2135),
+#: in the order the reasons are joined. Each check guards its own state, so
+#: a closed row reaches only the open-PR-on-closed-ticket check.
+STRANDED_CHECKS: Tuple[Callable[[Item, _StrandFacts], Optional[str]], ...] = (
+    _strand_open_pr_on_closed_ticket,
+    _strand_pr_under_non_building_project,
+    _strand_approved_conflicting_head,
+    _strand_stale_claim,
+    _strand_childless_building_project,
+    _strand_closed_parent,
+    _strand_finished_upkeep_project,
+    _strand_dead_blocker,
+    _strand_unclearable_block,
+    _strand_block_cycle,
+)
+
+
 def stranded_items(
     items: Iterable[Item],
     now: datetime,
@@ -15151,96 +15225,25 @@ def stranded_items(
     ``Building``. Missing CI history is intentionally absent; no fetched fact
     distinguishes that from a PR whose first check is still pending.
 
+    Each reason is one named check in ``STRANDED_CHECKS`` (#2135), which also
+    holds the open ticket under a closed, unparked project (#1169) and the
+    block nothing can lift and nobody is asked about (#1432). An item's
+    reasons are joined in that order.
+
     ``pr_facts`` is optional so the function remains fixture-pure. ``None``
     means the caller has not requested PR lookups and therefore treats a stale
     claim as having no PR; a supplied mapping distinguishes a known no-PR
     result from a fact that was not fetched.
     """
     rows = list(items)
-    by_ref = {item.ref: item for item in rows}
-    stale = {
-        item.ref for item in stale_locks(rows, now, pr_facts=pr_facts)
-    }
-    cycle_reasons = _block_cycle_reasons(rows, by_ref)
+    facts = _strand_facts(rows, now, pr_facts)
     found: List[Dict[str, object]] = []
 
     for item in rows:
-        reasons: List[str] = []
-        pr_known = pr_facts is None or item.ref in pr_facts
-        pr = None if pr_facts is None else pr_facts.get(item.ref)
-
-        if (
-            isinstance(pr, dict)
-            and str(pr.get("state") or "").upper() == "OPEN"
-            and item.parent is not None
-        ):
-            if item.state == "CLOSED":
-                reasons.append("open PR on closed ticket")
-            elif item.state == "OPEN":
-                parent = by_ref.get(item.parent)
-                if parent is not None and parent.status != "Building":
-                    status = parent.status or "unset"
-                    reasons.append(
-                        "open PR on open ticket whose project Status is {}; "
-                        "merge gate will refuse it".format(status)
-                    )
-
-        if item.state != "OPEN":
-            if reasons:
-                found.append({
-                    "ref": item.ref,
-                    "title": item.title,
-                    "url": item.url,
-                    "reason": "; ".join(reasons),
-                })
-            continue
-
-        if (
-            pr
-            and str(pr.get("state") or "").upper() == "OPEN"
-            and str(pr.get("mergeable") or "").upper() == "CONFLICTING"
-            and _approved_current_head(pr)
-        ):
-            reasons.append("approved verdict against an unmergeable branch")
-
-        if item.ref in stale and pr_known and pr is None:
-            reasons.append("claim past its TTL with no PR")
-
-        if item.parent is None and item.status == "Building" and not item.children_total:
-            reasons.append("Building project has no tickets")
-
-        # An open ticket under a closed project has nowhere to go: no gate is
-        # watching it, the ladder ranks it through a parent that is finished,
-        # and nothing will close it. Parked parents are excluded on purpose —
-        # parking is a decision, and its tickets are meant to sit. Detection
-        # only; nothing here closes anything.
-        parent = by_ref.get(item.parent or "")
-        if (
-            parent is not None
-            and parent.state != "OPEN"
-            and parent.status != "Parked"
-        ):
-            reasons.append(
-                "parent {} is closed with Status {}".format(
-                    parent.ref, parent.status or "unset"
-                )
-            )
-
-        if _auto_closeable_project(item):
-            reasons.append("finished upkeep project not closed")
-
-        dead = _dead_dependency_refs(item, by_ref)
-        if dead:
-            reasons.append(
-                "blocked on blocker that will never close: {}".format(
-                    ", ".join(dead))
-            )
-
-        if unclearable_block(item):
-            reasons.append(_unclearable_block_reason(item))
-
-        reasons.extend(cycle_reasons.get(item.ref, []))
-
+        reasons = [
+            reason for reason in (check(item, facts) for check in STRANDED_CHECKS)
+            if reason
+        ]
         if reasons:
             found.append({
                 "ref": item.ref,
@@ -15757,6 +15760,9 @@ _BRIEF_UNAVAILABLE = object()
 _ACTIVE_BRIEF_CACHE: contextvars.ContextVar = contextvars.ContextVar(
     "active_brief_cache", default=None
 )
+_ACTIVE_BRIEF_HEARTBEAT_CACHE: contextvars.ContextVar = contextvars.ContextVar(
+    "active_brief_heartbeat_cache", default=None
+)
 _BRIEF_SECTION_STATE: contextvars.ContextVar = contextvars.ContextVar(
     "brief_section_state", default=None
 )
@@ -15792,12 +15798,16 @@ class BriefCache:
     def __init__(self):
         self._pr_facts = _BRIEF_UNAVAILABLE
         self._heartbeat_rows: Dict[str, List[Dict]] = {}
+        self._strict_heartbeat_rows: Dict[str, List[Dict]] = {}
+        self._strict_heartbeat_errors: Dict[str, Exception] = {}
         self._comment_tails: Dict[str, List[Dict]] = {}
 
     def clear(self) -> None:
         """Forget auxiliary reads after a command may have mutated GitHub."""
         self._pr_facts = _BRIEF_UNAVAILABLE
         self._heartbeat_rows.clear()
+        self._strict_heartbeat_rows.clear()
+        self._strict_heartbeat_errors.clear()
         self._comment_tails.clear()
 
     def get_pr_facts(self, items: Sequence[Item]):
@@ -15830,6 +15840,8 @@ class BriefCache:
         return self.comment_tails(items)
 
     def heartbeat_rows(self, agent: str) -> List[Dict]:
+        if agent in self._strict_heartbeat_rows:
+            return self._strict_heartbeat_rows[agent]
         if agent in self._heartbeat_rows:
             return self._heartbeat_rows[agent]
 
@@ -15858,9 +15870,49 @@ class BriefCache:
         self._heartbeat_rows[agent] = rows
         return rows
 
+    def brief_heartbeat_rows(self, agent: str) -> List[Dict]:
+        """Read strict heartbeat history once for the five published sections."""
+        if agent in self._strict_heartbeat_rows:
+            return self._strict_heartbeat_rows[agent]
+        if agent in self._strict_heartbeat_errors:
+            raise self._strict_heartbeat_errors[agent]
+
+        import heartbeat
+
+        timeout = _brief_timeout_remaining()
+        try:
+            if timeout is None:
+                rows = heartbeat.read_brief(agent)
+            else:
+                try:
+                    rows = heartbeat.read_brief(agent, timeout=timeout)
+                except TypeError as exc:
+                    # Keep fixture-era one-argument test doubles compatible
+                    # while the real heartbeat reader uses the bound.
+                    if "timeout" not in str(exc):
+                        raise
+                    rows = heartbeat.read_brief(agent)
+        except subprocess.TimeoutExpired as exc:
+            state = _BRIEF_SECTION_STATE.get()
+            section = state[0] if state else "unknown"
+            error = BriefSectionTimeout(
+                section, "heartbeat read timed out"
+            )
+            self._strict_heartbeat_errors[agent] = error
+            raise error from exc
+        except Exception as exc:
+            self._strict_heartbeat_errors[agent] = exc
+            raise
+
+        self._strict_heartbeat_rows[agent] = rows
+        return rows
+
 
 def _brief_heartbeat_rows(agent: str) -> List[Dict]:
     """Read one heartbeat spool, reusing the active brief cache when present."""
+    brief_cache = _ACTIVE_BRIEF_HEARTBEAT_CACHE.get()
+    if brief_cache is not None:
+        return brief_cache.brief_heartbeat_rows(agent)
     cache = _ACTIVE_BRIEF_CACHE.get()
     if cache is not None:
         return cache.heartbeat_rows(agent)
@@ -16029,6 +16081,7 @@ def cmd_brief(
         deadline = time.perf_counter() + BRIEF_TOTAL_BUDGET_SECONDS
     cache = brief_cache or _ACTIVE_BRIEF_CACHE.get() or BriefCache()
     cache_token = _ACTIVE_BRIEF_CACHE.set(cache)
+    heartbeat_cache_token = _ACTIVE_BRIEF_HEARTBEAT_CACHE.set(cache)
     deferred_pure: Dict[str, Callable[[], object]] = {}
     deferred_section = object()
 
@@ -16051,6 +16104,68 @@ def cmd_brief(
         return decisions, by_ref, [
             item_json(i, now, by_ref) for i in decisions
         ], [watch_gate_json(i, now, by_ref) for i in watched]
+
+    try:
+        import heartbeat
+
+        heartbeat_providers = sorted(heartbeat.PROVIDERS)
+        heartbeat_agents = sorted(
+            set(heartbeat_providers) | set(METERED_AGENTS)
+        )
+        active_heartbeat_agents = [
+            agent for agent in heartbeat_providers
+            if agent not in heartbeat.RETIRED_AGENTS
+        ]
+        heartbeat_module_error = None
+    except Exception as exc:
+        heartbeat_providers = []
+        heartbeat_agents = []
+        active_heartbeat_agents = []
+        heartbeat_module_error = _brief_error(exc)
+
+    heartbeat_errors: Dict[str, str] = (
+        {"unknown": heartbeat_module_error}
+        if heartbeat_module_error else {}
+    )
+
+    def read_provider_heartbeat(agent: str) -> None:
+        name = "heartbeat_" + agent
+        rows = section(
+            name, lambda agent=agent: cache.brief_heartbeat_rows(agent)
+        )
+        if rows is not None:
+            return
+        error = "heartbeat read failed"
+        for entry in missing:
+            if entry.get("section") == name:
+                entry.setdefault("agent", agent)
+                error = entry.get("error", error)
+        heartbeat_errors[agent] = error
+
+    def heartbeat_section(
+        name: str, agents: Sequence[str], reader: Callable[[], object]
+    ):
+        failures = (
+            [("unknown", heartbeat_module_error)]
+            if heartbeat_module_error else [
+                (agent, heartbeat_errors[agent])
+                for agent in agents if agent in heartbeat_errors
+            ]
+        )
+        for agent, error in failures:
+            missing.append({
+                "section": name,
+                "agent": agent,
+                "error": "heartbeat read unavailable for {}: {}".format(
+                    agent, error
+                ),
+            })
+        if failures:
+            # The provider read already established that this section's input
+            # is unavailable. Publish null without asking its consumer to read
+            # the same heartbeat again.
+            return section(name, lambda: None)
+        return section(name, reader)
 
     try:
         decision_result = section("items", decision_payload)
@@ -16129,9 +16244,21 @@ def cmd_brief(
             "maintenance_load", lambda: maintenance_load(items, now)
         )
         disposal_report = section("disposal", lambda: disposal(items, now))
-        resend = section("resend_ratio", lambda: recent_resend_ratio(now))
-        merges = section(
-            "unattended_merges", lambda: unattended_merges(now)
+
+        for agent in heartbeat_agents:
+            read_provider_heartbeat(agent)
+
+        all_heartbeat_agents = (
+            heartbeat_providers
+            if heartbeat_module_error is None else []
+        )
+        resend = heartbeat_section(
+            "resend_ratio", METERED_AGENTS,
+            lambda: recent_resend_ratio(now),
+        )
+        merges = heartbeat_section(
+            "unattended_merges", all_heartbeat_agents,
+            lambda: unattended_merges(now),
         )
         approvals = section(
             "unattended_approvals",
@@ -16141,10 +16268,17 @@ def cmd_brief(
             "connector_gate_answers",
             lambda: connector_gate_answers(items, now, brief_cache=cache),
         )
-        run_summary = section("run_summary", lambda: agent_run_summary(now))
-        health = section("agent_health", lambda: agent_health(now))
-        touched = section(
-            "working_tree_touched", lambda: working_tree_touched(now)
+        run_summary = heartbeat_section(
+            "run_summary", active_heartbeat_agents,
+            lambda: agent_run_summary(now),
+        )
+        health = heartbeat_section(
+            "agent_health", active_heartbeat_agents,
+            lambda: agent_health(now),
+        )
+        touched = heartbeat_section(
+            "working_tree_touched", all_heartbeat_agents,
+            lambda: working_tree_touched(now),
         )
         rejected = section(
             "rejected_merges", lambda: rejected_merges(items, now)
@@ -16306,6 +16440,7 @@ def cmd_brief(
         print(json.dumps(brief, indent=2))
         return 0
     finally:
+        _ACTIVE_BRIEF_HEARTBEAT_CACHE.reset(heartbeat_cache_token)
         _ACTIVE_BRIEF_CACHE.reset(cache_token)
 
 
@@ -18034,41 +18169,48 @@ def classify_blockers(blockers: Iterable[dict], repo: str) -> Dict[str, List[str
 
 def _current_block_comment_details(
     comments: Sequence[Mapping[str, object]],
-) -> Optional[Tuple[List[str], Optional[date], str,
-                    Optional[Dict[str, str]]]]:
-    """Choose the newest block-making comment by its GitHub creation time.
+) -> Tuple[List[str], Optional[date], Optional[str],
+           Optional[Dict[str, str]], Optional[str]]:
+    """Read the current block record: the newest one of any kind (#2166).
 
-    A later Declined comment starts a new blocked episode without machine-
-    readable conditions. An older Blocked-on header must not satisfy it. A
-    newer Blocked-on header can establish conditions for that later episode.
+    Three kinds of comment record a block: a parseable block header, a
+    Needs-a-decision question and a Declined. The newest of them alone is
+    current, and its fields are returned as ``(references, blocked_until,
+    reason, event, question)``; the other kinds' fields are empty, as they
+    are when the thread holds no record at all.
+
+    A later Declined starts a new blocked episode without machine-readable
+    conditions (#2019), and a later question is waiting on Nate's answer, so
+    an older header's conditions must satisfy neither. A newer header can
+    establish conditions for a later episode, and then an older question is
+    no longer the one being asked.
+
+    Newest is by GitHub creation time when every record carries one, the later
+    comment winning a tie; when any record lacks it, by body order, which is
+    the order GitHub returns comments in.
     """
-    bodies = [str(comment.get("body") or "") for comment in comments]
-    block_rows = []
-    decline_times = []
-    has_decline = False
-    for comment, body in zip(comments, bodies):
+    records = []
+    for index, comment in enumerate(comments):
+        body = str(comment.get("body") or "")
         details = _parse_block_comment_details([body])
         if details is not None:
-            block_rows.append((parse_time(comment.get("createdAt")), details))
-        if body.lstrip().startswith(DECLINED_PREFIX):
-            has_decline = True
-            decline_times.append(parse_time(comment.get("createdAt")))
+            fields = details + (None,)
+        elif NEEDS_DECISION_RE.match(body):
+            # A question header whose text reads as empty is still the
+            # current record: it asks rather than lets an older header clear.
+            fields = ([], None, None, None,
+                      parse_needs_decision_comment([body]))
+        elif body.lstrip().startswith(DECLINED_PREFIX):
+            fields = ([], None, None, None, None)
+        else:
+            continue
+        records.append((parse_time(comment.get("createdAt")), index, fields))
 
-    if has_decline:
-        if (
-            not block_rows
-            or any(at is None for at, _ in block_rows)
-            or any(at is None for at in decline_times)
-        ):
-            return None
-        newest_block = max(at for at, _ in block_rows)
-        newest_decline = max(decline_times)
-        if newest_decline >= newest_block:
-            return None
-
-    if block_rows and all(at is not None for at, _ in block_rows):
-        return max(block_rows, key=lambda row: row[0])[1]
-    return _parse_block_comment_details(bodies)
+    if not records:
+        return [], None, None, None, None
+    if all(at is not None for at, _, _ in records):
+        return max(records, key=lambda record: record[:2])[2]
+    return records[-1][2]
 
 
 def _load_block_comment(item: Item) -> None:
@@ -18077,6 +18219,18 @@ def _load_block_comment(item: Item) -> None:
     Block comments are intentionally loaded outside the Project query. The
     normal load pays for this only for open blocked items, and the parsed state
     stays on ``Item`` for pure queue functions and the brief to reuse.
+
+    The current block record alone sets ``block_references``,
+    ``blocked_until``, ``block_reason``, ``block_event`` and
+    ``needs_decision`` (``_current_block_comment_details``, #2166): an older
+    header's conditions never read beside a newer question, so the clear
+    cannot lift a block that is waiting on Nate's answer.
+
+    ``decline_reason`` stays thread-wide: it is the newest Declined however
+    old. ``gate_question`` and ``watch_owns_gate`` read it as "this ticket
+    was declined", and so does the #1942 reset of a legacy Needs ``human``
+    in ``clear_satisfied_blocks``, which runs only once a newer header's
+    conditions are satisfied.
     """
     payload = _gh_json(
         "gh", "issue", "view", str(item.number), "--repo", item.repo,
@@ -18096,16 +18250,13 @@ def _load_block_comment(item: Item) -> None:
     ]
     bodies = [comment.get("body") or "" for comment in comments]
     item.unparseable_block_comments = unparseable_block_comment_lines(bodies)
-    item.block_event = None
-    parsed = _current_block_comment_details(comments)
-    if parsed is not None:
-        (
-            item.block_references,
-            item.blocked_until,
-            item.block_reason,
-            item.block_event,
-        ) = parsed
-    item.needs_decision = parse_needs_decision_comment(bodies)
+    (
+        item.block_references,
+        item.blocked_until,
+        item.block_reason,
+        item.block_event,
+        item.needs_decision,
+    ) = _current_block_comment_details(comments)
     item.decline_reason = parse_decline_comment(bodies)
     item.decline_route = parse_decline_route_comment(payload["comments"])
     for body in reversed(bodies):
@@ -18933,6 +19084,27 @@ def review_queue(
     return found
 
 
+def unshapeable_reason(state: Optional[str], status: Optional[str],
+                       children_total: int) -> Optional[str]:
+    """Why a row cannot be shaped now, or ``None`` when it can (#2139).
+
+    The one shapeable-now predicate: ``shapeable_idea`` filters with it, and
+    ``shape.apply_shape`` refuses a stale apply with it on its fresh re-read,
+    so the picker offers a row exactly when apply would proceed on it. A
+    closed issue is never shaped, nor is one that has left Ideas or already
+    has children. The needs-shaping label, tier and headroom are not here:
+    they are the picker's alone, because ``shape-apply --voice nate-relayed``
+    shapes unlabelled ideas in session.
+    """
+    if state != "OPEN":
+        return "not-open"
+    if status != "Ideas":
+        return "status-changed"
+    if children_total > 0:
+        return "with-children"
+    return None
+
+
 def shapeable_idea(items: Sequence[Item], tier: Optional[str],
                    reading: Dict,
                    skipped: Optional[List[Dict[str, str]]] = None
@@ -18941,9 +19113,10 @@ def shapeable_idea(items: Sequence[Item], tier: Optional[str],
 
     Shaping starts new work, so it is the last optional job after review and
     breakdown. The ordering itself stays in ``ideas()``; this function only
-    filters that shared order through the existing tier and headroom rules.
-    Ideas with children are ineligible here; ``shape.apply_shape`` keeps its
-    fresh-read refusal as a backstop for children added after this selection.
+    filters that shared order through the existing tier and headroom rules
+    and ``unshapeable_reason``, the predicate ``shape.apply_shape``'s
+    fresh-read refusal shares (#2139). That refusal is the backstop for a
+    row that closes, moves or gains children after this selection.
 
     Each tier shapes its own ideas: an escalated run is offered the
     first escalated-tier idea, a standard run the first standard-tier
@@ -18964,11 +19137,14 @@ def shapeable_idea(items: Sequence[Item], tier: Optional[str],
         )
         if tier is not None and needed != tier:
             continue
-        if getattr(item, "children_total", 0) > 0:
+        reason = unshapeable_reason(
+            getattr(item, "state", None), getattr(item, "status", None),
+            getattr(item, "children_total", 0))
+        if reason is not None:
             if skipped is not None:
                 skipped.append({
                     "ref": item.ref,
-                    "reason": "with-children",
+                    "reason": reason,
                 })
             continue
         return item
@@ -19200,17 +19376,47 @@ def sweep_shaped_self_approvals(
 
     The Shaped gate is re-checked by the same predicate used when a plan is
     first written. Other live questions, such as an unblock question, remain
-    owned by their existing gate and are not swept.
+    owned by their existing gate and are not swept. The compact begin view
+    carries the row fields needed to select candidates but omits their bodies;
+    read only those bodies, oldest at the gate first, before applying the
+    predicate. If the begin envelope cannot cover another body read, leave
+    that candidate and every later one at Shaped for a later run.
     """
     by_ref = {item.ref: item for item in items}
     advanced: List[Dict[str, str]] = []
     errors: List[Dict[str, str]] = []
+    candidates = []
     for item in items:
-        if item.state != "OPEN" or item.status != "Shaped":
+        if (
+            item.state != "OPEN"
+            or item.status != "Shaped"
+            or item.origin != "agent"
+            or item.needs != "none"
+        ):
             continue
         question = gate_question(item)
+        # The Shaped question is this sweep's own gate; other live questions
+        # (for example, Unblock) stay with their existing owner.
         if question is not None and question != GATES["Shaped"]:
             continue
+        candidates.append(item)
+
+    oldest_unknown = datetime.max.replace(tzinfo=timezone.utc)
+    candidates.sort(key=lambda item: (
+        question_since(item) is None,
+        question_since(item) or oldest_unknown,
+        item.repo,
+        item.number,
+    ))
+
+    for item in candidates:
+        if not getattr(item, "body_loaded", True):
+            try:
+                _load_close_candidate_bodies(items, [item])
+            except BeginCannotComplete:
+                break
+            if not getattr(item, "body_loaded", True):
+                continue
         if not shaped_self_approvable(item, by_ref):
             continue
 

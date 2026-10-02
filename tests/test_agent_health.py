@@ -316,8 +316,10 @@ def test_sparse_history_uses_the_absolute_silence_floor_and_reaches_the_brief(
         "muse": "meta",
     })
     monkeypatch.setattr(
-        funnel, "_brief_heartbeat_rows",
-        lambda agent: silent if agent in ("zcode", "muse") else [],
+        heartbeat, "read_brief",
+        lambda agent, timeout=None: (
+            silent if agent in ("zcode", "muse") else []
+        ),
     )
     monkeypatch.setattr(funnel, "recent_resend_ratio", lambda now: {})
     monkeypatch.setattr(funnel, "unattended_merges", lambda now: [])

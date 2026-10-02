@@ -25,6 +25,7 @@ import os
 import pathlib
 import re
 import sys
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
@@ -62,8 +63,9 @@ def validation_exit(attempt: Optional[int]) -> int:
     return RETRY_EXIT if attempt < FINAL_ATTEMPT else 1
 
 
-def _read_fresh_shape_facts(item) -> Tuple[Optional[str], int]:
-    """Read the target's current Project Status and complete child count."""
+def _read_fresh_shape_facts(item) -> Tuple[str, Optional[str], int]:
+    """Read the target's current issue state, Project Status and complete
+    child count: the inputs of ``funnel.unshapeable_reason`` (#2139)."""
     fresh_items = funnel.load_project_items_by_refs([item.ref])
     if (not isinstance(fresh_items, list) or len(fresh_items) != 1
             or getattr(fresh_items[0], "ref", None) != item.ref):
@@ -74,6 +76,12 @@ def _read_fresh_shape_facts(item) -> Tuple[Optional[str], int]:
         )
 
     fresh = fresh_items[0]
+    state = getattr(fresh, "state", None)
+    if not isinstance(state, str):
+        raise funnel.GitHubError(
+            "could not read current issue state for {} before shape "
+            "apply".format(item.ref)
+        )
     status = getattr(fresh, "status", None)
     if status is not None and not isinstance(status, str):
         raise funnel.GitHubError(
@@ -88,7 +96,7 @@ def _read_fresh_shape_facts(item) -> Tuple[Optional[str], int]:
             "could not read current sub-issue count for {} before shape "
             "apply".format(item.ref)
         )
-    return status, children_total
+    return state, status, children_total
 
 
 #: The answer keys shape-apply accepts — exactly these, no extras. From
@@ -132,7 +140,9 @@ NEEDS_FIELDS = (
 #: The runner's review policy for agent-origin self-approvable plans.
 #: It rides in the packet so the shaping model sees the rule at the point
 #: where it chooses signals; ``review_agent_shape_output`` enforces the
-#: false-hold cases before they are recorded.
+#: false-hold cases before they are recorded. ``shape_inputs`` decides
+#: both, so an agent-origin idea whose Class the answer will set gets it
+#: too (#2136).
 AGENT_SELF_APPROVABLE_OUTPUT_REVIEW = {
     "scope": (
         "For agent-origin Investigate, Broken, Maintenance, Improve, and "
@@ -492,6 +502,11 @@ def render_plan(answer: Dict) -> str:
     Canonical Risk and Needs values live in Project fields. Takes a
     validated answer; ``apply_shape`` validates before calling. The body
     carries exactly one ``Proposed class:`` line, the runner's (#1723).
+
+    No origin override is rendered (#2138). The runner carries the one the
+    decision honoured after this body, so an override marker anywhere in
+    the model's fields, the narrative or a one-line field, is made inert:
+    the model never moves an idea toward agents or toward Nate.
     """
     lines = [_without_proposed_class_lines(answer["plan_markdown"]).rstrip(),
              "", "## Premises", ""]
@@ -541,7 +556,12 @@ def render_plan(answer: Dict) -> str:
         for category, questions in open_questions:
             lines.append("- {}: {}".format(category, "; ".join(questions)))
     lines.append("")
-    return "\n".join(lines)
+    # Only model text can hold the marker: no runner line above writes it.
+    # ``&lt;!--`` renders as ``<!--`` on GitHub, as in
+    # ``funnel.inert_comment_text``, but no reader takes it for the marker.
+    marker = funnel.ORIGIN_OVERRIDE_MARKER
+    return "\n".join(lines).replace(
+        marker, marker.replace("<!--", "&lt;!--", 1))
 
 
 def open_need_categories(answer: Dict) -> List[str]:
@@ -680,6 +700,72 @@ def _record_ordering_decision(answer: Dict, refs: Sequence[str]) -> None:
     answer["decided_by_agent"].append(entry)
 
 
+def output_review_applies(klass: Optional[str],
+                          origin_voice: Optional[str]) -> bool:
+    """Whether the agent-origin output review judges an answer (#2136).
+
+    The one copy of the predicate: ``review_agent_shape_output`` gates on it
+    and ``shape_inputs`` builds the packet's flag from it. Agent origin only;
+    an origin override to agents does not widen it.
+    """
+    return (origin_voice == "agent"
+            and klass in funnel.SELF_APPROVABLE_CLASSES)
+
+
+@dataclass(frozen=True)
+class ShapeInputs:
+    """One reading of an idea's shaping inputs (#2136, #1746).
+
+    The packet, the output review, preview and apply each read origin,
+    override and Class themselves until #2136, and the copies drifted: #1369
+    and #1448 each patched one, and the packet then omitted the guidance the
+    review enforced on an agent-origin idea with no Class.
+
+    ``class_adopted``: the idea is agent-origin with no ladder Class, so the
+    answer's ``proposed_class`` is its Class and apply writes it. ``klass``
+    is the effective Class the decision uses: the adopted one, else the
+    parent's Class or the idea's own. It is None for an adopted Class read
+    without an answer, which only the answer can supply. ``output_review``
+    says whether the agent-origin output review applies: the effective Class
+    is self-approvable, or, before the answer, the Class is still to be
+    adopted from it. ``state`` is the issue's GitHub state.
+    """
+
+    origin_voice: Optional[str]
+    override_target: Optional[str]
+    class_adopted: bool
+    klass: Optional[str]
+    output_review: bool
+    state: Optional[str]
+
+
+def shape_inputs(items: Sequence, item,
+                 answer: Optional[Dict] = None) -> ShapeInputs:
+    """Read the inputs every shaping step decides from (#2136).
+
+    ``collect`` reads without an answer; the output review, preview and
+    apply pass the validated answer. Pure apart from its arguments.
+    """
+    origin_voice = item.origin
+    override = funnel.parse_origin_override(item.body or "")
+    override_target = override["target"] if override is not None else None
+    class_adopted = item.klass not in funnel.LADDER and origin_voice == "agent"
+    if class_adopted:
+        klass = answer["proposed_class"] if answer is not None else None
+    else:
+        by_ref = {candidate.ref: candidate for candidate in items}
+        klass = funnel.effective_class(item, by_ref)
+    return ShapeInputs(
+        origin_voice=origin_voice,
+        override_target=override_target,
+        class_adopted=class_adopted,
+        klass=klass,
+        output_review=(output_review_applies(klass, origin_voice)
+                       or (class_adopted and answer is None)),
+        state=item.state,
+    )
+
+
 def review_agent_shape_output(
         answer: Dict, *, klass: Optional[str],
         origin_voice: Optional[str], repo: Optional[str] = None
@@ -696,8 +782,7 @@ def review_agent_shape_output(
     """
     reviewed = copy.deepcopy(answer)
     rejected = []
-    if (klass not in funnel.SELF_APPROVABLE_CLASSES
-            or origin_voice != "agent"):
+    if not output_review_applies(klass, origin_voice):
         return reviewed, rejected
 
     scope_questions = reviewed["needs_nate"]["scope"]
@@ -909,50 +994,109 @@ def decide(answer: Dict, *,
     return "Shaped", "; ".join(failed)
 
 
-def preview_decision(items: list, item, answer: Dict) -> Tuple[str, str]:
-    """The status one validated answer would record, without writing.
+@dataclass(frozen=True)
+class ShapeDecision:
+    """One answer's decision record: everything shaping writes (#2137).
 
-    The same inputs the live path decides from — the effective class
-    with the class-missing recovery, the origin voice and override, the
-    model's escalated-risk declaration inside the answer, and the
-    escalated-risk scan of the rendered plan — so ``--validate-only``
-    reports the status the live path would write. Pure apart from its
-    arguments; takes a validated answer.
+    Preview, ``--validate-only`` and ``apply_shape`` each decided, scanned
+    and derived the Risk write themselves until #2137, and preview and the
+    Risk write drifted apart twice (#1538 in #1644, #1679 in #1721).
+    ``decision_record`` now builds this once per answer and the writes read
+    only from it.
+
+    ``answer`` is the validated answer the record was built from, reviewed
+    when ``shape_decision`` built it. ``rendered`` is ``render_plan``'s
+    body and ``matches`` the wording scan of it, typed declarations left
+    out; ``declared`` is what holds the plan (``declared_risks``).
+    ``status`` and ``reason`` are ``decide``'s. ``risk`` is escalated
+    exactly when a risk is declared or scanned, and ``needs`` is human
+    exactly when the status is Shaped. ``scan_only`` holds the matches that
+    raise the review tier without holding, ``authority_signals`` the
+    advisory signals in the rendered plan, and ``risk_record`` the runner's
+    shape-risk block for the body.
     """
-    original_body = item.body or ""
-    origin_voice = item.origin
-    override = funnel.parse_origin_override(original_body)
-    override_target = override["target"] if override is not None else None
-    by_ref = {candidate.ref: candidate for candidate in items}
-    effective_klass = funnel.effective_class(item, by_ref)
-    if item.klass not in funnel.LADDER and origin_voice == "agent":
-        effective_klass = answer["proposed_class"]
+
+    answer: Dict
+    inputs: ShapeInputs
+    rendered: str
+    matches: List[Dict[str, Optional[str]]]
+    declared: List[str]
+    status: str
+    reason: str
+    risk: str
+    needs: str
+    scan_only: List[Dict[str, Optional[str]]]
+    authority_signals: List[str]
+    risk_record: str
+
+
+def decision_record(items: Sequence, item, answer: Dict) -> ShapeDecision:
+    """Build one validated answer's decision record (#2137).
+
+    The inputs come from ``shape_inputs`` (#2136): the effective class with
+    the class-missing recovery, the origin voice and override, and the
+    issue state. The model's escalated-risk declaration inside the answer
+    and the escalated-risk scan of the rendered plan complete it. Pure
+    apart from its arguments; it does not review the answer.
+    """
+    inputs = shape_inputs(items, item, answer)
     # `decide` consumes the typed declaration separately. Keep it out of the
     # wording scan so the durable Risk rationale does not report the same
     # declaration twice.
     matches = _plan_escalation_matches(answer)
-    return decide(
+    scan = [entry["reason"] for entry in matches
+            if isinstance(entry.get("reason"), str)]
+    declared = declared_risks(answer)
+    status, reason = decide(
         answer,
-        klass=effective_klass,
-        origin_voice=origin_voice,
-        override_target=override_target,
-        escalation_reasons=[entry["reason"] for entry in matches
-                            if isinstance(entry.get("reason"), str)],
+        klass=inputs.klass,
+        origin_voice=inputs.origin_voice,
+        override_target=inputs.override_target,
+        escalation_reasons=scan,
         escalation_matches=matches,
-        state=item.state,
+        state=inputs.state,
     )
+    rendered = render_plan(answer)
+    return ShapeDecision(
+        answer=answer,
+        inputs=inputs,
+        rendered=rendered,
+        matches=matches,
+        declared=declared,
+        status=status,
+        reason=reason,
+        # A declaration the shaper wrote into the plan holds it just as the
+        # typed list does, so it must also write Risk escalated: the sweep
+        # reads a standard Risk as no hold at all.
+        risk="escalated" if (declared or matches) else "standard",
+        needs="human" if status == "Shaped" else "none",
+        scan_only=scan_only_matches(answer, matches),
+        authority_signals=funnel.needs_nate_signals(rendered),
+        # The runner's record of what the decision held on (#1721). The
+        # Shaped sweep releases an escalated Risk only on this record, never
+        # on prose alone, which a malformed fence or quote in the narrative
+        # can blank.
+        risk_record=funnel.shape_risk_block(declared, scan),
+    )
+
+
+def preview_decision(items: list, item, answer: Dict) -> Tuple[str, str]:
+    """The status one validated answer would record, without writing.
+
+    The status and reason of ``decision_record``, the record the live path
+    writes from (#2137). Pure apart from its arguments; takes a validated
+    answer and does not review it.
+    """
+    record = decision_record(items, item, answer)
+    return record.status, record.reason
 
 
 def review_shape_output_for_item(items: list, item, answer: Dict
                                  ) -> Tuple[Dict, List[str]]:
-    """Apply the output review using the same effective class as shaping."""
-    origin_voice = item.origin
-    by_ref = {candidate.ref: candidate for candidate in items}
-    effective_klass = funnel.effective_class(item, by_ref)
-    if item.klass not in funnel.LADDER and origin_voice == "agent":
-        effective_klass = answer["proposed_class"]
+    """Apply the output review with the Class ``shape_inputs`` reads."""
+    inputs = shape_inputs(items, item, answer)
     return review_agent_shape_output(
-        answer, klass=effective_klass, origin_voice=origin_voice,
+        answer, klass=inputs.klass, origin_voice=inputs.origin_voice,
         repo=item.repo)
 
 
@@ -961,6 +1105,107 @@ def report_output_review(rejected: Sequence[str]) -> None:
     if rejected:
         print("shape-apply output review rejected: {}".format(
             "; ".join(rejected)), file=sys.stderr)
+
+
+def shape_decision(items: Sequence, item, answer_data: object
+                   ) -> ShapeDecision:
+    """Validate, review and record one answer (#2137).
+
+    The steps ``apply_main --validate-only`` and the live ``apply_shape``
+    share: each runs this once, so the status the preview prints is the one
+    the live path writes. Raises ``ShapeError`` on a malformed answer
+    before anything is reported.
+    """
+    answer = validate_answer(answer_data)
+    reviewed, rejected_signals = review_shape_output_for_item(
+        items, item, answer)
+    report_output_review(rejected_signals)
+    return decision_record(items, item, reviewed)
+
+
+def carried_override_blocks(original_body: str,
+                            override_target: Optional[str]) -> List[str]:
+    """The idea's blocks that carry the override the decision used (#2138).
+
+    ``funnel.parse_origin_override`` honours an override to agents only
+    while the body's newest provenance, in body order, is a Nate voice, and
+    the plan body ends with the shaper's own provenance. So an override to
+    agents is carried with the provenance block that authorised it, the
+    one that reader checked on the idea's body, verbatim and after the
+    shaper's: the runner never writes a Nate voice of its own. An override
+    toward Nate needs no voice. An override the decision did not honour is
+    not carried, so a nate-relayed shaping cannot lend it the voice it
+    lacked. Each block is the newest parseable one, the one the reader read.
+    """
+    if override_target is None:
+        return []
+    markers = [funnel.ORIGIN_OVERRIDE_MARKER]
+    if override_target == "agents":
+        markers.append(funnel.PROVENANCE_MARKER)
+    blocks = []
+    for marker in markers:
+        block = funnel._marked_json_block(original_body, marker)
+        if block is not None:
+            blocks.append(block)
+    return blocks
+
+
+def read_back_mismatches(body: str, decision: ShapeDecision) -> List[str]:
+    """Where funnel's stored-body readers disagree with the decision (#2138).
+
+    Every later reader, the Shaped sweep above all, reads the stored plan
+    body, never the idea's body the decision read. Each entry names one
+    reader that would see something other than what the decision used: the
+    origin override, the runner's risk record, or the proposed Class.
+    """
+    mismatches = []
+    override = funnel.parse_origin_override(body)
+    target = override["target"] if override is not None else None
+    if target != decision.inputs.override_target:
+        mismatches.append(
+            "the origin override reads {} where the decision used {}".format(
+                target or "none", decision.inputs.override_target or "none"))
+    runner_record = funnel._marked_json(
+        decision.risk_record, funnel.SHAPE_RISK_MARKER)
+    if funnel.parse_shape_risk_record(body) != runner_record:
+        mismatches.append(
+            "the shape-risk record read is not the runner's")
+    proposed = funnel.proposed_class_for_approval(body)
+    if proposed is None or proposed[0] != decision.answer["proposed_class"]:
+        mismatches.append("the proposed Class does not read {}".format(
+            decision.answer["proposed_class"]))
+    return mismatches
+
+
+def written_body(decision: ShapeDecision, original_body: str, *,
+                 voice: str, now: datetime,
+                 run: Optional[str] = None,
+                 agent: Optional[str] = None) -> str:
+    """The plan body ``apply_shape`` writes for ``decision`` (#2138).
+
+    The rendered plan, the runner's risk record, the shaper's provenance,
+    then the carried override blocks. The runner's record and provenance
+    come before the carried blocks, so a later copied marker must not read
+    as newer (#1937). Raises ``ShapeError``, before anything is written,
+    when the body would not read back to the decision. In practice that is
+    a carried Nate-voiced block dated at or after ``now``: it would become
+    the provenance ``parse_shape_risk_record`` reads the runner's record
+    against, and that record would read as unreadable.
+    """
+    body = funnel.append_provenance(
+        "{}\n\n{}\n".format(decision.rendered.rstrip("\n"),
+                            decision.risk_record),
+        voice, at=now, run=run, agent=agent)
+    for block in carried_override_blocks(
+            original_body, decision.inputs.override_target):
+        body = "{}\n\n{}".format(body, block)
+    mismatches = read_back_mismatches(body, decision)
+    if mismatches:
+        raise ShapeError(
+            "refusing to write the plan: its body would not read back to "
+            "the decision it was written from: {}".format(
+                "; ".join(mismatches)))
+    return body
 
 
 def issue_url(ref: str) -> str:
@@ -1150,6 +1395,7 @@ def issue_thread_section(comments: Sequence[Dict]) -> Optional[str]:
 def build_packet(*, repo: str, idea: Dict,
                  origin_voice: Optional[str],
                  override_target: Optional[str],
+                 output_review: bool,
                  plan_md: str, plan_md_missing: bool,
                  agents_md: str, agents_md_missing: bool,
                  siblings: Sequence[Dict],
@@ -1159,7 +1405,9 @@ def build_packet(*, repo: str, idea: Dict,
 
     Everything the shape question needs in one JSON-serialisable dict:
     the idea, its origin, the repo's plan.md and AGENTS.md, and the
-    sibling plans the model cites as precedent.
+    sibling plans the model cites as precedent. ``output_review`` is
+    ``shape_inputs``' flag, so the packet carries the review policy exactly
+    when the review will judge the answer (#2136).
     """
     packet = {
         "repo": repo,
@@ -1179,8 +1427,7 @@ def build_packet(*, repo: str, idea: Dict,
         issue_comments if issue_comments is not None else [])
     if issue_thread is not None:
         packet["issue_thread"] = issue_thread
-    if (origin_voice == "agent"
-            and idea.get("klass") in funnel.SELF_APPROVABLE_CLASSES):
+    if output_review:
         packet["output_review"] = dict(
             AGENT_SELF_APPROVABLE_OUTPUT_REVIEW)
     return packet
@@ -1246,15 +1493,15 @@ def collect(repo: Optional[str], idea_number: int, *,
         raise funnel.GitHubError(
             "could not read comments for {}#{}".format(resolved, idea_number)
         )
-    override = funnel.parse_origin_override(idea_item.body or "")
+    inputs = shape_inputs(items, idea_item)
     plan_md, plan_md_missing = fetch_repo_text(resolved, "plan.md")
     agents_md, agents_md_missing = fetch_repo_text(resolved, "AGENTS.md")
     return build_packet(
         repo=resolved,
         idea=_idea_packet(idea_item),
-        origin_voice=idea_item.origin,
-        override_target=(override["target"]
-                         if override is not None else None),
+        origin_voice=inputs.origin_voice,
+        override_target=inputs.override_target,
+        output_review=inputs.output_review,
         plan_md=plan_md,
         plan_md_missing=plan_md_missing,
         agents_md=agents_md,
@@ -1297,8 +1544,11 @@ def apply_shape(items: list, now: datetime, ref: str,
     Project read refuses a stale apply before it can overwrite the issue.
 
     The open-question record comes from the needs_nate fields rather than a
-    Needs-section parse. A manually placed origin-override block is carried
-    over verbatim; Origin itself lives in the Project field.
+    Needs-section parse. The origin override the decision honoured is
+    carried over verbatim, with the Nate-voiced provenance that authorised
+    an override to agents (``written_body``, #2138); Origin itself lives in
+    the Project field. The written body, and the in-session item, read back
+    to the decision through funnel's stored-body readers.
 
     Sequencing dependencies ride the body write as native blocked-by
     edges (#1053): one ``gh issue edit`` carries the rendered plan and
@@ -1308,41 +1558,19 @@ def apply_shape(items: list, now: datetime, ref: str,
     if voice not in ("agent", "nate-relayed"):
         raise ShapeError("shape provenance voice must be agent or nate-relayed")
     item = funnel.find(items, ref)
-    answer = validate_answer(answer_data)
-    answer, rejected_signals = review_shape_output_for_item(
-        items, item, answer)
-    report_output_review(rejected_signals)
+    # Validated, reviewed and decided once, before the body write below
+    # replaces item.body (#2136), by the steps --validate-only runs; every
+    # write below reads this record and nothing else decides (#2137).
+    decision = shape_decision(items, item, answer_data)
+    answer = decision.answer
+    status, reason = decision.status, decision.reason
+    scan_only = decision.scan_only
+    authority_signals = decision.authority_signals
 
-    original_body = item.body or ""
-    origin_voice = item.origin
-    carried_blocks = []
-    for marker in (funnel.ORIGIN_OVERRIDE_MARKER,):
-        block = funnel._marked_json_block(original_body, marker)
-        if block is not None:
-            carried_blocks.append(block)
-    # The runner risk record and provenance are written before these carried
-    # blocks below. The parser must not treat a later copied marker as newer.
-    class_missing = item.klass not in funnel.LADDER
-
-    rendered = render_plan(answer)
-    # Decided before the first write from the same inputs as the shadow
-    # path: the decision is pure, and previewing it early changes nothing
-    # the writes below can observe.
-    status, reason = preview_decision(items, item, answer)
-    authority_signals = funnel.needs_nate_signals(rendered)
-    matches = _plan_escalation_matches(answer)
-    declared = declared_risks(answer)
-    # The runner's record of what the decision held on (#1721). The Shaped
-    # sweep releases an escalated Risk only on this record, never on prose
-    # alone, which a malformed fence or quote in the narrative can blank.
-    risk_record = funnel.shape_risk_block(
-        declared, [entry["reason"] for entry in matches
-                   if isinstance(entry.get("reason"), str)])
-    body = funnel.append_provenance(
-        "{}\n\n{}\n".format(rendered.rstrip("\n"), risk_record),
-        voice, at=now, run=run, agent=agent)
-    for block in carried_blocks:
-        body = "{}\n\n{}".format(body, block)
+    # The body reads back to this decision through funnel's stored-body
+    # readers, or nothing is written (#2138).
+    body = written_body(decision, item.body or "", voice=voice, now=now,
+                        run=run, agent=agent)
 
     depends_on = answer.get("depends_on", [])
     current_blockers = getattr(item, "blocked_by_refs", None)
@@ -1362,16 +1590,19 @@ def apply_shape(items: list, now: datetime, ref: str,
         command += ["--add-blocked-by", ",".join(blocked_by)]
 
     # The packet and decision may be minutes old. Re-read immediately before
-    # the first issue mutation; a moved stage or newly added child makes this
-    # answer stale. Body-only edits deliberately do not block the apply.
-    fresh_status, fresh_children = _read_fresh_shape_facts(item)
-    if fresh_status != "Ideas" or fresh_children > 0:
+    # the first issue mutation; a closed issue, a moved stage or a newly added
+    # child makes this answer stale, by the picker's own predicate (#2139).
+    # Body-only edits deliberately do not block the apply.
+    fresh_state, fresh_status, fresh_children = _read_fresh_shape_facts(item)
+    stale_reason = funnel.unshapeable_reason(
+        fresh_state, fresh_status, fresh_children)
+    if stale_reason is not None:
         status_label = fresh_status if fresh_status is not None else "missing"
-        reason = "with-children" if fresh_children > 0 else "status-changed"
-        print("{} ref={} reason={} fresh Status={} children={}".format(
-            SKIPPED_STALE_SHAPE_OUTCOME, item.ref, reason, status_label,
-            fresh_children,
-        ))
+        print("{} ref={} reason={} fresh Status={} children={} "
+              "state={}".format(
+                  SKIPPED_STALE_SHAPE_OUTCOME, item.ref, stale_reason,
+                  status_label, fresh_children, fresh_state,
+              ))
         return 0
 
     out = funnel._run_gh(command, capture_output=True, text=True)
@@ -1413,7 +1644,7 @@ def apply_shape(items: list, now: datetime, ref: str,
 
     if not item.item_id:
         raise funnel.GitHubError("{} is not in the Project".format(item.ref))
-    if class_missing and origin_voice == "agent":
+    if decision.inputs.class_adopted:
         # This recovery write is the only place shaping may assign a
         # Class. Keep it immediately before the Status mutation so the
         # latter never makes an unclassed idea look like it advanced
@@ -1422,17 +1653,15 @@ def apply_shape(items: list, now: datetime, ref: str,
             funnel.SET_FIELD, project=funnel.PROJECT_ID,
             item=item.item_id, field=funnel.CLASS_FIELD_ID,
             option=funnel._option_id(funnel.CLASS_FIELD_ID,
-                                     answer["proposed_class"]))
-    # A declaration the shaper wrote into the plan holds it just as the typed
-    # list does, so it must also write Risk escalated: the sweep reads a
-    # standard Risk as no hold at all.
-    risk = "escalated" if (declared or matches) else "standard"
-    scan_only = scan_only_matches(answer, matches)
-    needs = "human" if status == "Shaped" else "none"
-    funnel.write_project_select(item.item_id, "Risk", risk, item.ref)
-    funnel.write_project_select(item.item_id, "Needs", needs, item.ref)
-    item.risk = risk
-    item.needs = needs
+                                     decision.inputs.klass))
+        # A same-session reader, the Shaped sweep included, reads the Class
+        # from this object, as it reads the body above (#2138).
+        item.klass = decision.inputs.klass
+    funnel.write_project_select(item.item_id, "Risk", decision.risk, item.ref)
+    funnel.write_project_select(
+        item.item_id, "Needs", decision.needs, item.ref)
+    item.risk = decision.risk
+    item.needs = decision.needs
     status_error = funnel._write_status(item, status, now)
     if status_error is not None:
         # The body is durable, but the stage is not confirmed. Do not
@@ -1572,7 +1801,10 @@ def apply_main(argv: Optional[Sequence[str]] = None) -> int:
               file=sys.stderr)
         return validation_exit(args.attempt)
     try:
-        answer = validate_answer(data)
+        # Only the exit code is decided here, before any read: a malformed
+        # answer is retryable on the runner protocol. Both paths then run
+        # ``shape_decision`` on the same data (#2137).
+        validate_answer(data)
     except ShapeError as exc:
         print("shape-apply: {}".format(exc), file=sys.stderr)
         return validation_exit(args.attempt)
@@ -1598,13 +1830,11 @@ def apply_main(argv: Optional[Sequence[str]] = None) -> int:
                 else:
                     items.extend(parent_items)
         if args.validate_only:
-            item = funnel.find(items, ref)
-            answer, rejected_signals = review_shape_output_for_item(
-                items, item, answer)
-            report_output_review(rejected_signals)
-            status, reason = preview_decision(items, item, answer)
-            print(json.dumps({"status": status, "reason": reason,
-                              "answer": answer},
+            # The live path's own steps on the same answer data (#2137).
+            decision = shape_decision(items, funnel.find(items, ref), data)
+            print(json.dumps({"status": decision.status,
+                              "reason": decision.reason,
+                              "answer": decision.answer},
                              indent=2, sort_keys=True))
             return 0
         return apply_shape(

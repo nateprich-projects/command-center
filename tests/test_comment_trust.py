@@ -47,13 +47,14 @@ TEXT_PARSERS = frozenset({
     "funnel.py:render_voice",
     "funnel.py:parse_self_approval",
     "funnel.py:parse_park_comment",
-    "funnel.py:_parse_block_comment_header",
-    "funnel.py:_unconditioned_event_reason",
-    "funnel.py:_parse_block_comment_details",
-    "funnel.py:parse_block_comment",
-    "funnel.py:unparseable_block_comment_lines",
+    # block_record.py owns the block, decision and decline headers (#2165).
+    "block_record.py:_parse_block_comment_header",
+    "block_record.py:_unconditioned_event_reason",
+    "block_record.py:_parse_block_comment_details",
+    "block_record.py:parse_block_comment",
+    "block_record.py:unparseable_block_comment_lines",
     "funnel.py:parse_needs_decision_comment",
-    "funnel.py:parse_decline_comment",
+    "block_record.py:parse_decline_comment",
     "funnel.py:parse_decline_route_comment",
     "funnel.py:parse_satisfied_block_comment",
     "funnel.py:parse_origin_override",
@@ -123,9 +124,9 @@ BODY_READERS: Dict[str, str] = {
     "funnel.py:_decline_route_withholds_startability": _PLAN_BODY,
     "funnel.py:recorded_cause_regressions": _PLAN_BODY,
     "metrics.py:_project_has_prior_cause": _PLAN_BODY,
-    "engine/shape.py:collect": _PLAN_BODY,
-    "engine/shape.py:preview_decision": _PLAN_BODY,
-    "engine/shape.py:apply_shape": _PLAN_BODY,
+    "engine/shape.py:shape_inputs": _PLAN_BODY,
+    "engine/shape.py:carried_override_blocks": _PLAN_BODY,
+    "engine/shape.py:read_back_mismatches": _PLAN_BODY,
     "engine/breakdown.py:apply": _PLAN_BODY,
     "engine/review.py:pr_body_section":
         "a funnel PR's body (#1794), which only its author and collaborators "
@@ -153,6 +154,10 @@ WRITERS = frozenset({
     "funnel.py:closed_itself_comment",
     "funnel.py:shape_risk_block",
     "funnel.py:_needs_decision_comment_body",
+    "block_record.py:render_blocked",
+    "block_record.py:render_blocked_until_event",
+    "block_record.py:render_needs_decision",
+    "block_record.py:render_declined",
     "funnel.py:_write_verdict",
     "funnel.py:cmd_park",
     "funnel.py:cmd_capture",
@@ -161,6 +166,7 @@ WRITERS = frozenset({
     "decline_classifier.py:declined_unsatisfiable_acceptance_comment",
     "decline_classifier.py:declined_pending_gate_answer_comment",
     "engine/breakdown.py:apply_question",
+    "engine/shape.py:render_plan",
     "engine/implement.py:render_closed_step_route",
     "engine/implement.py:finish_declined",
     "engine/implement.py:close_declined_defer_note_proof",
@@ -352,7 +358,8 @@ def test_override_adjacent_marker_readers_stay_classified_and_filtered():
     assert required_comment_readers <= set(COMMENT_READERS)
     assert required_comment_text_readers <= COMMENT_TEXT_READERS
     assert required_text_parsers <= TEXT_PARSERS
-    assert BODY_READERS["engine/shape.py:preview_decision"] == _PLAN_BODY
+    # collect, preview and apply read the override through it (#2136).
+    assert BODY_READERS["engine/shape.py:shape_inputs"] == _PLAN_BODY
 
     units = _units(_trees())
     for reader in required_comment_readers:

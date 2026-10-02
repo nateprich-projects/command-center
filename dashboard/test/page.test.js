@@ -150,10 +150,8 @@ function renderUsageFixture(usage, nowMs) {
   }
 }
 
-function usageRow(container, marker) {
-  return container.querySelectorAll(".usage").find((row) => (
-    row.className.split(/\s+/).includes(marker)
-  ));
+function usageRow(container, label) {
+  return container.querySelectorAll(".usage").find((row) => row.textContent.includes(label));
 }
 
 function nodesByTag(root, tagName) {
@@ -801,15 +799,19 @@ test("Muse account-panel usage shows its validated value, source and original sa
   });
 
   const container = renderUsageFixture({ muse_panel: sample }, now);
-  const row = usageRow(container, "usage-muse-panel");
+  const row = usageRow(container, "Muse account-panel usage");
   assert.equal(row.querySelector(".usage-percent").textContent, "15%");
-  assert.equal(row.querySelector(".usage-sampled-at").textContent,
-    "Sampled 2026-09-29T20:55:00-07:00");
-  assert.equal(row.querySelector(".usage-source").textContent, "Muse account panel");
-  assert.equal(row.querySelector(".usage-source").attributes.get("href"), sample.source_url);
-  assert.equal(row.querySelector(".usage-age").textContent, "45m old");
+  const source = row.querySelectorAll(".usage-label").find((node) => (
+    node.tagName === "a" && node.textContent === "Muse account panel"
+  ));
+  assert.equal(source.attributes.get("href"), sample.source_url);
+  const sampledAt = row.querySelectorAll(".usage-age").find((node) => node.tagName === "time");
+  assert.equal(sampledAt.textContent, "Sampled 2026-09-29T20:55:00-07:00 · 45m old");
   assert.ok(row.querySelector(".usage-fill"));
-  assert.equal(row.querySelector(".usage-refresh").attributes.get("href"),
+  const refresh = row.querySelectorAll(".usage-age").find((node) => (
+    node.tagName === "a" && node.textContent.includes("#2123")
+  ));
+  assert.equal(refresh.attributes.get("href"),
     "https://github.com/nateprich-projects/command-center/issues/2123");
 });
 
@@ -823,25 +825,29 @@ test("Muse account-panel usage hides a stale value and keeps its source timestam
   const now = Date.parse("2026-09-29T22:26:00-07:00");
   assert.equal(musePanelUsage(sample, now).state, "stale");
 
-  const row = usageRow(renderUsageFixture({ muse_panel: sample }, now), "usage-muse-panel");
+  const row = usageRow(renderUsageFixture({ muse_panel: sample }, now), "Muse account-panel usage");
   assert.match(row.textContent, /Stale/);
   assert.equal(row.querySelector(".usage-percent"), null);
   assert.equal(row.querySelector(".usage-fill"), null);
-  assert.equal(row.querySelector(".usage-source").textContent, "Muse account panel");
-  assert.equal(row.querySelector(".usage-sampled-at").textContent,
-    "Sampled 2026-09-29T20:55:00-07:00");
-  assert.equal(row.querySelector(".usage-age").textContent, "1h old");
+  assert.ok(row.querySelectorAll(".usage-label").some((node) => (
+    node.tagName === "a" && node.textContent === "Muse account panel"
+  )));
+  const sampledAt = row.querySelectorAll(".usage-age").find((node) => node.tagName === "time");
+  assert.equal(sampledAt.textContent, "Sampled 2026-09-29T20:55:00-07:00 · 1h old");
 });
 
 test("Muse panel usage is unavailable without a validated source reading", () => {
   assert.deepEqual(musePanelUsage(null), { state: "unavailable" });
   const row = usageRow(renderUsageFixture({}, Date.parse("2026-10-01T19:00:00Z")),
-    "usage-muse-panel");
+    "Muse account-panel usage");
   assert.match(row.textContent, /Unavailable/);
   assert.equal(row.querySelector(".usage-percent"), null);
   assert.equal(row.querySelector(".usage-fill"), null);
-  assert.equal(row.querySelector(".usage-sampled-at"), null);
-  assert.equal(row.querySelector(".usage-refresh").attributes.get("href"),
+  assert.equal(row.querySelectorAll(".usage-age").some((node) => node.tagName === "time"), false);
+  const refresh = row.querySelectorAll(".usage-age").find((node) => (
+    node.tagName === "a" && node.textContent.includes("#2123")
+  ));
+  assert.equal(refresh.attributes.get("href"),
     "https://github.com/nateprich-projects/command-center/issues/2123");
 });
 
@@ -865,22 +871,23 @@ test("the Muse derived-spend estimate labels its journal source and sample age",
     percent: 7.15,
   });
 
-  const row = usageRow(renderUsageFixture({ muse: estimate }, now), "usage-muse-estimate");
+  const row = usageRow(renderUsageFixture({ muse: estimate }, now), "Muse 7-day spend estimate");
   assert.match(row.querySelector(".usage-label").textContent, /estimate/i);
-  assert.equal(row.querySelector(".usage-source").textContent,
-    "Local Muse session journal estimate");
-  assert.equal(row.querySelector(".usage-sampled-at").textContent,
-    "Sampled 2026-09-30T03:55:00.000Z");
-  assert.equal(row.querySelector(".usage-age").textContent, "45m old");
+  assert.ok(row.querySelectorAll(".usage-label").some((node) => (
+    node.textContent === "Local Muse session journal estimate"
+  )));
+  const sampledAt = row.querySelectorAll(".usage-age").find((node) => node.tagName === "time");
+  assert.equal(sampledAt.textContent, "Sampled 2026-09-30T03:55:00.000Z · 45m old");
 
   const stale = museEstimate(estimate, Date.parse("2026-09-29T22:26:00-07:00"));
   assert.equal(stale.state, "stale");
   const staleRow = usageRow(renderUsageFixture({ muse: estimate },
-    Date.parse("2026-09-29T22:26:00-07:00")), "usage-muse-estimate");
+    Date.parse("2026-09-29T22:26:00-07:00")), "Muse 7-day spend estimate");
   assert.match(staleRow.textContent, /Stale/);
   assert.equal(staleRow.querySelector(".usage-percent"), null);
-  assert.equal(staleRow.querySelector(".usage-source").textContent,
-    "Local Muse session journal estimate");
+  assert.ok(staleRow.querySelectorAll(".usage-label").some((node) => (
+    node.textContent === "Local Muse session journal estimate"
+  )));
 });
 
 test("Claude weekly usage shows the exact percentage and recomputed sample age", () => {
@@ -902,22 +909,22 @@ test("Claude weekly usage shows the exact percentage and recomputed sample age",
   };
   try {
     renderUsage({ claude: { u: { sd: 42.375 }, t: sample } }, now);
-    const row = usageRow(container, "usage-claude");
+    const row = usageRow(container, "Claude weekly usage");
     assert.equal(row.querySelector(".usage-percent").textContent, "42.375%");
     assert.equal(row.querySelector(".usage-age").textContent, "45m old");
     assert.match(row.textContent, /Claude weekly usage/);
 
     renderUsage({ claude: { u: { sd: 42.375 }, t: sample } }, now + 30 * 60 * 1000);
-    assert.equal(usageRow(container, "usage-claude").querySelector(".usage-age").textContent,
+    assert.equal(usageRow(container, "Claude weekly usage").querySelector(".usage-age").textContent,
       "1h old");
 
     renderUsage({ claude: { u: { sd: 42.375 }, t: now / 1000 - 91 * 60 } }, now);
-    const staleRow = usageRow(container, "usage-claude");
+    const staleRow = usageRow(container, "Claude weekly usage");
     assert.match(staleRow.textContent, /Stale/);
     assert.equal(staleRow.querySelector(".usage-percent"), null);
 
     renderUsage({}, now);
-    const unavailableRow = usageRow(container, "usage-claude");
+    const unavailableRow = usageRow(container, "Claude weekly usage");
     assert.match(unavailableRow.textContent, /Unavailable/);
     assert.equal(unavailableRow.querySelector(".usage-fill"), null);
   } finally {
@@ -963,6 +970,47 @@ test("same-timestamp snapshots re-render when the published Claude sample change
   assert.equal(snapshotNeedsRender(previous, {
     generated_at: previous.generated_at,
     usage: { claude: { u: { sd: 42 }, t: previous.usage.claude.t } },
+  }, previous.generated_at), false);
+});
+
+test("same-timestamp snapshots re-render when the validated Muse panel sample changes", () => {
+  const previous = {
+    generated_at: "2026-10-01T19:00:00Z",
+    usage: { muse_panel: {
+      used_percent: 15,
+      sampled_at: "2026-09-29T20:55:00-07:00",
+      source: "Muse account panel",
+      source_url: "https://github.com/nateprich-projects/command-center/issues/1673#issuecomment-5903766309",
+    } },
+  };
+  assert.equal(snapshotNeedsRender(previous, {
+    generated_at: previous.generated_at,
+    usage: { muse_panel: { ...previous.usage.muse_panel, used_percent: 16 } },
+  }, previous.generated_at), true);
+  assert.equal(snapshotNeedsRender(previous, {
+    generated_at: previous.generated_at,
+    usage: { muse_panel: { ...previous.usage.muse_panel } },
+  }, previous.generated_at), false);
+});
+
+test("same-timestamp snapshots re-render when the Muse estimate changes", () => {
+  const previous = {
+    generated_at: "2026-10-01T19:00:00Z",
+    usage: { muse: {
+      source: "Local Muse session journal estimate",
+      captured_at: 1_790_000_000,
+      spent_dollars: 14.3,
+      cap_dollars: 200,
+      used_percent: 7.15,
+    } },
+  };
+  assert.equal(snapshotNeedsRender(previous, {
+    generated_at: previous.generated_at,
+    usage: { muse: { ...previous.usage.muse, captured_at: 1_790_000_001 } },
+  }, previous.generated_at), true);
+  assert.equal(snapshotNeedsRender(previous, {
+    generated_at: previous.generated_at,
+    usage: { muse: { ...previous.usage.muse } },
   }, previous.generated_at), false);
 });
 

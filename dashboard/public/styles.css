@@ -289,14 +289,6 @@ main[hidden] { display: none; }
 .usage-percent { font-size: 13px; color: var(--ink-dim); white-space: nowrap; }
 .usage-age, .usage-state { font-size: 13px; color: var(--ink-dim); white-space: nowrap; }
 .usage-state.stale, .usage-state.unavailable { color: var(--danger); }
-.usage-meta { flex: 1 1 100%; display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center; }
-.usage-source, .usage-sampled-at, .usage-refresh {
-  color: var(--ink-faint);
-  font-size: 12px;
-  white-space: nowrap;
-}
-.usage-source[href], .usage-refresh { color: var(--accent-ink); }
-.usage-meta .usage-age { font-size: 12px; }
 .empty { margin: 0; padding: 18px; color: var(--ink-dim); }
 .unreadable { margin: 0; padding: 12px 18px; color: var(--danger); }
 .waiting-section > .unreadable { padding: 0; }

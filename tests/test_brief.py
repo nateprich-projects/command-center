@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 
@@ -12,6 +13,8 @@ import pytest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 import funnel  # noqa: E402
+
+_LIVE_RECENT_RESEND_RATIO = funnel.recent_resend_ratio
 
 
 #: Comment markers count only from the owner account (#1788).
@@ -24,7 +27,12 @@ FIXTURE = pathlib.Path(__file__).parent / "fixtures" / "project_items.json"
 @pytest.fixture(autouse=True)
 def no_resend_network(monkeypatch):
     """Brief fixture tests should not read live heartbeat or outcome branches."""
+    import heartbeat
+
     funnel.reset_api_usage()
+    monkeypatch.setattr(
+        heartbeat, "read_brief", lambda agent, timeout=None: []
+    )
     monkeypatch.setattr(funnel, "recent_resend_ratio", lambda now: {})
     monkeypatch.setattr(funnel, "_read_outcome_signals", lambda now: None)
     monkeypatch.setattr(funnel, "_read_portfolio_metrics", lambda items, now: None)
@@ -2634,6 +2642,96 @@ def test_a_timed_out_cleared_blocks_section_reads_as_unread_not_empty(
 
     assert brief["cleared_blocks"] is None
     assert [row["section"] for row in brief["missing"]] == ["cleared_blocks"]
+
+
+def test_cmd_brief_heartbeat_timeouts_publish_dependent_sections_as_unknown(
+    monkeypatch, capsys
+):
+    import heartbeat
+
+    def timed_out(agent, timeout=None):
+        raise subprocess.TimeoutExpired(["gh", "api", agent], timeout)
+
+    monkeypatch.setattr(heartbeat, "read_brief", timed_out)
+    monkeypatch.setattr(
+        funnel, "recent_resend_ratio", _LIVE_RECENT_RESEND_RATIO
+    )
+
+    assert funnel.cmd_brief([], NOW) == 0
+    brief = json.loads(capsys.readouterr().out)
+
+    dependent = (
+        "agent_health",
+        "run_summary",
+        "unattended_merges",
+        "resend_ratio",
+        "working_tree_touched",
+    )
+    assert {section: brief[section] for section in dependent} == {
+        section: None for section in dependent
+    }
+    assert set(dependent) <= {
+        entry["section"] for entry in brief["missing"]
+    }
+
+
+def test_cmd_brief_raised_heartbeat_reads_name_the_unavailable_agent(
+    monkeypatch, capsys
+):
+    import heartbeat
+
+    calls = []
+
+    def unavailable(agent, timeout=None):
+        calls.append(agent)
+        raise heartbeat.HeartbeatError("GitHub connection failed")
+
+    monkeypatch.setattr(heartbeat, "read_brief", unavailable)
+    monkeypatch.setattr(
+        funnel, "recent_resend_ratio", _LIVE_RECENT_RESEND_RATIO
+    )
+
+    assert funnel.cmd_brief([], NOW) == 0
+    brief = json.loads(capsys.readouterr().out)
+
+    dependent = (
+        "agent_health",
+        "run_summary",
+        "unattended_merges",
+        "resend_ratio",
+        "working_tree_touched",
+    )
+    assert all(brief[section] is None for section in dependent)
+    assert calls == sorted(heartbeat.PROVIDERS)
+    for section in dependent:
+        entries = [
+            entry for entry in brief["missing"]
+            if entry["section"] == section
+        ]
+        assert entries
+        assert all(entry.get("agent") for entry in entries)
+
+
+def test_cmd_brief_reads_each_provider_once_and_reuses_the_rows(
+    monkeypatch, capsys
+):
+    import heartbeat
+
+    calls = []
+
+    def read(agent, timeout=None):
+        calls.append(agent)
+        return []
+
+    monkeypatch.setattr(heartbeat, "read_brief", read)
+    monkeypatch.setattr(
+        funnel, "recent_resend_ratio", _LIVE_RECENT_RESEND_RATIO
+    )
+
+    assert funnel.cmd_brief([], NOW) == 0
+    capsys.readouterr()
+
+    assert calls == sorted(heartbeat.PROVIDERS)
 
 
 def test_genuinely_empty_sections_still_read_as_empty(capsys):

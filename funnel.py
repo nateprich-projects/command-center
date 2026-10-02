@@ -730,6 +730,13 @@ BRIEF_SECTION_BUDGETS = {
     "stale_locks_taken_over": 0.25,
     "maintenance_load": 0.25,
     "disposal": 0.25,
+    # The former resend_ratio section read codex and zcode together in
+    # 1.86–3.61 s (ticket #2132). Give each provider up to that observed pair
+    # maximum; the four-provider pass stays inside the 120 s brief envelope.
+    "heartbeat_claude": 4.0,
+    "heartbeat_codex": 4.0,
+    "heartbeat_muse": 4.0,
+    "heartbeat_zcode": 4.0,
     "resend_ratio": 3.0,
     "unattended_merges": 3.0,
     "unattended_approvals": 49.0,
@@ -15694,16 +15701,16 @@ class BriefCache:
         timeout = _brief_timeout_remaining()
         try:
             if timeout is None:
-                rows = heartbeat.read(agent)
+                rows = heartbeat.read_brief(agent)
             else:
                 try:
-                    rows = heartbeat.read(agent, timeout=timeout)
+                    rows = heartbeat.read_brief(agent, timeout=timeout)
                 except TypeError as exc:
                     # Keep fixture-era one-argument test doubles compatible
                     # while the real heartbeat reader uses the bound.
                     if "timeout" not in str(exc):
                         raise
-                    rows = heartbeat.read(agent)
+                    rows = heartbeat.read_brief(agent)
         except subprocess.TimeoutExpired as exc:
             state = _BRIEF_SECTION_STATE.get()
             section = state[0] if state else "unknown"
@@ -15878,6 +15885,63 @@ def cmd_brief(
         ], [watch_gate_json(i, now, by_ref) for i in watched]
 
     try:
+        import heartbeat
+
+        heartbeat_providers = sorted(heartbeat.PROVIDERS)
+        heartbeat_agents = sorted(
+            set(heartbeat_providers) | set(METERED_AGENTS)
+        )
+        active_heartbeat_agents = [
+            agent for agent in heartbeat_providers
+            if agent not in heartbeat.RETIRED_AGENTS
+        ]
+        heartbeat_module_error = None
+    except Exception as exc:
+        heartbeat_providers = []
+        heartbeat_agents = []
+        active_heartbeat_agents = []
+        heartbeat_module_error = _brief_error(exc)
+
+    heartbeat_rows: Dict[str, List[Dict]] = {}
+    heartbeat_errors: Dict[str, str] = (
+        {"unknown": heartbeat_module_error}
+        if heartbeat_module_error else {}
+    )
+
+    def read_provider_heartbeat(agent: str) -> None:
+        name = "heartbeat_" + agent
+        rows = section(name, lambda agent=agent: cache.heartbeat_rows(agent))
+        if rows is not None:
+            heartbeat_rows[agent] = rows
+            return
+        error = "heartbeat read failed"
+        for entry in missing:
+            if entry.get("section") == name:
+                entry.setdefault("agent", agent)
+                error = entry.get("error", error)
+        heartbeat_errors[agent] = error
+
+    def heartbeat_section(
+        name: str, agents: Sequence[str], reader: Callable[[], object]
+    ):
+        failures = (
+            [("unknown", heartbeat_module_error)]
+            if heartbeat_module_error else [
+                (agent, heartbeat_errors[agent])
+                for agent in agents if agent in heartbeat_errors
+            ]
+        )
+        for agent, error in failures:
+            missing.append({
+                "section": name,
+                "agent": agent,
+                "error": "heartbeat read unavailable for {}: {}".format(
+                    agent, error
+                ),
+            })
+        return section(name, reader)
+
+    try:
         decision_result = section("items", decision_payload)
         if decision_result is deferred_section or decision_result is None:
             decisions = None
@@ -15954,9 +16018,21 @@ def cmd_brief(
             "maintenance_load", lambda: maintenance_load(items, now)
         )
         disposal_report = section("disposal", lambda: disposal(items, now))
-        resend = section("resend_ratio", lambda: recent_resend_ratio(now))
-        merges = section(
-            "unattended_merges", lambda: unattended_merges(now)
+
+        for agent in heartbeat_agents:
+            read_provider_heartbeat(agent)
+
+        all_heartbeat_agents = (
+            heartbeat_providers
+            if heartbeat_module_error is None else []
+        )
+        resend = heartbeat_section(
+            "resend_ratio", METERED_AGENTS,
+            lambda: recent_resend_ratio(now),
+        )
+        merges = heartbeat_section(
+            "unattended_merges", all_heartbeat_agents,
+            lambda: unattended_merges(now),
         )
         approvals = section(
             "unattended_approvals",
@@ -15966,10 +16042,17 @@ def cmd_brief(
             "connector_gate_answers",
             lambda: connector_gate_answers(items, now, brief_cache=cache),
         )
-        run_summary = section("run_summary", lambda: agent_run_summary(now))
-        health = section("agent_health", lambda: agent_health(now))
-        touched = section(
-            "working_tree_touched", lambda: working_tree_touched(now)
+        run_summary = heartbeat_section(
+            "run_summary", active_heartbeat_agents,
+            lambda: agent_run_summary(now),
+        )
+        health = heartbeat_section(
+            "agent_health", active_heartbeat_agents,
+            lambda: agent_health(now),
+        )
+        touched = heartbeat_section(
+            "working_tree_touched", all_heartbeat_agents,
+            lambda: working_tree_touched(now),
         )
         rejected = section(
             "rejected_merges", lambda: rejected_merges(items, now)

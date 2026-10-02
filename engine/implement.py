@@ -2823,7 +2823,8 @@ def _push_ticket_branch(root: pathlib.Path, branch: str, *, ref: str,
 
 def _preserve_human_step_work(
         root: pathlib.Path, number: int, branch: str, *, ref: str,
-        run: Optional[str], agent: str) -> Optional[str]:
+        run: Optional[str], agent: str,
+        claim_timestamp: Optional[str] = None) -> Optional[str]:
     """Push a tracked-only WIP checkpoint before a human-step side effect."""
     paths = _tracked_working_tree_paths(root)
     if not paths:
@@ -2831,14 +2832,19 @@ def _preserve_human_step_work(
     stray = [path for path in paths if _is_run_scratch(path)]
     if stray:
         raise StrayFileError(stray)
-    _require_current_claim(ref, run, agent)
+    _require_current_claim(
+        ref, run, agent, **_claim_timestamp_kwargs(claim_timestamp),
+    )
     _run(
         ["git", "commit", "--only", "-m",
          "[human-step-wip] WIP #{}: preserve tracked work".format(number),
          "--", *paths],
         cwd=root, timeout=LOCAL_GIT_TIMEOUT_SECONDS,
     )
-    _push_ticket_branch(root, branch, ref=ref, run=run, agent=agent)
+    _push_ticket_branch(
+        root, branch, ref=ref, run=run, agent=agent,
+        **_claim_timestamp_kwargs(claim_timestamp),
+    )
     return _run(["git", "rev-parse", "HEAD"], cwd=root,
                 timeout=LOCAL_GIT_TIMEOUT_SECONDS).stdout.strip()
 
@@ -3281,6 +3287,7 @@ def _human_step_wip_note(branch: str, sha: str, reason: str) -> str:
 def finish_blocked_on_human(
         blocked: dict, *, run: str, agent: str = "codex",
         repo: Optional[str] = None, cwd: Optional[os.PathLike] = None,
+        claim_timestamp: Optional[str] = None,
         release: Optional[Callable[[str], None]] = None,
         heartbeat_finish: Callable[[str, str, str, str, str], None]
         = finish_heartbeat,
@@ -3321,7 +3328,9 @@ def finish_blocked_on_human(
     ticket = fetch_ticket(resolved, context["number"])
     ref = ticket["ref"]
     release_effect = release or (
-        lambda target: release_claim(target, run=run, agent=agent)
+        lambda target: _release_claim_for_run(
+            target, run, agent, claim_timestamp,
+        )
     )
     parent = ticket.get("parent") or {}
     parent_number = parent.get("number")
@@ -3333,7 +3342,9 @@ def finish_blocked_on_human(
     if agent == "codex":
         wip_sha = _preserve_human_step_work(
             context["root"], context["number"], context["branch"],
-            ref=ref, run=run, agent=agent)
+            ref=ref, run=run, agent=agent,
+            **_claim_timestamp_kwargs(claim_timestamp),
+        )
     # Read before filing: a lane filed a second step for one ticket after Nate
     # closed the first as not planned, re-blocking the ticket he had unblocked.
     # Matching is on the ticket number the step names, never on the action's
@@ -3752,7 +3763,9 @@ def _finish_ticket(args: argparse.Namespace) -> int:
         elif "blocked_on_human" in answer:
             result = finish_blocked_on_human(
                 answer["blocked_on_human"], run=args.run, agent=args.agent,
-                repo=args.repo, release=release_for_run,
+                repo=args.repo,
+                **_claim_timestamp_kwargs(claim_timestamp),
+                release=release_for_run,
                 extra_note=args.note,
             )
         else:

@@ -31,7 +31,7 @@ import heartbeat  # noqa: E402
 
 REPO = "owner/repo"
 NOW = datetime(2026, 9, 30, 18, 0, 0, tzinfo=timezone.utc)
-CLAIM = NOW.strftime("%Y-%m-%dT%H:%M:%SZ")
+CLAIM = "2026-09-30T18:00:00.000000Z"
 
 ORIGINAL = (
     "What: fix the thing.\n\n"

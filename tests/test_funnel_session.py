@@ -318,8 +318,8 @@ def test_a_session_reuses_brief_auxiliary_reads_until_a_mutation(monkeypatch):
         lambda rows: pr_fact_calls.append(rows) or {},
     )
     monkeypatch.setattr(
-        heartbeat, "read",
-        lambda agent: heartbeat_calls.append(agent) or [],
+        heartbeat, "read_brief",
+        lambda agent, timeout=None: heartbeat_calls.append(agent) or [],
     )
 
     session = funnel.FunnelSession(loader=lambda: items)

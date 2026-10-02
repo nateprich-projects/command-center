@@ -20,6 +20,7 @@ import pytest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 import funnel  # noqa: E402
+import heartbeat  # noqa: E402
 import outcomes  # noqa: E402
 
 
@@ -65,6 +66,9 @@ SECTIONS = {
 def readable_brief(monkeypatch):
     """Every read succeeds offline unless a test breaks one."""
     funnel.reset_api_usage()
+    monkeypatch.setattr(
+        heartbeat, "read_brief", lambda agent, timeout=None: []
+    )
     monkeypatch.setattr(funnel, "load_items", lambda: [])
     monkeypatch.setattr(funnel, "ticket_pr_facts", lambda items: {})
     monkeypatch.setattr(

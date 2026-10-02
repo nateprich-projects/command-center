@@ -2986,6 +2986,99 @@ def _startable_candidate_items(
     return candidates
 
 
+def _decline_route_body_item(
+    item: Item, by_ref: Mapping[str, Item],
+) -> Optional[Item]:
+    """The row whose Issue.body decides ``item``'s decline route, if any.
+
+    These are the two routes ``_decline_route_withholds_startability`` defers
+    while a body is unloaded: an unsatisfiable-acceptance route compares the
+    ticket's own body with its digest, and a pending-gate-answer route reads
+    its gate's body for the answer. Every other item, routed or not, needs no
+    body for that check (#2067).
+    """
+    route = item.decline_route
+    if not isinstance(route, dict):
+        return None
+    if (
+        item.needs == "agent"
+        and route.get("type") == "unsatisfiable-acceptance"
+    ):
+        return item
+    if (
+        item.needs == "external-event"
+        and route.get("type") == "pending-gate-answer"
+    ):
+        gate_ref = route.get("gate_ref")
+        return by_ref.get(gate_ref) if isinstance(gate_ref, str) else None
+    return None
+
+
+def _load_decline_route_bodies(
+    items: Sequence[Item], candidates: Sequence[Item],
+) -> bool:
+    """Read the unloaded bodies the candidates' decline routes need (#2067).
+
+    The minimal listing omits Issue.body (#1775), so a routed ticket used to
+    be ranked startable, claimed, found withheld by its fresh body, released,
+    and offered again on the next fire, while other work waited. Only the rows
+    a candidate's route reads are fetched, through the detail read begin uses
+    after claim less its history half; unrouted rows are never read. Returns
+    whether anything was read, so the caller knows to filter again.
+
+    The history half is left out on purpose. The post-claim read charges the
+    begin envelope its full 60-event timeline, about 300 units a row, against
+    a 2,048-unit envelope that keeps 818 back for the claim, so a few routed
+    rows beside a large listing would refuse every begin, review lane
+    included. A body-only row costs three units. Leaving history out also
+    keeps a routed row's listed Status age, which the shared order sorts by,
+    the same as every other row's.
+
+    Inside begin the read is charged to the work envelope (#1776), and it
+    refuses rather than eat into the reserve the selected ticket's post-claim
+    refresh still needs.
+    """
+    by_ref = {item.ref: item for item in items}
+    wanted: List[Item] = []
+    seen: Set[str] = set()
+    for item in candidates:
+        row = _decline_route_body_item(item, by_ref)
+        if (
+            row is None
+            or getattr(row, "body_loaded", True)
+            or row.ref in seen
+        ):
+            continue
+        wanted.append(row)
+        seen.add(row.ref)
+    if not wanted:
+        return False
+    envelope = _ACTIVE_BEGIN_ENVELOPE
+    if envelope is not None:
+        work = begin_body_read_work(items, wanted)
+        # One unit for the GraphQL request itself, as the listing reserves.
+        if envelope.remaining - work - 1 < BEGIN_DETAIL_WORK_RESERVE:
+            raise BeginCannotComplete()
+        envelope.consume(hydrated_fields=work)
+    hydrate_item_details(items, wanted, body_only=True)
+    return True
+
+
+def _resolved_startable_candidates(
+    items: Sequence[Item], agent: str = "codex",
+) -> List[Item]:
+    """The shared startable candidates, decided with routed bodies loaded.
+
+    Queue and begin both take their candidates from here (#1773), so both
+    drop a ticket its decline route still withholds before anything ranks it
+    (#2067).
+    """
+    candidates = _startable_candidate_items(items, agent=agent)
+    if _load_decline_route_bodies(items, candidates):
+        candidates = _startable_candidate_items(items, agent=agent)
+    return candidates
+
+
 def _filter_prequalified_startable_items(
     candidates: Sequence[Item],
     awaiting_review: Optional[Set[str]] = None,
@@ -10093,6 +10186,8 @@ BEGIN_DETAIL_WORK_RESERVE = (
     BEGIN_DETAIL_MAX_SELECTED_ITEMS * BEGIN_DETAIL_FIELDS_PER_ITEM_MAX
     + BEGIN_DETAIL_QUERY_OVERHEAD
 )
+# A body-only read (#2067) carries no timeline and no children.
+BEGIN_DETAIL_BODY_FIELDS_PER_ITEM = 3  # id, content, body
 
 ITEM_DETAILS_QUERY = """
 query($ids: [ID!]!, $childIds: [ID!]!) {
@@ -10174,18 +10269,41 @@ query($ids: [ID!]!) {
     "{timeline_max}", str(BEGIN_DETAIL_TIMELINE_ITEMS_MAX)
 )
 
+# Before ranking, a candidate's decline route may need an Issue.body that the
+# minimal listing left out (#2067). This is the post-claim detail read without
+# its history half: only the body is added, and every listed field, including
+# the Status age the shared order sorts by, stays exactly as listed.
+ITEM_BODY_DETAILS_QUERY = """
+query($ids: [ID!]!) {
+  rateLimit { cost remaining resetAt }
+  nodes(ids: $ids) {
+    ... on ProjectV2Item {
+      id
+      content {
+        ... on Issue {
+          body
+        }
+      }
+    }
+  }
+}
+"""
+
 
 def _item_detail_request(
     ids: Sequence[str], child_ids: Sequence[str], include_body: bool = False,
-    include_history: bool = False,
+    include_history: bool = False, body_only: bool = False,
 ) -> Tuple[str, Dict[str, List[str]], str, Optional[str]]:
     """Assemble one batched document for requested history and child nodes.
 
     The compact begin listing is complete for selection and does not need a
     detail request. Callers opt in to history explicitly; a body read also
     requests history so the selected item's stale fields can be refreshed in
-    one post-claim GraphQL call.
+    one post-claim GraphQL call. ``body_only`` is the pre-ranking decline-route
+    read (#2067), which asks for the body alone.
     """
+    if body_only:
+        return ITEM_BODY_DETAILS_QUERY, {"ids": list(ids)}, "nodes", None
     include_history = include_history or include_body
     if not include_history:
         raise ValueError("a detail request needs history or a body")
@@ -11365,6 +11483,7 @@ def _from_node(node: dict) -> Optional[Item]:
 def hydrate_item_details(
     items: Sequence[Item], candidates: Optional[Iterable[Item]] = None,
     *, include_body: bool = False, include_history: bool = False,
+    body_only: bool = False,
 ) -> None:
     """Read selected item history and optionally bodies when requested.
 
@@ -11372,10 +11491,13 @@ def hydrate_item_details(
     default it already carries the fields needed for startability, routing,
     and claims, so this function does no extra read. Callers that need history
     opt in; begin requests the selected ticket's body and history only after
-    claiming it. A missing requested body is a load failure, never permission
-    to guess at body contents.
+    claiming it. ``body_only`` reads the body alone, through the same batches
+    and checks, for the decline routes decided before ranking (#2067). A
+    missing requested body is a load failure, never permission to guess at
+    body contents.
     """
-    if not include_history and not include_body:
+    reads_body = include_body or body_only
+    if not include_history and not reads_body:
         return
     by_id = {
         item.item_id: item
@@ -11395,7 +11517,7 @@ def hydrate_item_details(
         ):
             ids.append(item_id)
             seen.add(item_id)
-            if item.children_total > 0:
+            if item.children_total > 0 and not body_only:
                 child_ids.append(item_id)
     if not ids:
         return
@@ -11406,7 +11528,7 @@ def hydrate_item_details(
         child_batch = [item_id for item_id in batch if item_id in child_id_set]
         query, variables, history_field, child_field = _item_detail_request(
             batch, child_batch, include_body=include_body,
-            include_history=include_history,
+            include_history=include_history, body_only=body_only,
         )
         data = gh_graphql(query, **variables)
         if not isinstance(data, dict):
@@ -11429,16 +11551,17 @@ def hydrate_item_details(
             item = by_id.get(node.get("id"))
             content = node.get("content")
             if item is not None and isinstance(content, dict):
-                if include_body:
+                if reads_body:
                     if "body" not in content:
                         raise GitHubError(
                             "Project item detail response omitted issue body"
                         )
                     loaded_bodies.add(item.item_id or "")
                 _apply_item_detail_fields(
-                    item, content, include_children=False
+                    item, content, include_children=False,
+                    include_timeline=not body_only,
                 )
-        if include_body and loaded_bodies != set(batch):
+        if reads_body and loaded_bodies != set(batch):
             raise GitHubError(
                 "Project item detail response omitted a selected issue body"
             )
@@ -11498,6 +11621,32 @@ def begin_detail_hydration_work(
             )
     batches = math.ceil(len(selected) / PROJECT_ITEM_DETAIL_BATCH_SIZE)
     return fields + batches * BEGIN_DETAIL_QUERY_OVERHEAD
+
+
+def begin_body_read_work(
+    items: Sequence[Item], candidates: Iterable[Item],
+) -> int:
+    """Upper-bound a body-only read of ``candidates`` (#2067).
+
+    Each row returns its id, its content, and one body; each batch is one
+    request with its ``rateLimit`` fields. Rows ``hydrate_item_details`` would
+    not request, because they have no Project item id here, cost nothing.
+    """
+    known = {
+        item.item_id for item in items
+        if isinstance(item.item_id, str) and item.item_id
+    }
+    rows = {
+        item.item_id for item in candidates
+        if isinstance(item.item_id, str) and item.item_id in known
+    }
+    if not rows:
+        return 0
+    batches = math.ceil(len(rows) / PROJECT_ITEM_DETAIL_BATCH_SIZE)
+    return (
+        len(rows) * BEGIN_DETAIL_BODY_FIELDS_PER_ITEM
+        + batches * BEGIN_DETAIL_QUERY_OVERHEAD
+    )
 
 
 def hydrate_regression_history(items: Sequence[Item]) -> None:
@@ -12156,7 +12305,7 @@ def _ensure_startable_view(
     return ScopedItems(
         items,
         scope=items_scope(items),
-        startable_candidates=_startable_candidate_items(
+        startable_candidates=_resolved_startable_candidates(
             startable_items, agent=agent
         ),
         startable_items=startable_items,
@@ -12260,7 +12409,9 @@ def load_items(
             _load_begin_anchor_items(begin_items, members, timings)
         )
         candidates = (
-            _startable_candidate_items(begin_items, agent=startable_agent)
+            _resolved_startable_candidates(
+                begin_items, agent=startable_agent
+            )
             if include_startable else None
         )
         if include_details:
@@ -12358,7 +12509,7 @@ def load_items(
         # Candidate eligibility and ordering therefore share one row shape
         # instead of deriving work from this full-board response.
         startable_items = _load_minimal_startable_view(members)
-        candidates = _startable_candidate_items(
+        candidates = _resolved_startable_candidates(
             startable_items, agent=startable_agent
         )
     if include_details:
@@ -19836,54 +19987,70 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
             recent_starts=begin_starts,
         )
         recently_claimed: Set[str] = set()
-        while ticket is not None:
-            try:
-                current_claim = read_lock(ticket)
-            except BeginCannotComplete:
-                out.update(
-                    do="stop",
-                    gate="ok",
-                    why=BEGIN_CANNOT_COMPLETE_REASON,
-                )
-                ticket = None
-                break
-            except GitHubError as exc:
-                out.update(
-                    do="stop",
-                    gate="error",
-                    why="could not re-read {} claim: {}".format(ticket.ref, exc),
-                )
-                ticket = None
-                break
-            if (
-                current_claim is None
-                or now - current_claim >= BEGIN_CLAIM_COLLISION_WINDOW
-            ):
-                break
+        # Tickets this run claimed and then released because their refreshed
+        # body withheld them (#2067). They are excluded like a fresh claim, so
+        # no ticket is offered twice and the move-on below always ends.
+        withheld_after_claim: List[Dict[str, str]] = []
 
-            # This process has not claimed its selected ticket yet, so a new
-            # value in the live Project view belongs to another begin. Keep the
-            # local view honest for the WIP check and pass over it without
-            # changing the shared ordering.
-            ticket.in_motion_since = current_claim
-            recently_claimed.add(ticket.ref)
-            # That begin's start may not have reached the heartbeat when this
-            # one read it. Count it, or lanes pulling together would each see
-            # the Bugs' turn and take a Bug apiece (#1846). If its binding did
-            # land first it counts twice here, which can hold a Bug back but
-            # never let one through.
-            begin_starts = list(begin_starts) + [effective_class(
-                ticket, {entry.ref: entry for entry in items})]
-            ticket = next_ticket_for_tier(
-                items, now, tier=tier, blocked=blocked,
-                excluded=recently_claimed,
-                agent=agent,
-                repo_readiness=repo_readiness,
-                pr_facts=pr_facts,
-                backed_off=begin_backed_off,
-                startable_order=startable_order,
-                recent_starts=begin_starts,
-            )
+        def passed_over() -> Set[str]:
+            return recently_claimed | {
+                str(row["ref"]) for row in withheld_after_claim
+            }
+
+        def first_unclaimed(ticket: Optional[Item]) -> Optional[Item]:
+            """Re-read each pick's claim and pass over another begin's."""
+            nonlocal begin_starts
+            while ticket is not None:
+                try:
+                    current_claim = read_lock(ticket)
+                except BeginCannotComplete:
+                    out.update(
+                        do="stop",
+                        gate="ok",
+                        why=BEGIN_CANNOT_COMPLETE_REASON,
+                    )
+                    return None
+                except GitHubError as exc:
+                    out.update(
+                        do="stop",
+                        gate="error",
+                        why="could not re-read {} claim: {}".format(
+                            ticket.ref, exc
+                        ),
+                    )
+                    return None
+                if (
+                    current_claim is None
+                    or now - current_claim >= BEGIN_CLAIM_COLLISION_WINDOW
+                ):
+                    return ticket
+
+                # This process has not claimed its selected ticket yet, so a
+                # new value in the live Project view belongs to another begin.
+                # Keep the local view honest for the WIP check and pass over
+                # it without changing the shared ordering.
+                ticket.in_motion_since = current_claim
+                recently_claimed.add(ticket.ref)
+                # That begin's start may not have reached the heartbeat when
+                # this one read it. Count it, or lanes pulling together would
+                # each see the Bugs' turn and take a Bug apiece (#1846). If its
+                # binding did land first it counts twice here, which can hold
+                # a Bug back but never let one through.
+                begin_starts = list(begin_starts) + [effective_class(
+                    ticket, {entry.ref: entry for entry in items})]
+                ticket = next_ticket_for_tier(
+                    items, now, tier=tier, blocked=blocked,
+                    excluded=passed_over(),
+                    agent=agent,
+                    repo_readiness=repo_readiness,
+                    pr_facts=pr_facts,
+                    backed_off=begin_backed_off,
+                    startable_order=startable_order,
+                    recent_starts=begin_starts,
+                )
+            return None
+
+        ticket = first_unclaimed(ticket)
         held = held_claims_before(
             items,
             now,
@@ -19954,7 +20121,10 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
             if queue_empty:
                 out["queue"] = "empty"
                 _record_queue_empty(agent, out.get("run"), tier)
-        else:
+        # One pass per claim attempt. A pass ends the loop unless the claimed
+        # ticket's fresh body withholds it, when the run moves on (#2067).
+        selection_envelope = _ACTIVE_BEGIN_ENVELOPE
+        while ticket is not None:
             detail_candidates = [ticket]
             route = ticket.decline_route
             if (
@@ -19966,8 +20136,10 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
                              if item.ref == gate_ref), None)
                 if gate is not None and gate is not ticket:
                     detail_candidates.append(gate)
-            if _ACTIVE_BEGIN_ENVELOPE is not None:
-                _ACTIVE_BEGIN_ENVELOPE.consume(
+            if selection_envelope is not None:
+                # Every attempt's refresh is charged to the one envelope; one
+                # that no longer fits refuses, as the first attempt would.
+                selection_envelope.consume(
                     hydrated_fields=begin_detail_hydration_work(
                         items, detail_candidates
                     )
@@ -20027,15 +20199,44 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
                             "ticket's decline route still withholds work"
                         )
                     if body_reason is not None:
+                        released = False
                         try:
                             write_lock(ticket, "")
                             ticket.in_motion_since = None
+                            released = True
                         except GitHubError as release_exc:
                             out["release_error"] = str(release_exc)
                         out.update(
                             do="stop",
                             why="nothing — {}".format(body_reason),
                         )
+                        if released:
+                            # The listing judged this ticket startable and its
+                            # fresh body withholds it: a race, or a check only
+                            # a body can make. Move on to the next pick in the
+                            # same order instead of stopping with work waiting
+                            # (#2067). Each pass excludes one more ticket.
+                            withheld_after_claim.append(
+                                {"ref": ticket.ref, "reason": body_reason}
+                            )
+                            out["withheld_after_claim"] = withheld_after_claim
+                            _ACTIVE_BEGIN_ENVELOPE = selection_envelope
+                            following = first_unclaimed(next_ticket_for_tier(
+                                items, now, tier=tier, blocked=blocked,
+                                excluded=passed_over(),
+                                agent=agent,
+                                repo_readiness=repo_readiness,
+                                pr_facts=pr_facts,
+                                backed_off=begin_backed_off,
+                                startable_order=startable_order,
+                                recent_starts=begin_starts,
+                            ))
+                            _ACTIVE_BEGIN_ENVELOPE = None
+                            if following is not None:
+                                out.pop("do", None)
+                                out.pop("why", None)
+                                ticket = following
+                                continue
                     else:
                         out.update(
                             do="ticket",
@@ -20091,6 +20292,7 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
                             )
                         else:
                             out["vendor"] = IMPLEMENT_VENDORS[agent]
+            break
         if "bound" not in out:
             _bind_run(agent, out)
         print(json.dumps(out, indent=2))

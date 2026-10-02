@@ -4,7 +4,8 @@ import test from "node:test";
 
 import {
   STAGES, age, boardColumns, boardTabCounts, boardTabFromUrl, boardTabUrl, tabColumns,
-  failureState, museUsageText, claudeUsage, claudeUsageChanged, snapshotNeedsRender,
+  failureState, museUsageText, musePanelUsage, museEstimate,
+  claudeUsage, claudeUsageChanged, snapshotNeedsRender,
   renderUsage, nextOwner, ownerCell,
   phoneState, pipState, projectBlocked, projectHold, holdChip, renderPhoneBoard, ticketHold, unblocksChip,
   repoLabels, repoOf,
@@ -128,6 +129,31 @@ function renderWaitingFixture(brief) {
     if (previousDocument === undefined) delete globalThis.document;
     else globalThis.document = previousDocument;
   }
+}
+
+function renderUsageFixture(usage, nowMs) {
+  const container = new TestNode("div");
+  const previousDocument = globalThis.document;
+  globalThis.document = {
+    createElement(tagName) { return new TestNode(tagName); },
+    querySelector(selector) {
+      assert.equal(selector, "#usage");
+      return container;
+    },
+  };
+  try {
+    renderUsage(usage, nowMs);
+    return container;
+  } finally {
+    if (previousDocument === undefined) delete globalThis.document;
+    else globalThis.document = previousDocument;
+  }
+}
+
+function usageRow(container, marker) {
+  return container.querySelectorAll(".usage").find((row) => (
+    row.className.split(/\s+/).includes(marker)
+  ));
 }
 
 function nodesByTag(root, tagName) {
@@ -757,6 +783,106 @@ test("the usage line shows rolling 7-day Muse spend against the cap", () => {
   );
 });
 
+test("Muse account-panel usage shows its validated value, source and original sample age", () => {
+  const sample = {
+    used_percent: 15,
+    sampled_at: "2026-09-29T20:55:00-07:00",
+    source: "Muse account panel",
+    source_url: "https://github.com/nateprich-projects/command-center/issues/1673#issuecomment-5903766309",
+  };
+  const now = Date.parse("2026-09-29T21:40:00-07:00");
+  assert.deepEqual(musePanelUsage(sample, now), {
+    state: "live",
+    percent: 15,
+    source: "Muse account panel",
+    sourceUrl: sample.source_url,
+    sampledAt: sample.sampled_at,
+    ageText: "45m old",
+  });
+
+  const container = renderUsageFixture({ muse_panel: sample }, now);
+  const row = usageRow(container, "usage-muse-panel");
+  assert.equal(row.querySelector(".usage-percent").textContent, "15%");
+  assert.equal(row.querySelector(".usage-sampled-at").textContent,
+    "Sampled 2026-09-29T20:55:00-07:00");
+  assert.equal(row.querySelector(".usage-source").textContent, "Muse account panel");
+  assert.equal(row.querySelector(".usage-source").attributes.get("href"), sample.source_url);
+  assert.equal(row.querySelector(".usage-age").textContent, "45m old");
+  assert.ok(row.querySelector(".usage-fill"));
+  assert.equal(row.querySelector(".usage-refresh").attributes.get("href"),
+    "https://github.com/nateprich-projects/command-center/issues/2123");
+});
+
+test("Muse account-panel usage hides a stale value and keeps its source timestamp and age", () => {
+  const sample = {
+    used_percent: 15,
+    sampled_at: "2026-09-29T20:55:00-07:00",
+    source: "Muse account panel",
+    source_url: "https://github.com/nateprich-projects/command-center/issues/1673#issuecomment-5903766309",
+  };
+  const now = Date.parse("2026-09-29T22:26:00-07:00");
+  assert.equal(musePanelUsage(sample, now).state, "stale");
+
+  const row = usageRow(renderUsageFixture({ muse_panel: sample }, now), "usage-muse-panel");
+  assert.match(row.textContent, /Stale/);
+  assert.equal(row.querySelector(".usage-percent"), null);
+  assert.equal(row.querySelector(".usage-fill"), null);
+  assert.equal(row.querySelector(".usage-source").textContent, "Muse account panel");
+  assert.equal(row.querySelector(".usage-sampled-at").textContent,
+    "Sampled 2026-09-29T20:55:00-07:00");
+  assert.equal(row.querySelector(".usage-age").textContent, "1h old");
+});
+
+test("Muse panel usage is unavailable without a validated source reading", () => {
+  assert.deepEqual(musePanelUsage(null), { state: "unavailable" });
+  const row = usageRow(renderUsageFixture({}, Date.parse("2026-10-01T19:00:00Z")),
+    "usage-muse-panel");
+  assert.match(row.textContent, /Unavailable/);
+  assert.equal(row.querySelector(".usage-percent"), null);
+  assert.equal(row.querySelector(".usage-fill"), null);
+  assert.equal(row.querySelector(".usage-sampled-at"), null);
+  assert.equal(row.querySelector(".usage-refresh").attributes.get("href"),
+    "https://github.com/nateprich-projects/command-center/issues/2123");
+});
+
+test("the Muse derived-spend estimate labels its journal source and sample age", () => {
+  const now = Date.parse("2026-09-29T21:40:00-07:00");
+  const estimate = {
+    source: "Local Muse session journal estimate",
+    captured_at: Date.parse("2026-09-29T20:55:00-07:00") / 1000,
+    spent_dollars: 14.3,
+    cap_dollars: 200,
+    used_percent: 7.15,
+    calls: 42,
+  };
+  assert.deepEqual(museEstimate(estimate, now), {
+    state: "live",
+    source: "Local Muse session journal estimate",
+    sampledAt: new Date(estimate.captured_at * 1000).toISOString(),
+    ageText: "45m old",
+    spent: 14.3,
+    cap: 200,
+    percent: 7.15,
+  });
+
+  const row = usageRow(renderUsageFixture({ muse: estimate }, now), "usage-muse-estimate");
+  assert.match(row.querySelector(".usage-label").textContent, /estimate/i);
+  assert.equal(row.querySelector(".usage-source").textContent,
+    "Local Muse session journal estimate");
+  assert.equal(row.querySelector(".usage-sampled-at").textContent,
+    "Sampled 2026-09-30T03:55:00.000Z");
+  assert.equal(row.querySelector(".usage-age").textContent, "45m old");
+
+  const stale = museEstimate(estimate, Date.parse("2026-09-29T22:26:00-07:00"));
+  assert.equal(stale.state, "stale");
+  const staleRow = usageRow(renderUsageFixture({ muse: estimate },
+    Date.parse("2026-09-29T22:26:00-07:00")), "usage-muse-estimate");
+  assert.match(staleRow.textContent, /Stale/);
+  assert.equal(staleRow.querySelector(".usage-percent"), null);
+  assert.equal(staleRow.querySelector(".usage-source").textContent,
+    "Local Muse session journal estimate");
+});
+
 test("Claude weekly usage shows the exact percentage and recomputed sample age", () => {
   const now = Date.parse("2026-10-01T19:00:00Z");
   const sample = new Date(now - 45 * 60 * 1000).toISOString();
@@ -776,21 +902,22 @@ test("Claude weekly usage shows the exact percentage and recomputed sample age",
   };
   try {
     renderUsage({ claude: { u: { sd: 42.375 }, t: sample } }, now);
-    const row = container.querySelectorAll(".usage")[0];
+    const row = usageRow(container, "usage-claude");
     assert.equal(row.querySelector(".usage-percent").textContent, "42.375%");
     assert.equal(row.querySelector(".usage-age").textContent, "45m old");
     assert.match(row.textContent, /Claude weekly usage/);
 
     renderUsage({ claude: { u: { sd: 42.375 }, t: sample } }, now + 30 * 60 * 1000);
-    assert.equal(container.querySelector(".usage-age").textContent, "1h old");
+    assert.equal(usageRow(container, "usage-claude").querySelector(".usage-age").textContent,
+      "1h old");
 
     renderUsage({ claude: { u: { sd: 42.375 }, t: now / 1000 - 91 * 60 } }, now);
-    const staleRow = container.querySelectorAll(".usage")[0];
+    const staleRow = usageRow(container, "usage-claude");
     assert.match(staleRow.textContent, /Stale/);
     assert.equal(staleRow.querySelector(".usage-percent"), null);
 
     renderUsage({}, now);
-    const unavailableRow = container.querySelectorAll(".usage")[0];
+    const unavailableRow = usageRow(container, "usage-claude");
     assert.match(unavailableRow.textContent, /Unavailable/);
     assert.equal(unavailableRow.querySelector(".usage-fill"), null);
   } finally {

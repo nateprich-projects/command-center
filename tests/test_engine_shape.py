@@ -2239,8 +2239,11 @@ def test_apply_honours_and_carries_an_override_to_agents(
         + funnel.origin_block(
             "nate-relayed", at=NOW, run="capture-run", agent="muse")
         + "\n\n"
+        # Recorded before the shaping that carries it: a Nate voice dated
+        # at the write itself is refused (#2138).
         + funnel.provenance_block(
-            "nate-relayed", at=NOW, run="shape-run", agent="muse")
+            "nate-relayed", at=NOW - timedelta(hours=1), run="shape-run",
+            agent="muse")
         + "\n\n" + override_block)
     assert funnel.parse_origin_override(body)["target"] == "agents"
     item = idea(42, body=body, origin="Nate")

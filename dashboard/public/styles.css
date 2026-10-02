@@ -281,7 +281,7 @@ main[hidden] { display: none; }
    ends with a thin bar between. At or over the cap the fill turns danger. */
 #usage { padding: 12px 18px; }
 .panel:has(#usage:empty) { display: none; }
-.usage { display: flex; align-items: center; gap: 12px; }
+.usage { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
 .usage-label { font-size: 13px; color: var(--ink-dim); white-space: nowrap; }
 .usage-bar { flex: 1 1 auto; height: 6px; background: var(--surface-2); border-radius: 3px; overflow: hidden; }
 .usage-fill { display: block; height: 100%; background: var(--pip-submitted); }

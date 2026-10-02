@@ -895,6 +895,51 @@ function usageTimestampMs(timestamp) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+function safeGitHubUrl(value) {
+  if (typeof value !== "string") return null;
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "https:" || url.hostname !== "github.com") return null;
+    return url.href;
+  } catch {
+    return null;
+  }
+}
+
+function musePanelUsage(panel, nowMs = Date.now()) {
+  const percent = panel && panel.used_percent;
+  const sampledAt = panel && panel.sampled_at;
+  const sampledAtMs = usageTimestampMs(sampledAt);
+  const source = panel && typeof panel.source === "string" ? panel.source.trim() : "";
+  const sourceUrl = safeGitHubUrl(panel && panel.source_url);
+  if (
+    typeof percent !== "number" || !Number.isFinite(percent) ||
+    percent < 0 || percent > 100 || !Number.isFinite(sampledAtMs) ||
+    !source || !sourceUrl
+  ) {
+    return { state: "unavailable" };
+  }
+  const freshness = claudeUsage({ u: { sd: percent }, t: sampledAt }, nowMs);
+  if (freshness.state === "unavailable") return freshness;
+  return { ...freshness, source, sourceUrl, sampledAt };
+}
+
+function museEstimate(muse, nowMs = Date.now()) {
+  const parsed = museUsage(muse);
+  const capturedAtMs = usageTimestampMs(muse && muse.captured_at);
+  const source = muse && typeof muse.source === "string" ? muse.source.trim() : "";
+  if (!parsed || !Number.isFinite(capturedAtMs) || !source) {
+    return { state: "unavailable" };
+  }
+  const freshness = claudeUsage({ u: { sd: parsed.percent }, t: muse.captured_at }, nowMs);
+  if (freshness.state === "unavailable") return freshness;
+  const sampledAt = new Date(capturedAtMs).toISOString();
+  if (freshness.state === "stale") {
+    return { ...freshness, source, sampledAt };
+  }
+  return { ...freshness, source, sampledAt, ...parsed };
+}
+
 function claudeUsage(claude, nowMs = Date.now()) {
   const percent = claude && claude.u && claude.u.sd;
   const sampleMs = usageTimestampMs(claude && claude.t);
@@ -914,28 +959,93 @@ function claudeUsageChanged(previous, current) {
   return previous?.u?.sd !== current?.u?.sd || previous?.t !== current?.t;
 }
 
+function musePanelUsageChanged(previous, current) {
+  return previous?.used_percent !== current?.used_percent ||
+    previous?.sampled_at !== current?.sampled_at ||
+    previous?.source !== current?.source ||
+    previous?.source_url !== current?.source_url;
+}
+
+function museEstimateChanged(previous, current) {
+  return previous?.spent_dollars !== current?.spent_dollars ||
+    previous?.cap_dollars !== current?.cap_dollars ||
+    previous?.used_percent !== current?.used_percent ||
+    previous?.captured_at !== current?.captured_at ||
+    previous?.source !== current?.source;
+}
+
 function snapshotNeedsRender(previous, next, previousGeneratedAt) {
   const generatedAt = next && (next.generated_at || next.brief?.generated_at);
   if (!previous || !generatedAt || generatedAt !== previousGeneratedAt) return true;
-  return claudeUsageChanged(previous.usage?.claude, next.usage?.claude);
+  return claudeUsageChanged(previous.usage?.claude, next.usage?.claude) ||
+    musePanelUsageChanged(previous.usage?.muse_panel, next.usage?.muse_panel) ||
+    museEstimateChanged(previous.usage?.muse, next.usage?.muse);
 }
 
 function renderUsage(usage, nowMs = Date.now()) {
   const container = document.querySelector("#usage");
   container.replaceChildren();
-  const parsed = museUsage(usage && usage.muse);
-  if (parsed) {
-    const wrap = element("div", "usage");
-    wrap.append(element("span", "usage-label",
-      `Muse 7-day spend $${parsed.spent.toFixed(2)} of $${parsed.cap.toFixed(2)}`));
+  const panel = musePanelUsage(usage && usage.muse_panel, nowMs);
+  const panelRow = element("div", "usage");
+  panelRow.append(element("span", "usage-label", "Muse account-panel usage"));
+  if (panel.state === "live") {
     const bar = element("div", "usage-bar");
-    const fill = element("i", `usage-fill${parsed.percent >= 100 ? " over" : ""}`);
-    fill.setAttribute("style", `width: ${Math.min(100, parsed.percent).toFixed(1)}%`);
+    const fill = element("i", `usage-fill${panel.percent >= 100 ? " over" : ""}`);
+    fill.setAttribute("style", `width: ${Math.min(100, panel.percent).toFixed(1)}%`);
     bar.append(fill);
-    wrap.append(bar);
-    wrap.append(element("span", "usage-percent", `${parsed.percent.toFixed(1)}%`));
-    container.append(wrap);
+    panelRow.append(bar);
+    panelRow.append(element("span", "usage-percent", `${panel.percent}%`));
+  } else {
+    const state = panel.state === "stale"
+      ? `Stale · ${panel.ageText}`
+      : "Unavailable";
+    panelRow.append(element("span", `usage-state ${panel.state}`, state));
   }
+  const panelSource = element("a", "usage-label", panel.source || "Muse account panel");
+  if (panel.sourceUrl) {
+    panelSource.setAttribute("href", panel.sourceUrl);
+    panelSource.setAttribute("target", "_blank");
+    panelSource.setAttribute("rel", "noreferrer");
+  }
+  panelRow.append(panelSource);
+  if (panel.sampledAt) {
+    const sampledAt = element("time", "usage-age", `Sampled ${panel.sampledAt} · ${panel.ageText}`);
+    sampledAt.setAttribute("datetime", panel.sampledAt);
+    panelRow.append(sampledAt);
+  }
+  const refreshLink = element("a", "usage-age", "Measurement refresh: #2123");
+  refreshLink.setAttribute("href", "https://github.com/nateprich-projects/command-center/issues/2123");
+  refreshLink.setAttribute("target", "_blank");
+  refreshLink.setAttribute("rel", "noreferrer");
+  panelRow.append(refreshLink);
+  container.append(panelRow);
+
+  const estimate = museEstimate(usage && usage.muse, nowMs);
+  const estimateRow = element("div", "usage");
+  if (estimate.state === "live") {
+    estimateRow.append(element("span", "usage-label",
+      `Muse 7-day spend estimate $${estimate.spent.toFixed(2)} of $${estimate.cap.toFixed(2)}`));
+    const bar = element("div", "usage-bar");
+    const fill = element("i", `usage-fill${estimate.percent >= 100 ? " over" : ""}`);
+    fill.setAttribute("style", `width: ${Math.min(100, estimate.percent).toFixed(1)}%`);
+    bar.append(fill);
+    estimateRow.append(bar);
+    estimateRow.append(element("span", "usage-percent", `${estimate.percent.toFixed(1)}%`));
+  } else {
+    estimateRow.append(element("span", "usage-label", "Muse 7-day spend estimate"));
+    const state = estimate.state === "stale"
+      ? `Stale · ${estimate.ageText}`
+      : "Unavailable";
+    estimateRow.append(element("span", `usage-state ${estimate.state}`, state));
+  }
+  estimateRow.append(element("span", "usage-label",
+    estimate.source || "Local Muse session journal estimate"));
+  if (estimate.sampledAt) {
+    const sampledAt = element("time", "usage-age", `Sampled ${estimate.sampledAt} · ${estimate.ageText}`);
+    sampledAt.setAttribute("datetime", estimate.sampledAt);
+    estimateRow.append(sampledAt);
+  }
+  container.append(estimateRow);
 
   const claude = claudeUsage(usage && usage.claude, nowMs);
   const wrap = element("div", "usage");
@@ -2215,7 +2325,8 @@ if (typeof document !== "undefined") {
 
 export {
   STAGES, age, boardColumns, boardTabCounts, boardTabFromUrl, boardTabUrl, tabColumns,
-  failureState, museUsageText, claudeUsage, claudeUsageChanged, snapshotNeedsRender,
+  failureState, museUsageText, musePanelUsage, museEstimate,
+  claudeUsage, claudeUsageChanged, snapshotNeedsRender,
   renderUsage, nextOwner, ownerCell,
   phoneState, pipState, projectBlocked, projectHold, holdChip, localTime,
   renderPhoneBoard, ticketHold, unblocksChip,

@@ -2,10 +2,10 @@
 
 Paste into a **Codex Scheduled** task; keep tier and schedule external.
 
-Sandbox writes are limited to Codex’s per-session directory and
-`~/.claude/command-center-heartbeat`. Grant
-`/Users/nateprich/.claude/command-center-run` read-and-execute access only;
-its `codex-runs/` subtree is writable. Only sandbox configuration may name
+Limit sandbox writes to Codex’s per-session directory and
+`~/.claude/command-center-heartbeat`.
+`/Users/nateprich/.claude/command-center-run` is read-and-execute only;
+only `codex-runs/` is writable. Only sandbox configuration may name
 the runtime root’s resolved target.
 
 Never invoke the Codex CLI headlessly.
@@ -29,7 +29,7 @@ in the launchd run-keeper.
 
 Work one ticket, then stop. When `do` is `stop`, finish `run`: `over`→
 `skipped-over-pace`; `unknown`→`skipped-usage-unknown`; `reserve`→
-`skipped-api-reserve`; `config`→`config-drift`; else `nothing-to-do`.
+`skipped-api-reserve`; `config` is `config-drift`; else `nothing-to-do`.
 
 When `do` is `ticket`, the ticket is already claimed. Treat `packet` as the
 implementation evidence: read ticket, parent plan, current-head verdict,

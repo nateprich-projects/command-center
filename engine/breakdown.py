@@ -51,6 +51,7 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import funnel  # noqa: E402
+from block_record import render_needs_decision  # noqa: E402
 from engine.shape import issue_thread_section  # noqa: E402
 
 
@@ -882,12 +883,11 @@ def apply_question(repo: str, parent_number: int, question: str, *,
 
     Creates no tickets: a ticket built on an invented decision is worse
     than no ticket, because someone will implement it. The question is the
-    model's words, so it is made inert (#1798).
+    model's words, so it is made inert (#1798); ``block_record`` renders it,
+    the one owner of the header ``_load_block_comment`` reads (#2169).
     """
     post_comment(
-        repo, parent_number,
-        "{} {}".format(funnel.NEEDS_DECISION_PREFIX,
-                       funnel.inert_comment_text(question)),
+        repo, parent_number, render_needs_decision(question),
         run=run, agent=agent)
     url = "https://github.com/{}/issues/{}".format(repo, parent_number)
     funnel.write_project_select(

@@ -357,7 +357,8 @@ ANSWERS = {
                          "why": "backfills the ledger table"}]),
     "scan-only": lambda: answer(
         proposed_class="Broken",
-        plan_markdown="# Plan\n\nWe will rotate the deploy api-key monthly.\n"),
+        plan_markdown=("# Plan\n\n"
+                       "We will rotate the deploy api-key monthly.\n")),
     "prose-rationale": lambda: answer(
         proposed_class="Broken",
         plan_markdown=("# Plan\n\nDisplay source freshness.\n\n"
@@ -372,7 +373,7 @@ ANSWERS = {
 
 @dataclass(frozen=True)
 class DecisionCase:
-    """One matrix idea, optionally under a parent with a Class, and an answer."""
+    """A matrix idea, maybe under a parent with a Class, and an answer."""
 
     case: ShapeCase
     answer: str
@@ -389,7 +390,8 @@ class DecisionCase:
 
 AGENT_BROKEN_OPEN = ShapeCase("agent", "Broken", "OPEN")
 AGENT_BROKEN_CLOSED = ShapeCase("agent", "Broken", "CLOSED")
-_AGENT_READY = "needs_nate all null; class Broken self-approvable; origin agent"
+_AGENT_READY = ("needs_nate all null; class Broken self-approvable; "
+                "origin agent")
 _CLOSED = "the issue is CLOSED on GitHub"
 
 #: (status, reason, Risk, Needs, declared, scan) for every case beyond the
@@ -514,7 +516,8 @@ def test_validate_only_prints_what_the_live_apply_writes(
 
     monkeypatch.setattr(funnel, "gh_graphql", offline)
     monkeypatch.setattr(funnel.subprocess, "run", offline)
-    code, out, _ = run_shape_apply(monkeypatch, capsys, data, "--validate-only")
+    code, out, _ = run_shape_apply(
+        monkeypatch, capsys, data, "--validate-only")
     assert code == 0
     previewed = json.loads(out)
     assert (previewed["status"], previewed["reason"]) == (status, reason)

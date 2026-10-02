@@ -273,6 +273,36 @@ def test_hotspots_leave_out_a_function_only_one_project_touched(tmp_path):
     assert [(row["function"], row["count"]) for row in hot] == [("one", 2)]
 
 
+def test_append_after_function_does_not_create_a_hotspot(tmp_path):
+    root = _new_repo(tmp_path)
+    _commit(root, {"app.py": _body("run", ["value = 1"])},
+            "Initial", NOW - timedelta(days=30))
+    _commit(root, {"app.py": _body("run", ["value = 2"])},
+            "Fix in function (#51) (#151)", NOW - timedelta(days=2))
+    _commit(root, {"app.py": _body("run", ["value = 2"])
+                   + "module_value = 3\n"},
+            "Append after function (#52) (#152)", NOW - timedelta(days=1))
+
+    result = fr.measure(root, {51: 510, 52: 520}, NOW)
+
+    assert result["hotspots"] == []
+
+
+def test_hotspots_keep_in_function_changes_through_last_body_line(tmp_path):
+    root = _new_repo(tmp_path)
+    _commit(root, {"app.py": _body("run", ["first = 1", "last = 1"])},
+            "Initial", NOW - timedelta(days=30))
+    _commit(root, {"app.py": _body("run", ["first = 2", "last = 1"])},
+            "Fix first body line (#53) (#153)", NOW - timedelta(days=2))
+    _commit(root, {"app.py": _body("run", ["first = 2", "last = 2"])},
+            "Fix last body line (#54) (#154)", NOW - timedelta(days=1))
+
+    result = fr.measure(root, {53: 530, 54: 540}, NOW)
+
+    assert [(row["function"], row["projects"], row["count"])
+            for row in result["hotspots"]] == [("run", [530, 540], 2)]
+
+
 def test_removed_code_line_starting_with_dashes_is_not_a_header(tmp_path):
     root = _new_repo(tmp_path)
     pad = "".join("select {};\n".format(n) for n in range(10))

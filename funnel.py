@@ -19116,17 +19116,47 @@ def sweep_shaped_self_approvals(
 
     The Shaped gate is re-checked by the same predicate used when a plan is
     first written. Other live questions, such as an unblock question, remain
-    owned by their existing gate and are not swept.
+    owned by their existing gate and are not swept. The compact begin view
+    carries the row fields needed to select candidates but omits their bodies;
+    read only those bodies, oldest at the gate first, before applying the
+    predicate. If the begin envelope cannot cover another body read, leave
+    that candidate and every later one at Shaped for a later run.
     """
     by_ref = {item.ref: item for item in items}
     advanced: List[Dict[str, str]] = []
     errors: List[Dict[str, str]] = []
+    candidates = []
     for item in items:
-        if item.state != "OPEN" or item.status != "Shaped":
+        if (
+            item.state != "OPEN"
+            or item.status != "Shaped"
+            or item.origin != "agent"
+            or item.needs != "none"
+        ):
             continue
         question = gate_question(item)
+        # The Shaped question is this sweep's own gate; other live questions
+        # (for example, Unblock) stay with their existing owner.
         if question is not None and question != GATES["Shaped"]:
             continue
+        candidates.append(item)
+
+    oldest_unknown = datetime.max.replace(tzinfo=timezone.utc)
+    candidates.sort(key=lambda item: (
+        question_since(item) is None,
+        question_since(item) or oldest_unknown,
+        item.repo,
+        item.number,
+    ))
+
+    for item in candidates:
+        if not getattr(item, "body_loaded", True):
+            try:
+                _load_close_candidate_bodies(items, [item])
+            except BeginCannotComplete:
+                break
+            if not getattr(item, "body_loaded", True):
+                continue
         if not shaped_self_approvable(item, by_ref):
             continue
 

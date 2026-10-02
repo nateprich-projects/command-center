@@ -53,12 +53,24 @@ def _override(target, voice):
     ))
 
 
+def _clean_shaped_body():
+    return "\n\n".join((
+        "# Plan\n\nBuild the report.",
+        funnel.gates_answer_block("Who may write Ready?", "Nate", at=NOW),
+        funnel.provenance_block(
+            "agent", at=NOW, run="shape-run", agent="muse"),
+        funnel.origin_block(
+            "agent", at=NOW, run="shape-run", agent="muse"),
+    ))
+
+
 class Row:
     """One Project item on the fake board."""
 
     def __init__(self, number, body="# Plan", *, klass=None, origin="agent",
                  status="Building", parent=None, children=0, done=0,
-                 needs="none", risk="standard"):
+                 needs="none", risk="standard",
+                 status_updated_at="2026-09-20T00:00:00Z"):
         self.number = number
         self.body = body
         self.klass = klass
@@ -69,6 +81,7 @@ class Row:
         self.done = done
         self.needs = needs
         self.risk = risk
+        self.status_updated_at = status_updated_at
 
     @property
     def item_id(self):
@@ -107,7 +120,7 @@ class Row:
             "id": self.item_id,
             "claim": None,
             "status": {"name": self.status,
-                       "updatedAt": "2026-09-20T00:00:00Z"},
+                       "updatedAt": self.status_updated_at},
             "class": {"name": self.klass} if self.klass else None,
             "gate": {"name": self.needs},
             "risk": {"name": self.risk},
@@ -450,8 +463,8 @@ def test_the_close_read_is_charged_and_never_spends_the_claim_reserve(
 # Listing Origin must not let the Shaped sweep decide on an unread body.
 
 
-def test_the_shaped_sweep_does_not_advance_a_plan_whose_body_was_not_read(
-    monkeypatch,
+def test_the_shaped_sweep_reads_an_override_before_leaving_it_at_shaped(
+        monkeypatch,
 ):
     """An override toward Nate lives in the body the begin view leaves out."""
     plan = Row(80, _override("nate", "agent"), klass="Broken",
@@ -469,4 +482,128 @@ def test_the_shaped_sweep_does_not_advance_a_plan_whose_body_was_not_read(
     advanced, errors = funnel.sweep_shaped_self_approvals(view, NOW)
 
     assert (advanced, errors, writes) == ([], [], [])
+    assert board.body_reads == [[plan.item_id]]
+    loaded = {item.ref: item for item in view}[plan.ref]
+    assert loaded.body_loaded
     assert board.gh == []
+
+
+def test_shaped_sweep_loads_and_advances_a_clean_begin_candidate(monkeypatch):
+    body = _clean_shaped_body()
+    plan = Row(81, body, klass="Broken", status="Shaped")
+    board = _board(monkeypatch, [plan])
+    view = _begin_view()
+    loaded = {item.ref: item for item in view}[plan.ref]
+    writes = []
+
+    def write_status(item, status, now):
+        writes.append((item.ref, status))
+        item.status = status
+        return None
+
+    monkeypatch.setattr(funnel, "_write_status", write_status)
+
+    advanced, errors = funnel.sweep_shaped_self_approvals(view, NOW)
+
+    assert loaded.origin == "agent" and loaded.needs == "none"
+    assert loaded.body_loaded and loaded.body == body
+    assert board.body_reads == [[plan.item_id]]
+    assert advanced == [{"ref": plan.ref, "status": "Ready"}]
+    assert (errors, writes, loaded.status) == ([], [(plan.ref, "Ready")], "Ready")
+
+
+def test_shaped_sweep_reads_bodies_only_for_begin_candidates(monkeypatch):
+    candidate = Row(
+        82, _clean_shaped_body(), klass="Broken", status="Shaped")
+    needs_human = Row(
+        83, _clean_shaped_body(), klass="Broken", status="Shaped",
+        needs="human")
+    nate_origin = Row(
+        84, _clean_shaped_body(), klass="Broken", status="Shaped",
+        origin="Nate")
+    board = _board(monkeypatch, [needs_human, nate_origin, candidate])
+    view = _begin_view()
+    loaded = {item.ref: item for item in view}
+    writes = []
+
+    def write_status(item, status, now):
+        writes.append((item.ref, status))
+        item.status = status
+        return None
+
+    monkeypatch.setattr(funnel, "_write_status", write_status)
+
+    advanced, errors = funnel.sweep_shaped_self_approvals(view, NOW)
+
+    assert board.body_reads == [[candidate.item_id]]
+    assert loaded[candidate.ref].body_loaded
+    assert not loaded[needs_human.ref].body_loaded
+    assert not loaded[nate_origin.ref].body_loaded
+    assert advanced == [{"ref": candidate.ref, "status": "Ready"}]
+    assert (errors, writes) == ([], [(candidate.ref, "Ready")])
+
+
+def test_shaped_sweep_keeps_loaded_override_and_declared_risk_candidates(
+        monkeypatch):
+    override = Row(
+        85, _override("nate", "agent"), klass="Broken", status="Shaped")
+    declared_body = "\n\n".join((
+        "# Plan\n\nBackfill the ledger.",
+        funnel.shape_risk_block(["credentials"], ["data-migration"]),
+        funnel.provenance_block(
+            "agent", at=NOW, run="shape-run", agent="muse"),
+        funnel.origin_block(
+            "agent", at=NOW, run="shape-run", agent="muse"),
+    ))
+    declared = Row(
+        86, declared_body, klass="Broken", status="Shaped",
+        risk="escalated")
+    board = _board(monkeypatch, [declared, override])
+    view = _begin_view()
+    loaded = {item.ref: item for item in view}
+    writes = []
+    monkeypatch.setattr(
+        funnel, "_write_status",
+        lambda item, status, now: writes.append((item.ref, status)),
+    )
+
+    advanced, errors = funnel.sweep_shaped_self_approvals(view, NOW)
+
+    assert board.body_reads == [[override.item_id], [declared.item_id]]
+    assert all(loaded[row.ref].body_loaded for row in (override, declared))
+    assert (advanced, errors, writes) == ([], [], [])
+    assert {loaded[row.ref].status for row in (override, declared)} == {"Shaped"}
+
+
+def test_shaped_sweep_stops_after_oldest_candidate_exhausts_the_envelope(
+        monkeypatch):
+    older = Row(
+        87, _clean_shaped_body(), klass="Broken", status="Shaped",
+        status_updated_at="2026-09-01T00:00:00Z")
+    newer = Row(
+        88, _clean_shaped_body(), klass="Broken", status="Shaped",
+        status_updated_at="2026-09-20T00:00:00Z")
+    board = _board(monkeypatch, [newer, older])
+    view = _begin_view()
+    loaded = {item.ref: item for item in view}
+    writes = []
+
+    def write_status(item, status, now):
+        writes.append((item.ref, status))
+        item.status = status
+        return None
+
+    monkeypatch.setattr(funnel, "_write_status", write_status)
+    monkeypatch.setattr(
+        funnel,
+        "_ACTIVE_BEGIN_ENVELOPE",
+        funnel.BeginWorkEnvelope(funnel.BEGIN_DETAIL_WORK_RESERVE + 14),
+    )
+
+    advanced, errors = funnel.sweep_shaped_self_approvals(view, NOW)
+
+    assert board.body_reads == [[older.item_id]]
+    assert advanced == [{"ref": older.ref, "status": "Ready"}]
+    assert (errors, writes) == ([], [(older.ref, "Ready")])
+    assert loaded[older.ref].status == "Ready" and loaded[older.ref].body_loaded
+    assert loaded[newer.ref].status == "Shaped" and not loaded[newer.ref].body_loaded

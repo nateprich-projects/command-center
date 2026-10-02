@@ -2351,13 +2351,14 @@ def post_agent_comment(repo: str, number: int, body: str, *,
                 repo, number, (proc.stderr or "").strip()))
 
 
-def _claim_state(ref: str, run: Optional[str], agent: str
+def _claim_state(ref: str, run: Optional[str], agent: str,
+                 claim_timestamp: Optional[str] = None
                  ) -> Tuple[str, List[funnel.Item]]:
-    """Resolve the holder from the timestamped Project claim and heartbeat binds.
+    """Resolve the holder from the claim timestamp and heartbeat binds.
 
-    The Project field intentionally remains a timestamp. The run identity is
-    the latest heartbeat binding for this ticket at or after that timestamp.
-    A missing, conflicting, or unreadable binding is unknown and fails closed.
+    An exact timestamp returned by claim/begin is the run binding. Without an
+    exact match, the latest heartbeat binding at or after the Project timestamp
+    decides ownership. A missing, conflicting, or unreadable binding fails closed.
     """
     try:
         items = funnel.load_project_items_by_refs([ref])
@@ -2372,6 +2373,13 @@ def _claim_state(ref: str, run: Optional[str], agent: str
         return "empty", items
     if not run:
         return "unknown", items
+    if claim_timestamp is not None:
+        claimed_at = funnel.parse_claim_timestamp(claim_timestamp)
+        if claimed_at is not None and claimed_at == lock:
+            # `funnel claim` has no run id for a heartbeat record. The exact
+            # timestamp it wrote is the run binding; a later claim has a
+            # different value and still falls through to takeover checks.
+            return "owned", items
     try:
         import heartbeat
 
@@ -2406,9 +2414,12 @@ def _claim_state(ref: str, run: Optional[str], agent: str
     return ("owned" if next(iter(holders)) == run else "other"), items
 
 
-def _require_current_claim(ref: str, run: Optional[str], agent: str) -> str:
+def _require_current_claim(ref: str, run: Optional[str], agent: str,
+                           claim_timestamp: Optional[str] = None) -> str:
     """Refuse writes when another run holds the claim or its owner is unknown."""
-    state, _items = _claim_state(ref, run, agent)
+    state, _items = _claim_state(
+        ref, run, agent, **_claim_timestamp_kwargs(claim_timestamp),
+    )
     if state not in ("owned", "empty"):
         reason = (
             "another run holds the claim"
@@ -2418,10 +2429,28 @@ def _require_current_claim(ref: str, run: Optional[str], agent: str) -> str:
     return state
 
 
+def _claim_timestamp_kwargs(claim_timestamp: Optional[str]) -> dict:
+    """Pass the optional binding without changing legacy call signatures."""
+    if claim_timestamp is None:
+        return {}
+    return {"claim_timestamp": claim_timestamp}
+
+
+def _release_claim_for_run(ref: str, run: Optional[str], agent: str,
+                           claim_timestamp: Optional[str] = None) -> None:
+    release_claim(
+        ref, run=run, agent=agent,
+        **_claim_timestamp_kwargs(claim_timestamp),
+    )
+
+
 def release_claim(ref: str, *, run: Optional[str] = None,
-                  agent: str = "codex") -> None:
+                  agent: str = "codex",
+                  claim_timestamp: Optional[str] = None) -> None:
     """Release only this run's claim; an empty claim is already released."""
-    state, items = _claim_state(ref, run, agent)
+    state, items = _claim_state(
+        ref, run, agent, **_claim_timestamp_kwargs(claim_timestamp),
+    )
     if state == "empty":
         return
     if state != "owned":
@@ -2728,7 +2757,8 @@ def _note_test_source(source: str, *, repo: str) -> str:
 
 
 def _push_ticket_branch(root: pathlib.Path, branch: str, *, ref: str,
-                        run: Optional[str], agent: str) -> None:
+                        run: Optional[str], agent: str,
+                        claim_timestamp: Optional[str] = None) -> None:
     """Push the ticket branch as a fast-forward, even after a rebase (#890).
 
     A stale-PR verdict asks the engineer to rebase onto main, which rewrites
@@ -2740,7 +2770,9 @@ def _push_ticket_branch(root: pathlib.Path, branch: str, *, ref: str,
     commit never reaches it. The ownership guard runs immediately before the
     remote branch can be changed.
     """
-    _require_current_claim(ref, run, agent)
+    _require_current_claim(
+        ref, run, agent, **_claim_timestamp_kwargs(claim_timestamp),
+    )
     fetched = _run(["git", "fetch", "origin",
                     "+refs/heads/{0}:refs/remotes/origin/{0}".format(branch)],
                    cwd=root, check=False,
@@ -2755,7 +2787,9 @@ def _push_ticket_branch(root: pathlib.Path, branch: str, *, ref: str,
                   "Record the previous {} tip before pushing the rebased branch".format(branch),
                   remote_ref], cwd=root,
                  timeout=LOCAL_GIT_TIMEOUT_SECONDS)
-    _require_current_claim(ref, run, agent)
+    _require_current_claim(
+        ref, run, agent, **_claim_timestamp_kwargs(claim_timestamp),
+    )
     _run(["git", "push", "--set-upstream", "origin", branch], cwd=root,
          timeout=REMOTE_GIT_TIMEOUT_SECONDS)
 
@@ -2876,6 +2910,7 @@ def _remove_codex_run_checkout(root: pathlib.Path, number: int,
 
 def _keep_work(root: pathlib.Path, number: int, branch: str, *, ref: str,
                run: Optional[str], agent: str,
+               claim_timestamp: Optional[str] = None,
                reason: str = "tests failing") -> Tuple[str, bool]:
     """Commit and push explicit paths, so a failure loses time only.
 
@@ -2886,7 +2921,9 @@ def _keep_work(root: pathlib.Path, number: int, branch: str, *, ref: str,
     keeps it, for diagnosis or because it holds the only copy of the work.
     """
     try:
-        _require_current_claim(ref, run, agent)
+        _require_current_claim(
+            ref, run, agent, **_claim_timestamp_kwargs(claim_timestamp),
+        )
         paths = _working_tree_paths(root)
         if paths:
             _stage_explicit_paths(root, paths)
@@ -2901,7 +2938,10 @@ def _keep_work(root: pathlib.Path, number: int, branch: str, *, ref: str,
                      timeout=LOCAL_GIT_TIMEOUT_SECONDS).stdout.strip()
         if not ahead.isdigit() or int(ahead) < 1:
             return "no work to keep", False
-        _push_ticket_branch(root, branch, ref=ref, run=run, agent=agent)
+        _push_ticket_branch(
+            root, branch, ref=ref, run=run, agent=agent,
+            **_claim_timestamp_kwargs(claim_timestamp),
+        )
         return "work kept on {}".format(branch), True
     except SupersededRunError:
         raise
@@ -2911,7 +2951,8 @@ def _keep_work(root: pathlib.Path, number: int, branch: str, *, ref: str,
 
 
 def _checkpoint_work(root: pathlib.Path, number: int, branch: str, *,
-                     ref: str, run: Optional[str], agent: str) -> bool:
+                     ref: str, run: Optional[str], agent: str,
+                     claim_timestamp: Optional[str] = None) -> bool:
     """Push the current implementation before a long test run can lose it.
 
     Ticket work is checkpointed on its deterministic remote branch at each
@@ -2925,17 +2966,23 @@ def _checkpoint_work(root: pathlib.Path, number: int, branch: str, *,
         return False
     _stage_explicit_paths(root, paths)
     _check_no_run_scratch(root, about_to_commit=paths)
-    _require_current_claim(ref, run, agent)
+    _require_current_claim(
+        ref, run, agent, **_claim_timestamp_kwargs(claim_timestamp),
+    )
     _run(["git", "commit", "-m",
           "WIP #{}: checkpoint implementation".format(number)], cwd=root,
          timeout=LOCAL_GIT_TIMEOUT_SECONDS)
-    _push_ticket_branch(root, branch, ref=ref, run=run, agent=agent)
+    _push_ticket_branch(
+        root, branch, ref=ref, run=run, agent=agent,
+        **_claim_timestamp_kwargs(claim_timestamp),
+    )
     return True
 
 
 def _recover_answer_error(
         exc: ImplementError, *, run: str, agent: str = "codex",
         repo: Optional[str] = None, cwd: Optional[os.PathLike] = None,
+        claim_timestamp: Optional[str] = None,
         release: Optional[Callable[[str], None]] = None,
         heartbeat_finish: Callable[[str, str, str, str, str], None]
         = finish_heartbeat) -> bool:
@@ -2952,11 +2999,14 @@ def _recover_answer_error(
     resolved = resolve_checkout_repo(context["root"], repo)
     ref = "{}#{}".format(resolved, context["number"])
     release_effect = release or (
-        lambda target: release_claim(target, run=run, agent=agent)
+        lambda target: _release_claim_for_run(
+            target, run, agent, claim_timestamp,
+        )
     )
     kept, pushed = _keep_work(
         context["root"], context["number"], context["branch"],
-        ref=ref, run=run, agent=agent, reason="answer unreadable",
+        ref=ref, run=run, agent=agent,
+        claim_timestamp=claim_timestamp, reason="answer unreadable",
     )
     release_effect(ref)
     first = str(exc).splitlines()[0] if str(exc) else "unknown answer error"
@@ -2974,6 +3024,7 @@ def _recover_answer_error(
 
 def finish_done(answer: dict, *, run: str, agent: str = "codex",
                 repo: Optional[str] = None, cwd: Optional[os.PathLike] = None,
+                claim_timestamp: Optional[str] = None,
                 test_commands: Optional[Sequence[Sequence[str]]] = None,
                 release: Optional[Callable[[str], None]] = None,
                 heartbeat_finish: Callable[[str, str, str, str, str], None]
@@ -2998,7 +3049,9 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
     ticket = fetch_ticket(resolved, context["number"])
     ref = ticket["ref"]
     release_effect = release or (
-        lambda target: release_claim(target, run=run, agent=agent)
+        lambda target: _release_claim_for_run(
+            target, run, agent, claim_timestamp,
+        )
     )
     phase = "checkpoint"
     checkpointed = False
@@ -3007,6 +3060,7 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
         checkpointed = _checkpoint_work(
             context["root"], context["number"], context["branch"],
             ref=ref, run=run, agent=agent,
+            **_claim_timestamp_kwargs(claim_timestamp),
         )
         phase = "tests"
         tests, test_source, tested, merged = _run_finish_tests(
@@ -3041,6 +3095,7 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
         kept, pushed = _keep_work(
             context["root"], context["number"], context["branch"],
             ref=ref, run=run, agent=agent,
+            **_claim_timestamp_kwargs(claim_timestamp),
             reason=("merge conflict with origin/main" if conflict else
                     "tests failed" if phase == "tests" else
                     "checkpoint retry"),
@@ -3078,7 +3133,10 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
         raise
     try:
         if _working_tree_paths(context["root"]):
-            _require_current_claim(ref, run, agent)
+            _require_current_claim(
+                ref, run, agent,
+                **_claim_timestamp_kwargs(claim_timestamp),
+            )
         committed = _commit_if_needed(
             context["root"], context["number"], answer["summary"],
             allow_empty=True,
@@ -3087,7 +3145,10 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
             evidence = _verify_done_evidence(
                 answer.get("evidence") or [], run=run, agent=agent,
             )
-            _require_current_claim(ref, run, agent)
+            _require_current_claim(
+                ref, run, agent,
+                **_claim_timestamp_kwargs(claim_timestamp),
+            )
             close_effect(
                 resolved, context["number"], cwd=context["root"],
             )
@@ -3107,6 +3168,7 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
         _push_ticket_branch(
             context["root"], context["branch"],
             ref=ref, run=run, agent=agent,
+            **_claim_timestamp_kwargs(claim_timestamp),
         )
         # The evidence block is keyed to this, the commit the PR's head now
         # is, after any merge the push added (#1805).
@@ -3551,6 +3613,10 @@ def _record_superseded_finish(args: argparse.Namespace, ref: str,
 
 
 def _finish_ticket(args: argparse.Namespace) -> int:
+    claim_timestamp = getattr(args, "claim_timestamp", None)
+    release_for_run = lambda target: _release_claim_for_run(
+        target, args.run, args.agent, claim_timestamp,
+    )
     try:
         try:
             context = checkout_context()
@@ -3561,7 +3627,10 @@ def _finish_ticket(args: argparse.Namespace) -> int:
         if context is not None:
             resolved = resolve_checkout_repo(context["root"], args.repo)
             ref = "{}#{}".format(resolved, context["number"])
-            _require_current_claim(ref, args.run, args.agent)
+            _require_current_claim(
+                ref, args.run, args.agent,
+                **_claim_timestamp_kwargs(claim_timestamp),
+            )
     except SupersededRunError as exc:
         return _record_superseded_finish(args, exc.ref, exc.reason)
     except (funnel.GitHubError, ImplementError, OSError,
@@ -3580,8 +3649,8 @@ def _finish_ticket(args: argparse.Namespace) -> int:
         try:
             _recover_answer_error(
                 exc, run=args.run, agent=args.agent, repo=args.repo,
-                release=lambda target: release_claim(
-                    target, run=args.run, agent=args.agent),
+                **_claim_timestamp_kwargs(claim_timestamp),
+                release=release_for_run,
                 heartbeat_finish=finish_heartbeat,
             )
         except SupersededRunError as recovery_exc:
@@ -3602,22 +3671,20 @@ def _finish_ticket(args: argparse.Namespace) -> int:
         if "done" in answer:
             result = finish_done(
                 answer, run=args.run, agent=args.agent, repo=args.repo,
-                release=lambda target: release_claim(
-                    target, run=args.run, agent=args.agent),
+                **_claim_timestamp_kwargs(claim_timestamp),
+                release=release_for_run,
                 extra_note=args.note,
             )
         elif "blocked_on_human" in answer:
             result = finish_blocked_on_human(
                 answer["blocked_on_human"], run=args.run, agent=args.agent,
-                repo=args.repo, release=lambda target: release_claim(
-                    target, run=args.run, agent=args.agent),
+                repo=args.repo, release=release_for_run,
                 extra_note=args.note,
             )
         else:
             result = finish_declined(
                 answer["declined"], run=args.run, agent=args.agent,
-                repo=args.repo, release=lambda target: release_claim(
-                    target, run=args.run, agent=args.agent),
+                repo=args.repo, release=release_for_run,
                 extra_note=args.note,
             )
     except CommandTimeoutError as exc:
@@ -3626,8 +3693,7 @@ def _finish_ticket(args: argparse.Namespace) -> int:
                 ref = _bound_work_ref_for_run(args.run, args.agent)
                 _record_command_timeout(
                     exc, run=args.run, agent=args.agent, ref=ref,
-                    release=lambda target: release_claim(
-                        target, run=args.run, agent=args.agent),
+                    release=release_for_run,
                     heartbeat_finish=finish_heartbeat,
                 )
             except (funnel.GitHubError, ImplementError, OSError,
@@ -3667,6 +3733,8 @@ def finish_main(argv: Optional[Sequence[str]] = None) -> int:
     )
     parser.add_argument("--run", required=False, default=None,
                         help="bound heartbeat run id")
+    parser.add_argument("--claim-timestamp", default=None,
+                        help="exact In-motion timestamp returned by funnel claim/begin")
     parser.add_argument("--agent", default="codex",
                         choices=("codex", "muse", "zcode", "claude"))
     parser.add_argument("--repo", default=None,

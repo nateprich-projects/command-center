@@ -11234,6 +11234,19 @@ def parse_time(value: Optional[str]) -> Optional[datetime]:
         return None
 
 
+def parse_claim_timestamp(value: Optional[str]) -> Optional[datetime]:
+    """Parse the lock's UTC timestamp, including its fractional claim instant."""
+    if not value:
+        return None
+    text = value.strip()
+    for fmt in ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ"):
+        try:
+            return datetime.strptime(text, fmt).replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+    return None
+
+
 def _record_begin_load_phase(
     timings: Optional[Dict[str, object]], phase: str, elapsed: float,
 ) -> None:
@@ -11536,7 +11549,7 @@ def _from_node(node: dict) -> Optional[Item]:
         children_done=summary.get("completed") or 0,
         closed_at=parse_time(content.get("closedAt")),
         item_id=node.get("id"),
-        in_motion_since=parse_time(
+        in_motion_since=parse_claim_timestamp(
             (node.get("claim") or node.get("lock") or {}).get("text")
         ),
         blocked_by_refs=_blocked_by_refs_from_connection(
@@ -16435,6 +16448,15 @@ def write_lock(item: Item, value: str) -> None:
     )
 
 
+def _format_claim_timestamp(now: datetime) -> str:
+    """Serialize the exact UTC claim instant, retaining fractional seconds."""
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    else:
+        now = now.astimezone(timezone.utc)
+    return now.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
 def read_lock(item: Item) -> Optional[datetime]:
     """Read one ticket's current Project lock immediately before claiming it."""
     if not item.item_id:
@@ -16446,7 +16468,7 @@ def read_lock(item: Item) -> Optional[datetime]:
         raise GitHubError(
             "{} left the Project before its claim could be read".format(item.ref)
         )
-    return parse_time((node.get("lock") or {}).get("text"))
+    return parse_claim_timestamp((node.get("lock") or {}).get("text"))
 
 
 def find(items: Sequence[Item], ref: str) -> Item:
@@ -16502,7 +16524,7 @@ def claim_ticket(
         write_lock(item, "")
         print("took over stale claim on {}".format(item.ref), file=sys.stderr)
 
-    write_lock(target, now.strftime("%Y-%m-%dT%H:%M:%SZ"))
+    write_lock(target, _format_claim_timestamp(now))
     # `Ready -> Building` is written on the first claim, here in the shared
     # implementation so `funnel begin` (#349) and `funnel claim` promote alike.
     _begin_parent(items, target)
@@ -16608,7 +16630,11 @@ def cmd_claim(
     if refusal is not None:
         print(refusal, file=sys.stderr)
         return 1
-    print(target.url)
+    print(json.dumps({
+        "ref": target.ref,
+        "url": target.url,
+        "claim_timestamp": _format_claim_timestamp(now),
+    }, sort_keys=True))
     return 0
 
 
@@ -20595,6 +20621,7 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
                             do="ticket",
                             work=item_json(ticket, now, by_ref),
                         )
+                        out["claim_timestamp"] = _format_claim_timestamp(now)
                 if out.get("do") == "ticket" and agent in IMPLEMENT_VENDORS:
                     try:
                         ensure_ticket_branch(ticket.repo, ticket.number)
@@ -20608,6 +20635,7 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
                         except GitHubError:
                             out["release_error"] = "could not release the ticket claim"
                         out.pop("work", None)
+                        out.pop("claim_timestamp", None)
                         out.update(
                             do="stop",
                             gate="error",
@@ -20636,6 +20664,7 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
                             except GitHubError as release_exc:
                                 out["release_error"] = str(release_exc)
                             out.pop("work", None)
+                            out.pop("claim_timestamp", None)
                             out.update(
                                 do="stop",
                                 gate="error",

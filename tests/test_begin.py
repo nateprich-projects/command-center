@@ -252,7 +252,7 @@ def test_begin_refreshes_the_selected_body_after_claim_before_starting(
     assert events[2] == ("claim_write", ticket.ref, "")
     assert len(events) == 3
     assert writes == [
-        (ticket.ref, NOW.strftime("%Y-%m-%dT%H:%M:%SZ")),
+        (ticket.ref, "2026-09-05T12:00:00.000000Z"),
         (ticket.ref, ""),
     ]
 
@@ -2203,7 +2203,8 @@ def test_begin_rechecks_a_stale_claim_projection_before_claiming(
 
     assert result["do"] == "ticket"
     assert result["work"]["ref"] == ticket.ref
-    assert writes[0][0] == ticket.ref and writes[0][1] is not None
+    assert result["claim_timestamp"] == "2026-09-05T12:00:00.000000Z"
+    assert writes[0] == (ticket.ref, "2026-09-05T12:00:00.000000Z")
 
 
 def test_begin_claims_ticket_when_live_claim_is_missing(monkeypatch, capsys):

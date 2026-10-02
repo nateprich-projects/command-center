@@ -69,6 +69,9 @@ from block_record import (  # noqa: F401 -- re-exported under the old names
     parse_decline_comment,
     unparseable_block_comment_lines,
 )
+# funnel's block, hold and needs-decision writers render through the owner
+# too, so their reasons are inert and their headers read back (#2169).
+from block_record import render_blocked, render_needs_decision
 import nightly_watch
 import price_watch
 
@@ -22395,17 +22398,21 @@ def _blocked_reference(value: str) -> str:
 
 
 def _blocked_comment_body(blocked_on: Sequence[str], because: str) -> str:
-    """Render the block-comment header owned by ``BLOCK_COMMENT_RE``."""
-    references = " and ".join("#{}".format(number) for number in blocked_on)
-    return "**Blocked on {}:** {}".format(references, because)
+    """Render ``comment --blocked-on`` through ``block_record`` (#2169).
+
+    The reason is made inert like a question or a decline reason (#1798):
+    a line break or ``<!--`` in it once put a runner marker at the start of
+    a line in an owner-trusted comment.
+    """
+    return render_blocked(because, on=blocked_on)
 
 
 def _needs_decision_comment_body(question: str) -> str:
-    """Render the breakdown-question header owned by its parser.
+    """Render the breakdown-question header through ``block_record`` (#2169).
 
     The question is a model's words, so it is made inert (#1798).
     """
-    return "{} {}".format(NEEDS_DECISION_PREFIX, inert_comment_text(question))
+    return render_needs_decision(question)
 
 
 def _hold_reference(value: str) -> str:
@@ -22441,16 +22448,17 @@ def _hold_until_date(value: str) -> date:
 
 def _hold_comment_body(reason: str, until: Optional[date] = None,
                        on: Sequence[str] = ()) -> str:
-    """Render an Accept hold as the block header ``BLOCK_COMMENT_RE`` owns.
+    """Render an Accept hold through ``block_record.render_blocked`` (#2169).
 
     Exactly one condition: a hold on both a date and an issue would parse,
-    but the verb offers one so the brief can say plainly what lifts it.
+    but the verb offers one so the brief can say plainly what lifts it. The
+    reason is made inert, as ``comment --blocked-on``'s is.
     """
     if (until is None) == (not on):
         raise ValueError("a hold needs exactly one of a date or issues")
     if until is not None:
-        return "**Blocked until {}:** {}".format(until.isoformat(), reason)
-    return _blocked_comment_body(on, reason)
+        return render_blocked(reason, until=until)
+    return render_blocked(reason, on=on)
 
 
 #: Whether each command's shared Project load must carry item history (#1622).

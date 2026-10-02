@@ -153,7 +153,9 @@ WRITERS = frozenset({
     "funnel.py:satisfied_block_comment",
     "funnel.py:closed_itself_comment",
     "funnel.py:shape_risk_block",
-    "funnel.py:_needs_decision_comment_body",
+    # funnel.py's block, hold and needs-decision writers and the breakdown's
+    # apply_question render through these, so name no marker themselves
+    # (#2169).
     "block_record.py:render_blocked",
     "block_record.py:render_blocked_until_event",
     "block_record.py:render_needs_decision",
@@ -165,7 +167,6 @@ WRITERS = frozenset({
     "decline_classifier.py:declined_review_routing_comment",
     "decline_classifier.py:declined_unsatisfiable_acceptance_comment",
     "decline_classifier.py:declined_pending_gate_answer_comment",
-    "engine/breakdown.py:apply_question",
     "engine/shape.py:render_plan",
     "engine/implement.py:render_closed_step_route",
     "engine/implement.py:finish_declined",

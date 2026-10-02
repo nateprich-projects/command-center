@@ -13356,11 +13356,11 @@ def dashboard_board(
 
 
 def _dashboard_muse_usage(now_epoch: float) -> Optional[Dict[str, object]]:
-    """Return the compact Muse spend row for the dashboard snapshot.
+    """Return the compact Muse local-spend estimate for the dashboard.
 
     Rolling seven-day dollars against the cap only; the 2026-09-18 decision
     declined a 24-hour companion line. Best effort like the rest of the
-    snapshot: an unreadable reader yields None and the page hides the row,
+    snapshot: an unreadable reader yields None and the page shows unavailable,
     never a failed brief.
     """
     try:
@@ -13381,6 +13381,7 @@ def _dashboard_muse_usage(now_epoch: float) -> Optional[Dict[str, object]]:
     cap = reading.get("cap_dollars")
     percent = window.get("used_percent")
     calls = window.get("calls")
+    captured_at = reading.get("captured_at")
     for value in (spent, cap, percent):
         if (
             not isinstance(value, (int, float))
@@ -13389,6 +13390,13 @@ def _dashboard_muse_usage(now_epoch: float) -> Optional[Dict[str, object]]:
             or value in (float("inf"), float("-inf"))
         ):
             return None
+    if (
+        not isinstance(captured_at, (int, float))
+        or isinstance(captured_at, bool)
+        or not math.isfinite(captured_at)
+        or captured_at < 0
+    ):
+        return None
     if cap <= 0 or spent < 0:
         return None
     if (
@@ -13398,6 +13406,8 @@ def _dashboard_muse_usage(now_epoch: float) -> Optional[Dict[str, object]]:
     ):
         return None
     row: Dict[str, object] = {
+        "source": "Local Muse session journal estimate",
+        "captured_at": float(captured_at),
         "spent_dollars": float(spent),
         "cap_dollars": float(cap),
         "used_percent": float(percent),
@@ -13421,6 +13431,24 @@ def _dashboard_muse_usage(now_epoch: float) -> Optional[Dict[str, object]]:
                 row[key] = float(value)
         break
     return row
+
+
+def _dashboard_muse_panel_usage() -> Dict[str, object]:
+    """Return the latest validated account-panel sample recorded on GitHub.
+
+    The source issue comment records 15% at Tue 2026-09-29 20:55 PDT. Keep
+    the source timestamp intact; the measurement owner in #2123 owns future
+    refreshes, while the dashboard marks this seed stale after 90 minutes.
+    """
+    return {
+        "used_percent": 15.0,
+        "sampled_at": "2026-09-29T20:55:00-07:00",
+        "source": "Muse account panel",
+        "source_url": (
+            "https://github.com/nateprich-projects/command-center/"
+            "issues/1673#issuecomment-5903766309"
+        ),
+    }
 
 
 def _dashboard_claude_usage(now_epoch: float) -> Optional[Dict[str, object]]:
@@ -22853,6 +22881,7 @@ def main(argv: Optional[Sequence[str]] = None, *,
                         )
                     snapshot_usage = {
                         "muse": _dashboard_muse_usage(now.timestamp()),
+                        "muse_panel": _dashboard_muse_panel_usage(),
                         "claude": _dashboard_claude_usage(now.timestamp()),
                     }
                     if snapshot_usage["claude"] is None:

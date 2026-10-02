@@ -281,7 +281,7 @@ main[hidden] { display: none; }
    ends with a thin bar between. At or over the cap the fill turns danger. */
 #usage { padding: 12px 18px; }
 .panel:has(#usage:empty) { display: none; }
-.usage { display: flex; align-items: center; gap: 12px; }
+.usage { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
 .usage-label { font-size: 13px; color: var(--ink-dim); white-space: nowrap; }
 .usage-bar { flex: 1 1 auto; height: 6px; background: var(--surface-2); border-radius: 3px; overflow: hidden; }
 .usage-fill { display: block; height: 100%; background: var(--pip-submitted); }
@@ -289,6 +289,14 @@ main[hidden] { display: none; }
 .usage-percent { font-size: 13px; color: var(--ink-dim); white-space: nowrap; }
 .usage-age, .usage-state { font-size: 13px; color: var(--ink-dim); white-space: nowrap; }
 .usage-state.stale, .usage-state.unavailable { color: var(--danger); }
+.usage-meta { flex: 1 1 100%; display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center; }
+.usage-source, .usage-sampled-at, .usage-refresh {
+  color: var(--ink-faint);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.usage-source[href], .usage-refresh { color: var(--accent-ink); }
+.usage-meta .usage-age { font-size: 12px; }
 .empty { margin: 0; padding: 18px; color: var(--ink-dim); }
 .unreadable { margin: 0; padding: 12px 18px; color: var(--danger); }
 .waiting-section > .unreadable { padding: 0; }

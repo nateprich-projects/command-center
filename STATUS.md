@@ -152,6 +152,13 @@ is not already a symlink, and refuses to touch a `settings.json` it cannot parse
   bare null. `open_starts` and `api_cost_for_run` are thin adapters over it, so a run
   read twice (GitHub plus spool) is one run. Built and fixture-tested; not yet checked
   against the live branch (#2179).
+  `heartbeat start` and `finish` read GitHub strictly (#2175): a failed read is lost,
+  never "no records", and only a missing file is an empty history. They carry on from
+  the spool alone; `finish` trusts the run id it was given instead of refusing ("no
+  start recorded"), writes the run's API cost, job and token fields as unknown and says
+  so on stderr, and takes start, binding, job and API cost through the per-run view.
+  The Muse quota-hit record reads its paired total the same way, so an unread GitHub
+  is "could not be read". Built and fixture-tested; not checked live.
 - `.github/workflows/watchdog.yml` + `.github/scripts/watchdog.py` — hourly. Reports
   silence, dying runs, and repeated errors; deliberately silent on over-pace, locked and
   nothing-to-do, which are the system working. Full cycle verified live: opened an issue,

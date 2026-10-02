@@ -32,6 +32,17 @@ unreadable value never reads as zero or as nothing measured. An errored finish
 written before `error_class` was recorded is classified on read. `open_starts`
 and `api_cost_for_run` are thin adapters over it. The view is derived on every
 read: the spool format and the records on GitHub are unchanged.
+
+**Start and finish read GitHub strictly** (`read(strict=True)`, #2175). A
+GitHub read that fails is lost, never "no records"; only a missing file is an
+empty history. Both commands then carry on from the spool alone and write as
+always, spool first and push after. A finish trusts the run id it was given
+rather than refusing a run whose start was not read, and writes the run's API
+cost, job and token fields as unknown, saying so on stderr: the spool holds
+only what has not drained, so a sum over it would be an undercount that reads
+as measured. The finish takes the run's start, binding, job and API cost
+through the per-run view (`_start_for_run`, `verify_finish`, `job_for_run`,
+`api_cost_for_run`).
 """
 
 from __future__ import annotations
@@ -718,20 +729,16 @@ def record_job(agent: str, run: Optional[str], job: str) -> str:
 
 def job_for_run(records: List[Dict], run: Optional[str],
                 agent: str) -> Optional[str]:
-    """Return one unambiguous scheduled job recorded for this run."""
-    if not run:
+    """Return one unambiguous scheduled job recorded for this run.
+
+    A thin adapter over the per-run view (#2175): the view keeps the job
+    records of the run's own agent, so a run that belongs to another agent
+    has none here.
+    """
+    view = run_view(records, run)
+    if view is None or view["agent"] != agent:
         return None
-    jobs = {
-        row.get("job")
-        for row in records
-        if isinstance(row, dict)
-        and row.get("phase") == "job"
-        and row.get("run") == run
-        and row.get("agent") == agent
-        and isinstance(row.get("job"), str)
-        and row["job"].strip()
-    }
-    return next(iter(jobs)) if len(jobs) == 1 else None
+    return view["job"]
 
 
 def session_id(agent: str) -> Optional[str]:
@@ -1433,8 +1440,14 @@ def verify_finish(records: List[Dict], run_id: str, *,
     Membership alone let a stale id from an earlier tick accept an outcome
     whenever that id was still open; the observed case (#497) was saved only
     because the stale run had already finished.
+
+    A thin adapter over the per-run view (#2175): the named run's binding,
+    and each other run's binding and whether it is still open, come from
+    `run_views`.
     """
-    bound = bindings(records).get(run_id)
+    views = run_views(records)
+    view = views.get(run_id)
+    bound = view["binding"] if view is not None else None
     if bound is None:
         return None
     if work:
@@ -1448,10 +1461,11 @@ def verify_finish(records: List[Dict], run_id: str, *,
         return None
     if matches:
         return None
-    opens = {r.get("run") for r in open_starts(records)}
     right = None
-    for other, other_bound in bindings(records).items():
-        if other == run_id or other not in opens:
+    for other, other_view in views.items():
+        other_bound = other_view["binding"]
+        if (other == run_id or other_bound is None
+                or other_view["pairing"] != PAIRING_OPEN):
             continue
         if work and str(other_bound.get("work")) == str(work):
             right = other
@@ -1667,25 +1681,14 @@ def _empty_token_usage() -> Dict[str, Optional[int]]:
 
 
 def _start_for_run(records: List[Dict], run_id: Optional[str]) -> Dict:
-    """Find the latest start row for a run, if the durable records have one."""
-    if not run_id:
-        return {}
-    starts = [
-        row for row in records
-        if isinstance(row, dict)
-        and row.get("phase") == "start"
-        and row.get("run") == run_id
-    ]
-    if not starts:
-        return {}
-    return max(
-        starts,
-        key=lambda row: (
-            isinstance(row.get("ts"), (int, float))
-            and not isinstance(row.get("ts"), bool),
-            row.get("ts") if isinstance(row.get("ts"), (int, float)) else 0,
-        ),
-    )
+    """Find the latest start row for a run, if the durable records have one.
+
+    A thin adapter over the per-run view (#2175), whose start is the run's
+    latest by ts.
+    """
+    view = run_view(records, run_id)
+    start = view["start"] if view is not None else None
+    return start if isinstance(start, dict) else {}
 
 
 def token_usage_for_run(
@@ -2064,7 +2067,9 @@ def record_muse_quota_hit(run: Optional[str], reset_stamp: Optional[str],
     if classification == "weekly" and reset_epoch is not None:
         read_failed = False
         try:
-            records = read("muse", timeout=10)
+            # Strict (#2175): an unread GitHub is "could not be read", never
+            # a history in which no paired total matches.
+            records = read("muse", timeout=10, strict=True)
             matches = [
                 row for row in muse_window_consumption(records)
                 if abs(float(row["resets_at"]) - reset_epoch) < 0.5
@@ -2127,8 +2132,33 @@ def _parse_records_strict(content: str) -> List[Dict]:
     return records
 
 
-def read_github(agent: str, timeout: Optional[float] = None) -> Records:
-    """Read only the durable records on GitHub, excluding the local spool."""
+def _missing_on_github(exc: Exception) -> bool:
+    """Whether a failed Contents read was GitHub saying the file is absent.
+
+    A missing file is a valid empty history; every other failure leaves the
+    history unknown.
+    """
+    return bool(re.search(r"\bHTTP\s+404\b", str(exc), re.IGNORECASE))
+
+
+def read_github(agent: str, timeout: Optional[float] = None,
+                strict: bool = False) -> Records:
+    """Read only the durable records on GitHub, excluding the local spool.
+
+    By default a failed read is no records, which best-effort readers accept.
+    ``strict`` (#2175) keeps a failed read apart from an empty file: it raises
+    `HeartbeatError`, and only a missing file (HTTP 404) reads as an empty
+    history, as `read_brief` reads it. Lines go through `parse_records` either
+    way, so a bad line is counted rather than refusing the whole file.
+    """
+    if strict:
+        try:
+            content = _fetch_strict(agent, timeout=timeout)
+        except HeartbeatError as exc:
+            if not _missing_on_github(exc):
+                raise
+            content = None
+        return _parse_records(content)
     if timeout is None:
         content, _ = _fetch(agent)
     else:
@@ -2136,13 +2166,11 @@ def read_github(agent: str, timeout: Optional[float] = None) -> Records:
     return _parse_records(content)
 
 
-def read_github_strict(agent: str, timeout: Optional[float] = None) -> List[Dict]:
-    """Read durable records or raise when their contents cannot be established.
+def _fetch_strict(agent: str, timeout: Optional[float] = None) -> str:
+    """The durable file's content, or `HeartbeatError` when it cannot be read.
 
-    Most heartbeat readers are best-effort instrumentation and treat an
-    unavailable GitHub read as no records. Finish-time claim ownership cannot:
-    an absent binding means the holder is unknown, so this path preserves API
-    and parse failures instead of confusing them with an empty file.
+    Unlike `_fetch`, an API or decoding failure raises rather than returning
+    no content, so a caller can tell an unread file from an empty one.
     """
     args = (
         "api",
@@ -2174,7 +2202,18 @@ def read_github_strict(agent: str, timeout: Optional[float] = None) -> List[Dict
             raise HeartbeatError(
                 "GitHub returned unreadable heartbeat content"
             ) from exc
-    return _parse_records_strict(content)
+    return content
+
+
+def read_github_strict(agent: str, timeout: Optional[float] = None) -> List[Dict]:
+    """Read durable records or raise when their contents cannot be established.
+
+    Most heartbeat readers are best-effort instrumentation and treat an
+    unavailable GitHub read as no records. Finish-time claim ownership cannot:
+    an absent binding means the holder is unknown, so this path preserves API
+    and parse failures instead of confusing them with an empty file.
+    """
+    return _parse_records_strict(_fetch_strict(agent, timeout=timeout))
 
 
 def _spooled_strict(agent: str) -> List[Dict]:
@@ -2198,7 +2237,7 @@ def read_brief(agent: str, timeout: Optional[float] = None) -> List[Dict]:
     try:
         durable = read_github_strict(agent, timeout=timeout)
     except HeartbeatError as exc:
-        if not re.search(r"\bHTTP\s+404\b", str(exc), re.IGNORECASE):
+        if not _missing_on_github(exc):
             raise
         durable = []
     return durable + _spooled_strict(agent)
@@ -2232,13 +2271,19 @@ def muse_auth_outage_open(records: List[Dict]) -> bool:
     return open_outage
 
 
-def read(agent: str, timeout: Optional[float] = None) -> Records:
+def read(agent: str, timeout: Optional[float] = None,
+         strict: bool = False) -> Records:
     """Every record this machine knows about — pushed and still spooled.
 
     Still the list every caller reads; its `unreadable` counts the lines on
-    either side that `parse_records` left out (#2173).
+    either side that `parse_records` left out (#2173). ``strict`` (#2175)
+    raises `HeartbeatError` when GitHub could not be read, rather than
+    returning the spool as if it were the whole history; see `read_github`.
     """
-    durable = read_github(agent, timeout=timeout)
+    durable = (
+        read_github(agent, timeout=timeout, strict=True) if strict
+        else read_github(agent, timeout=timeout)
+    )
     spooled = _spooled(agent)
     return Records(
         list(durable) + list(spooled),
@@ -2344,7 +2389,8 @@ def run_summary(
     }
 
 
-def resolve_run(records: List[Dict], requested: Optional[str]):
+def resolve_run(records: List[Dict], requested: Optional[str],
+                complete: bool = True):
     """Which run a `finish` belongs to: `(run_id, candidates)`.
 
     A `run_id` means it is known. A `None` run_id with candidates means it could
@@ -2358,13 +2404,19 @@ def resolve_run(records: List[Dict], requested: Optional[str]):
     most recent open start is B, so A's outcome would land on B — the same bug
     through a new mechanism. The run that finishes is usually the one that
     started earlier, so there is no safe guess. Refusing to guess is the fix.
+
+    ``complete`` is False when the records are known to be partial (#2175):
+    GitHub could not be read, or a line could not be parsed. A start that was
+    not read is not a start that never happened, so a requested id is then
+    trusted rather than refused; a finish that *was* read still refuses a
+    second one.
     """
     if requested:
         starts = {r.get("run") for r in records if r.get("phase") == "start"}
-        # An empty set means the records could not be read at all — GitHub
-        # unreachable and nothing spooled. Instrumentation must not gate the
-        # thing it instruments, so trust the caller rather than refuse.
-        if starts and requested not in starts:
+        # No start read at all, or a read known to be partial: the run's own
+        # start may be among what was not read. Instrumentation must not gate
+        # the thing it instruments, so trust the caller rather than refuse.
+        if complete and starts and requested not in starts:
             raise HeartbeatError(
                 "no start recorded for run {} — refusing to record a finish "
                 "against a run that never began".format(requested)
@@ -2396,6 +2448,20 @@ def unfinished(records: List[Dict], now: float, ttl_seconds: int) -> List[Dict]:
         r for r in open_starts(records)
         if now - (r.get("ts") or 0) > ttl_seconds
     ]
+
+
+def _read_for_run(agent: str):
+    """The records `start` and `finish` read, and why GitHub's were not (#2175).
+
+    Strict, so a failed GitHub read is never taken for an empty history:
+    returns ``(records, None)`` from a full read, or the spool alone and the
+    reason when GitHub could not be read. The write that follows is spool
+    first and push after either way, so an unread GitHub never stops a run.
+    """
+    try:
+        return read(agent, strict=True), None
+    except HeartbeatError as exc:
+        return _spooled(agent), " ".join(str(exc).split()) or "no reason given"
 
 
 def main(argv=None) -> int:
@@ -2501,7 +2567,17 @@ def main(argv=None) -> int:
         if args.command == "start":
             run_id = uuid.uuid4().hex[:12]
             current_session = session_id(args.agent)
-            records = read(args.agent)
+            records, unread = _read_for_run(args.agent)
+            if unread is not None and current_session:
+                # Without a session id no re-begin is checked, so an unread
+                # GitHub changes nothing this start does.
+                print(
+                    "heartbeat: GitHub heartbeat records could not be read "
+                    "({}); starting from the local spool alone, so only "
+                    "spooled starts were checked for a same-session "
+                    "re-begin.".format(unread),
+                    file=sys.stderr,
+                )
             close_rebegun_starts(
                 args.agent, records, run_id, current_session
             )
@@ -2524,8 +2600,11 @@ def main(argv=None) -> int:
             print(run_id)
             return 0
 
-        records = read(args.agent)
-        run_id, candidates = resolve_run(records, args.run)
+        records, unread = _read_for_run(args.agent)
+        run_id, candidates = resolve_run(
+            records, args.run,
+            complete=unread is None and not getattr(records, "unreadable", 0),
+        )
         if args.run and run_id:
             misfiled = verify_finish(
                 records, run_id, merged=_merged_pr(args.merged), work=args.work
@@ -2562,6 +2641,17 @@ def main(argv=None) -> int:
                     len(candidates) if candidates else 0),
                 file=sys.stderr,
             )
+        if unread is not None:
+            # The spool holds only what has not drained yet; the rest of the
+            # run is on GitHub. A sum over the spool would write an
+            # undercount that reads as measured, so these stay unknown.
+            print(
+                "heartbeat: GitHub heartbeat records could not be read ({}); "
+                "recording this finish from the local spool alone, so the "
+                "run's API cost, job and token fields are unknown.".format(
+                    unread),
+                file=sys.stderr,
+            )
         finished_at = time.time()
         runtime = runtime_state()
         record = {
@@ -2583,19 +2673,27 @@ def main(argv=None) -> int:
             "human_intervention_required": args.human_intervention or None,
             "repo": repo_state(),
             "runtime": runtime,
-            "api_cost": api_cost_for_run(records, run_id),
-            "graphql_by_caller": graphql_by_caller_for_run(
-                records, run_id
+            "api_cost": (
+                api_cost_for_run(records, run_id) if unread is None
+                else {name: None for name in API_COST_FIELDS}
+            ),
+            "graphql_by_caller": (
+                graphql_by_caller_for_run(records, run_id)
+                if unread is None else None
             ),
             **detect_model(args.agent),
         }
         if args.agent != "muse":
             # Muse usage is derived from its session ids at read time. Do not
             # freeze a first-session snapshot into the finish record.
-            record["token_usage"] = token_usage_for_run(
-                args.agent, records, run_id, finished_at
+            record["token_usage"] = (
+                token_usage_for_run(args.agent, records, run_id, finished_at)
+                if unread is None else _empty_token_usage()
             )
-        job = job_for_run(records, run_id, args.agent)
+        job = (
+            job_for_run(records, run_id, args.agent) if unread is None
+            else None
+        )
         if job is not None:
             record["job"] = job
         if args.outcome == "errored":

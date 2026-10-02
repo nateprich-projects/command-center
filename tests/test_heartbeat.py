@@ -253,7 +253,7 @@ def test_unreadable_records_do_not_refuse_an_explicit_id():
 
 def test_finish_accepts_skipped_blocked(monkeypatch):
     records = []
-    monkeypatch.setattr(heartbeat, "read", lambda agent: [])
+    monkeypatch.setattr(heartbeat, "read", lambda agent, **kwargs: [])
     monkeypatch.setattr(heartbeat, "usage_snapshot", lambda agent: None)
     monkeypatch.setattr(heartbeat, "repo_state", lambda: None)
     monkeypatch.setattr(heartbeat, "detect_model", lambda agent: {})
@@ -273,7 +273,7 @@ def test_finish_accepts_skipped_blocked(monkeypatch):
 
 def test_finish_records_structured_issue_outcomes(monkeypatch):
     records = []
-    monkeypatch.setattr(heartbeat, "read", lambda agent: [])
+    monkeypatch.setattr(heartbeat, "read", lambda agent, **kwargs: [])
     monkeypatch.setattr(heartbeat, "usage_snapshot", lambda agent: None)
     monkeypatch.setattr(heartbeat, "repo_state", lambda: None)
     monkeypatch.setattr(heartbeat, "detect_model", lambda agent: {})
@@ -297,7 +297,7 @@ def test_finish_records_structured_issue_outcomes(monkeypatch):
 
 def test_finish_records_every_muse_call_id_and_keeps_uncaptured_slots(monkeypatch):
     records = []
-    monkeypatch.setattr(heartbeat, "read", lambda agent: [])
+    monkeypatch.setattr(heartbeat, "read", lambda agent, **kwargs: [])
     monkeypatch.setattr(heartbeat, "usage_snapshot", lambda agent: None)
     monkeypatch.setattr(heartbeat, "repo_state", lambda: None)
     monkeypatch.setattr(heartbeat, "detect_model", lambda agent: {})
@@ -322,7 +322,7 @@ def test_finish_records_every_muse_call_id_and_keeps_uncaptured_slots(monkeypatc
 
 def test_finish_keeps_single_id_bound_and_omits_token_snapshot(monkeypatch):
     records = []
-    monkeypatch.setattr(heartbeat, "read", lambda agent: [])
+    monkeypatch.setattr(heartbeat, "read", lambda agent, **kwargs: [])
     monkeypatch.setattr(heartbeat, "usage_snapshot", lambda agent: None)
     monkeypatch.setattr(heartbeat, "repo_state", lambda: None)
     monkeypatch.setattr(heartbeat, "detect_model", lambda agent: {})
@@ -400,7 +400,7 @@ def test_start_and_finish_record_separate_usage_readings(monkeypatch):
         seen_agents.append(agent)
         return readings.pop(0)
 
-    monkeypatch.setattr(heartbeat, "read", lambda agent: records)
+    monkeypatch.setattr(heartbeat, "read", lambda agent, **kwargs: records)
     monkeypatch.setattr(heartbeat, "session_id", lambda agent: "session-1")
     monkeypatch.setattr(heartbeat, "usage_snapshot", usage_read)
     monkeypatch.setattr(heartbeat, "close_rebegun_starts", lambda *args: None)
@@ -561,7 +561,7 @@ def test_usage_snapshot_fails_closed_for_unreadable_or_unknown_usage(
 
 def test_finish_accepts_skipped_human_step(monkeypatch):
     records = []
-    monkeypatch.setattr(heartbeat, "read", lambda agent: [])
+    monkeypatch.setattr(heartbeat, "read", lambda agent, **kwargs: [])
     monkeypatch.setattr(heartbeat, "usage_snapshot", lambda agent: None)
     monkeypatch.setattr(heartbeat, "repo_state", lambda: None)
     monkeypatch.setattr(heartbeat, "detect_model", lambda agent: {})
@@ -606,7 +606,7 @@ def test_merged_suite_timeout_stays_unclassified_with_mixed_output_markers():
 def test_errored_finish_records_its_class_and_runtime_head(monkeypatch):
     records = []
     runtime = {"root": "/runtime/checkout", "head": "0123456789ab"}
-    monkeypatch.setattr(heartbeat, "read", lambda agent: [])
+    monkeypatch.setattr(heartbeat, "read", lambda agent, **kwargs: [])
     monkeypatch.setattr(heartbeat, "usage_snapshot", lambda agent: None)
     monkeypatch.setattr(heartbeat, "repo_state", lambda: None)
     monkeypatch.setattr(heartbeat, "runtime_state", lambda: runtime)
@@ -632,7 +632,7 @@ def test_errored_finish_records_its_class_and_runtime_head(monkeypatch):
 
 def test_finish_records_input_usage_when_harness_exposes_both_counts(monkeypatch):
     records = []
-    monkeypatch.setattr(heartbeat, "read", lambda agent: [])
+    monkeypatch.setattr(heartbeat, "read", lambda agent, **kwargs: [])
     monkeypatch.setattr(heartbeat, "usage_snapshot", lambda agent: None)
     monkeypatch.setattr(heartbeat, "input_usage", lambda agent: {
         "total_input_tokens": 100,
@@ -668,7 +668,7 @@ def test_finish_records_input_usage_when_harness_exposes_both_counts(monkeypatch
 def test_finish_omits_input_usage_when_harness_does_not_expose_both_counts(
         monkeypatch):
     records = []
-    monkeypatch.setattr(heartbeat, "read", lambda agent: [])
+    monkeypatch.setattr(heartbeat, "read", lambda agent, **kwargs: [])
     monkeypatch.setattr(heartbeat, "usage_snapshot", lambda agent: None)
     monkeypatch.setattr(heartbeat, "input_usage", lambda agent: None)
     monkeypatch.setattr(heartbeat, "repo_state", lambda: None)
@@ -711,7 +711,7 @@ def test_finish_records_four_token_kinds_from_the_bound_session(monkeypatch):
     monkeypatch.setattr(
         heartbeat.session_usage, "usage_for_session", usage_for_session
     )
-    monkeypatch.setattr(heartbeat, "read", lambda agent: records)
+    monkeypatch.setattr(heartbeat, "read", lambda agent, **kwargs: records)
     monkeypatch.setattr(heartbeat, "usage_snapshot", lambda agent: None)
     monkeypatch.setattr(heartbeat, "repo_state", lambda: None)
     monkeypatch.setattr(heartbeat, "runtime_state", lambda: None)
@@ -769,7 +769,7 @@ def test_finish_sums_api_cost_events_from_two_funnel_commands(monkeypatch):
         api_event("run-id", 5, 3),
     ]
     written = []
-    monkeypatch.setattr(heartbeat, "read", lambda agent: records)
+    monkeypatch.setattr(heartbeat, "read", lambda agent, **kwargs: records)
     monkeypatch.setattr(heartbeat, "usage_snapshot", lambda agent: None)
     monkeypatch.setattr(heartbeat, "repo_state", lambda: None)
     monkeypatch.setattr(heartbeat, "detect_model", lambda agent: {})
@@ -1112,7 +1112,7 @@ def test_graphql_points_with_known_reset_and_null_cost_stay_unknown():
 def test_finish_reports_null_api_cost_without_funnel_commands(monkeypatch):
     records = [start("run-id", NOW)]
     written = []
-    monkeypatch.setattr(heartbeat, "read", lambda agent: records)
+    monkeypatch.setattr(heartbeat, "read", lambda agent, **kwargs: records)
     monkeypatch.setattr(heartbeat, "usage_snapshot", lambda agent: None)
     monkeypatch.setattr(heartbeat, "repo_state", lambda: None)
     monkeypatch.setattr(heartbeat, "detect_model", lambda agent: {})
@@ -1137,7 +1137,7 @@ def test_finish_reports_null_api_cost_without_funnel_commands(monkeypatch):
 def test_finish_keeps_only_unreadable_api_cost_field_null(monkeypatch):
     records = [start("run-id", NOW), api_event("run-id", None, 2)]
     written = []
-    monkeypatch.setattr(heartbeat, "read", lambda agent: records)
+    monkeypatch.setattr(heartbeat, "read", lambda agent, **kwargs: records)
     monkeypatch.setattr(heartbeat, "usage_snapshot", lambda agent: None)
     monkeypatch.setattr(heartbeat, "repo_state", lambda: None)
     monkeypatch.setattr(heartbeat, "detect_model", lambda agent: {})
@@ -1293,7 +1293,7 @@ def test_finish_accepts_named_skips(monkeypatch, outcome):
     system working correctly.
     """
     records = []
-    monkeypatch.setattr(heartbeat, "read", lambda agent: [])
+    monkeypatch.setattr(heartbeat, "read", lambda agent, **kwargs: [])
     monkeypatch.setattr(heartbeat, "usage_snapshot", lambda agent: None)
     monkeypatch.setattr(heartbeat, "repo_state", lambda: None)
     monkeypatch.setattr(heartbeat, "detect_model", lambda agent: {})

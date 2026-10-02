@@ -1354,10 +1354,11 @@ def apply_shape(items: list, now: datetime, ref: str,
         fresh_state, fresh_status, fresh_children)
     if stale_reason is not None:
         status_label = fresh_status if fresh_status is not None else "missing"
-        print("{} ref={} reason={} fresh Status={} children={} state={}".format(
-            SKIPPED_STALE_SHAPE_OUTCOME, item.ref, stale_reason, status_label,
-            fresh_children, fresh_state,
-        ))
+        print("{} ref={} reason={} fresh Status={} children={} "
+              "state={}".format(
+                  SKIPPED_STALE_SHAPE_OUTCOME, item.ref, stale_reason,
+                  status_label, fresh_children, fresh_state,
+              ))
         return 0
 
     out = funnel._run_gh(command, capture_output=True, text=True)

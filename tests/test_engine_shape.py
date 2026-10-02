@@ -1868,7 +1868,7 @@ READ_FRESH_SHAPE_FACTS = shape._read_fresh_shape_facts
 
 
 def stub_fresh_project_row(monkeypatch, fresh):
-    """Let apply_shape's real fresh re-read see ``fresh`` as the Project row."""
+    """Serve ``fresh`` as the Project row to apply_shape's real re-read."""
     monkeypatch.setattr(
         shape, "_read_fresh_shape_facts", READ_FRESH_SHAPE_FACTS)
     stub_project_ref_load(monkeypatch, fresh)

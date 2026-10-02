@@ -38,6 +38,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import funnel  # noqa: E402
 
+import block_record  # noqa: E402
 from decline_classifier import (  # noqa: E402
     DECLINE_REVIEW_ROUTING_MARKER,
     classify_decline_reason,
@@ -1950,7 +1951,14 @@ def write_declined_agent_needs(url: str, ref: str) -> None:
 
 def mark_ticket_blocked(repo: str, number: int, *, blocked_by: Optional[int] = None,
                         cwd: pathlib.Path) -> None:
-    """Label one ticket blocked, with the native edge when one exists."""
+    """Label one ticket blocked, with the native edge when one exists.
+
+    It writes no comment. Its caller posts the ticket's block or decline
+    record before calling it (#2168): ``_load_block_comment`` reads a
+    labelled ticket's newest record as its current block, so a label set
+    before the record would leave an earlier episode's record current, whose
+    condition ``clear_satisfied_blocks`` can then lift.
+    """
     command = ["gh", "issue", "edit", str(number), "--repo", repo]
     if blocked_by is not None:
         command += ["--add-blocked-by", str(blocked_by)]
@@ -2344,11 +2352,11 @@ def close_declined_defer_note_proof(
         cwd: pathlib.Path) -> None:
     """Close an explicitly accepted defer-note proof as completed.
 
-    The reason is the model's words, so it is made inert (#1798).
+    The reason is the model's words, so ``block_record.render_declined``
+    makes it inert (#1798, #2168).
     """
     comment = funnel.append_provenance(
-        "{} {}".format(funnel.DECLINED_PREFIX,
-                       funnel.inert_comment_text(reason)), "agent",
+        block_record.render_declined(reason), "agent",
         at=datetime.now(timezone.utc), run=run, agent=agent,
     )
     proc = funnel._run_gh(
@@ -3320,6 +3328,10 @@ def finish_blocked_on_human(
     follows its reason: ``session_needs_effect`` for a step a Claude Code
     session can do, ``needs_effect`` for Nate's (#1901).
 
+    The ticket's ``**Blocked on #N:**`` record is posted before its label
+    and blocked-by edge (#2168), so a labelled ticket's current record is
+    always this one, and a record that fails to post leaves no label.
+
     A human step Nate closed as not planned for this ticket is his answer
     that no step will happen, so nothing is filed again (#1726): the ticket
     is routed to review and shaping instead, or, when it was already routed
@@ -3372,11 +3384,9 @@ def finish_blocked_on_human(
             session_needs_effect(created["url"], created["ref"])
         else:
             needs_effect(created["url"], created["ref"])
-        block_effect(resolved, context["number"],
-                     blocked_by=created["number"], cwd=context["root"])
-        blocked_comment = (
-            "**Blocked on #{}:** Complete the human step before resuming "
-            "this ticket.".format(created["number"]))
+        blocked_comment = block_record.render_blocked(
+            "Complete the human step before resuming this ticket.",
+            on=[created["number"]])
         if wip_sha is not None:
             blocked_comment += _human_step_wip_note(
                 context["branch"], wip_sha, blocked["reason"])
@@ -3384,6 +3394,8 @@ def finish_blocked_on_human(
             resolved, context["number"],
             blocked_comment,
             run=run, agent=agent, cwd=context["root"])
+        block_effect(resolved, context["number"],
+                     blocked_by=created["number"], cwd=context["root"])
     except funnel.GitHubError as exc:
         raise funnel.GitHubError(
             "{} (already created: {})".format(exc, created["ref"]))
@@ -3488,7 +3500,15 @@ def finish_declined(
         defer_note_close_effect: Callable[..., None]
         = close_declined_defer_note_proof,
         extra_note: Optional[str] = None) -> dict:
-    """Record the decline and route only verified, parseable reasons."""
+    """Record the decline and route only verified, parseable reasons.
+
+    The ``**Declined:**`` record is the first write (#2168): Needs, the
+    ``blocked`` label, a prerequisite's blocked-by edge and any routing
+    comment all follow it, so a labelled ticket's current record is always
+    this decline, and a record that fails to post leaves the ticket as it
+    was. Only the prerequisite read comes before it, since a disproof is
+    part of the record. Each decline class keeps its outcome (#1393, #1538).
+    """
     context = checkout_context(cwd)
     resolved = resolve_checkout_repo(context["root"], repo)
     ticket = fetch_ticket(resolved, context["number"])
@@ -3522,10 +3542,8 @@ def finish_declined(
         decline_class == "unsatisfiable-acceptance"
     )
     pending_gate_answer_routed = decline_class == "pending-gate-answer"
-    if accept_conflict_routed:
-        # Keep this in an agent lane so review and shaping can see the ticket.
-        needs_effect(ticket["url"], ref)
-    elif decline_class == "prerequisite-ticket" and decline_target is not None:
+    prerequisite_open = False
+    if decline_class == "prerequisite-ticket" and decline_target is not None:
         try:
             prerequisite_facts = prerequisite_facts_effect(decline_target)
             landed = prerequisite_project_landed(prerequisite_facts)
@@ -3538,14 +3556,32 @@ def finish_declined(
                 isinstance(prerequisite_facts, dict)
                 and prerequisite_facts.get("state") == "OPEN"
             ):
-                prerequisite_edge_effect(
-                    resolved, context["number"], decline_target,
-                    cwd=context["root"],
-                )
-                prerequisite_recorded = True
+                prerequisite_open = True
         except (funnel.GitHubError, ImplementError, shape.ShapeError,
                 OSError, subprocess.SubprocessError):
-            # A failed lookup or edge write keeps today's visible block.
+            # A failed lookup keeps today's visible block.
+            prerequisite_open = False
+    # The record before any Needs, label or edge (#2168). The reason is the
+    # model's words: ``render_declined`` makes it one line with no ``<!--``,
+    # so it can never form a runner marker in the owner's comment (#1798).
+    declined_comment = block_record.render_declined(reason)
+    if prerequisite_evidence is not None:
+        declined_comment += "\n\n" + prerequisite_evidence
+    comment_effect(resolved, context["number"], declined_comment,
+                   run=run, agent=agent, cwd=context["root"])
+    if accept_conflict_routed:
+        # Keep this in an agent lane so review and shaping can see the ticket.
+        needs_effect(ticket["url"], ref)
+    elif prerequisite_open:
+        try:
+            prerequisite_edge_effect(
+                resolved, context["number"], decline_target,
+                cwd=context["root"],
+            )
+            prerequisite_recorded = True
+        except (funnel.GitHubError, ImplementError, shape.ShapeError,
+                OSError, subprocess.SubprocessError):
+            # A failed edge write keeps today's visible block.
             prerequisite_recorded = False
     if (not prerequisite_recorded and not accept_conflict_routed
             and not false_unlanded_prerequisite_routed
@@ -3556,14 +3592,6 @@ def finish_declined(
         # route its Unblock question through the funnel watch.
         declined_needs_effect(ticket["url"], ref)
         block_effect(resolved, context["number"], cwd=context["root"])
-    # The reason is the model's words: one line with no ``<!--``, so it can
-    # never form a runner marker in the owner's comment (#1798).
-    declined_comment = "{} {}".format(
-        funnel.DECLINED_PREFIX, funnel.inert_comment_text(reason))
-    if prerequisite_evidence is not None:
-        declined_comment += "\n\n" + prerequisite_evidence
-    comment_effect(resolved, context["number"], declined_comment,
-                   run=run, agent=agent, cwd=context["root"])
     if false_unlanded_prerequisite_routed:
         # Record proof before returning a false decline to the agent queue.
         clear_block_effect(

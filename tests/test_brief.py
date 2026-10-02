@@ -933,22 +933,24 @@ def test_brief_surfaces_parked_items_with_their_reason(monkeypatch, capsys):
     nodes = json.loads(FIXTURE.read_text())
     items = fixture_items()
     parked_node = next(node for node in nodes if node.get("park_comment"))
-    calls = []
+    batches = []
+    full_reads = []
 
-    def gh_json(*args):
-        calls.append(args)
-        if args[3] == "14":
-            return {"comments": []}
-        assert args == (
-            "gh", "issue", "view", "15", "--repo", "nateprich/beta",
-            "--json", "comments",
-        )
-        return {"comments": [
-            {"author": OWNER, "body": "An unrelated comment."},
-            {"author": OWNER, "body": parked_node["park_comment"]},
-        ]}
+    def batched_tails(candidates):
+        # The brief's shared batched comment-tail read (#2133).
+        batches.append([item.ref for item in candidates])
+        return {
+            item.ref: [
+                {"author": OWNER, "body": "An unrelated comment."},
+                {"author": OWNER, "body": parked_node["park_comment"]},
+            ] if item.ref == "nateprich/beta#15" else []
+            for item in candidates
+        }
 
-    monkeypatch.setattr(funnel, "_gh_json", gh_json)
+    monkeypatch.setattr(funnel, "_batched_issue_comments", batched_tails)
+    monkeypatch.setattr(
+        funnel, "_issue_comments", lambda item: full_reads.append(item.ref)
+    )
     monkeypatch.setattr(funnel, "unattended_merges", lambda now: [])
 
     assert funnel.cmd_brief(items, NOW) == 0
@@ -962,8 +964,8 @@ def test_brief_surfaces_parked_items_with_their_reason(monkeypatch, capsys):
         "reason": "The rewrite no longer earns its maintenance cost.",
     }]
     assert brief["pending_wakes"] == []
-    assert len(calls) == 1
-    assert calls[0][3] == "15"
+    assert ["nateprich/beta#15"] in batches
+    assert full_reads == []
 
 
 def test_brief_reports_wakes_for_parked_items_until_they_resume(
@@ -994,12 +996,20 @@ def test_brief_reports_wakes_for_parked_items_until_they_resume(
         ),
     }
     comment_reads = []
+    full_reads = []
 
-    def issue_comments(item):
-        comment_reads.append(item.number)
-        return [{"author": OWNER, "body": comment_bodies[item.number]}]
+    def batched_tails(candidates):
+        # The brief's shared batched comment-tail read (#2133).
+        comment_reads.append([item.number for item in candidates])
+        return {
+            item.ref: [{"author": OWNER, "body": comment_bodies[item.number]}]
+            for item in candidates
+        }
 
-    monkeypatch.setattr(funnel, "_issue_comments", issue_comments)
+    monkeypatch.setattr(funnel, "_batched_issue_comments", batched_tails)
+    monkeypatch.setattr(
+        funnel, "_issue_comments", lambda item: full_reads.append(item.ref)
+    )
     monkeypatch.setattr(funnel, "unattended_merges", lambda now: [])
 
     assert funnel.cmd_brief([future, no_wake, resumed], NOW) == 0
@@ -1012,7 +1022,9 @@ def test_brief_reports_wakes_for_parked_items_until_they_resume(
         "wake_date": "2026-09-10",
         "wake_status": "Building",
     }]
-    assert comment_reads == [31, 32]
+    # The parked section reads its two candidates' tails, not the resumed one.
+    assert [31, 32] in comment_reads
+    assert full_reads == []
 
 
 def test_brief_does_not_treat_ready_as_a_human_decision(monkeypatch, capsys):
@@ -1078,15 +1090,18 @@ def test_parked_items_are_newest_first_and_missing_reason_is_null(monkeypatch):
         status_since=datetime(2026, 9, 4, tzinfo=timezone.utc),
     )
 
-    def gh_json(*args):
-        if args[3] == "21":
-            return {"comments": [{"author": OWNER, "body": "No marker here."}]}
-        return {"comments": [{
-            "author": OWNER,
-            "body": funnel.PARK_COMMENT_PREFIX + "Older reason",
-        }]}
+    def batched_tails(candidates):
+        # The brief's shared batched comment-tail read (#2133).
+        return {
+            item.ref: [{"author": OWNER, "body": "No marker here."}]
+            if item.number == 21 else [{
+                "author": OWNER,
+                "body": funnel.PARK_COMMENT_PREFIX + "Older reason",
+            }]
+            for item in candidates
+        }
 
-    monkeypatch.setattr(funnel, "_gh_json", gh_json)
+    monkeypatch.setattr(funnel, "_batched_issue_comments", batched_tails)
 
     assert funnel.parked_json([older, newer]) == [
         {
@@ -1879,6 +1894,8 @@ def test_brief_marks_an_unreadable_comment_section_instead_of_empty_result(
         status_since=NOW,
     )
     monkeypatch.setattr(funnel, "_gh_json", lambda *args: None)
+    # The batched comment-tail read answers without the issue (#2133).
+    monkeypatch.setattr(funnel, "gh_graphql", lambda query, **kwargs: {})
 
     assert funnel.cmd_brief([parked], NOW) == 0
     brief = json.loads(capsys.readouterr().out)

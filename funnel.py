@@ -14622,6 +14622,21 @@ def _abandoned_ticket(blocker: Item, dependent: Item,
     return dependent.parent != blocker.parent
 
 
+def _block_event_can_clear(item: Item) -> bool:
+    """Whether ``clear_satisfied_blocks`` can ever lift this event wait.
+
+    The clear reads GitHub heartbeat finishes only for agents in
+    ``heartbeat.PROVIDERS`` and matches every other agent against no records,
+    so an event naming any other agent (a member repo's own job, say) never
+    lifts. ``satisfied_block_refs`` needs every parsed condition, so nothing
+    beside such an event can lift the block either (#2135).
+    """
+    import heartbeat
+
+    event = item.block_event
+    return isinstance(event, dict) and event.get("agent") in heartbeat.PROVIDERS
+
+
 def unclearable_block(item: Item) -> bool:
     """Whether a blocked item has no condition that can lift it and no asker.
 
@@ -14635,10 +14650,15 @@ def unclearable_block(item: Item) -> bool:
     a well-formed event spec counts as a condition, as it does for the clear
     (#1451), and a block whose comments could not be read is never called
     unclearable: its condition is unknown, not absent (#1417's dry window).
+    An event counts only when its agent is one whose heartbeat the clear
+    reads (``_block_event_can_clear``); any other agent's event never lifts.
     """
     if item.state != "OPEN" or not item.is_blocked:
         return False
-    if block_condition(item) is not None or item.open_blockers:
+    condition = block_condition(item)
+    if condition == "event" and not _block_event_can_clear(item):
+        condition = None
+    if condition is not None or item.open_blockers:
         return False
     if item.needs == "claude-code-environment":
         return False

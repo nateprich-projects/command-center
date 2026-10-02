@@ -140,6 +140,65 @@ def test_doctor_lists_event_and_unread_blocks_as_still_waiting():
     ]
 
 
+def test_event_wait_on_an_agent_the_clear_never_reads_stays_stranded():
+    """The clear reads heartbeats only for its own providers.
+
+    An event naming any other agent matches no records, so nothing can ever
+    lift it and ``gate_question`` asks nothing: it is still stranded.
+    """
+    project = building(120)
+    unread_agent = dict(EVENT, agent="example-nightly-job")
+    wait = ticket(
+        121, project, labels=["blocked"], needs="external-event",
+        block_reason="Wait for the example job to fail.",
+        block_event=unread_agent,
+    )
+    reason = (
+        "blocked with no condition that can clear it, and no one is asked "
+        "(Needs: external-event)"
+    )
+
+    assert funnel.block_condition(wait) == "event"
+    assert funnel.gate_question(wait) is None
+    assert funnel.unclearable_block(wait)
+    assert funnel.stranded_items([project, wait], NOW) == [{
+        "ref": wait.ref,
+        "title": "issue 121",
+        "url": "https://example.invalid/121",
+        "reason": reason,
+    }]
+    result = funnel.check_block_conditions([project, wait], now=NOW)
+    assert not result.ok
+    assert result.found == "owner/repo#121: stranded: " + reason
+
+
+def test_agent_block_with_only_a_parsed_reason_stays_stranded(monkeypatch):
+    """A read comment with a reason and no date, reference or event (#1432)."""
+    project = building(130)
+    blocked = ticket(131, project, labels=["blocked"], needs="agent")
+    monkeypatch.setattr(
+        funnel, "_gh_json",
+        lambda *args: {"comments": [
+            {"author": OWNER, "body": "**Blocked:** Waiting on a person."},
+        ]},
+    )
+
+    funnel._load_block_comment(blocked)
+
+    assert blocked.block_comments_error is None
+    assert blocked.block_reason == "Waiting on a person."
+    assert blocked.block_references == []
+    assert blocked.blocked_until is None
+    assert blocked.block_event is None
+    assert funnel.stranded_items([project, blocked], NOW) == [{
+        "ref": blocked.ref,
+        "title": "issue 131",
+        "url": "https://example.invalid/131",
+        "reason": "blocked with no condition that can clear it, and no one "
+                  "is asked (Needs: agent)",
+    }]
+
+
 # Replays of the two live shapes, through the real comment loader.
 
 

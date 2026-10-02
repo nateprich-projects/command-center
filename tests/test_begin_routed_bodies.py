@@ -509,10 +509,12 @@ def test_unrouted_rows_are_never_read_before_ranking(monkeypatch):
     assert not any(item.body_loaded for item in view)
 
 
-#: One routed row's body-only read: three fields, one request's overhead.
-ONE_BODY = (
-    funnel.BEGIN_DETAIL_BODY_FIELDS_PER_ITEM + funnel.BEGIN_DETAIL_QUERY_OVERHEAD
-)
+def _one_body():
+    """One routed row's body-only read: three fields, one request's overhead."""
+    return (
+        funnel.BEGIN_DETAIL_BODY_FIELDS_PER_ITEM
+        + funnel.BEGIN_DETAIL_QUERY_OVERHEAD
+    )
 
 
 def test_the_routed_read_is_charged_to_the_begin_envelope(monkeypatch):
@@ -525,8 +527,8 @@ def test_the_routed_read_is_charged_to_the_begin_envelope(monkeypatch):
     view = _begin_view()
 
     loaded = {item.ref: item for item in view}
-    assert funnel.begin_body_read_work(view, [loaded[bug.ref]]) == ONE_BODY
-    assert envelope.hydrated_fields == ONE_BODY
+    assert funnel.begin_body_read_work(view, [loaded[bug.ref]]) == _one_body()
+    assert envelope.hydrated_fields == _one_body()
     assert envelope.listed_items == len(rows)
     assert envelope.remaining >= funnel.BEGIN_DETAIL_WORK_RESERVE
 
@@ -562,7 +564,7 @@ def test_a_routed_read_never_spends_the_claim_reserve(
     # The listing's rows, the read and its request beside the full reserve,
     # less one unit when it must refuse.
     envelope = funnel.BeginWorkEnvelope(
-        limit=funnel.BEGIN_DETAIL_WORK_RESERVE + len(rows) + ONE_BODY
+        limit=funnel.BEGIN_DETAIL_WORK_RESERVE + len(rows) + _one_body()
         + spare
     )
     monkeypatch.setattr(funnel, "_ACTIVE_BEGIN_ENVELOPE", envelope)

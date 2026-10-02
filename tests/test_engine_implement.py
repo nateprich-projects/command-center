@@ -5892,7 +5892,38 @@ def test_render_evidence_block_names_prior_fix_rewrites():
         prior_fixes=[(42, "engine/implement.py", "finish_done")],
     )
 
-    assert "- rewrites prior fix: #42 (engine/implement.py:finish_done)\n" in block
+    assert "- rewrites #42's prior fix (engine/implement.py:finish_done)\n" in block
+
+
+#: GitHub's closing-keyword shape: a keyword, an optional colon, then an
+#: issue reference. A merged PR whose body holds it closes that issue.
+CLOSING_KEYWORD_RE = re.compile(
+    r"(?i)\b(close[sd]?|fix(e[sd])?|resolve[sd]?)\b:?\s+#\d+")
+
+
+@pytest.mark.parametrize("prior_fixes", [
+    [(1964, "engine/implement.py", "finish_done")],
+    # Past the cap the rest are counted on a line of their own.
+    [(1964 + n, "engine/implement.py", "finish_done")
+     for n in range(implement.MAX_EVIDENCE_PRIOR_FIXES + 2)],
+    # The scan could not run.
+    None,
+])
+def test_evidence_block_names_prior_fixes_without_a_closing_keyword(
+        prior_fixes):
+    """#2069: `rewrites prior fix: #1964` reads to GitHub as `fix: #1964`,
+    which closes #1964 when the PR merges. PR #2059's block named five."""
+    block = implement.render_evidence_block(
+        sha="a" * 40, merged=None,
+        reproduction={"line": "reproduction: not run", "tests": []},
+        repo=PUBLIC_REPO, prior_fixes=prior_fixes,
+    )
+
+    assert CLOSING_KEYWORD_RE.search(block) is None, block
+    if prior_fixes:
+        # The reference survives: the review still reads which fix it was.
+        assert ("- rewrites #1964's prior fix "
+                "(engine/implement.py:finish_done)\n") in block
 
 
 def test_unavailable_prior_fix_scan_is_explicit_and_best_effort(

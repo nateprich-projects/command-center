@@ -876,9 +876,25 @@ def test_the_block_finish_writes_is_the_block_the_packet_reads():
         "- reproduction: passes-on-base\n"
         "- added tests: 0 red, 1 passes-on-base, 0 no signal\n"
         "- passes-on-base: tests/test_half.py::test_half_rounds_down\n"
-        "- rewrites prior fix: #42 (engine/implement.py:finish_done)")
+        "- rewrites #42's prior fix (engine/implement.py:finish_done)")
     assert "command-center-evidence" not in found["pr_body"]
     assert found["pr_body"].endswith("- `python3 -m pytest -q`")
+
+
+@pytest.mark.parametrize("line", [
+    "- rewrites #1964's prior fix (engine/implement.py:finish_done)",
+    # The form finish wrote before #2069, still in the body of any PR
+    # opened before it.
+    "- rewrites prior fix: #1964 (engine/implement.py:finish_done)",
+])
+def test_the_packet_carries_either_form_of_a_prior_fix_line(line):
+    """#2069: the review reads the new prior-fix line and the old one."""
+    found = evidence_packet(MODEL_TEXT + "\n" + evidence_block(
+        HEAD40, "reproduction: red", line, "- (+2 more prior fixes)"))
+
+    assert found["evidence"].endswith(
+        "- red: tests/test_half.py::test_half_rounds_down\n"
+        + line + "\n- (+2 more prior fixes)")
 
 
 @pytest.mark.parametrize("sha", [

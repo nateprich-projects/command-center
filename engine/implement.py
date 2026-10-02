@@ -1247,13 +1247,17 @@ def resolve_checkout_repo(root: pathlib.Path, explicit: Optional[str]) -> str:
 #:   - added tests: <n> red, <n> passes-on-base, <n> no signal
 #:   - <outcome>: <node id>    (command-center only, at most
 #:     MAX_EVIDENCE_TEST_IDS, then "- (+<n> more)")
-#:   - rewrites prior fix: #<ticket> (<path>:<function>)
+#:   - rewrites #<ticket>'s prior fix (<path>:<function>)
 #:     (at most MAX_EVIDENCE_PRIOR_FIXES, then "- (+<n> more prior fixes)")
 #:   - prior fix scan: not run    (only when its bounded scan was unavailable)
 #:   <!-- /command-center-evidence -->
 #:
 #: Every other repository's block carries the counts and no node id, as
-#: its notes do (#1796).
+#: its notes do (#1796). No line puts a GitHub closing keyword (close, fix,
+#: resolve and their -s/-d forms, with or without a colon) directly before
+#: a reference: GitHub closes what a merged PR body names that way, and the
+#: old "rewrites prior fix: #<ticket>" line did so to every fix it named
+#: (#2069). Readers still accept that old line from PRs opened before it.
 EVIDENCE_MARKER = "<!-- command-center-evidence -->"
 EVIDENCE_END_MARKER = "<!-- /command-center-evidence -->"
 
@@ -1332,7 +1336,8 @@ def render_evidence_block(*, sha: str, merged: Optional[dict],
                 _strip_evidence_markers(str(path)).split())[:200]
             safe_function = " ".join(
                 _strip_evidence_markers(str(function or "<unknown>")).split())[:120]
-            lines.append("- rewrites prior fix: #{} ({}:{})".format(
+            # The reference comes before "fix", never after it (#2069).
+            lines.append("- rewrites #{}'s prior fix ({}:{})".format(
                 ticket_number, safe_path, safe_function))
         if len(found) > MAX_EVIDENCE_PRIOR_FIXES:
             lines.append("- (+{} more prior fixes)".format(

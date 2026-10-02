@@ -2342,6 +2342,134 @@ def test_parse_created_number_reads_the_issue_url():
         implement.parse_created_number("nothing useful\n")
 
 
+def test_finish_blocked_on_human_pushes_tracked_wip_before_blocking(
+        tmp_path, monkeypatch):
+    remote, clone = make_clone(tmp_path)
+    _stub_claim_state(monkeypatch, "owned")
+    (clone / "README.md").write_text("tracked progress\n")
+    (clone / "generated.txt").write_text("untracked output\n")
+    run_git("add", "generated.txt", cwd=clone)
+    monkeypatch.setattr(
+        implement, "fetch_ticket", lambda repo, number: ticket(number))
+    effects = []
+
+    def remote_head():
+        result = subprocess.run(
+            ["git", "--git-dir", str(remote), "rev-parse", "--verify",
+             "refs/heads/ticket/42"],
+            check=False, capture_output=True, text=True,
+        )
+        assert result.returncode == 0, result.stderr
+        return result.stdout.strip()
+
+    def assert_pushed():
+        head = remote_head()
+        subject = run_git(
+            "--git-dir", str(remote), "log", "-1", "--format=%s", head,
+        ).stdout.strip()
+        assert subject.startswith("[human-step-wip]")
+        assert run_git(
+            "--git-dir", str(remote), "show", "{}:README.md".format(head),
+        ).stdout == "tracked progress\n"
+        return head
+
+    def create(repo, parent, title, body, **kwargs):
+        assert_pushed()
+        effects.append("create")
+        return {"number": 43, "ref": "{}#43".format(repo),
+                "url": "https://github.com/{}/issues/43".format(repo)}
+
+    def needs(url, ref):
+        assert_pushed()
+        effects.append("needs")
+
+    def block(repo, number, **kwargs):
+        assert_pushed()
+        effects.append("block")
+
+    def comment(repo, number, body, **kwargs):
+        head = assert_pushed()
+        assert "ticket/42" in body
+        assert head in body
+        assert "entering a credential" in body
+        effects.append("comment")
+
+    def release(ref):
+        assert_pushed()
+        effects.append("release")
+
+    def finish(*args):
+        assert_pushed()
+        effects.append("finish")
+
+    implement.finish_blocked_on_human(
+        blocked()["blocked_on_human"],
+        run="run-42",
+        repo=REPO,
+        cwd=clone,
+        release=release,
+        heartbeat_finish=finish,
+        create_effect=create,
+        needs_effect=needs,
+        block_effect=block,
+        comment_effect=comment,
+        sub_issues_effect=lambda *args: [],
+    )
+
+    assert effects == ["create", "needs", "block", "comment", "release",
+                       "finish"]
+    assert run_git(
+        "--git-dir", str(remote), "rev-list", "--count",
+        "refs/heads/main..refs/heads/ticket/42",
+    ).stdout.strip() == "1"
+    untracked = subprocess.run(
+        ["git", "--git-dir", str(remote), "cat-file", "-e",
+         "refs/heads/ticket/42:generated.txt"],
+        check=False, capture_output=True, text=True,
+    )
+    assert untracked.returncode != 0
+
+
+def test_finish_blocked_on_human_push_failure_keeps_run_unfinished(
+        tmp_path, monkeypatch):
+    remote, clone = make_codex_run_clone(tmp_path, monkeypatch)
+    _stub_claim_state(monkeypatch, "owned")
+    (clone / "README.md").write_text("tracked progress\n")
+    monkeypatch.setattr(
+        implement, "fetch_ticket", lambda repo, number: ticket(number))
+    effects = []
+
+    def fail_push(*args, **kwargs):
+        raise implement.ImplementError("git push failed: remote unavailable")
+
+    monkeypatch.setattr(implement, "_push_ticket_branch", fail_push)
+    with pytest.raises(implement.ImplementError, match="remote unavailable"):
+        implement.finish_blocked_on_human(
+            blocked()["blocked_on_human"],
+            run="run-42",
+            repo=REPO,
+            cwd=clone,
+            release=lambda ref: effects.append("release"),
+            heartbeat_finish=lambda *args: effects.append("finish"),
+            create_effect=lambda *args, **kwargs: effects.append("create"),
+            needs_effect=lambda *args: effects.append("needs"),
+            block_effect=lambda *args, **kwargs: effects.append("block"),
+            comment_effect=lambda *args, **kwargs: effects.append("comment"),
+            sub_issues_effect=lambda *args: [],
+        )
+
+    assert effects == []
+    assert clone.is_dir()
+    assert run_git("log", "-1", "--format=%s", cwd=clone).stdout.strip() == (
+        "[human-step-wip] WIP #42: preserve tracked work")
+    remote_branch = subprocess.run(
+        ["git", "--git-dir", str(remote), "show-ref", "--verify", "--quiet",
+         "refs/heads/ticket/42"],
+        check=False, capture_output=True, text=True,
+    )
+    assert remote_branch.returncode != 0
+
+
 def test_finish_blocked_on_human_files_blocks_comments_and_finishes(
         tmp_path, monkeypatch):
     remote, clone = make_clone(tmp_path)
@@ -2626,6 +2754,31 @@ def test_a_closed_not_planned_step_for_the_ticket_routes_without_filing(
          "review and shaping".format(REPO),
          REPO + "#42")
     ]
+
+
+def test_closed_step_route_comment_names_preserved_wip(
+        tmp_path, monkeypatch):
+    remote, clone = make_clone(tmp_path)
+    _stub_claim_state(monkeypatch, "owned")
+    (clone / "README.md").write_text("tracked progress\n")
+    monkeypatch.setattr(
+        implement, "fetch_ticket", lambda repo, number: ticket(number))
+    effects = closed_step_effects()
+
+    result = run_blocked_with_siblings(
+        clone, [human_step_row(57)], effects)
+
+    assert result["routed"] == "review"
+    head = run_git(
+        "--git-dir", str(remote), "rev-parse", "refs/heads/ticket/42",
+    ).stdout.strip()
+    (comment,) = effects["comments"]
+    assert "ticket/42" in comment
+    assert head in comment
+    assert "an account or billing setting" in comment
+    assert run_git(
+        "--git-dir", str(remote), "show", "{}:README.md".format(head),
+    ).stdout == "tracked progress\n"
 
 
 def test_a_second_run_at_an_unchanged_head_hands_the_ticket_to_nate(
@@ -4833,7 +4986,7 @@ def test_finish_git_invocation_sites_match_the_recorded_inventory():
 
     expected = Counter({
         ("rev-parse", "--show-toplevel"): 2,
-        ("rev-parse", "HEAD"): 1,
+        ("rev-parse", "HEAD"): 2,
         ("rev-parse", "--verify"): 2,
         ("branch", "--show-current"): 2,
         ("status", "--porcelain"): 1,
@@ -4842,6 +4995,8 @@ def test_finish_git_invocation_sites_match_the_recorded_inventory():
         ("<path-command>", ""): 1,
         ("add", "--"): 1,
         ("commit", "-m"): 3,
+        ("commit", "--only"): 1,
+        ("diff", "--name-status"): 1,
         ("rev-list", "--count"): 2,
         ("fetch", "origin"): 2,
         ("merge-base", "--is-ancestor"): 1,
@@ -4851,13 +5006,15 @@ def test_finish_git_invocation_sites_match_the_recorded_inventory():
     assert actual == expected
 
     inventory = (ROOT / "docs" / "finish-subprocess-bounds.md").read_text()
-    assert "24 bounded Git callsites" in inventory
-    assert "23 static callsites" in inventory
+    assert "27 bounded Git callsites" in inventory
+    assert "26 static callsites" in inventory
     for command in (
         "git diff --name-only -z",
         "git diff --cached --name-only -z",
         "git ls-files --others --exclude-standard -z",
         "git diff --name-only -z origin/main...HEAD",
+        "git diff --name-status -z HEAD",
+        "git ls-tree -r --name-only -z HEAD",
         "git ls-files -z -- <selected paths>",
         "git status --porcelain --untracked-files=all",
         "git fetch origin",
@@ -4865,6 +5022,7 @@ def test_finish_git_invocation_sites_match_the_recorded_inventory():
         "git merge -s ours",
         "git push --set-upstream origin",
         "git rev-parse HEAD",
+        "git commit --only -m [human-step-wip] -- <tracked paths>",
         "make",
         "python3 -m pytest",
     ):

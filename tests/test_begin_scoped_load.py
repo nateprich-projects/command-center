@@ -189,14 +189,15 @@ def test_startable_scan_projects_only_shared_listing_fields():
         'claim: fieldValueByName(name: "In motion since")',
         'status: fieldValueByName(name: "Status")',
         'class: fieldValueByName(name: "Class")',
+        # A finished project's close reads Origin from this view (#2147).
+        'origin: fieldValueByName(name: "Origin")',
         'gate: fieldValueByName(name: "Needs")',
         'risk: fieldValueByName(name: "Risk")',
         'pinned: fieldValueByName(name: "Pinned")',
         "startable: content",
     ):
         assert field in query
-    for detail in ('fieldValueByName(name: "Origin")', "assignees"):
-        assert detail not in query
+    assert "assignees" not in query
     assert " body" not in query
     assert "timelineItems" not in query
     assert "name updatedAt" in query

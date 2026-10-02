@@ -6283,6 +6283,10 @@ def command_center_ticket_pr_share(
     cutoff = now - MAINTENANCE_WINDOW
     try:
         rows = _recent_merged_pr_rows(REPO, cutoff)
+    except BriefSectionTimeout:
+        # A brief section's timeout belongs to its runner, which publishes
+        # null and names the section in `missing` (#2131).
+        raise
     except Exception as exc:
         return {
             "window_days": MAINTENANCE_WINDOW.days,
@@ -15510,6 +15514,10 @@ def _read_outcome_signals(now: datetime) -> Dict[str, object]:
         import outcomes
 
         return outcomes.signal_summary(outcomes.read_records(), now=now)
+    except BriefSectionTimeout:
+        # The section runner owns a timeout: it publishes null and names the
+        # section in `missing`, which this fallback would hide (#2131).
+        raise
     except Exception as exc:
         # Outcome history is diagnostic input. Keep the brief usable when its
         # separate heartbeat-branch read is unavailable, while making the
@@ -15599,6 +15607,46 @@ def _brief_timed(
     return value
 
 
+def _brief_section(
+    name: str,
+    reader: Callable[[], object],
+    missing: List[Dict[str, str]],
+    timings: Dict[str, object],
+    degraded: List[Dict[str, object]],
+    *,
+    deadline: Optional[float] = None,
+    unread_error: Optional[str] = None,
+) -> object:
+    """Run one brief section to its published value; ``None`` means unread.
+
+    The one section runner (#2131): ``cmd_brief`` runs its sections through
+    it, and ``main`` runs the reads it makes before ``cmd_brief`` through it
+    too, so every section keeps #1595's contract. A section skipped by its
+    budget or the shared deadline, timed out, or whose reader raises publishes
+    ``None`` with exactly one ``missing`` entry; a skip or timeout also keeps
+    ``_brief_timed``'s ``degraded`` record. ``unread_error`` words that entry
+    for a skip or timeout where the caller already has its own wording.
+    """
+    value = _brief_timed(
+        name,
+        lambda: _brief_read(name, reader, missing),
+        timings,
+        degraded,
+        deadline=None if name in BRIEF_PURE_SECTIONS else deadline,
+    )
+    if value is _BRIEF_UNAVAILABLE:
+        if not any(entry.get("section") == name for entry in missing):
+            missing.append({
+                "section": name,
+                "error": unread_error or (
+                    "could not read {} within its budget; this is "
+                    "an unread section, not an empty one".format(name)
+                ),
+            })
+        return None
+    return value
+
+
 def cmd_brief(
     items: List[Item],
     now: datetime,
@@ -15625,22 +15673,9 @@ def cmd_brief(
     deferred_section = object()
 
     def run_section(name: str, reader: Callable[[], object]):
-        value = _brief_timed(
-            name,
-            lambda: _brief_read(name, reader, missing),
-            timings,
-            degraded,
-            deadline=None if name in BRIEF_PURE_SECTIONS else deadline,
+        return _brief_section(
+            name, reader, missing, timings, degraded, deadline=deadline
         )
-        if value is _BRIEF_UNAVAILABLE:
-            if not any(entry.get("section") == name for entry in missing):
-                missing.append({
-                    "section": name,
-                    "error": "could not read {} within its budget; this is "
-                             "an unread section, not an empty one".format(name),
-                })
-            return None
-        return value
 
     def section(name: str, reader: Callable[[], object]):
         if name in BRIEF_PURE_SECTIONS:
@@ -22666,107 +22701,84 @@ def main(argv: Optional[Sequence[str]] = None, *,
             brief_timing_token = _ACTIVE_BRIEF_TIMINGS.set(timings)
 
             try:
-                pr_facts_error: List[str] = []
-
-                def read_pr_facts():
-                    try:
-                        return cache.get_pr_facts(items)
-                    except BriefSectionTimeout:
-                        # A failed PR read makes these pips unknown. Do not
-                        # wait or retry before the current brief is published.
-                        raise
-                    except Exception as exc:
-                        pr_facts_error.append(
-                            "could not read ticket branch facts: {}".format(
-                                _brief_error(exc)
-                            )
-                        )
-                        for section in BRIEF_PR_FACT_SECTIONS:
-                            missing.append({
-                                "section": section,
-                                "error": pr_facts_error[-1],
-                            })
-                        return {}
-
-                pr_facts = _brief_timed(
+                # All six reads made here go through the runner cmd_brief's
+                # sections use, so a skipped, timed-out or raising read is
+                # null with exactly one `missing` entry and never fails the
+                # brief (#2131).
+                #
+                # ticket_pr_facts is not a published section: unread, it
+                # names each section built on it instead of itself (#1168).
+                # A timed-out read is not waited on or retried before the
+                # current brief is published.
+                pr_facts_unread: List[Dict[str, str]] = []
+                pr_facts = _brief_section(
                     "ticket_pr_facts",
-                    read_pr_facts,
+                    lambda: cache.get_pr_facts(items),
+                    pr_facts_unread,
                     timings,
                     degraded,
                     deadline=deadline,
+                    unread_error="brief section read timed out",
                 )
-                pr_facts_missing = bool(pr_facts_error)
-                if pr_facts is _BRIEF_UNAVAILABLE:
-                    pr_facts_missing = True
+                pr_facts_missing = bool(pr_facts_unread)
+                if pr_facts_missing:
                     # A missing PR/branch scan must not turn a stale claim into a
                     # false diagnostic. An empty mapping says those facts are
                     # unavailable, so the pure consumers preserve the safe side.
                     pr_facts = {}
-                    if not pr_facts_error:
-                        error = "could not read ticket branch facts: brief section read timed out"
-                        for section in BRIEF_PR_FACT_SECTIONS:
-                            missing.append({"section": section, "error": error})
-                outcome_signals = _brief_timed(
+                    error = "could not read ticket branch facts: {}".format(
+                        pr_facts_unread[0]["error"]
+                    )
+                    for section in BRIEF_PR_FACT_SECTIONS:
+                        missing.append({"section": section, "error": error})
+                outcome_signals = _brief_section(
                     "outcome_signals",
                     lambda: _read_outcome_signals(now),
+                    missing,
                     timings,
                     degraded,
                     deadline=deadline,
                 )
-                if outcome_signals is _BRIEF_UNAVAILABLE:
-                    outcome_signals = None
-                portfolio_metrics = _brief_timed(
+                portfolio_metrics = _brief_section(
                     "portfolio_metrics",
                     lambda: _read_portfolio_metrics(items, now),
+                    missing,
                     timings,
                     degraded,
                     deadline=deadline,
                 )
-                if portfolio_metrics is _BRIEF_UNAVAILABLE:
-                    portfolio_metrics = None
-                decline_routing = _brief_timed(
+                decline_routing = _brief_section(
                     "decline_routing",
-                    lambda: _brief_read(
-                        "decline_routing",
-                        lambda: decline_routing_metric(items, now),
-                        missing,
-                    ),
+                    lambda: decline_routing_metric(items, now),
+                    missing,
                     timings,
                     degraded,
                     deadline=deadline,
                 )
-                if decline_routing is _BRIEF_UNAVAILABLE:
-                    decline_routing = None
                 # Live read, computed here rather than inside cmd_brief for the
                 # same reason as the two above: the renderer stays pure over its
                 # arguments, so a fixture brief needs no network and reports
                 # `main_ci` as null — unknown — instead of an empty list.
-                main_ci = _brief_timed(
+                main_ci = _brief_section(
                     "main_ci",
-                    lambda: _brief_read("main_ci", main_ci_json, missing),
+                    main_ci_json,
+                    missing,
                     timings,
                     degraded,
                     deadline=deadline,
                 )
-                if main_ci is _BRIEF_UNAVAILABLE:
-                    main_ci = None
                 # Live per-repo read, computed here for the same reason as the
                 # three above: cmd_brief stays pure over its arguments and a
                 # fixture brief reports null — unknown — rather than an empty
                 # list that would read as "nothing outside the Project".
-                orphans = _brief_timed(
+                orphans = _brief_section(
                     "member_issues_without_project_items",
-                    lambda: _brief_read(
-                        "member_issues_without_project_items",
-                        lambda: member_issues_without_project_items(items),
-                        missing,
-                    ),
+                    lambda: member_issues_without_project_items(items),
+                    missing,
                     timings,
                     degraded,
                     deadline=deadline,
                 )
-                if orphans is _BRIEF_UNAVAILABLE:
-                    orphans = None
                 # Keep the existing brief JSON as the command's stdout. The
                 # display snapshot is a separate, best-effort side effect and
                 # must not change what callers parse or whether the command

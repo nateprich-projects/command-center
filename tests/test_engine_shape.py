@@ -1863,6 +1863,84 @@ def test_shape_picker_does_not_reoffer_with_children_idea_on_consecutive_fires(
     assert capsys.readouterr().out == ""
 
 
+#: apply_shape's own fresh re-read, kept here because ``stub_gh`` replaces it.
+READ_FRESH_SHAPE_FACTS = shape._read_fresh_shape_facts
+
+
+def stub_fresh_project_row(monkeypatch, fresh):
+    """Let apply_shape's real fresh re-read see ``fresh`` as the Project row."""
+    monkeypatch.setattr(
+        shape, "_read_fresh_shape_facts", READ_FRESH_SHAPE_FACTS)
+    stub_project_ref_load(monkeypatch, fresh)
+
+
+def test_apply_refuses_an_idea_the_fresh_read_shows_closed(
+        monkeypatch, capsys):
+    """Reproduction (#2139): a closed idea still at Ideas was rewritten and
+    written Ready, because the fresh read never looked at the issue state."""
+    item = idea(42)
+    fresh = idea(42, state="CLOSED")
+    calls = stub_gh(monkeypatch, item)
+    stub_fresh_project_row(monkeypatch, fresh)
+    project_writes = []
+    status_writes = []
+    monkeypatch.setattr(
+        funnel, "write_project_select",
+        lambda item_id, field, value, ref:
+            project_writes.append((item_id, field, value, ref)),
+    )
+    monkeypatch.setattr(
+        funnel, "_write_status",
+        lambda target, status, now: status_writes.append((target.ref, status)),
+    )
+
+    assert shape.apply_shape(
+        [item], NOW, item.ref, answer(),
+        run="shape-run", agent="muse") == 0
+
+    assert gh_calls(calls, "gh", "issue", "edit") == []
+    assert gh_calls(calls, "gh", "issue", "comment") == []
+    assert not [call for call in calls
+                if call[0] == "graphql" and call[1] == funnel.SET_FIELD]
+    assert project_writes == []
+    assert status_writes == []
+    assert (item.status, item.labels) == ("Ideas", ["needs-shaping"])
+    output = capsys.readouterr().out
+    assert ("run outcome: skipped-stale-shape ref=owner/repo#42 "
+            "reason=not-open") in output
+    assert "state=CLOSED" in output
+
+
+#: The rows #2139 names, as the Project would return them: closed at Ideas,
+#: moved to Shaped, with a child (#2092), and clean.
+SHAPEABLE_NOW_ROWS = {
+    "closed": {"state": "CLOSED"},
+    "shaped": {"status": "Shaped"},
+    "with-children": {"children_total": 1},
+    "clean": {},
+}
+
+
+@pytest.mark.parametrize("row", sorted(SHAPEABLE_NOW_ROWS))
+def test_shape_picker_offers_exactly_the_rows_fresh_apply_proceeds_on(
+        monkeypatch, capsys, row):
+    """#2139: the picker and the stale-apply refusal share one predicate."""
+    fresh = idea(42, **SHAPEABLE_NOW_ROWS[row])
+    monkeypatch.setattr(usage, "shaping_allowed", lambda reading: True)
+    offered = funnel.shapeable_idea([fresh], None, {}) is fresh
+
+    snapshot = idea(42)
+    calls = stub_gh(monkeypatch, snapshot)
+    stub_fresh_project_row(monkeypatch, fresh)
+    assert shape.apply_shape(
+        [snapshot], NOW, snapshot.ref, answer(),
+        run="shape-run", agent="muse") == 0
+    proceeded = bool(gh_calls(calls, "gh", "issue", "edit"))
+
+    assert offered == proceeded
+    assert offered is (row == "clean")
+
+
 def test_fresh_shape_facts_read_the_exact_project_item(monkeypatch):
     item = idea(42)
     calls = []

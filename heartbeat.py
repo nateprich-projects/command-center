@@ -37,7 +37,7 @@ import subprocess
 import sys
 import time
 import uuid
-from typing import Dict, List, Optional
+from typing import Dict, Iterable, List, Optional
 
 try:
     import fcntl
@@ -373,12 +373,51 @@ def _spool(agent: str, record: Dict) -> None:
         fh.write(json.dumps(record, sort_keys=True) + "\n")
 
 
-def _spooled(agent: str) -> List[Dict]:
+class Records(list):
+    """Heartbeat records read from JSONL, with a count of the lines left out.
+
+    A plain list to every existing caller. `unreadable` counts the non-blank
+    lines that were not JSON or not a JSON object (#2173): each is left out on
+    its own, rather than hiding every record around it, and counted, rather
+    than read as no record at all.
+    """
+
+    def __init__(self, records: Iterable[Dict] = (), unreadable: int = 0):
+        super().__init__(records)
+        self.unreadable = unreadable
+
+
+def parse_records(content: Optional[str]) -> Records:
+    """The one tolerant parser for heartbeat JSONL: the spool, the durable
+    file and the watchdog all read lines through it (#2173).
+
+    `_parse_records_strict` stays separate: its readers must refuse a file
+    with any bad line rather than read around it.
+    """
+    records = Records()
+    for line in (content or "").splitlines():
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except ValueError:
+            records.unreadable += 1
+            continue
+        if not isinstance(record, dict):
+            records.unreadable += 1
+            continue
+        records.append(record)
+    return records
+
+
+def _spooled(agent: str) -> Records:
+    # Decoded with replacement, as `_fetch` decodes the durable file: a write
+    # killed mid-character must spoil only its own line, never the whole read.
     try:
-        with open(_spool_path(agent)) as fh:
-            return [json.loads(ln) for ln in fh if ln.strip()]
-    except (OSError, ValueError):
-        return []
+        with open(_spool_path(agent), encoding="utf-8", errors="replace") as fh:
+            return parse_records(fh.read())
+    except OSError:
+        return Records()
 
 
 @contextlib.contextmanager
@@ -494,11 +533,23 @@ def _push_drain(agent: str, extra: Optional[List[Dict]] = None) -> None:
             # the unwritable-spool case that `extra` exists for. Rewriting the file
             # there raises, and a push that already succeeded would be reported as
             # a lost record.
+            #
+            # The rewrite keeps readable records only, so an unreadable line
+            # is dropped here rather than left to sit in the spool for good;
+            # say so, since nothing else will (#2173).
             if from_spool:
-                remaining = _spooled(agent)[len(from_spool):]
+                now_spooled = _spooled(agent)
+                remaining = now_spooled[len(from_spool):]
                 with open(_spool_path(agent), "w") as fh:
                     for r in remaining:
                         fh.write(json.dumps(r, sort_keys=True) + "\n")
+                if now_spooled.unreadable:
+                    print(
+                        "heartbeat: dropped {} unreadable line(s) from the {} "
+                        "spool while draining it.".format(
+                            now_spooled.unreadable, agent),
+                        file=sys.stderr,
+                    )
             return
         except HeartbeatError:
             if attempt >= len(BACKOFF):
@@ -1854,14 +1905,8 @@ def record_muse_quota_hit(run: Optional[str], reset_stamp: Optional[str],
     return kept
 
 
-def _parse_records(content: Optional[str]) -> List[Dict]:
-    records = []
-    for line in (content or "").splitlines():
-        try:
-            records.append(json.loads(line))
-        except ValueError:
-            continue
-    return records
+def _parse_records(content: Optional[str]) -> Records:
+    return parse_records(content)
 
 
 def _parse_records_strict(content: str) -> List[Dict]:
@@ -1880,7 +1925,7 @@ def _parse_records_strict(content: str) -> List[Dict]:
     return records
 
 
-def read_github(agent: str, timeout: Optional[float] = None) -> List[Dict]:
+def read_github(agent: str, timeout: Optional[float] = None) -> Records:
     """Read only the durable records on GitHub, excluding the local spool."""
     if timeout is None:
         content, _ = _fetch(agent)
@@ -1985,9 +2030,19 @@ def muse_auth_outage_open(records: List[Dict]) -> bool:
     return open_outage
 
 
-def read(agent: str, timeout: Optional[float] = None) -> List[Dict]:
-    """Every record this machine knows about — pushed and still spooled."""
-    return read_github(agent, timeout=timeout) + _spooled(agent)
+def read(agent: str, timeout: Optional[float] = None) -> Records:
+    """Every record this machine knows about — pushed and still spooled.
+
+    Still the list every caller reads; its `unreadable` counts the lines on
+    either side that `parse_records` left out (#2173).
+    """
+    durable = read_github(agent, timeout=timeout)
+    spooled = _spooled(agent)
+    return Records(
+        list(durable) + list(spooled),
+        unreadable=(getattr(durable, "unreadable", 0)
+                    + getattr(spooled, "unreadable", 0)),
+    )
 
 
 def open_starts(records: List[Dict]) -> List[Dict]:

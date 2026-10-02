@@ -1078,3 +1078,130 @@ def test_an_unreadable_heartbeat_is_a_problem_the_issue_names(monkeypatch):
     assert bodies, posted
     assert "`muse`: heartbeat unreadable (HTTP 502 from the contents API)." \
         in bodies[0]
+
+
+# --- one line parser for heartbeat JSONL (#2173) -----------------------------
+#
+# The spool, the durable file and the watchdog each parsed lines their own
+# way: one torn spool line hid every spooled record (and `append` then said
+# `pushed` while nothing reached GitHub), and a line that parsed to something
+# other than an object reached `assess`, which raised on it. One parser now
+# keeps the object records and counts every other non-blank line.
+
+
+def _torn_spool(agent):
+    """Two records with a torn line between them, as a killed write leaves."""
+    first = {"run": "a", "phase": "start", "ts": 1, "agent": agent}
+    last = {"run": "a", "phase": "finish", "ts": 2, "agent": agent,
+            "outcome": "done"}
+    path = pathlib.Path(heartbeat._spool_path(agent))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(first, sort_keys=True) + "\n"
+        + '{"agent": "' + agent + '", "phase": "sta\n'
+        + json.dumps(last, sort_keys=True) + "\n"
+    )
+    return first, last
+
+
+def _contents_answer(body):
+    import base64 as b64
+
+    return json.dumps({
+        "encoding": "base64", "size": len(body),
+        "content": b64.b64encode(body.encode()).decode()})
+
+
+def test_parse_records_keeps_objects_and_counts_every_other_line():
+    parsed = heartbeat.parse_records(
+        '{"run": "a"}\n'
+        "\n"
+        "   \n"
+        '{"run": "b", "pha\n'
+        "[1, 2]\n"
+        '"text"\n'
+        "42\n"
+        '{"run": "c"}\n'
+    )
+
+    assert parsed == [{"run": "a"}, {"run": "c"}]
+    assert parsed.unreadable == 4
+
+
+def test_a_torn_spool_line_hides_neither_neighbour(tmp_path, monkeypatch):
+    _isolate_spool(tmp_path, monkeypatch)
+    first, last = _torn_spool("codex")
+
+    spooled = heartbeat._spooled("codex")
+
+    assert spooled == [first, last]
+    assert spooled.unreadable == 1
+
+
+def test_append_pushes_the_records_either_side_of_a_torn_spool_line(
+        tmp_path, monkeypatch, capsys):
+    """Main read the torn spool as empty, sent no PUT and said `pushed`."""
+    _isolate_spool(tmp_path, monkeypatch)
+    store = _store(monkeypatch)
+    first, last = _torn_spool("codex")
+    new = {"run": "b", "phase": "start", "ts": 3, "agent": "codex"}
+
+    assert heartbeat.append("codex", new) == "pushed"
+
+    assert store["puts"] == 1
+    assert store["text"].splitlines() == [
+        json.dumps(record, sort_keys=True) for record in (first, last, new)
+    ]
+    # Drained: the readable records went to GitHub and the torn line is
+    # dropped with a word on stderr, never kept to hide the next drain.
+    assert pathlib.Path(heartbeat._spool_path("codex")).read_text() == ""
+    assert "dropped 1 unreadable line" in capsys.readouterr().err
+
+
+def test_read_leaves_out_and_counts_a_non_object_line(tmp_path, monkeypatch):
+    _isolate_spool(tmp_path, monkeypatch)
+    durable = {"run": "a", "phase": "start", "ts": 1, "agent": "codex"}
+    spooled = {"run": "a", "phase": "finish", "ts": 2, "agent": "codex",
+               "outcome": "done"}
+    monkeypatch.setattr(
+        heartbeat, "_fetch",
+        lambda agent, timeout=None: (
+            _lines(durable, ["not", "an", "object"]), "s0"),
+    )
+    heartbeat._spool("codex", spooled)
+
+    rows = heartbeat.read("codex")
+
+    assert rows == [durable, spooled]
+    assert rows.unreadable == 1
+
+
+def test_watchdog_records_leave_out_a_non_object_line_and_assess_reads_on(
+        monkeypatch):
+    readable = [start("a", 1), finish("a", 0.5)]
+    body = _lines(readable[0], ["not", "an", "object"], readable[1])
+    monkeypatch.setattr(watchdog, "gh", _gh_answering([
+        (lambda a: True, _contents_answer(body)),
+    ], []))
+
+    rows = watchdog.records("codex")
+
+    assert rows == readable
+    assert rows.unreadable == 1
+    assert watchdog.assess("codex", rows, NOW) == watchdog.assess(
+        "codex", readable, NOW)
+    assert "1 unreadable heartbeat line" in watchdog.note("codex", rows, NOW)
+
+
+def test_the_watchdog_note_does_not_call_an_unreadable_file_never_run(
+        monkeypatch):
+    monkeypatch.setattr(watchdog, "gh", _gh_answering([
+        (lambda a: True, _contents_answer('{"run": "a", "pha\n')),
+    ], []))
+
+    rows = watchdog.records("codex")
+    message = watchdog.note("codex", rows, NOW)
+
+    assert rows == []
+    assert "never recorded a run" not in message
+    assert "1 unreadable heartbeat line" in message

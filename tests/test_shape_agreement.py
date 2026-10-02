@@ -315,6 +315,8 @@ def test_apply_writes_the_class_the_reader_adopts(case, monkeypatch, capsys):
         and call[2].get("field") == funnel.CLASS_FIELD_ID
     ]
     body_written = bool(gh_calls(calls, "gh", "issue", "edit"))
+    # A CLOSED idea may be refused before any write (#2139); it then gets
+    # no Class write either.
     if case.state == "OPEN":
         assert body_written
     if body_written and inputs.class_adopted:

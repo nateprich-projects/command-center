@@ -123,8 +123,7 @@ BODY_READERS: Dict[str, str] = {
     "funnel.py:_decline_route_withholds_startability": _PLAN_BODY,
     "funnel.py:recorded_cause_regressions": _PLAN_BODY,
     "metrics.py:_project_has_prior_cause": _PLAN_BODY,
-    "engine/shape.py:collect": _PLAN_BODY,
-    "engine/shape.py:preview_decision": _PLAN_BODY,
+    "engine/shape.py:shape_inputs": _PLAN_BODY,
     "engine/shape.py:apply_shape": _PLAN_BODY,
     "engine/breakdown.py:apply": _PLAN_BODY,
     "engine/review.py:pr_body_section":
@@ -352,7 +351,8 @@ def test_override_adjacent_marker_readers_stay_classified_and_filtered():
     assert required_comment_readers <= set(COMMENT_READERS)
     assert required_comment_text_readers <= COMMENT_TEXT_READERS
     assert required_text_parsers <= TEXT_PARSERS
-    assert BODY_READERS["engine/shape.py:preview_decision"] == _PLAN_BODY
+    # collect, preview and apply read the override through it (#2136).
+    assert BODY_READERS["engine/shape.py:shape_inputs"] == _PLAN_BODY
 
     units = _units(_trees())
     for reader in required_comment_readers:

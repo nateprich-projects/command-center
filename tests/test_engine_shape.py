@@ -1648,6 +1648,7 @@ def packet(**kw):
         "idea": idea_dict(),
         "origin_voice": "agent",
         "override_target": None,
+        "output_review": False,
         "plan_md": "# design record",
         "plan_md_missing": False,
         "agents_md": "# rule book",
@@ -1677,9 +1678,25 @@ def test_packet_carries_every_field():
     json.dumps(found)  # the packet is JSON by contract
 
 
+def collected_packet(monkeypatch, item):
+    """The packet ``collect`` builds for one idea, offline."""
+    monkeypatch.setattr(
+        shape, "fetch_repo_text",
+        lambda repo, path: ("{} text".format(path), False))
+    return shape.collect(item.repo, item.number,
+                         items_loader=lambda: [item], now=NOW)
+
+
+def test_packet_carries_the_review_policy_exactly_when_flagged():
+    assert packet(output_review=True)["output_review"] == \
+        shape.AGENT_SELF_APPROVABLE_OUTPUT_REVIEW
+    assert "output_review" not in packet(output_review=False)
+
+
 @pytest.mark.parametrize("klass", sorted(funnel.SELF_APPROVABLE_CLASSES))
-def test_agent_self_approvable_packet_carries_its_output_review(klass):
-    found = packet(idea=idea_dict(klass=klass))
+def test_agent_self_approvable_packet_carries_its_output_review(
+        klass, monkeypatch):
+    found = collected_packet(monkeypatch, idea(42, klass=klass))
     assert found["output_review"] == \
         shape.AGENT_SELF_APPROVABLE_OUTPUT_REVIEW
     assert "concrete unresolved stakeholder tradeoff" \
@@ -1690,13 +1707,16 @@ def test_agent_self_approvable_packet_carries_its_output_review(klass):
         in found["output_review"]["escalated_risk"]
 
 
-def test_other_origins_and_classes_do_not_get_agent_broken_review():
-    assert "output_review" not in packet()
-    assert "output_review" not in packet(
-        idea=idea_dict(klass="Broken"), origin_voice="nate-relayed")
+def test_other_origins_and_classes_do_not_get_agent_broken_review(
+        monkeypatch):
+    # An agent-origin idea with no Class does get it since #2136: the
+    # review judges it by the Class its answer proposes
+    # (tests/test_shape_agreement.py).
+    assert "output_review" not in collected_packet(
+        monkeypatch, idea(42, klass="Broken", origin="Nate"))
     for klass in ("New", "Replace"):
-        assert "output_review" not in packet(
-            idea=idea_dict(klass=klass))
+        assert "output_review" not in collected_packet(
+            monkeypatch, idea(42, klass=klass))
 
 
 def test_packet_marks_missing_instruction_files():

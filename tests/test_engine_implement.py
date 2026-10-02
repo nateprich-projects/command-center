@@ -6422,3 +6422,23 @@ def test_a_refused_heartbeat_finish_keeps_the_cli_exit_and_output(
         "finish-ticket: heartbeat finish refused run run-42; already done: "
         "PR #91 is open, claim released\n")
     assert released == [REPO + "#42"]
+
+
+def test_a_timeout_still_releases_before_its_visibility_read(monkeypatch):
+    # The note reads the repository's visibility over gh, unbounded; the
+    # release came first before #2167 so a slow read cannot hold the claim.
+    events = []
+
+    def read_visibility(endpoint):
+        events.append("visibility")
+        return {"visibility": "private"}
+
+    monkeypatch.setattr(funnel, "_gh_api_json", read_visibility)
+    implement._record_command_timeout(
+        implement.CommandTimeoutError(["make", "suite"], 7),
+        run="run-42", agent="codex", ref=REPO + "#42",
+        release=lambda ref: events.append("release"),
+        heartbeat_finish=lambda *args: events.append("finish"),
+    )
+
+    assert events == ["release", "visibility", "finish"]

@@ -2997,10 +2997,34 @@ def _changed_test_functions(changed: Sequence[str], context: Sequence[str],
     return changes
 
 
+_CLOSING_REFERENCE_RE = re.compile(
+    r"(?<![A-Za-z0-9_])"
+    r"(?:fix|fixes|fixed|close|closes|closed|resolve|resolves|resolved)"
+    r"\b\s*:?\s+"
+    r"(?P<reference>"
+    r"https?://(?:www\.)?github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/"
+    r"(?:issues|pull)/[0-9]+"
+    r"|[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#[0-9]+"
+    r"|#?[0-9]+"
+    r")"
+    r"(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+
+
+def neutralize_closing_reference_line(line: str) -> str:
+    """Keep issue identity while removing closing-keyword citation shapes."""
+    return _CLOSING_REFERENCE_RE.sub(
+        lambda match: "Prior ticket: {}".format(match.group("reference")),
+        line,
+    )
+
+
 def _test_weakening_report(items: Sequence[str]) -> Dict[str, Any]:
     count = len(items)
     return {"count": count,
-            "items": list(items[:TEST_WEAKENING_ITEM_LIMIT]),
+            "items": [neutralize_closing_reference_line(item)
+                      for item in items[:TEST_WEAKENING_ITEM_LIMIT]],
             "truncated": count > TEST_WEAKENING_ITEM_LIMIT}
 
 

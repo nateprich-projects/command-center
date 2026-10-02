@@ -432,3 +432,31 @@ def test_a_timed_out_batch_publishes_both_sections_null_and_degraded(
     # Both budgets are unchanged by the read path (#1211).
     assert degraded["parked"]["budget_seconds"] == 30.0
     assert degraded["cleared_blocks"]["budget_seconds"] == 30.0
+
+
+@pytest.mark.parametrize("section", ["parked", "cleared_blocks"])
+def test_a_tail_missing_from_the_batch_is_unreadable_not_empty(
+        monkeypatch, section):
+    """A candidate the batch did not answer for is not read as no record."""
+    parked = _parked(261, 1)
+    cleared = _cleared(361, 1)
+    full_reads = []
+    monkeypatch.setattr(
+        funnel, "_issue_comments", lambda item: full_reads.append(item.ref)
+    )
+
+    class PartialCache:
+        def comment_tails(self, candidates):
+            return {}
+
+    with pytest.raises(funnel.GitHubError) as raised:
+        if section == "parked":
+            funnel.parked_json([parked], brief_cache=PartialCache())
+        else:
+            funnel.cleared_blocks_json(
+                [cleared], NOW, brief_cache=PartialCache()
+            )
+
+    ref = parked.ref if section == "parked" else cleared.ref
+    assert str(raised.value) == "could not read comments for {}".format(ref)
+    assert full_reads == []

@@ -13659,14 +13659,18 @@ def parse_park_comment(body: str) -> Optional[Dict[str, object]]:
     }
 
 
-def _parked_item_json(item: Item) -> Dict[str, object]:
-    """Render one parked item and read its durable reason comment.
+def _parked_item_json(
+    item: Item, comments: Optional[Sequence[dict]] = None
+) -> Dict[str, object]:
+    """Render one parked item from its durable reason comment.
 
-    Comments are deliberately fetched here, rather than in ``ITEM_QUERY``:
-    parked items are uncommon and the normal Project load must not pay for a
-    comment request for every issue.
+    Comments are deliberately not part of ``ITEM_QUERY``: the normal Project
+    load must not pay for a comment request for every issue. ``comments`` is
+    the item's bounded tail from the brief's shared batched read (#2133);
+    without it, the whole thread is read here.
     """
-    comments = _issue_comments(item)
+    if comments is None:
+        comments = _issue_comments(item)
     parsed = None
     # Only the owner's park header is the reason and wake date (#1788).
     for comment in reversed(trusted_comments(comments)):
@@ -13688,9 +13692,35 @@ def _parked_item_json(item: Item) -> Dict[str, object]:
     return rendered
 
 
-def parked_json(items: Iterable[Item]) -> List[Dict[str, object]]:
-    """The brief's parked section, with one comment lookup per parked item."""
-    return [_parked_item_json(item) for item in parked_items(items)]
+def parked_json(
+    items: Iterable[Item], brief_cache=None
+) -> List[Dict[str, object]]:
+    """The brief's parked section, read through the shared comment tails.
+
+    One batched read covers every parked item (#2133); with a comment read
+    per item the section took 9.4-15.2 s. A full tail with no park header may
+    have cut the header off, so only then is that item's whole thread read.
+    An unreadable batch raises: the section is unknown, never a list of
+    reasonless parks.
+    """
+    candidates = parked_items(items)
+    if not candidates:
+        return []
+    cache = brief_cache or _ACTIVE_BRIEF_CACHE.get() or BriefCache()
+    tails = cache.comment_tails(candidates)
+    rows = []
+    for item in candidates:
+        tail = tails.get(item.ref)
+        if tail is None:
+            raise GitHubError(
+                "could not read comments for {}".format(item.ref)
+            )
+        row = _parked_item_json(item, tail)
+        if (row["reason"] is None
+                and len(tail) >= CLOSED_ITSELF_COMMENT_PAGE_SIZE):
+            row = _parked_item_json(item)
+        rows.append(row)
+    return rows
 
 
 def pending_wakes_json(
@@ -13855,9 +13885,16 @@ def cleared_block_items(items: Iterable[Item], now: datetime) -> List[Item]:
     )
 
 
-def _cleared_block_item_json(item: Item) -> Optional[Dict[str, object]]:
-    """Render the newest valid satisfied-block record on one unblocked item."""
-    comments = _issue_comments(item)
+def _cleared_block_item_json(
+    item: Item, comments: Optional[Sequence[dict]] = None
+) -> Optional[Dict[str, object]]:
+    """Render the newest valid satisfied-block record on one unblocked item.
+
+    ``comments`` is the item's bounded tail from the brief's shared batched
+    read (#2133); without it, the whole thread is read here.
+    """
+    if comments is None:
+        comments = _issue_comments(item)
     for comment in reversed(comments):
         # The record's agent voice is only an agent's when the owner account
         # posted it (#1788).
@@ -13880,12 +13917,31 @@ def _cleared_block_item_json(item: Item) -> Optional[Dict[str, object]]:
 
 
 def cleared_blocks_json(
-    items: Iterable[Item], now: datetime
+    items: Iterable[Item], now: datetime, brief_cache=None
 ) -> List[Dict[str, object]]:
-    """The brief's recent provenance-backed mechanical block clears."""
+    """The brief's recent provenance-backed mechanical block clears.
+
+    One batched read covers every candidate (#2133): a comment read per item
+    hit the section's 30 s budget in every brief from 2026-10-01 15:13 to
+    2026-10-02 00:19 PDT. A full tail with no satisfied-block record may have
+    cut it off, so only then is that item's whole thread read. An unreadable
+    batch raises: the section is unknown, never an empty list of clears.
+    """
+    candidates = cleared_block_items(items, now)
+    if not candidates:
+        return []
+    cache = brief_cache or _ACTIVE_BRIEF_CACHE.get() or BriefCache()
+    tails = cache.comment_tails(candidates)
     rows = []
-    for item in cleared_block_items(items, now):
-        row = _cleared_block_item_json(item)
+    for item in candidates:
+        tail = tails.get(item.ref)
+        if tail is None:
+            raise GitHubError(
+                "could not read comments for {}".format(item.ref)
+            )
+        row = _cleared_block_item_json(item, tail)
+        if row is None and len(tail) >= CLOSED_ITSELF_COMMENT_PAGE_SIZE:
+            row = _cleared_block_item_json(item)
         if row is not None:
             rows.append(row)
     return rows

@@ -9833,7 +9833,9 @@ BEGIN_ITEM_NODE_FIELDS = ITEM_NODE_FIELDS.replace(
 # selected ticket's body and history are fetched after its claim.
 # The response aliases name the shared listing contract: startable issue
 # facts, Status, Class, gate (Needs), claim, and canonical ticket Risk. Pinned
-# is also read for the settled ordering rule; Origin does not route ticket work.
+# is also read for the settled ordering rule. Origin does not route ticket
+# work, but begin and merge decide a finished project's close from this view,
+# and without it every Improve project read as Nate's and never closed (#2147).
 STARTABLE_ITEM_NODE_FIELDS = """\
           id
           claim: fieldValueByName(name: "In motion since") {
@@ -9843,6 +9845,9 @@ STARTABLE_ITEM_NODE_FIELDS = """\
             ... on ProjectV2ItemFieldSingleSelectValue { name updatedAt }
           }
           class: fieldValueByName(name: "Class") {
+            ... on ProjectV2ItemFieldSingleSelectValue { name }
+          }
+          origin: fieldValueByName(name: "Origin") {
             ... on ProjectV2ItemFieldSingleSelectValue { name }
           }
           gate: fieldValueByName(name: "Needs") {
@@ -13891,6 +13896,13 @@ def closed_itself_items(items: Iterable[Item], now: datetime) -> List[Item]:
     )
 
 
+#: The classes whose finished projects close themselves whoever raised them.
+#: Improve also closes, when its shape owner is the agents (#987, #1845).
+SELF_CLOSING_UPKEEP_CLASSES = frozenset(
+    {"Investigate", "Broken", "Maintenance", "Bug"}
+)
+
+
 def _can_close_itself(item: Item) -> bool:
     """Whether a finished project may close without Nate's acceptance.
 
@@ -13911,7 +13923,7 @@ def _can_close_itself(item: Item) -> bool:
     # rule names the upkeep classes as SELF_APPROVABLE_CLASSES and lets every
     # one but Improve close itself whoever raised it; Bug is a defect class,
     # upkeep like Broken, so no Bug project waits at `Accept it?`.
-    if item.klass in {"Investigate", "Broken", "Maintenance", "Bug"}:
+    if item.klass in SELF_CLOSING_UPKEEP_CLASSES:
         return True
     if item.klass != "Improve":
         return False
@@ -18929,8 +18941,12 @@ def shaped_self_approvable(item: Item,
     """Re-evaluate one Shaped plan with the existing self-approval rule.
 
     Only a declared risk holds (#1721): an escalated Risk the wording scan
-    set alone no longer does.
+    set alone no longer does. A plan whose body the load left out holds: the
+    begin view lists Origin but no body (#2147), and an override toward Nate
+    lives in the body.
     """
+    if not getattr(item, "body_loaded", True):
+        return False
     body = _loaded_item_body(item)
     override = parse_origin_override(body)
     override_target = override["target"] if override is not None else None
@@ -21166,6 +21182,62 @@ def _auto_closeable_project(item: Item, *, children_done: Optional[int] = None
     )
 
 
+def _finished_close_candidate(item: Item, *,
+                              children_done: Optional[int] = None) -> bool:
+    """Whether ``item``'s unattended close turns on its body (#2147).
+
+    Open at Building with every ticket closed, in a class that can close
+    itself. Its body decides the rest: an analysis marker keeps it at Accept,
+    and an Improve project's origin override can hand it to either owner.
+    """
+    completed = item.children_done if children_done is None else children_done
+    return (
+        item.state == "OPEN"
+        and item.status == "Building"
+        and item.children_total > 0
+        and completed == item.children_total
+        and (
+            item.klass in SELF_CLOSING_UPKEEP_CLASSES
+            or item.klass == "Improve"
+        )
+    )
+
+
+def _load_close_candidate_bodies(
+    items: Sequence[Item], candidates: Sequence[Item],
+) -> None:
+    """Read the unloaded bodies of finished close candidates (#2147).
+
+    The begin view lists open items without Issue.body (#1775), so the close
+    read an analysis marker or origin override as absent: an analysis-marked
+    upkeep project could close itself, and an override to the agents was
+    never seen. Only the candidates the caller names are read, through the
+    body-only read #2067 added; a row already carrying its body, as every
+    full-board row does, is never read again.
+
+    Inside begin the read is charged to the work envelope (#1776), and it
+    refuses rather than eat into the reserve the selected ticket's post-claim
+    refresh still needs, as the decline-route read does.
+    """
+    wanted: List[Item] = []
+    seen: Set[str] = set()
+    for item in candidates:
+        if getattr(item, "body_loaded", True) or item.ref in seen:
+            continue
+        wanted.append(item)
+        seen.add(item.ref)
+    if not wanted:
+        return
+    envelope = _ACTIVE_BEGIN_ENVELOPE
+    if envelope is not None:
+        work = begin_body_read_work(items, wanted)
+        # One unit for the GraphQL request itself, as the listing reserves.
+        if envelope.remaining - work - 1 < BEGIN_DETAIL_WORK_RESERVE:
+            raise BeginCannotComplete()
+        envelope.consume(hydrated_fields=work)
+    hydrate_item_details(items, wanted, body_only=True)
+
+
 def _close_auto_closeable_project(project: Item,
                                   *, children_done: Optional[int] = None
                                   ) -> bool:
@@ -21225,7 +21297,14 @@ def _close_auto_closeable_project(project: Item,
 
 
 def reconcile_auto_closeable_projects(items: Sequence[Item]) -> List[str]:
-    """Close every eligible item with finished children before queue selection."""
+    """Close every eligible item with finished children before queue selection.
+
+    The candidates' bodies are read first when the view left them out
+    (#2147), so the decision below never reads an unloaded body as empty.
+    """
+    _load_close_candidate_bodies(
+        items, [item for item in items if _finished_close_candidate(item)]
+    )
     closed: List[str] = []
     projects = sorted(
         (item for item in items if _auto_closeable_project(item)),
@@ -21314,7 +21393,9 @@ def _auto_close_parent(items: Sequence[Item], ticket: Item) -> bool:
 
     The Project summary is read before the merge, so exactly one open child is
     the evidence that this merge was the last open ticket. The project-level
-    eligibility decision is shared with the begin reconcile.
+    eligibility decision is shared with the begin reconcile. Merge is served
+    from the begin view, so the parent's body is read here when that view
+    left it out (#2147).
     """
     parent = next((item for item in items if item.ref == ticket.parent), None)
     if parent is None:
@@ -21327,6 +21408,8 @@ def _auto_close_parent(items: Sequence[Item], ticket: Item) -> bool:
         or parent.children_done != parent.children_total - 1
     ):
         return False
+    if _finished_close_candidate(parent, children_done=parent.children_total):
+        _load_close_candidate_bodies(items, [parent])
     return _close_auto_closeable_project(
         parent, children_done=parent.children_total
     )

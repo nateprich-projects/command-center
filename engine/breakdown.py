@@ -783,6 +783,27 @@ def match_existing_siblings(tickets: Sequence[dict],
     return matched
 
 
+def ticket_routing(ticket: dict, project_risk: Optional[str]) -> dict:
+    """One ticket's routing record: Origin, Risk, Needs, inherited (#2140).
+
+    Under an escalated ``project_risk`` the Risk is escalated whatever the
+    answer said (#1757): the #1679 approval promises the escalated reviewer
+    for scan-escalated work, and the model copying the project's tier is a
+    judgement that can be missed. Under a standard project, or one with no
+    Risk, the answer's per-ticket risk stands, escalated included.
+
+    The Project field writes and the coverage row both read this record, so
+    what GitHub holds and what the coverage comment names cannot drift.
+    """
+    inherited = project_risk == "escalated"
+    return {
+        "origin": "agent",
+        "risk": "escalated" if inherited else ticket["risk"],
+        "risk_inherited": inherited,
+        "needs": ticket["needs"],
+    }
+
+
 def apply_create(repo: str, parent_number: int, tickets: Sequence[dict], *,
                  project_risk: Optional[str] = None,
                  run: Optional[str] = None,
@@ -791,22 +812,19 @@ def apply_create(repo: str, parent_number: int, tickets: Sequence[dict], *,
 
     Blockers go first, so every native edge points at an issue that already
     exists. Existing children are matched by unique title from GitHub; their
-    Project add and Needs write are repeated so a later attempt repairs a
+    Project add and field writes are repeated so a later attempt repairs a
     half-applied sequence. The returned rows follow creation order, so the
     coverage comment lists each blocker before its dependents. A failure
     names the issues already present, so the next attempt starts from
     GitHub's truth rather than this run's memory.
 
-    Under an escalated ``project_risk`` every ticket, created or resumed, is
-    written escalated whatever the answer said (#1757): the #1679 approval
-    promises the escalated reviewer for scan-escalated work, and the model
-    copying the project's tier is a judgement that can be missed. Under a
-    standard project, or one with no Risk, the answer's per-ticket risk
-    stands, escalated included.
+    Every ticket, created or resumed, gets one ``ticket_routing`` record
+    (#2140), carrying the escalated project's Risk (#1757); its Origin,
+    Risk and Needs writes and its coverage row are all read from it.
     """
-    inherit = project_risk == "escalated"
     created_numbers: Dict[int, int] = {}
     created_refs: Dict[int, str] = {}
+    routing: Dict[int, dict] = {}
     order = creation_order(tickets)
     existing = match_existing_siblings(
         tickets, fetch_siblings(repo, parent_number))
@@ -824,19 +842,20 @@ def apply_create(repo: str, parent_number: int, tickets: Sequence[dict], *,
                 url = issue_url(ref)
             created_numbers[index] = number
             created_refs[index] = ref
+            routing[index] = ticket_routing(ticket, project_risk)
             item_id = add_to_project(url)
-            funnel.write_project_select(item_id, "Origin", "agent", ref)
             funnel.write_project_select(
-                item_id, "Risk",
-                "escalated" if inherit else ticket["risk"], ref)
-            write_needs(item_id, ticket["needs"], ref)
+                item_id, "Origin", routing[index]["origin"], ref)
+            funnel.write_project_select(
+                item_id, "Risk", routing[index]["risk"], ref)
+            write_needs(item_id, routing[index]["needs"], ref)
         created = [{
             "ref": created_refs[index],
             "number": created_numbers[index],
             "title": tickets[index]["title"],
-            "risk": "escalated" if inherit else tickets[index]["risk"],
-            "risk_inherited": inherit,
-            "needs": tickets[index]["needs"],
+            "risk": routing[index]["risk"],
+            "risk_inherited": routing[index]["risk_inherited"],
+            "needs": routing[index]["needs"],
             "blocked_by": display_blockers(
                 tickets[index], created_refs, repo),
         } for index in order]

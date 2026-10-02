@@ -17950,41 +17950,48 @@ def classify_blockers(blockers: Iterable[dict], repo: str) -> Dict[str, List[str
 
 def _current_block_comment_details(
     comments: Sequence[Mapping[str, object]],
-) -> Optional[Tuple[List[str], Optional[date], str,
-                    Optional[Dict[str, str]]]]:
-    """Choose the newest block-making comment by its GitHub creation time.
+) -> Tuple[List[str], Optional[date], Optional[str],
+           Optional[Dict[str, str]], Optional[str]]:
+    """Read the current block record: the newest one of any kind (#2166).
 
-    A later Declined comment starts a new blocked episode without machine-
-    readable conditions. An older Blocked-on header must not satisfy it. A
-    newer Blocked-on header can establish conditions for that later episode.
+    Three kinds of comment record a block: a parseable block header, a
+    Needs-a-decision question and a Declined. The newest of them alone is
+    current, and its fields are returned as ``(references, blocked_until,
+    reason, event, question)``; the other kinds' fields are empty, as they
+    are when the thread holds no record at all.
+
+    A later Declined starts a new blocked episode without machine-readable
+    conditions (#2019), and a later question is waiting on Nate's answer, so
+    an older header's conditions must satisfy neither. A newer header can
+    establish conditions for a later episode, and then an older question is
+    no longer the one being asked.
+
+    Newest is by GitHub creation time when every record carries one, the later
+    comment winning a tie; when any record lacks it, by body order, which is
+    the order GitHub returns comments in.
     """
-    bodies = [str(comment.get("body") or "") for comment in comments]
-    block_rows = []
-    decline_times = []
-    has_decline = False
-    for comment, body in zip(comments, bodies):
+    records = []
+    for index, comment in enumerate(comments):
+        body = str(comment.get("body") or "")
         details = _parse_block_comment_details([body])
         if details is not None:
-            block_rows.append((parse_time(comment.get("createdAt")), details))
-        if body.lstrip().startswith(DECLINED_PREFIX):
-            has_decline = True
-            decline_times.append(parse_time(comment.get("createdAt")))
+            fields = details + (None,)
+        elif NEEDS_DECISION_RE.match(body):
+            # A question header whose text reads as empty is still the
+            # current record: it asks rather than lets an older header clear.
+            fields = ([], None, None, None,
+                      parse_needs_decision_comment([body]))
+        elif body.lstrip().startswith(DECLINED_PREFIX):
+            fields = ([], None, None, None, None)
+        else:
+            continue
+        records.append((parse_time(comment.get("createdAt")), index, fields))
 
-    if has_decline:
-        if (
-            not block_rows
-            or any(at is None for at, _ in block_rows)
-            or any(at is None for at in decline_times)
-        ):
-            return None
-        newest_block = max(at for at, _ in block_rows)
-        newest_decline = max(decline_times)
-        if newest_decline >= newest_block:
-            return None
-
-    if block_rows and all(at is not None for at, _ in block_rows):
-        return max(block_rows, key=lambda row: row[0])[1]
-    return _parse_block_comment_details(bodies)
+    if not records:
+        return [], None, None, None, None
+    if all(at is not None for at, _, _ in records):
+        return max(records, key=lambda record: record[:2])[2]
+    return records[-1][2]
 
 
 def _load_block_comment(item: Item) -> None:
@@ -17993,6 +18000,18 @@ def _load_block_comment(item: Item) -> None:
     Block comments are intentionally loaded outside the Project query. The
     normal load pays for this only for open blocked items, and the parsed state
     stays on ``Item`` for pure queue functions and the brief to reuse.
+
+    The current block record alone sets ``block_references``,
+    ``blocked_until``, ``block_reason``, ``block_event`` and
+    ``needs_decision`` (``_current_block_comment_details``, #2166): an older
+    header's conditions never read beside a newer question, so the clear
+    cannot lift a block that is waiting on Nate's answer.
+
+    ``decline_reason`` stays thread-wide: it is the newest Declined however
+    old. ``gate_question`` and ``watch_owns_gate`` read it as "this ticket
+    was declined", and so does the #1942 reset of a legacy Needs ``human``
+    in ``clear_satisfied_blocks``, which runs only once a newer header's
+    conditions are satisfied.
     """
     payload = _gh_json(
         "gh", "issue", "view", str(item.number), "--repo", item.repo,
@@ -18012,16 +18031,13 @@ def _load_block_comment(item: Item) -> None:
     ]
     bodies = [comment.get("body") or "" for comment in comments]
     item.unparseable_block_comments = unparseable_block_comment_lines(bodies)
-    item.block_event = None
-    parsed = _current_block_comment_details(comments)
-    if parsed is not None:
-        (
-            item.block_references,
-            item.blocked_until,
-            item.block_reason,
-            item.block_event,
-        ) = parsed
-    item.needs_decision = parse_needs_decision_comment(bodies)
+    (
+        item.block_references,
+        item.blocked_until,
+        item.block_reason,
+        item.block_event,
+        item.needs_decision,
+    ) = _current_block_comment_details(comments)
     item.decline_reason = parse_decline_comment(bodies)
     item.decline_route = parse_decline_route_comment(payload["comments"])
     for body in reversed(bodies):

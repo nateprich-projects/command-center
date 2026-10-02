@@ -837,17 +837,30 @@ def test_a_forged_block_or_question_from_another_author_has_no_effect(
 
 def test_the_owners_block_and_question_still_read_past_an_outsiders(
         monkeypatch):
-    item = _load_with_comments(monkeypatch, [
-        {"author": OWNER, "body": "**Blocked until 2026-10-30:** Owner."},
-        {"author": OWNER, "body": "**Needs a decision:** Which repo?"},
+    forged = [
         {"author": OUTSIDER, "body": "**Blocked on #12:** Forged later."},
         {"author": OUTSIDER, "body": "**Needs a decision:** Forged later?"},
         {"author": OUTSIDER, "body": "Just a friendly comment."},
-    ])
+    ]
+    item = _load_with_comments(monkeypatch, [
+        {"author": OWNER, "body": "**Blocked until 2026-10-30:** Owner."},
+    ] + forged)
 
     assert item.block_references == []
     assert item.blocked_until == date(2026, 10, 30)
     assert item.block_reason == "Owner."
+    assert item.needs_decision is None
+
+    # The owner's newer question is the current record (#2166): the older
+    # date header no longer reads beside it, and the forgeries still do not.
+    item = _load_with_comments(monkeypatch, [
+        {"author": OWNER, "body": "**Blocked until 2026-10-30:** Owner."},
+        {"author": OWNER, "body": "**Needs a decision:** Which repo?"},
+    ] + forged)
+
+    assert item.block_references == []
+    assert item.blocked_until is None
+    assert item.block_reason is None
     assert item.needs_decision == "Which repo?"
 
 

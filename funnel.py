@@ -15708,6 +15708,9 @@ _BRIEF_UNAVAILABLE = object()
 _ACTIVE_BRIEF_CACHE: contextvars.ContextVar = contextvars.ContextVar(
     "active_brief_cache", default=None
 )
+_ACTIVE_BRIEF_HEARTBEAT_CACHE: contextvars.ContextVar = contextvars.ContextVar(
+    "active_brief_heartbeat_cache", default=None
+)
 _BRIEF_SECTION_STATE: contextvars.ContextVar = contextvars.ContextVar(
     "brief_section_state", default=None
 )
@@ -15743,12 +15746,16 @@ class BriefCache:
     def __init__(self):
         self._pr_facts = _BRIEF_UNAVAILABLE
         self._heartbeat_rows: Dict[str, List[Dict]] = {}
+        self._strict_heartbeat_rows: Dict[str, List[Dict]] = {}
+        self._strict_heartbeat_errors: Dict[str, Exception] = {}
         self._comment_tails: Dict[str, List[Dict]] = {}
 
     def clear(self) -> None:
         """Forget auxiliary reads after a command may have mutated GitHub."""
         self._pr_facts = _BRIEF_UNAVAILABLE
         self._heartbeat_rows.clear()
+        self._strict_heartbeat_rows.clear()
+        self._strict_heartbeat_errors.clear()
         self._comment_tails.clear()
 
     def get_pr_facts(self, items: Sequence[Item]):
@@ -15781,8 +15788,42 @@ class BriefCache:
         return self.comment_tails(items)
 
     def heartbeat_rows(self, agent: str) -> List[Dict]:
+        if agent in self._strict_heartbeat_rows:
+            return self._strict_heartbeat_rows[agent]
         if agent in self._heartbeat_rows:
             return self._heartbeat_rows[agent]
+
+        import heartbeat
+
+        timeout = _brief_timeout_remaining()
+        try:
+            if timeout is None:
+                rows = heartbeat.read(agent)
+            else:
+                try:
+                    rows = heartbeat.read(agent, timeout=timeout)
+                except TypeError as exc:
+                    # Keep fixture-era one-argument test doubles compatible
+                    # while the real heartbeat reader uses the bound.
+                    if "timeout" not in str(exc):
+                        raise
+                    rows = heartbeat.read(agent)
+        except subprocess.TimeoutExpired as exc:
+            state = _BRIEF_SECTION_STATE.get()
+            section = state[0] if state else "unknown"
+            raise BriefSectionTimeout(
+                section, "heartbeat read timed out"
+            ) from exc
+
+        self._heartbeat_rows[agent] = rows
+        return rows
+
+    def brief_heartbeat_rows(self, agent: str) -> List[Dict]:
+        """Read strict heartbeat history once for the five published sections."""
+        if agent in self._strict_heartbeat_rows:
+            return self._strict_heartbeat_rows[agent]
+        if agent in self._strict_heartbeat_errors:
+            raise self._strict_heartbeat_errors[agent]
 
         import heartbeat
 
@@ -15802,16 +15843,24 @@ class BriefCache:
         except subprocess.TimeoutExpired as exc:
             state = _BRIEF_SECTION_STATE.get()
             section = state[0] if state else "unknown"
-            raise BriefSectionTimeout(
+            error = BriefSectionTimeout(
                 section, "heartbeat read timed out"
-            ) from exc
+            )
+            self._strict_heartbeat_errors[agent] = error
+            raise error from exc
+        except Exception as exc:
+            self._strict_heartbeat_errors[agent] = exc
+            raise
 
-        self._heartbeat_rows[agent] = rows
+        self._strict_heartbeat_rows[agent] = rows
         return rows
 
 
 def _brief_heartbeat_rows(agent: str) -> List[Dict]:
     """Read one heartbeat spool, reusing the active brief cache when present."""
+    brief_cache = _ACTIVE_BRIEF_HEARTBEAT_CACHE.get()
+    if brief_cache is not None:
+        return brief_cache.brief_heartbeat_rows(agent)
     cache = _ACTIVE_BRIEF_CACHE.get()
     if cache is not None:
         return cache.heartbeat_rows(agent)
@@ -15980,6 +16029,7 @@ def cmd_brief(
         deadline = time.perf_counter() + BRIEF_TOTAL_BUDGET_SECONDS
     cache = brief_cache or _ACTIVE_BRIEF_CACHE.get() or BriefCache()
     cache_token = _ACTIVE_BRIEF_CACHE.set(cache)
+    heartbeat_cache_token = _ACTIVE_BRIEF_HEARTBEAT_CACHE.set(cache)
     deferred_pure: Dict[str, Callable[[], object]] = {}
     deferred_section = object()
 
@@ -16028,7 +16078,9 @@ def cmd_brief(
 
     def read_provider_heartbeat(agent: str) -> None:
         name = "heartbeat_" + agent
-        rows = section(name, lambda agent=agent: cache.heartbeat_rows(agent))
+        rows = section(
+            name, lambda agent=agent: cache.brief_heartbeat_rows(agent)
+        )
         if rows is not None:
             return
         error = "heartbeat read failed"
@@ -16336,6 +16388,7 @@ def cmd_brief(
         print(json.dumps(brief, indent=2))
         return 0
     finally:
+        _ACTIVE_BRIEF_HEARTBEAT_CACHE.reset(heartbeat_cache_token)
         _ACTIVE_BRIEF_CACHE.reset(cache_token)
 
 

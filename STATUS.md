@@ -145,6 +145,13 @@ is not already a symlink, and refuses to touch a `settings.json` it cannot parse
 - `heartbeat.py` — records run **start and finish separately**, each with a usage
   snapshot, to an orphan `heartbeat` branch via the Contents API (compare-and-swap on
   the blob sha, so a concurrent write is rejected rather than lost). Smoke-tested live.
+  Readers pair records through one per-run view, `heartbeat.run_views` (#2174, plan
+  #1750): per run id over the distinct records, the start, finish (re-begin flagged),
+  binding, job, api_cost events and pairing (open, finished, re-begun, closed by an
+  unresolved finish), with each API cost field measured, missing or lost rather than a
+  bare null. `open_starts` and `api_cost_for_run` are thin adapters over it, so a run
+  read twice (GitHub plus spool) is one run. Built and fixture-tested; not yet checked
+  against the live branch (#2179).
 - `.github/workflows/watchdog.yml` + `.github/scripts/watchdog.py` — hourly. Reports
   silence, dying runs, and repeated errors; deliberately silent on over-pace, locked and
   nothing-to-do, which are the system working. Full cycle verified live: opened an issue,

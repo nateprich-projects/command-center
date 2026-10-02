@@ -13,6 +13,7 @@ import json
 import pathlib
 import stat
 import sys
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -2885,6 +2886,122 @@ def test_collect_fails_closed_when_thread_was_not_read(monkeypatch):
     current = idea(42, issue_comments=None)
     monkeypatch.setattr(funnel, "load_items", lambda **kwargs: [current])
     with pytest.raises(funnel.GitHubError, match="could not read comments"):
+        shape.collect(REPO, 42, now=NOW)
+
+
+# -- bodies the begin view leaves unloaded (#2149) ---------------------------
+
+def begin_view_board(monkeypatch, *rows, omit=()):
+    """Serve ``rows`` as the begin view lists them: no body (#1775).
+
+    Each row's body is kept aside and answered only by the body-only read
+    #2067 added; every other GitHub read fails the test. Returns the ids each
+    body read asked for, in order: the spy. ``omit`` names item ids whose
+    body the read leaves out, as an unreadable body.
+    """
+    bodies = {row.item_id: row.body for row in rows}
+    listed = [replace(row, body=None, body_loaded=False) for row in rows]
+    reads = []
+
+    def graphql(query, **variables):
+        assert query == funnel.ITEM_BODY_DETAILS_QUERY, query
+        reads.append(list(variables["ids"]))
+        return {"nodes": [
+            {"id": item_id,
+             "content": ({} if item_id in omit
+                         else {"body": bodies[item_id]})}
+            for item_id in variables["ids"]
+        ]}
+
+    monkeypatch.setattr(funnel, "load_items", lambda **kwargs: listed)
+    monkeypatch.setattr(funnel, "gh_graphql", graphql)
+    monkeypatch.setattr(
+        shape, "fetch_repo_text",
+        lambda repo, path: ("{} text".format(path), False))
+    return listed, reads
+
+
+def test_collect_publishes_the_idea_and_sibling_bodies_from_the_begin_view(
+        monkeypatch):
+    """Reproduction: since #1775 the packet published ``body: null``."""
+    current = idea(42, body="Captured note: the idea's own text.")
+    shaped = idea(89, status="Shaped", body="# Plan\n\nA shaped plan.\n")
+    building = idea(91, status="Building", body="# Plan\n\nA built plan.\n")
+    begin_view_board(monkeypatch, current, shaped, building)
+
+    found = shape.collect(REPO, 42, now=NOW)
+
+    assert found["idea"]["body"] == "Captured note: the idea's own text."
+    assert {row["ref"]: row["body"] for row in found["sibling_plans"]} == {
+        REPO + "#89": "# Plan\n\nA shaped plan.\n",
+        REPO + "#91": "# Plan\n\nA built plan.\n",
+    }
+
+
+def test_collect_honours_an_origin_override_in_an_unloaded_idea_body(
+        monkeypatch):
+    body = (
+        "Captured note.\n\n"
+        + funnel.origin_block(
+            "nate-relayed", at=NOW, run="capture-run", agent="muse")
+        + "\n\n"
+        + funnel.provenance_block(
+            "nate-relayed", at=NOW, run="relay-run", agent="claude")
+        + "\n\n" + funnel.ORIGIN_OVERRIDE_MARKER
+        + '\n\n```json\n{"target": "agents"}\n```')
+    assert funnel.parse_origin_override(body)["target"] == "agents"
+    begin_view_board(monkeypatch, idea(42, body=body, origin="Nate"))
+
+    found = shape.collect(REPO, 42, now=NOW)
+
+    assert found["origin"]["override_target"] == "agents"
+    assert found["idea"]["body"] == body
+
+
+def test_collect_reads_only_the_idea_and_its_included_siblings(monkeypatch):
+    current = idea(42)
+    sibling = idea(89, status="Shaped", body="A sibling plan.")
+    other_idea = idea(93, status="Ideas", body="Another idea.")
+    ticket = idea(97, status="Shaped", parent=REPO + "#89",
+                  body="A child ticket, not a plan.")
+    other_repo = idea(7, repo="other/repo", status="Shaped",
+                      item_id="project-item-other-7",
+                      body="Another repo's plan.")
+    listed, reads = begin_view_board(
+        monkeypatch, current, other_idea, ticket, other_repo, sibling)
+
+    found = shape.collect(REPO, 42, now=NOW)
+
+    assert reads == [["project-item-42", "project-item-89"]]
+    assert [row["body"] for row in found["sibling_plans"]] == \
+        ["A sibling plan."]
+    unread = [row.ref for row in listed if not row.body_loaded]
+    assert unread == [REPO + "#93", REPO + "#97", "other/repo#7"]
+
+
+def test_collect_does_not_reread_a_body_the_load_already_carries(
+        monkeypatch):
+    sibling = idea(89, status="Shaped", body="A sibling plan.")
+    listed, reads = begin_view_board(monkeypatch, idea(42), sibling)
+    loaded = replace(listed[1], body="A sibling plan.", body_loaded=True)
+    listed[1] = loaded
+
+    found = shape.collect(REPO, 42, now=NOW)
+
+    assert reads == [["project-item-42"]]
+    assert [row["body"] for row in found["sibling_plans"]] == \
+        ["A sibling plan."]
+
+
+@pytest.mark.parametrize("unreadable", ["omitted", "no-item-id"])
+def test_collect_fails_when_the_idea_body_cannot_be_read(
+        monkeypatch, unreadable):
+    if unreadable == "omitted":
+        begin_view_board(monkeypatch, idea(42), omit={"project-item-42"})
+    else:
+        begin_view_board(monkeypatch, idea(42, item_id=None))
+
+    with pytest.raises(funnel.GitHubError):
         shape.collect(REPO, 42, now=NOW)
 
 

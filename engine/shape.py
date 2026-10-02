@@ -1186,6 +1186,28 @@ def build_packet(*, repo: str, idea: Dict,
     return packet
 
 
+def load_packet_bodies(items: list, idea_item) -> None:
+    """Read the idea's and its included siblings' unloaded bodies (#2149).
+
+    The begin view lists open rows without ``Issue.body`` (#1775), so the
+    packet published the idea and every sibling plan with ``body: null``
+    and the origin override read an empty body. Only the idea and the
+    sibling plans the packet carries are read, and only when unloaded,
+    through the body-only read #2067 added; no other row is. A body still
+    unloaded after the read fails the packet rather than ship it empty.
+    """
+    wanted = [row for row in [idea_item]
+              + sibling_plan_items(items, idea_item)
+              if not getattr(row, "body_loaded", True)]
+    if not wanted:
+        return
+    funnel.hydrate_item_details(items, wanted, body_only=True)
+    for row in wanted:
+        if not getattr(row, "body_loaded", True):
+            raise funnel.GitHubError(
+                "could not read the body of {}".format(row.ref))
+
+
 def collect(repo: Optional[str], idea_number: int, *,
             items_loader: Optional[Callable[[], list]] = None,
             now: Optional[datetime] = None) -> Dict:
@@ -1214,6 +1236,7 @@ def collect(repo: Optional[str], idea_number: int, *,
     else:
         items = items_loader()
     idea_item = funnel.find(items, idea_ref)
+    load_packet_bodies(items, idea_item)
     issue_comments = getattr(idea_item, "issue_comments", None)
     if issue_comments is None and items_loader is not None:
         # Pure packet fixtures and injected readers can omit the optional

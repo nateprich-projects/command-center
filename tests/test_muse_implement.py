@@ -848,7 +848,6 @@ def test_watcher_killed_after_fake_job_exit_does_not_run_parent_cleanup(
                 env=env,
                 stdout=stdout,
                 stderr=stderr,
-                timeout=30,
             )
     finally:
         for loader in loaders:

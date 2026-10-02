@@ -1,7 +1,6 @@
 # Codex routine — one ticket per run
 
-Paste this into a **Codex Scheduled** task; tier and schedule live outside
-it.
+Use in **Codex Scheduled**; configure tier and schedule separately.
 
 Configure the sandbox with write access only to Codex’s per-session directory
 and `~/.claude/command-center-heartbeat`. Give
@@ -23,9 +22,10 @@ the gate’s outcome (`over` is `skipped-over-pace`, `unknown` is
 `skipped-usage-unknown`, `reserve` is `skipped-api-reserve`,
 `config` is `config-drift`, otherwise `nothing-to-do`) and stop.
 
-When `do` is `ticket`, the ticket is already claimed. Treat `packet` as the
+For `do=ticket`, the ticket is already claimed. Treat `packet` as the
 implementation evidence: read its ticket, parent plan, current-head verdict,
-blocking list, and prior-run digest. Treat `vendor` as binding.
+blockers, and prior-run digest. Treat `vendor` as binding. Pass top-level
+`claim_timestamp` unchanged to `finish-ticket`.
 
 Clone `packet.repo` into an owner-only (`0700`) directory under runtime root’s
 `codex-runs/` subtree, named `ticket-<number>-<YYYYMMDDTHHMMSSffffffZ>` (UTC stamp:
@@ -61,7 +61,7 @@ run's heartbeat start.
 
 Write it to a file in the Codex session directory, outside the ticket
 checkout. From the ticket checkout, run
-`python3 /Users/nateprich/.claude/command-center-run/funnel.py finish-ticket --run <run> --answer-file <path>`.
+`python3 /Users/nateprich/.claude/command-center-run/funnel.py finish-ticket --run <run> --answer-file <path> --claim-timestamp <claim_timestamp>`.
 The runner validates the answer, tests the checkout, commits and pushes, opens
 the PR or records the blocked/declined path, releases the claim, and finishes
 the heartbeat. Report any failure honestly and stop; never simulate an effect

@@ -27,7 +27,8 @@ def test_runtime_has_one_begin_and_one_finish_ticket_command():
     ) == 1
     assert runtime.count(
         "python3 /Users/nateprich/.claude/command-center-run/funnel.py "
-        "finish-ticket --run <run> --answer-file <path>"
+        "finish-ticket --run <run> --answer-file <path> "
+        "--claim-timestamp <claim_timestamp>"
     ) == 1
     assert "--routine-sha" not in runtime
     assert "funnel.py next" not in runtime

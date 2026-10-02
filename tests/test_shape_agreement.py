@@ -700,11 +700,18 @@ def test_reproduction_a_carried_override_to_agents_survives_the_rewrite(
     _shape_held_by_gates(monkeypatch, control)
     for item in (delegated, control):
         _answer_gates(item)
-    swept = _sweep(monkeypatch, [delegated, control])
+    by_ref = {item.ref: item for item in (delegated, control)}
+    # The predicate the sweep applies to a candidate, read off the stored
+    # body. Which rows are candidates is the sweep's own row-field rule
+    # (#2171 takes Origin agent only), so the delegated plan is judged here
+    # by the predicate and the sweep runs on the control.
+    verdicts = (_override_target(delegated.body),
+                funnel.shaped_self_approvable(delegated, by_ref),
+                funnel.shaped_self_approvable(control, by_ref))
+    swept = _sweep(monkeypatch, [control])
 
-    assert (_override_target(delegated.body), swept) == (
-        "agents", sorted([delegated.ref, control.ref]))
-    assert (delegated.status, control.status) == ("Ready", "Ready")
+    assert verdicts == ("agents", True, True)
+    assert (swept, control.status) == ([control.ref], "Ready")
 
 
 #: Whether the Shaped sweep may advance each matrix row once its Gates

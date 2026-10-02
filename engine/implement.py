@@ -1795,9 +1795,11 @@ def create_or_update_pr(repo: str, context: dict, ticket: dict,
     return {"number": int(match.group(1)), "url": url}
 
 
-def render_human_step_title(action: str) -> str:
-    """Render the human-step sub-issue title from the model's action."""
-    return "Human step: {}".format(action)
+def render_human_step_title(action: str, *, needs: str) -> str:
+    """Render the blocked-step title with its canonical Needs prefix."""
+    prefix = ("Claude Code environment step"
+              if needs == "claude-code-environment" else "Human step")
+    return "{}: {}".format(prefix, action)
 
 
 def render_human_step_body(*, parent_number: int, ticket_number: int,
@@ -3218,13 +3220,14 @@ def finish_blocked_on_human(
             comment_effect=comment_effect, comments_effect=comments_effect,
             head_effect=head_effect, route_needs_effect=route_needs_effect,
             human_needs_effect=human_needs_effect, extra_note=extra_note)
-    title = render_human_step_title(blocked["action"])
+    step_needs = HUMAN_STEP_NEEDS[blocked["reason"]]
+    title = render_human_step_title(
+        blocked["action"], needs=step_needs)
     body = render_human_step_body(
         parent_number=parent_number, ticket_number=context["number"],
         reason=blocked["reason"], action=blocked["action"])
     created = create_effect(
         resolved, parent_number, title, body, cwd=context["root"])
-    step_needs = HUMAN_STEP_NEEDS[blocked["reason"]]
     try:
         if step_needs == "claude-code-environment":
             session_needs_effect(created["url"], created["ref"])

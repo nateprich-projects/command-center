@@ -879,3 +879,32 @@ def test_ticket_2180_the_table_drives_the_filter(monkeypatch, ref, region):
 
     assert funnel.plan_escalation_matches(fixture["body"]) == \
         _recorded_hits(fixture)
+
+
+# -- region boundaries that must not hide active prose (#2180 rework) --------
+#
+# Each body puts a proposal where the old scan read it and a misread region
+# boundary could blank it: quotes that cross a boundary, list shapes after a
+# Rejected label, a setext heading, a non-Markdown line separator, and the
+# review's gap cases.
+
+REGION_EDGES = json.loads(
+    (FIXTURES / "escalation_plan_region_edges.json").read_text(
+        encoding="utf-8"))
+
+
+@pytest.mark.parametrize(
+    "fixture", [entry for entry in REGION_EDGES if "expected" in entry],
+    ids=lambda entry: entry["name"])
+def test_ticket_2180_a_misread_boundary_never_hides_active_prose(fixture):
+    assert funnel.plan_escalation_matches(fixture["body"]) == \
+        fixture["expected"], fixture["source"]
+
+
+@pytest.mark.parametrize(
+    "fixture", [entry for entry in REGION_EDGES
+                if "expected_declared" in entry],
+    ids=lambda entry: entry["name"])
+def test_ticket_2180_a_line_inside_premises_declares_nothing(fixture):
+    assert funnel.plan_declared_risks(fixture["body"]) == \
+        fixture["expected_declared"], fixture["source"]

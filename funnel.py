@@ -1748,7 +1748,16 @@ _PLAN_MALFORMED_ATX_RE = re.compile(
 _PLAN_REJECTED_INLINE_RE = re.compile(
     r"[ \t]+\(rejected:[^\r\n]*\)[ \t]*$", re.IGNORECASE
 )
-_PLAN_LIST_ITEM_RE = re.compile(r"^ {0,3}(?:[-*+]|\d{1,9}[.)])(?:[ \t]|$)")
+_PLAN_LIST_ITEM_RE = re.compile(
+    r"^(?P<indent> {0,3})(?P<marker>[-*+]|\d{1,9}[.)])(?:[ \t]|$)"
+)
+#: A setext heading underline, when the line above it is not blank.
+_PLAN_SETEXT_UNDERLINE_RE = re.compile(r"^ {0,3}(?:=+|-+)[ \t]*$")
+#: Line breaks to ``str.splitlines`` that Markdown does not break on, so the
+#: two disagree about where a line, and so a heading, starts.
+_PLAN_NON_MARKDOWN_BREAK_RE = re.compile(
+    "[\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029]"
+)
 
 #: Every region of a plan body the wording scan does not read (#2180), as
 #: ``(kind, name)``; ``plan_scan_text`` is the one filter that applies it.
@@ -1996,10 +2005,15 @@ def _plan_scan_regions(kind: str) -> Tuple[str, ...]:
                  if region_kind == kind)
 
 
-def _plan_scan_unquoted(text: str) -> str:
-    """Blank the table's quoted regions, in table order, keeping lines."""
+def _plan_scan_unquoted(text: str, skip: Collection[str] = ()) -> str:
+    """Blank the table's quoted regions, in table order, keeping lines.
+
+    ``skip`` names quoted regions to leave in place.
+    """
     applied = []
     for name in _plan_scan_regions("quoted"):
+        if name in skip:
+            continue
         blank = _PLAN_QUOTED_REGION_FILTERS[name]
         if blank not in applied:
             applied.append(blank)
@@ -2017,22 +2031,39 @@ def _plan_label_re(name: str) -> re.Pattern:
     )
 
 
+def _plan_list_item(line: str) -> Optional[Tuple[int, str]]:
+    """A list item's indent and marker kind, or ``None`` for another line.
+
+    The kind is the bullet character, or the delimiter of a numbered item.
+    """
+    match = _PLAN_LIST_ITEM_RE.match(line)
+    if match is None:
+        return None
+    marker = match.group("marker")
+    return len(match.group("indent")), marker[-1]
+
+
 def _plan_label_list_end(lines: Sequence[str], label: int) -> Optional[int]:
     """The line after a label's list, or ``None`` when its end is unclear.
 
-    The list may follow blank lines, and runs through its items, their
-    indented continuation lines and the blank lines between them. It ends at
-    a heading, or at a blank line followed by an unindented line that is not
-    an item. A label followed by prose, or an unindented line directly after
-    an item, leaves the end unclear. A label with nothing before the next
-    heading covers only its own line.
+    The list may follow blank lines, and its first item sets its indent and
+    marker. It runs through items with that indent and marker, and through
+    lines indented deeper than its items directly below one. A blank line
+    continues it only into another such item; anything else after a blank
+    line ends it, as do a heading and a different marker at or outside the
+    list's indent. A label followed by prose or by an item indented less
+    than itself, or an unindented line directly after an item, leaves the
+    end unclear. A label with nothing before the next heading covers only
+    its own line.
     """
+    label_indent = len(lines[label]) - len(lines[label].lstrip(" "))
     index = label + 1
     while index < len(lines) and not lines[index].strip():
         index += 1
     if index == len(lines) or _PLAN_ATX_HEADING_RE.match(lines[index]):
         return label + 1
-    if not _PLAN_LIST_ITEM_RE.match(lines[index]):
+    first = _plan_list_item(lines[index])
+    if first is None or first[0] < label_indent:
         return None
     end = index + 1
     after_blank = False
@@ -2043,26 +2074,43 @@ def _plan_label_list_end(lines: Sequence[str], label: int) -> Optional[int]:
             continue
         if _PLAN_ATX_HEADING_RE.match(line):
             break
-        if _PLAN_LIST_ITEM_RE.match(line) or line[:1] in " \t":
+        item = _plan_list_item(line)
+        if item == first:
             end = index + 1
             after_blank = False
             continue
-        if after_blank:
+        if after_blank or (item is not None and item[0] <= first[0]):
             break
+        if len(line) - len(line.lstrip(" \t")) > first[0]:
+            end = index + 1
+            continue
         return None
     return end
 
 
-def _plan_scan_ignored_lines(lines: Sequence[str]
+def _plan_boundary_like(line: str) -> bool:
+    """Whether a line is, or may be, a heading or a heading underline."""
+    return bool(_PLAN_ATX_HEADING_RE.match(line)
+                or _PLAN_MALFORMED_ATX_RE.match(line)
+                or _PLAN_SETEXT_UNDERLINE_RE.match(line))
+
+
+def _plan_scan_ignored_lines(lines: Sequence[str],
+                             unquoted_prose: Sequence[str]
                              ) -> Optional[Tuple[Set[int], Set[int]]]:
     """Lines to blank and lines whose rejected clause to blank (#2180).
 
     ``lines`` are the body with its quoted regions already blank, so a
-    heading or label inside a quote is not one. ``None`` means a boundary
-    cannot be read: a named section whose heading is malformed, at another
-    level or repeated, a malformed heading inside one, or a label whose
+    heading or label inside a quote is not one; ``unquoted_prose`` is the
+    same body with prose quotes left in. ``None`` means a boundary cannot
+    be read: a heading or heading underline that a prose quote hides, a
+    named section whose heading is malformed, at another level or repeated,
+    a malformed heading or a setext underline inside one, or a label whose
     list has no clear end.
     """
+    for line, shown in zip(lines, unquoted_prose):
+        if _plan_boundary_like(shown) and not _plan_boundary_like(line):
+            return None
     sections = _plan_scan_regions("section")
     clauses = _plan_scan_regions("clause")
     named_malformed = [
@@ -2105,6 +2153,10 @@ def _plan_scan_ignored_lines(lines: Sequence[str]
             end = section_end(start)
             if any(start < index < end for index in malformed):
                 return None
+            if any(_PLAN_SETEXT_UNDERLINE_RE.match(lines[index])
+                   and lines[index - 1].strip()
+                   for index in range(start + 2, end)):
+                return None
             blank.update(range(start + 1, end))
 
     clause_lines: Set[int] = set()
@@ -2135,17 +2187,23 @@ def plan_scan_text(plan_body: str) -> str:
     keeping line structure, and an ignored section keeps its heading line so
     the Risk rationale reader still sees where the section before it ends.
     When a boundary cannot be read, only the quoted regions are blanked, so
-    an uncertain parse cannot hide an asserted proposal.
+    an uncertain parse cannot hide an asserted proposal. That includes a
+    body with a line break Markdown does not share, and one where blanking
+    a region pairs the prose quotes outside it differently.
     """
     body = _strip_plan_code_blocks(plan_body or "")
     whole = _plan_scan_unquoted(body)
+    if _PLAN_NON_MARKDOWN_BREAK_RE.search(body):
+        return whole
     raw_lines = body.splitlines(keepends=True)
     visible_lines = whole.splitlines()
-    if len(visible_lines) > len(raw_lines):
+    shown_lines = _plan_scan_unquoted(body, skip=("prose quote",)).splitlines()
+    if max(len(visible_lines), len(shown_lines)) > len(raw_lines):
         return whole
     visible_lines.extend([""] * (len(raw_lines) - len(visible_lines)))
+    shown_lines.extend([""] * (len(raw_lines) - len(shown_lines)))
 
-    ignored = _plan_scan_ignored_lines(visible_lines)
+    ignored = _plan_scan_ignored_lines(visible_lines, shown_lines)
     if ignored is None:
         return whole
     blank, clause_lines = ignored
@@ -2153,15 +2211,27 @@ def plan_scan_text(plan_body: str) -> str:
     for index, line in enumerate(raw_lines):
         content = line.rstrip("\r\n")
         ending = line[len(content):]
-        if index in blank:
-            raw_lines[index] = ending
-            continue
         if index in clause_lines:
             content = _PLAN_REJECTED_INLINE_RE.sub(
                 lambda match: " " * len(match.group(0)), content
             )
         raw_lines[index] = content + ending
-    return _plan_scan_unquoted("".join(raw_lines))
+    # The text outside the blanked lines must read as it does with only the
+    # rejected clauses blanked. Prose quotes pair across the whole body, so a
+    # quote mark inside a blanked region can re-pair the ones outside it and
+    # blank active text; that makes the boundary unreadable too.
+    expected = _plan_scan_unquoted("".join(raw_lines)).splitlines()
+    for index in blank:
+        line = raw_lines[index]
+        raw_lines[index] = line[len(line.rstrip("\r\n")):]
+    scanned = _plan_scan_unquoted("".join(raw_lines))
+    scanned_lines = scanned.splitlines()
+    for lines in (expected, scanned_lines):
+        lines.extend([""] * (len(raw_lines) - len(lines)))
+    if any(scanned_lines[index] != expected[index]
+           for index in range(len(raw_lines)) if index not in blank):
+        return whole
+    return scanned
 
 
 def plan_escalation_matches(plan_body: str

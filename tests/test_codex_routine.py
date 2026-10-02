@@ -98,6 +98,21 @@ def test_runtime_waits_for_the_same_slow_begin_session():
     assert "never invoke `begin` again" in normalized
 
 
+def test_archive_helper_runs_after_only_an_ok_gate_in_the_app_hosted_routine():
+    runtime = routine().split("\n---\n", 1)[1]
+    normalized = " ".join(runtime.split())
+
+    assert normalized.index("begin --agent codex") < normalized.index(
+        "After `begin`, run the SSD archive helper"
+    )
+    assert 'only when its JSON has `gate: "ok"`' in normalized
+    assert (
+        "python3 /Users/nateprich/.claude/command-center-run/"
+        "session_log_archive.py"
+    ) in normalized
+    assert "Keep it app-hosted, never in the launchd run-keeper." in normalized
+
+
 def funnel_wait_rule() -> str:
     import funnel
 

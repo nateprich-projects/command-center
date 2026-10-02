@@ -1,12 +1,20 @@
 {
-  "generated_at": "2026-09-13T08:00:00Z",
+  "generated_at": "2026-10-01T19:00:00Z",
   "last_brief_failed": false,
   "usage": {
     "muse": {
+      "source": "Local Muse session journal estimate",
+      "captured_at": "2026-09-13T08:00:00Z",
       "spent_dollars": 0.704,
       "cap_dollars": 20.0,
       "used_percent": 3.52,
       "calls": 42
+    },
+    "muse_panel": {
+      "used_percent": 15.0,
+      "sampled_at": "2026-09-29T20:55:00-07:00",
+      "source": "Muse account panel",
+      "source_url": "https://github.com/nateprich-projects/command-center/issues/1673#issuecomment-5903766309"
     }
   },
   "brief": {

@@ -1472,6 +1472,33 @@ def _working_tree_paths(root: pathlib.Path) -> List[str]:
     return sorted(paths)
 
 
+def _tracked_working_tree_paths(root: pathlib.Path) -> List[str]:
+    """List changes to paths already tracked by the ticket branch."""
+    tracked = set(_git_name_paths(
+        root, ("ls-tree", "-r", "--name-only", "-z", "HEAD")))
+    raw = _run(["git", "diff", "--name-status", "-z", "HEAD"], cwd=root,
+               timeout=LOCAL_GIT_TIMEOUT_SECONDS).stdout
+    fields = raw.split("\0")
+    paths = set()
+    index = 0
+    while index < len(fields):
+        status = fields[index]
+        index += 1
+        if not status:
+            continue
+        if status[0] in ("R", "C"):
+            old, new = fields[index:index + 2]
+            index += 2
+            if old in tracked:
+                paths.update((old, new))
+        else:
+            path = fields[index]
+            index += 1
+            if status[0] != "A" and path in tracked:
+                paths.add(path)
+    return sorted(paths)
+
+
 def _staged_paths(root: pathlib.Path) -> List[str]:
     """List the paths currently in the index, using Git's safe NUL format."""
     return sorted(set(_git_name_paths(
@@ -2759,6 +2786,29 @@ def _push_ticket_branch(root: pathlib.Path, branch: str, *, ref: str,
     _run(["git", "push", "--set-upstream", "origin", branch], cwd=root,
          timeout=REMOTE_GIT_TIMEOUT_SECONDS)
 
+
+def _preserve_human_step_work(
+        root: pathlib.Path, number: int, branch: str, *, ref: str,
+        run: Optional[str], agent: str) -> Optional[str]:
+    """Push a tracked-only WIP checkpoint before a human-step side effect."""
+    paths = _tracked_working_tree_paths(root)
+    if not paths:
+        return None
+    stray = [path for path in paths if _is_run_scratch(path)]
+    if stray:
+        raise StrayFileError(stray)
+    _require_current_claim(ref, run, agent)
+    _run(
+        ["git", "commit", "--only", "-m",
+         "[human-step-wip] WIP #{}: preserve tracked work".format(number),
+         "--", *paths],
+        cwd=root, timeout=LOCAL_GIT_TIMEOUT_SECONDS,
+    )
+    _push_ticket_branch(root, branch, ref=ref, run=run, agent=agent)
+    return _run(["git", "rev-parse", "HEAD"], cwd=root,
+                timeout=LOCAL_GIT_TIMEOUT_SECONDS).stdout.strip()
+
+
 def _remove_codex_run_checkout(root: pathlib.Path, number: int,
                                agent: str) -> bool:
     """Remove only this Codex ticket checkout under a runtime codex-runs/.
@@ -3160,6 +3210,12 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
     _remove_codex_run_checkout(context["root"], context["number"], agent)
     return pr
 
+
+def _human_step_wip_note(branch: str, sha: str, reason: str) -> str:
+    return ("\n\nPreserved tracked work on `{}` in WIP commit `{}`. "
+            "Human-block reason: `{}`.").format(branch, sha, reason)
+
+
 def finish_blocked_on_human(
         blocked: dict, *, run: str, agent: str = "codex",
         repo: Optional[str] = None, cwd: Optional[os.PathLike] = None,
@@ -3184,9 +3240,10 @@ def finish_blocked_on_human(
         extra_note: Optional[str] = None) -> dict:
     """File the human step, block the ticket, release, and finish. No PR.
 
-    No test run, commit, or push happens here. After recording the finish, the
-    guarded cleanup removes a checkout only if its clean Git head already
-    matches the ticket's remote branch; unpushed or dirty work stays (#1856).
+    No test run or PR happens here. A Codex run first pushes tracked dirty
+    work in a marked WIP commit; failure aborts before the human-step effects.
+    After recording the finish, guarded cleanup removes a checkout only if its
+    clean Git head matches the ticket's remote branch; other work stays (#1856).
     A failure after the sub-issue exists names it, so the retry starts
     from GitHub's truth rather than filing a second one. The step's Needs
     follows its reason: ``session_needs_effect`` for a step a Claude Code
@@ -3210,6 +3267,11 @@ def finish_blocked_on_human(
         raise ImplementError(
             "blocked_on_human needs the ticket's parent to file the "
             "human step under")
+    wip_sha = None
+    if agent == "codex":
+        wip_sha = _preserve_human_step_work(
+            context["root"], context["number"], context["branch"],
+            ref=ref, run=run, agent=agent)
     # Read before filing: a lane filed a second step for one ticket after Nate
     # closed the first as not planned, re-blocking the ticket he had unblocked.
     # Matching is on the ticket number the step names, never on the action's
@@ -3224,7 +3286,8 @@ def finish_blocked_on_human(
             heartbeat_finish=heartbeat_finish, block_effect=block_effect,
             comment_effect=comment_effect, comments_effect=comments_effect,
             head_effect=head_effect, route_needs_effect=route_needs_effect,
-            human_needs_effect=human_needs_effect, extra_note=extra_note)
+            human_needs_effect=human_needs_effect, extra_note=extra_note,
+            wip_sha=wip_sha)
     step_needs = HUMAN_STEP_NEEDS[blocked["reason"]]
     title = render_human_step_title(
         blocked["action"], needs=step_needs)
@@ -3240,10 +3303,15 @@ def finish_blocked_on_human(
             needs_effect(created["url"], created["ref"])
         block_effect(resolved, context["number"],
                      blocked_by=created["number"], cwd=context["root"])
+        blocked_comment = (
+            "**Blocked on #{}:** Complete the human step before resuming "
+            "this ticket.".format(created["number"]))
+        if wip_sha is not None:
+            blocked_comment += _human_step_wip_note(
+                context["branch"], wip_sha, blocked["reason"])
         comment_effect(
             resolved, context["number"],
-            "**Blocked on #{}:** Complete the human step before resuming "
-            "this ticket.".format(created["number"]),
+            blocked_comment,
             run=run, agent=agent, cwd=context["root"])
     except funnel.GitHubError as exc:
         raise funnel.GitHubError(
@@ -3272,7 +3340,7 @@ def _finish_closed_human_step(
         head_effect: Callable[[pathlib.Path, str], Optional[str]],
         route_needs_effect: Callable[[str, str], None],
         human_needs_effect: Callable[[str, str], None],
-        extra_note: Optional[str]) -> dict:
+        extra_note: Optional[str], wip_sha: Optional[str]) -> dict:
     """Route a ticket whose step Nate closed as not planned; file nothing.
 
     Routed like an accept-body conflict: Needs stays with the agents and a
@@ -3289,16 +3357,22 @@ def _finish_closed_human_step(
     if routed_for_closed_step(comments_effect(resolved, number), step_ref,
                               head):
         human_needs_effect(ticket["url"], ref)
-        comment_effect(resolved, number,
-                       render_closed_step_hold(step_ref, head),
+        hold_comment = render_closed_step_hold(step_ref, head)
+        if wip_sha is not None:
+            hold_comment += _human_step_wip_note(
+                context["branch"], wip_sha, blocked["reason"])
+        comment_effect(resolved, number, hold_comment,
                        run=run, agent=agent, cwd=root)
         routed = "human"
         outcome = "already routed at this head; Needs human"
     else:
         route_needs_effect(ticket["url"], ref)
         try:
-            comment_effect(resolved, number,
-                           render_closed_step_route(step_ref, head, blocked),
+            route_comment = render_closed_step_route(step_ref, head, blocked)
+            if wip_sha is not None:
+                route_comment += _human_step_wip_note(
+                    context["branch"], wip_sha, blocked["reason"])
+            comment_effect(resolved, number, route_comment,
                            run=run, agent=agent, cwd=root)
             routed = "review"
             outcome = "routed to review and shaping"

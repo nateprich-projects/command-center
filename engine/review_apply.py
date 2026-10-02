@@ -260,11 +260,17 @@ def decide(answer: Dict[str, object]) -> Tuple[str, List[str], Optional[str]]:
         verdict = "rejected"
         blocking = blocking + [
             "requirement unmet: {} -- {}".format(
-                entry.get("requirement"), entry.get("evidence"))
+                review.neutralize_closing_reference_line(
+                    str(entry.get("requirement"))),
+                review.neutralize_closing_reference_line(
+                    str(entry.get("evidence"))))
             for entry in unmet]
         blocking = blocking + [
             "requirement unsure: {} -- {}".format(
-                entry.get("requirement"), entry.get("evidence"))
+                review.neutralize_closing_reference_line(
+                    str(entry.get("requirement"))),
+                review.neutralize_closing_reference_line(
+                    str(entry.get("evidence"))))
             for entry in req_unsure]
     return verdict, blocking, "; ".join(notes) or None
 

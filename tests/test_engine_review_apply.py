@@ -12,6 +12,7 @@ from __future__ import annotations
 import io
 import json
 import pathlib
+import re
 import stat
 import sys
 
@@ -42,6 +43,39 @@ def answer(**kw):
             "requirements": [requirement()]}
     data.update(kw)
     return json.dumps(data)
+
+
+CLOSING_VERBS = (
+    "fix", "fixes", "fixed", "close", "closes", "closed",
+    "resolve", "resolves", "resolved",
+)
+CLOSING_REFERENCE_SHAPES = (
+    "42", "#42", "owner/repo#42",
+    "https://github.com/owner/repo/issues/42",
+    "https://github.com/owner/repo/pull/42",
+)
+CLOSING_CASES = ("lower", "title", "upper", "mixed")
+
+
+def closing_verb_case(verb, style):
+    if style == "lower":
+        return verb.lower()
+    if style == "title":
+        return verb.capitalize()
+    if style == "upper":
+        return verb.upper()
+    return "".join(char.upper() if index % 2 == 0 else char.lower()
+                   for index, char in enumerate(verb))
+
+
+def has_closing_reference(text, reference):
+    verbs = "|".join(CLOSING_VERBS)
+    pattern = re.compile(
+        r"(?<![A-Za-z0-9_])(?:" + verbs + r")\b\s*:?\s*"
+        + re.escape(reference) + r"\b",
+        re.IGNORECASE,
+    )
+    return bool(pattern.search(text))
 
 
 # Every malformed shape the runner can hand over: not JSON, not an
@@ -301,6 +335,33 @@ def test_an_unsure_requirement_turns_an_approval_into_a_rejection():
     assert blocking == ["requirement unsure: rotate monthly "
                         "-- no rotation date in the diff"]
     assert "were unsure" in note
+
+
+@pytest.mark.parametrize("verb", CLOSING_VERBS)
+@pytest.mark.parametrize("reference", CLOSING_REFERENCE_SHAPES)
+@pytest.mark.parametrize("case", CLOSING_CASES)
+def test_two_sided_requirement_evidence_neutralizes_closing_references(
+        verb, reference, case):
+    rendered_verb = closing_verb_case(verb, case)
+    plain = "{} {}".format(rendered_verb, reference)
+    colon = "{}: {}".format(rendered_verb, reference)
+    requirements = [
+        requirement(status="unmet", requirement="check " + plain,
+                    evidence="observed " + colon),
+        requirement(status="unsure", requirement="check " + colon,
+                    evidence="observed " + plain),
+    ]
+
+    verdict, blocking, _ = review_apply.decide(
+        review_apply.parse_answer(answer(requirements=requirements)))
+
+    citation = "Prior ticket: {}".format(reference)
+    assert verdict == "rejected"
+    assert blocking == [
+        "requirement unmet: check {} -- observed {}".format(citation, citation),
+        "requirement unsure: check {} -- observed {}".format(citation, citation),
+    ]
+    assert not any(has_closing_reference(line, reference) for line in blocking)
 
 
 def test_met_requirements_keep_a_rejection_for_other_reasons():

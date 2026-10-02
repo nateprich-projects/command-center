@@ -62,8 +62,9 @@ def validation_exit(attempt: Optional[int]) -> int:
     return RETRY_EXIT if attempt < FINAL_ATTEMPT else 1
 
 
-def _read_fresh_shape_facts(item) -> Tuple[Optional[str], int]:
-    """Read the target's current Project Status and complete child count."""
+def _read_fresh_shape_facts(item) -> Tuple[str, Optional[str], int]:
+    """Read the target's current issue state, Project Status and complete
+    child count: the inputs of ``funnel.unshapeable_reason`` (#2139)."""
     fresh_items = funnel.load_project_items_by_refs([item.ref])
     if (not isinstance(fresh_items, list) or len(fresh_items) != 1
             or getattr(fresh_items[0], "ref", None) != item.ref):
@@ -74,6 +75,12 @@ def _read_fresh_shape_facts(item) -> Tuple[Optional[str], int]:
         )
 
     fresh = fresh_items[0]
+    state = getattr(fresh, "state", None)
+    if not isinstance(state, str):
+        raise funnel.GitHubError(
+            "could not read current issue state for {} before shape "
+            "apply".format(item.ref)
+        )
     status = getattr(fresh, "status", None)
     if status is not None and not isinstance(status, str):
         raise funnel.GitHubError(
@@ -88,7 +95,7 @@ def _read_fresh_shape_facts(item) -> Tuple[Optional[str], int]:
             "could not read current sub-issue count for {} before shape "
             "apply".format(item.ref)
         )
-    return status, children_total
+    return state, status, children_total
 
 
 #: The answer keys shape-apply accepts — exactly these, no extras. From
@@ -1339,15 +1346,17 @@ def apply_shape(items: list, now: datetime, ref: str,
         command += ["--add-blocked-by", ",".join(blocked_by)]
 
     # The packet and decision may be minutes old. Re-read immediately before
-    # the first issue mutation; a moved stage or newly added child makes this
-    # answer stale. Body-only edits deliberately do not block the apply.
-    fresh_status, fresh_children = _read_fresh_shape_facts(item)
-    if fresh_status != "Ideas" or fresh_children > 0:
+    # the first issue mutation; a closed issue, a moved stage or a newly added
+    # child makes this answer stale, by the picker's own predicate (#2139).
+    # Body-only edits deliberately do not block the apply.
+    fresh_state, fresh_status, fresh_children = _read_fresh_shape_facts(item)
+    stale_reason = funnel.unshapeable_reason(
+        fresh_state, fresh_status, fresh_children)
+    if stale_reason is not None:
         status_label = fresh_status if fresh_status is not None else "missing"
-        reason = "with-children" if fresh_children > 0 else "status-changed"
-        print("{} ref={} reason={} fresh Status={} children={}".format(
-            SKIPPED_STALE_SHAPE_OUTCOME, item.ref, reason, status_label,
-            fresh_children,
+        print("{} ref={} reason={} fresh Status={} children={} state={}".format(
+            SKIPPED_STALE_SHAPE_OUTCOME, item.ref, stale_reason, status_label,
+            fresh_children, fresh_state,
         ))
         return 0
 

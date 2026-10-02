@@ -18689,6 +18689,27 @@ def review_queue(
     return found
 
 
+def unshapeable_reason(state: Optional[str], status: Optional[str],
+                       children_total: int) -> Optional[str]:
+    """Why a row cannot be shaped now, or ``None`` when it can (#2139).
+
+    The one shapeable-now predicate: ``shapeable_idea`` filters with it, and
+    ``shape.apply_shape`` refuses a stale apply with it on its fresh re-read,
+    so the picker offers a row exactly when apply would proceed on it. A
+    closed issue is never shaped, nor is one that has left Ideas or already
+    has children. The needs-shaping label, tier and headroom are not here:
+    they are the picker's alone, because ``shape-apply --voice nate-relayed``
+    shapes unlabelled ideas in session.
+    """
+    if state != "OPEN":
+        return "not-open"
+    if status != "Ideas":
+        return "status-changed"
+    if children_total > 0:
+        return "with-children"
+    return None
+
+
 def shapeable_idea(items: Sequence[Item], tier: Optional[str],
                    reading: Dict,
                    skipped: Optional[List[Dict[str, str]]] = None
@@ -18697,9 +18718,10 @@ def shapeable_idea(items: Sequence[Item], tier: Optional[str],
 
     Shaping starts new work, so it is the last optional job after review and
     breakdown. The ordering itself stays in ``ideas()``; this function only
-    filters that shared order through the existing tier and headroom rules.
-    Ideas with children are ineligible here; ``shape.apply_shape`` keeps its
-    fresh-read refusal as a backstop for children added after this selection.
+    filters that shared order through the existing tier and headroom rules
+    and ``unshapeable_reason``, the predicate ``shape.apply_shape``'s
+    fresh-read refusal shares (#2139). That refusal is the backstop for a
+    row that closes, moves or gains children after this selection.
 
     Each tier shapes its own ideas: an escalated run is offered the
     first escalated-tier idea, a standard run the first standard-tier
@@ -18720,11 +18742,14 @@ def shapeable_idea(items: Sequence[Item], tier: Optional[str],
         )
         if tier is not None and needed != tier:
             continue
-        if getattr(item, "children_total", 0) > 0:
+        reason = unshapeable_reason(
+            getattr(item, "state", None), getattr(item, "status", None),
+            getattr(item, "children_total", 0))
+        if reason is not None:
             if skipped is not None:
                 skipped.append({
                     "ref": item.ref,
-                    "reason": "with-children",
+                    "reason": reason,
                 })
             continue
         return item

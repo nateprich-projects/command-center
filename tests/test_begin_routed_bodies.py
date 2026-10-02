@@ -131,9 +131,10 @@ class Row:
 class Board:
     """Answer every GraphQL document the listing, queue and begin send.
 
-    ``events`` records each detail read that asked for bodies, as
-    ``("body", [item ids])``, in order with the claim writes the begin
-    fixture adds. ``body_reads`` is the same reads alone: the spy.
+    ``events`` records each detail read that asked for bodies, in order with
+    the claim writes the begin fixture adds: ``("body", [item ids])`` for a
+    body-only read, ``("refresh", [item ids])`` for the post-claim body and
+    history read. ``body_reads`` is every body read's ids alone: the spy.
     """
 
     def __init__(self, rows, events):
@@ -147,12 +148,17 @@ class Board:
         if "nodes(ids: $ids)" in query:
             ids = list(variables["ids"])
             with_body = "body" in query
+            with_history = "timelineItems" in query
             if with_body:
                 self.body_reads.append(ids)
-                self.events.append(("body", ids))
+                self.events.append(
+                    ("refresh" if with_history else "body", ids)
+                )
             nodes = []
             for item_id in ids:
-                content = {"timelineItems": {"nodes": []}}
+                content = {}
+                if with_history:
+                    content["timelineItems"] = {"nodes": []}
                 if with_body:
                     content["body"] = self.by_id[item_id].body
                 nodes.append({"id": item_id, "content": content})
@@ -321,7 +327,7 @@ def test_a_withheld_bug_is_dropped_before_ranking_so_begin_takes_the_next(
     assert board.events == [
         ("body", [bug.item_id]),
         ("claim", other.ref, CLAIM),
-        ("body", [other.item_id]),
+        ("refresh", [other.item_id]),
     ]
 
     board.body_reads.clear()
@@ -348,6 +354,11 @@ def test_an_edited_acceptance_makes_the_routed_bug_startable_again(
     # Decided on the loaded body, not deferred past the claim.
     assert board.body_reads == [[bug.item_id]]
     assert bug.ref in [item.ref for item in view.startable_candidates]
+    # The body-only read adds the body and leaves the listed Status age the
+    # shared order sorts by.
+    loaded = {item.ref: item for item in view}[bug.ref]
+    assert loaded.body_loaded and loaded.body == bug.body
+    assert loaded.status_since == funnel.parse_time(bug.updated)
     result = _run_begin(monkeypatch, capsys, view, _hydrating(view))
 
     # Nothing has started yet, so the Bugs' turn takes the Bug.
@@ -357,7 +368,7 @@ def test_an_edited_acceptance_makes_the_routed_bug_startable_again(
     assert board.events == [
         ("body", [bug.item_id]),
         ("claim", bug.ref, CLAIM),
-        ("body", [bug.item_id]),
+        ("refresh", [bug.item_id]),
     ]
 
     board.body_reads.clear()
@@ -396,10 +407,10 @@ def test_a_withhold_found_after_claim_moves_on_to_the_next_pick(
     assert board.events == [
         ("body", [bug.item_id]),
         ("claim", bug.ref, CLAIM),
-        ("body", [bug.item_id]),
+        ("refresh", [bug.item_id]),
         ("claim", bug.ref, ""),
         ("claim", other.ref, CLAIM),
-        ("body", [other.item_id]),
+        ("refresh", [other.item_id]),
     ]
 
 
@@ -498,6 +509,12 @@ def test_unrouted_rows_are_never_read_before_ranking(monkeypatch):
     assert not any(item.body_loaded for item in view)
 
 
+#: One routed row's body-only read: three fields, one request's overhead.
+ONE_BODY = (
+    funnel.BEGIN_DETAIL_BODY_FIELDS_PER_ITEM + funnel.BEGIN_DETAIL_QUERY_OVERHEAD
+)
+
+
 def test_the_routed_read_is_charged_to_the_begin_envelope(monkeypatch):
     rows = _bug_and_improve(ORIGINAL)
     bug = rows[1]
@@ -508,25 +525,84 @@ def test_the_routed_read_is_charged_to_the_begin_envelope(monkeypatch):
     view = _begin_view()
 
     loaded = {item.ref: item for item in view}
-    assert envelope.hydrated_fields == funnel.begin_detail_hydration_work(
-        view, [loaded[bug.ref]]
-    )
+    assert funnel.begin_body_read_work(view, [loaded[bug.ref]]) == ONE_BODY
+    assert envelope.hydrated_fields == ONE_BODY
+    assert envelope.listed_items == len(rows)
     assert envelope.remaining >= funnel.BEGIN_DETAIL_WORK_RESERVE
 
 
-def test_a_routed_read_that_would_spend_the_claim_reserve_refuses(
-    monkeypatch,
+def test_many_routed_rows_still_fit_beside_the_claim_reserve(monkeypatch):
+    """The post-claim read would charge ~300 units a row; a body three."""
+    rows = [Row(1, "Gates: none", klass="Bug", children=12)] + [
+        Row(number, ORIGINAL, parent=1, needs="agent")
+        for number in range(2, 14)
+    ]
+    board = _board(monkeypatch, rows, {
+        row.ref: UNSATISFIABLE for row in rows[1:]
+    })
+    envelope = funnel.BeginWorkEnvelope()
+    monkeypatch.setattr(funnel, "_ACTIVE_BEGIN_ENVELOPE", envelope)
+
+    view = _begin_view()
+
+    assert view.startable_candidates == []
+    assert board.body_reads == [[row.item_id for row in rows[1:]]]
+    assert envelope.hydrated_fields == (
+        12 * funnel.BEGIN_DETAIL_BODY_FIELDS_PER_ITEM
+        + funnel.BEGIN_DETAIL_QUERY_OVERHEAD
+    )
+
+
+@pytest.mark.parametrize("spare, refuses", [(0, True), (1, False)])
+def test_a_routed_read_never_spends_the_claim_reserve(
+    monkeypatch, spare, refuses,
 ):
     rows = _bug_and_improve(ORIGINAL)
     board = _board(monkeypatch, rows, {rows[1].ref: UNSATISFIABLE})
-    # The listing fits beside the reserve; the routed read does not.
+    # The listing's rows, the read and its request beside the full reserve,
+    # less one unit when it must refuse.
     envelope = funnel.BeginWorkEnvelope(
-        limit=funnel.BEGIN_DETAIL_WORK_RESERVE + 200
+        limit=funnel.BEGIN_DETAIL_WORK_RESERVE + len(rows) + ONE_BODY
+        + spare
     )
     monkeypatch.setattr(funnel, "_ACTIVE_BEGIN_ENVELOPE", envelope)
 
-    with pytest.raises(funnel.BeginCannotComplete):
+    if refuses:
+        with pytest.raises(funnel.BeginCannotComplete):
+            _begin_view()
+        assert board.body_reads == []
+        assert envelope.hydrated_fields == 0
+    else:
+        _begin_view()
+        assert board.body_reads == [[rows[1].item_id]]
+        assert envelope.remaining == funnel.BEGIN_DETAIL_WORK_RESERVE + 1
+
+
+def test_a_body_only_read_that_omits_the_body_fails_the_load(monkeypatch):
+    rows = _bug_and_improve(ORIGINAL)
+    board = _board(monkeypatch, rows, {rows[1].ref: UNSATISFIABLE})
+    listing = board.__call__
+
+    def omit_bodies(query, **variables):
+        if "nodes(ids: $ids)" in query:
+            return {"nodes": [{"id": item_id, "content": {}}
+                              for item_id in variables["ids"]]}
+        return listing(query, **variables)
+
+    monkeypatch.setattr(funnel, "gh_graphql", omit_bodies)
+
+    with pytest.raises(funnel.GitHubError, match="omitted issue body"):
         _begin_view()
 
-    assert board.body_reads == []
-    assert envelope.hydrated_fields == 0
+
+def test_the_body_only_request_asks_for_the_body_alone():
+    query, variables, field, child_field = funnel._item_detail_request(
+        ["item-2"], ["item-2"], body_only=True,
+    )
+
+    assert query == funnel.ITEM_BODY_DETAILS_QUERY
+    assert "body" in query
+    assert "timelineItems" not in query
+    assert "subIssues" not in query
+    assert variables == {"ids": ["item-2"]}
+    assert (field, child_field) == ("nodes", None)

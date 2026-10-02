@@ -2416,7 +2416,8 @@ def test_finish_blocked_on_human_pushes_tracked_wip_before_blocking(
         sub_issues_effect=lambda *args: [],
     )
 
-    assert effects == ["create", "needs", "block", "comment", "release",
+    # #2168: the ticket's block record is posted before the label goes on.
+    assert effects == ["create", "needs", "comment", "block", "release",
                        "finish"]
     assert run_git(
         "--git-dir", str(remote), "rev-list", "--count",

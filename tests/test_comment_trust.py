@@ -169,8 +169,8 @@ WRITERS = frozenset({
     "decline_classifier.py:declined_pending_gate_answer_comment",
     "engine/shape.py:render_plan",
     "engine/implement.py:render_closed_step_route",
-    "engine/implement.py:finish_declined",
-    "engine/implement.py:close_declined_defer_note_proof",
+    # finish_declined, close_declined_defer_note_proof and
+    # finish_blocked_on_human render through block_record's writers (#2168).
     "engine/implement.py:render_evidence_block",
 })
 

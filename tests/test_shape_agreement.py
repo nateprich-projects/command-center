@@ -16,6 +16,8 @@ reader's way.
 
 from __future__ import annotations
 
+import io
+import json
 import pathlib
 import sys
 from dataclasses import dataclass
@@ -35,6 +37,7 @@ from test_engine_shape import (  # noqa: E402  (shared fixture harness)
     gh_calls,
     idea,
     stub_gh,
+    stub_project_ref_load,
 )
 
 
@@ -327,3 +330,284 @@ def test_apply_writes_the_class_the_reader_adopts(case, monkeypatch, capsys):
         status, reason = expected_decision(case)
         verb = "advanced to Ready" if status == "Ready" else "held at Shaped"
         assert "{}: {}".format(verb, reason) in capsys.readouterr().out
+
+
+# -- one decision record per answer (#2137) ---------------------------------
+#
+# Preview, ``apply_main --validate-only`` and the live ``apply_shape`` each
+# decided, scanned and derived the Risk write themselves until #2137, and
+# preview and the Risk write drifted apart twice (#1538 in #1644, #1679 in
+# #1721). ``shape.shape_decision`` now validates, reviews and records one
+# answer, both paths run it once, and every write reads the record.
+
+GENERIC_SCOPE = {"exposure": None, "gates": None,
+                 "scope": ["Should we fix this?"], "preference": None}
+GATES_QUESTION = {"exposure": None, "gates": ["Who may write Ready?"],
+                  "scope": None, "preference": None}
+
+#: Raw model answers. ``generic-permission`` is the matrix's answer; the
+#: others are the cases #2137 adds, each differing from ``clean`` in one way.
+ANSWERS = {
+    "generic-permission": lambda: answer(
+        proposed_class="Broken", needs_nate=GENERIC_SCOPE),
+    "clean": lambda: answer(proposed_class="Broken"),
+    "typed-risk": lambda: answer(
+        proposed_class="Broken",
+        escalated_risk=[{"reason": "data-migration",
+                         "why": "backfills the ledger table"}]),
+    "scan-only": lambda: answer(
+        proposed_class="Broken",
+        plan_markdown="# Plan\n\nWe will rotate the deploy api-key monthly.\n"),
+    "prose-rationale": lambda: answer(
+        proposed_class="Broken",
+        plan_markdown=("# Plan\n\nDisplay source freshness.\n\n"
+                       "## Risk rationale\n\n"
+                       "- destructive: drops the retired table\n")),
+    "gates-question": lambda: answer(
+        proposed_class="Broken", needs_nate=GATES_QUESTION),
+    "generic-permission-new": lambda: answer(
+        proposed_class="New", needs_nate=GENERIC_SCOPE),
+}
+
+
+@dataclass(frozen=True)
+class DecisionCase:
+    """One matrix idea, optionally under a parent with a Class, and an answer."""
+
+    case: ShapeCase
+    answer: str
+    parent: Optional[str] = None
+
+    @property
+    def id(self):
+        parts = [self.case.origin, str(self.case.klass), self.case.state,
+                 self.answer]
+        if self.parent is not None:
+            parts.append("under-" + self.parent)
+        return "-".join(parts)
+
+
+AGENT_BROKEN_OPEN = ShapeCase("agent", "Broken", "OPEN")
+AGENT_BROKEN_CLOSED = ShapeCase("agent", "Broken", "CLOSED")
+_AGENT_READY = "needs_nate all null; class Broken self-approvable; origin agent"
+_CLOSED = "the issue is CLOSED on GitHub"
+
+#: (status, reason, Risk, Needs, declared, scan) for every case beyond the
+#: matrix's generic-permission rows, written out from the ticket. The parent
+#: rows and the unclassed agent idea proposing New answer the #2136 review.
+EXPECTED_RECORDS = {
+    DecisionCase(AGENT_BROKEN_OPEN, "typed-risk"): (
+        "Shaped", "escalated risk (data-migration)",
+        "escalated", "human", ["data-migration"], []),
+    DecisionCase(AGENT_BROKEN_CLOSED, "typed-risk"): (
+        "Shaped", _CLOSED + "; escalated risk (data-migration)",
+        "escalated", "human", ["data-migration"], []),
+    DecisionCase(AGENT_BROKEN_OPEN, "scan-only"): (
+        "Ready", _AGENT_READY
+        + "; scan-only escalation (credentials) raises the review tier",
+        "escalated", "none", [], ["credentials"]),
+    DecisionCase(AGENT_BROKEN_CLOSED, "scan-only"): (
+        "Shaped", _CLOSED, "escalated", "human", [], ["credentials"]),
+    DecisionCase(AGENT_BROKEN_OPEN, "prose-rationale"): (
+        "Shaped", "escalated risk (destructive)",
+        "escalated", "human", ["destructive"], []),
+    DecisionCase(AGENT_BROKEN_CLOSED, "prose-rationale"): (
+        "Shaped", _CLOSED + "; escalated risk (destructive)",
+        "escalated", "human", ["destructive"], []),
+    DecisionCase(AGENT_BROKEN_OPEN, "gates-question"): (
+        "Shaped", "open question under Gates", "standard", "human", [], []),
+    DecisionCase(AGENT_BROKEN_CLOSED, "gates-question"): (
+        "Shaped", _CLOSED + "; open question under Gates",
+        "standard", "human", [], []),
+    # The parent's Class is the idea's Class, whatever the idea carries.
+    DecisionCase(ShapeCase("agent", "New", "OPEN"), "generic-permission",
+                 parent="Broken"): (
+        "Ready", _AGENT_READY, "standard", "none", [], []),
+    DecisionCase(ShapeCase("agent", "Broken", "OPEN"), "generic-permission",
+                 parent="New"): (
+        "Shaped", "class New is not self-approvable; " + _SCOPE_OPEN,
+        "standard", "human", [], []),
+    DecisionCase(ShapeCase("nate-override-to-agents", None, "OPEN"), "clean",
+                 parent="Broken"): (
+        "Ready", "needs_nate all null; class Broken self-approvable; "
+        "origin override to agents", "standard", "none", [], []),
+    # The adopted Class is not self-approvable, so the output review does not
+    # judge the answer and its generic question stays open.
+    DecisionCase(ShapeCase("agent", None, "OPEN"),
+                 "generic-permission-new"): (
+        "Shaped", "class New is not self-approvable; " + _SCOPE_OPEN,
+        "standard", "human", [], []),
+}
+
+DECISION_CASES = ([DecisionCase(case, "generic-permission") for case in MATRIX]
+                  + list(EXPECTED_RECORDS))
+
+#: Needs is human exactly when the status is Shaped (#2137).
+_NEEDS_FOR = {"Ready": "none", "Shaped": "human"}
+
+
+def expected_record(case: DecisionCase):
+    """The matrix rows decide as #2136's table says, with nothing at risk."""
+    if case in EXPECTED_RECORDS:
+        return EXPECTED_RECORDS[case]
+    status, reason = expected_decision(case.case)
+    return status, reason, "standard", _NEEDS_FOR[status], [], []
+
+
+PARENT_NUMBER = 7
+
+
+def decision_items(case: DecisionCase):
+    """The idea and the Project rows shaping reads, its parent included."""
+    item = matrix_item(case.case)
+    if case.parent is None:
+        return item, [item]
+    parent = idea(PARENT_NUMBER, klass=case.parent, status="Building",
+                  origin="Nate", labels=[])
+    item.parent = parent.ref
+    return item, [item, parent]
+
+
+def run_shape_apply(monkeypatch, capsys, data, *flags):
+    """Run the shape-apply CLI on idea 42 with ``data`` on stdin."""
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(data)))
+    capsys.readouterr()
+    code = shape.apply_main(["42", "--repo", REPO, "--answer", "-", *flags])
+    captured = capsys.readouterr()
+    return code, captured.out, captured.err
+
+
+def _bodies(calls, *prefix):
+    return [args[args.index("--body") + 1]
+            for _, args in gh_calls(calls, *prefix) if "--body" in args]
+
+
+@pytest.mark.parametrize("case", DECISION_CASES, ids=lambda case: case.id)
+def test_the_record_holds_the_decision(case):
+    item, items = decision_items(case)
+    status, reason, risk, needs, declared, scan = expected_record(case)
+
+    record = shape.shape_decision(items, item, ANSWERS[case.answer]())
+
+    assert (record.status, record.reason) == (status, reason)
+    assert (record.risk, record.needs) == (risk, needs)
+    assert record.declared == declared
+    assert [entry["reason"] for entry in record.matches] == scan
+    # The ticket's two rules, read off the record itself.
+    assert (record.risk == "escalated") is bool(
+        record.declared or record.matches)
+    assert (record.needs == "human") is (record.status == "Shaped")
+    assert shape.preview_decision(items, item, record.answer) == (
+        status, reason)
+
+
+@pytest.mark.parametrize("case", DECISION_CASES, ids=lambda case: case.id)
+def test_validate_only_prints_what_the_live_apply_writes(
+        case, monkeypatch, capsys):
+    item, items = decision_items(case)
+    stub_project_ref_load(monkeypatch, *items)
+    status, reason, risk, needs, declared, scan = expected_record(case)
+    data = ANSWERS[case.answer]()
+
+    def offline(*args, **kwargs):
+        raise AssertionError("validate-only must not reach GitHub")
+
+    monkeypatch.setattr(funnel, "gh_graphql", offline)
+    monkeypatch.setattr(funnel.subprocess, "run", offline)
+    code, out, _ = run_shape_apply(monkeypatch, capsys, data, "--validate-only")
+    assert code == 0
+    previewed = json.loads(out)
+    assert (previewed["status"], previewed["reason"]) == (status, reason)
+
+    calls = stub_gh(monkeypatch, item)
+    field_writes = []
+    monkeypatch.setattr(
+        funnel, "write_project_select",
+        lambda item_id, field, value, ref: field_writes.append((field, value)))
+    code, out, err = run_shape_apply(
+        monkeypatch, capsys, data, "--run", "shape-run", "--agent", "muse")
+
+    body_writes = _bodies(calls, "gh", "issue", "edit")
+    comments = _bodies(calls, "gh", "issue", "comment")
+    approvals = [comment for comment in comments
+                 if comment.startswith(funnel.SELF_APPROVED_PREFIX)]
+    if not body_writes:
+        # #2139 refuses an idea the fresh read shows CLOSED before any write,
+        # so nothing is written that could disagree with the preview.
+        assert case.case.state == "CLOSED"
+        assert (code, field_writes, comments) == (0, [], [])
+        return
+
+    (body,) = body_writes
+    assert funnel.parse_shape_risk_record(body) == {
+        "declared": declared, "scan": scan}
+    assert field_writes == [("Risk", risk), ("Needs", needs)]
+    class_writes = [
+        call[2]["option"] for call in calls
+        if call[0] == "graphql" and call[1] == funnel.SET_FIELD
+        and call[2].get("field") == funnel.CLASS_FIELD_ID]
+    if case.case.origin == "agent" and case.case.klass is None:
+        assert class_writes == [
+            "opt-{}".format(data["proposed_class"])]
+    else:
+        assert class_writes == []
+    if case.case.state == "CLOSED":
+        # The closed-issue guard refuses the Status write (#1206); what was
+        # asked for is the record's status, and nothing claims approval.
+        assert code == 1
+        assert item.status == "Ideas"
+        assert "could not confirm requested Status {} for {}".format(
+            status, item.ref) in err
+        assert approvals == []
+        return
+
+    assert code == 0
+    assert item.status == status
+    verb = "advanced to Ready" if status == "Ready" else "held at Shaped"
+    assert "{} → {}".format(item.ref, status) in out
+    assert "{}: {}".format(verb, reason) in out
+    if status == "Ready":
+        (approval,) = approvals
+        assert approval.startswith(
+            funnel.SELF_APPROVED_PREFIX + reason + "; no ")
+    else:
+        assert approvals == []
+    scan_comments = [comment for comment in comments
+                     if comment.startswith("**Escalation scan")]
+    assert len(scan_comments) == (1 if scan and not declared else 0)
+
+
+def test_both_paths_validate_review_and_record_once(monkeypatch, capsys):
+    """Each path runs the shared steps once and the wording scan once."""
+    item = matrix_item(AGENT_BROKEN_OPEN)
+    stub_project_ref_load(monkeypatch, item)
+    data = ANSWERS["scan-only"]()
+    steps = []
+    real_steps = getattr(shape, "shape_decision", None)
+
+    def spy_steps(items, target, answer_data):
+        steps.append(target.ref)
+        return real_steps(items, target, answer_data)
+
+    monkeypatch.setattr(shape, "shape_decision", spy_steps, raising=False)
+    scans = []
+    real_scan = funnel.plan_escalation_matches
+
+    def spy_scan(body):
+        scans.append(body)
+        return real_scan(body)
+
+    monkeypatch.setattr(funnel, "plan_escalation_matches", spy_scan)
+
+    assert run_shape_apply(
+        monkeypatch, capsys, data, "--validate-only")[0] == 0
+    preview = (len(scans), list(steps))
+    scans.clear()
+    steps.clear()
+    stub_gh(monkeypatch, item)
+    assert run_shape_apply(
+        monkeypatch, capsys, data, "--run", "shape-run", "--agent", "muse"
+    )[0] == 0
+
+    assert (preview[0], len(scans)) == (1, 1)
+    assert (preview[1], steps) == ([item.ref], [item.ref])

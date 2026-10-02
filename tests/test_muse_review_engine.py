@@ -4243,6 +4243,32 @@ def test_the_judges_are_told_how_to_weigh_the_implement_runs_evidence(
     assert "If `unavailable`, say so; judge as usual." in question
 
 
+def test_the_judges_read_either_form_of_a_prior_fix_line(tmp_path):
+    """#2069: finish now writes `rewrites #N's prior fix`, because GitHub
+    read the old `rewrites prior fix: #N` as closing #N. Both reach every
+    judge call, and no judge or routine instruction names only the old one,
+    since open PRs may carry it until they merge."""
+    new = "- rewrites #1964's prior fix (engine/implement.py:finish_done)"
+    old = "- rewrites prior fix: #1965 (engine/implement.py:finish_done)"
+    evidence = ("Implementer-reported: written into the PR body by the "
+                "implement run for this head, not verified by the review.\n"
+                "- sha: {}\n{}\n{}".format(HEAD, new, old))
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), _packet(evidence=evidence),
+        answers=_review_answers(_judge_answer()))
+
+    assert proc.returncode == 0, proc.stderr
+    judge = (repo / "muse.prompt.2").read_text()
+    assert new in judge
+    assert old in judge
+
+    framing = judge.split("The assigned requirements are:", 1)[0]
+    question = ROUTINE.read_text().split("\n---\n", 1)[1]
+    for text in (framing, question):
+        flat = " ".join(text.split())
+        assert "rewrites prior fix:" not in flat or "'s prior fix" in flat
+
+
 def test_the_routine_asks_for_cited_met_results_and_concrete_blocks():
     """#1852 (plan #1837 ticket 3, rule R3): a met cites the line doing the
     work, and a blocking item names the input, the path through the diff and

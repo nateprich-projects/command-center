@@ -2727,7 +2727,8 @@ def packet_evidence(inner: Optional[str], head_sha: object) -> str:
     which strips them from everything it writes (#1805). The block's own
     header line is replaced by ``EVIDENCE_LABEL``, which says whose report
     it is. Prior-fix rewrite lines are runner facts too and pass through to
-    the review packet unchanged.
+    the review packet unchanged, in either form: ``rewrites #N's prior fix``
+    and the ``rewrites prior fix: #N`` finish wrote before #2069.
     """
     if inner is None or not isinstance(head_sha, str) or not head_sha:
         return EVIDENCE_UNAVAILABLE
@@ -4049,10 +4050,11 @@ def collect(repo: Optional[str], pr_number: int, *,
         seen.add((closing_repo, closing_number))
         closing = fetch_ticket(closing_repo, closing_number)
         # An open PR cannot close a closed issue, so a closed one is never
-        # its spec. Evidence lines such as "rewrites prior fix: #N" are
-        # GitHub closing keywords, and judging the PR against that earlier
-        # ticket's Accept rejected PR #2047 for #1964's work (#2068). Merged
-        # and closed PRs keep their full list, so replays read as before.
+        # its spec. Evidence lines written before #2069, such as "rewrites
+        # prior fix: #N", are GitHub closing keywords, and judging the PR
+        # against that earlier ticket's Accept rejected PR #2047 for #1964's
+        # work (#2068). Merged and closed PRs keep their full list, so
+        # replays read as before.
         if pr_open and str(closing.get("state") or "").upper() == "CLOSED":
             continue
         tickets.append(closing)

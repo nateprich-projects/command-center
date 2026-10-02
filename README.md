@@ -51,9 +51,16 @@ When a ticket has a durable heartbeat binding, the record also carries each
 implementation run's detected model, effort, harness, provider, session time
 and four token kinds captured on that run's heartbeat finish. Missing transcript
 data stays null; new outcome derivation does not depend on local transcripts
-surviving. The heartbeat quota meter is not used as a cost proxy. The
-effective-dated rate table and notional dollar calculation are a separate
-consumer of these observations.
+surviving. A Muse run with some call ids uncaptured or journals unreadable
+carries the tokens of the journals that were read, with its coverage marked
+`partial`; the unread calls are counted, never estimated and never read as
+zero. With no journal read it carries no tokens. The heartbeat quota meter is
+not used as a cost proxy. The effective-dated rate table and notional dollar
+calculation are a separate consumer of these observations: a run with partial
+coverage, or with some token kinds unknown, is valued at its observed tokens
+only, with status `partial` and the missing calls or kinds listed, and is
+never `priced`. A ticket with such a run keeps its total `token_usage` null
+and its notional cost `incomplete`.
 
 `outcomes.py signals` computes priced cost per merged PR by observed lane,
 rework as attempts beyond the first per merged PR, and the intervention rate.

@@ -8,6 +8,7 @@ implements the gate itself, for the same reason neither ranks anything itself.
     usage.py claude          # the two windows, as JSON
     usage.py codex
     usage.py gate codex      # exit 0 to proceed, 1 if over pace, 2 if unknown
+    usage.py claude-plan-sample  # raw signed-in weekly sample for the dashboard
 
 **The gate must be called from inside a live session**, after that session has
 made at least one model call. Both sources are written *by* a running session,
@@ -550,15 +551,8 @@ def read_claude() -> Optional[Dict]:
     }
 
 
-def read_claude_plan_history(now: Optional[float] = None) -> Optional[Dict]:
-    """Read Claude's latest app-reported percentages for the signed-in org.
-
-    The desktop app keeps samples for every organization in one file. Only the
-    organization in Claude Code's current OAuth account is relevant here. A
-    missing, malformed, stale, or future-dated sample is unavailable so the
-    caller can use the existing transcript estimate.
-    """
-    now = time.time() if now is None else now
+def _latest_claude_plan_sample() -> Optional[Dict]:
+    """Return the newest numeric-timestamp sample for Claude Code's org."""
     try:
         with open(CLAUDE_APP_CONFIG) as fh:
             account = json.load(fh).get("oauthAccount", {})
@@ -594,12 +588,73 @@ def read_claude_plan_history(now: Optional[float] = None) -> Optional[Dict]:
     if newest is None:
         return None
 
-    captured_at = newest[0] / 1000.0
+    return newest[1]
+
+
+def read_claude_plan_weekly_sample(
+        now: Optional[float] = None) -> Optional[Dict]:
+    """Return only the provider's raw weekly percentage and sample timestamp.
+
+    Unlike the budget reader, this display path keeps valid older samples so
+    the dashboard can label them stale from their original timestamp. It still
+    selects the signed-in organization and rejects malformed or future-dated
+    values. Organization identifiers never leave this reader.
+    """
+    now = time.time() if now is None else now
+    sample = _latest_claude_plan_sample()
+    if sample is None:
+        return None
+
+    stamp_ms = sample.get("t")
+    if isinstance(stamp_ms, bool) or not isinstance(stamp_ms, (int, float)):
+        return None
+    try:
+        stamp_number = float(stamp_ms)
+    except (OverflowError, TypeError, ValueError):
+        return None
+    if not math.isfinite(stamp_number) or stamp_number < 0:
+        return None
+    if now - stamp_number / 1000.0 < -60:
+        return None
+
+    sample_usage = sample.get("u")
+    if not isinstance(sample_usage, dict):
+        return None
+    weekly = sample_usage.get("sd")
+    if isinstance(weekly, bool) or not isinstance(weekly, (int, float)):
+        return None
+    try:
+        weekly_number = float(weekly)
+    except (OverflowError, TypeError, ValueError):
+        return None
+    if not math.isfinite(weekly_number) or not 0.0 <= weekly_number <= 100.0:
+        return None
+
+    return {"u": {"sd": weekly}, "t": stamp_ms}
+
+
+def read_claude_plan_history(now: Optional[float] = None) -> Optional[Dict]:
+    """Read Claude's latest app-reported percentages for the signed-in org.
+
+    The desktop app keeps samples for every organization in one file. Only the
+    organization in Claude Code's current OAuth account is relevant here. A
+    missing, malformed, stale, or future-dated sample is unavailable so the
+    caller can use the existing transcript estimate.
+    """
+    now = time.time() if now is None else now
+    sample = _latest_claude_plan_sample()
+    if sample is None:
+        return None
+
+    stamp_ms = sample.get("t")
+    if isinstance(stamp_ms, bool) or not isinstance(stamp_ms, (int, float)):
+        return None
+    captured_at = float(stamp_ms) / 1000.0
     age = now - captured_at
     if age > CLAUDE_PLAN_HISTORY_MAX_AGE or age < -60:
         return None
 
-    usage = newest[1].get("u")
+    usage = sample.get("u")
     if not isinstance(usage, dict):
         return None
     percentages = {}
@@ -1681,6 +1736,10 @@ def main(argv=None) -> int:
     # Driven by the registry, so adding a provider adds its CLI surface too.
     for name in sorted(PROVIDERS):
         sub.add_parser(name, help="read {}'s usage".format(name))
+    sub.add_parser(
+        "claude-plan-sample",
+        help="read the signed-in Claude app's raw weekly sample for the dashboard",
+    )
     gate = sub.add_parser("gate", help="exit 1 if over pace, 2 if unknown")
     gate.add_argument("agent", choices=sorted(PROVIDERS))
     gate.add_argument(
@@ -1691,6 +1750,10 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
 
     now = time.time()
+    if args.command == "claude-plan-sample":
+        print(json.dumps(read_claude_plan_weekly_sample(now)))
+        return 0
+
     agent = args.agent if args.command == "gate" else args.command
     reading = read_agent(agent, now)
 

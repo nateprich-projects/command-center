@@ -529,6 +529,40 @@ def test_newest_app_sample_for_signed_in_org_beats_other_sources(tmp_path, monke
     assert reading["windows"]["seven_day"]["used_percent"] == 57.0
 
 
+def test_dashboard_sample_preserves_raw_weekly_fields_for_signed_in_org(
+    tmp_path, monkeypatch
+):
+    now = 1_800_000_000.0
+    sample_t = 1_799_992_800_123
+    plan_usage_history(tmp_path, monkeypatch, [
+        {"org": "current-org", "t": sample_t,
+         "u": {"sd": 63.25}},
+        {"org": "another-org", "t": 1_800_000_000_999,
+         "u": {"sd": 99.0}},
+    ])
+
+    assert usage.read_claude_plan_weekly_sample(now) == {
+        "u": {"sd": 63.25}, "t": sample_t,
+    }
+
+
+@pytest.mark.parametrize("sample", [
+    {"org": "current-org", "t": 1_799_992_800_123, "u": {}},
+    {"org": "current-org", "t": 1_799_992_800_123,
+     "u": {"sd": True}},
+    {"org": "current-org", "t": 1_799_992_800_123,
+     "u": {"sd": float("nan")}},
+    {"org": "current-org", "t": "bad", "u": {"sd": 63.25}},
+    {"org": "current-org", "u": {"sd": 63.25}},
+])
+def test_dashboard_sample_omits_missing_or_malformed_weekly_fields(
+    tmp_path, monkeypatch, sample
+):
+    plan_usage_history(tmp_path, monkeypatch, [sample])
+
+    assert usage.read_claude_plan_weekly_sample(1_800_000_000.0) is None
+
+
 def test_app_sample_within_six_hours_passes_the_gate(tmp_path, monkeypatch):
     import time as _time
     now = _time.time()

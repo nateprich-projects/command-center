@@ -18,6 +18,15 @@ import funnel  # noqa: E402
 NOW = datetime(2026, 9, 13, 12, 0, tzinfo=timezone.utc)
 
 
+@pytest.fixture(autouse=True)
+def _no_live_claude_sample(monkeypatch):
+    import usage
+
+    monkeypatch.setattr(
+        usage, "read_claude_plan_weekly_sample", lambda _now: None
+    )
+
+
 def _item(number, status, *, repo="nateprich-projects/command-center", **kwargs):
     values = {
         "repo": repo,
@@ -582,6 +591,45 @@ def test_successful_brief_spools_muse_usage(monkeypatch, tmp_path, capsys):
     assert funnel.main(["brief"]) == 0
     assert capsys.readouterr().out == expected + "\n"
     assert _spooled(spool)["usage"] == {"muse": row}
+
+
+def test_successful_brief_spools_only_claude_weekly_sample_fields(
+    monkeypatch, tmp_path, capsys
+):
+    import usage
+
+    spool = tmp_path / "dashboard-spool"
+    monkeypatch.setenv(funnel.DASHBOARD_SPOOL_ENV, str(spool))
+    expected = _brief_output()
+    monkeypatch.setattr(funnel, "load_items", lambda: [])
+
+    def fake_cmd_brief(items, now, **kwargs):
+        print(expected)
+        return 0
+
+    monkeypatch.setattr(funnel, "cmd_brief", fake_cmd_brief)
+    muse = {"spent_dollars": 14.30, "cap_dollars": 200.0,
+            "used_percent": 7.15, "calls": 42}
+    monkeypatch.setattr(funnel, "_dashboard_muse_usage", lambda _now: muse)
+    sample_t = 1_790_000_000_123
+    monkeypatch.setattr(
+        usage,
+        "read_claude_plan_weekly_sample",
+        lambda _now: {
+            "u": {"sd": 63.25, "fh": 12.5},
+            "t": sample_t,
+            "org": "private-org-id",
+        },
+    )
+
+    assert funnel.main(["brief"]) == 0
+    assert capsys.readouterr().out == expected + "\n"
+    snapshot = _spooled(spool)
+    assert snapshot["usage"] == {
+        "muse": muse,
+        "claude": {"u": {"sd": 63.25}, "t": sample_t},
+    }
+    assert "private-org-id" not in next(spool.glob("*.json")).read_text()
 
 
 def test_spool_prune_failure_keeps_the_brief_and_the_snapshot(

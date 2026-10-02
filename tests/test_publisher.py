@@ -179,6 +179,19 @@ def write_spool_entry(spool_dir, name, seconds_ago, extra=None):
     return path, payload
 
 
+def write_claude_plan_history(home, samples, org="current-org"):
+    (home / ".claude.json").write_text(json.dumps({
+        "oauthAccount": {"organizationUuid": org},
+    }))
+    history = (
+        home / "Library" / "Application Support" / "Claude"
+        / "plan-usage-history.json"
+    )
+    history.parent.mkdir(parents=True, exist_ok=True)
+    history.write_text(json.dumps({"version": 1, "samples": samples}))
+    return history
+
+
 def write_env_file(path, token=FAKE_TOKEN, account=FAKE_ACCOUNT):
     lines = []
     if token is not None:
@@ -369,6 +382,77 @@ def test_publishes_when_remote_snapshot_is_missing(
     puts = kv.puts_to("snapshot")
     assert len(puts) == 1
     assert json.loads(puts[0][2].decode()) == payload
+
+
+def test_publisher_tick_adds_exact_signed_in_claude_sample(
+    tmp_path, kv, monkeypatch, capsys
+):
+    spool = tmp_path / "spool"
+    spool.mkdir()
+    muse = {"spent_dollars": 3.5, "cap_dollars": 200.0}
+    entry_path, payload = write_spool_entry(
+        spool, "entry.json", seconds_ago=60, extra={"usage": {"muse": muse}}
+    )
+    sample_t = int((time.time() - 2 * 3600) * 1000)
+    previous = dict(payload)
+    previous["usage"] = {
+        "muse": muse,
+        "claude": {"u": {"sd": 41.0}, "t": sample_t - 1000},
+    }
+    kv.values["snapshot"] = json.dumps(previous).encode()
+    home = Path(os.environ["HOME"])
+    write_claude_plan_history(home, [
+        {"org": "current-org", "t": sample_t, "u": {"sd": 63.25}},
+        {"org": "another-org", "t": sample_t + 1000,
+         "u": {"sd": 99.0}},
+    ])
+    argv, _ = base_argv(tmp_path, kv, spool)
+
+    code, _, err = run_publisher(argv, monkeypatch, capsys)
+
+    assert code == 0, err
+    published = json.loads(kv.values["snapshot"])
+    assert published["generated_at"] == payload["generated_at"]
+    assert published["usage"] == {
+        "muse": muse,
+        "claude": {"u": {"sd": 63.25}, "t": sample_t},
+    }
+    assert len(kv.puts_to("snapshot")) == 1
+    assert b"current-org" not in kv.values["snapshot"]
+    assert b"another-org" not in kv.values["snapshot"]
+    assert entry_path.exists()
+
+
+def test_publisher_tick_omits_malformed_claude_sample(
+    tmp_path, kv, monkeypatch, capsys
+):
+    spool = tmp_path / "spool"
+    spool.mkdir()
+    muse = {"spent_dollars": 3.5, "cap_dollars": 200.0}
+    entry_path, payload = write_spool_entry(
+        spool, "entry.json", seconds_ago=60, extra={"usage": {"muse": muse}}
+    )
+    sample_t = int((time.time() - 60) * 1000)
+    previous = dict(payload)
+    previous["usage"] = {
+        "muse": muse,
+        "claude": {"u": {"sd": 41.0}, "t": sample_t - 1000},
+    }
+    kv.values["snapshot"] = json.dumps(previous).encode()
+    home = Path(os.environ["HOME"])
+    write_claude_plan_history(home, [
+        {"org": "current-org", "t": sample_t, "u": {"sd": "63.25"}},
+    ])
+    argv, _ = base_argv(tmp_path, kv, spool)
+
+    code, _, err = run_publisher(argv, monkeypatch, capsys)
+
+    assert code == 0, err
+    published = json.loads(kv.values["snapshot"])
+    assert published["usage"] == {"muse": muse}
+    assert published["generated_at"] == payload["generated_at"]
+    assert len(kv.puts_to("snapshot")) == 1
+    assert entry_path.exists()
 
 
 def test_unparseable_spool_files_are_skipped_not_fatal(

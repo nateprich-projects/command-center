@@ -28,6 +28,7 @@ import base64
 import contextlib
 import json
 import os
+import re
 import glob
 import math
 from datetime import datetime, timezone
@@ -1927,6 +1928,33 @@ def read_github_strict(agent: str, timeout: Optional[float] = None) -> List[Dict
                 "GitHub returned unreadable heartbeat content"
             ) from exc
     return _parse_records_strict(content)
+
+
+def _spooled_strict(agent: str) -> List[Dict]:
+    """Read the local write-ahead file, treating only absence as empty."""
+    try:
+        content = Path(_spool_path(agent)).read_text()
+    except FileNotFoundError:
+        return []
+    except (OSError, UnicodeError) as exc:
+        raise HeartbeatError("heartbeat spool could not be read") from exc
+    return _parse_records_strict(content)
+
+
+def read_brief(agent: str, timeout: Optional[float] = None) -> List[Dict]:
+    """Read heartbeat history for the brief, preserving unavailable reads.
+
+    A missing history file is a valid empty history. Other GitHub failures and
+    malformed durable contents stay visible to the caller so the brief can
+    publish an unknown section instead of reporting an all-clear.
+    """
+    try:
+        durable = read_github_strict(agent, timeout=timeout)
+    except HeartbeatError as exc:
+        if not re.search(r"\bHTTP\s+404\b", str(exc), re.IGNORECASE):
+            raise
+        durable = []
+    return durable + _spooled_strict(agent)
 
 
 MUSE_AUTH_OUTAGE_NOTE = "Muse provider outage: missing meta credentials"

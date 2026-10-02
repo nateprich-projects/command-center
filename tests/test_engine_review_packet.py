@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import re
 import stat
 import sys
 
@@ -98,6 +99,39 @@ STOP_COUNTER = {"window_days": 7, "count": 0, "refs": [],
 
 def empty_pr_comments():
     return {"status": "empty", "message": "No PR comments.", "comments": []}
+
+
+CLOSING_VERBS = (
+    "fix", "fixes", "fixed", "close", "closes", "closed",
+    "resolve", "resolves", "resolved",
+)
+CLOSING_REFERENCE_SHAPES = (
+    "42", "#42", "owner/repo#42",
+    "https://github.com/owner/repo/issues/42",
+    "https://github.com/owner/repo/pull/42",
+)
+CLOSING_CASES = ("lower", "title", "upper", "mixed")
+
+
+def closing_verb_case(verb, style):
+    if style == "lower":
+        return verb.lower()
+    if style == "title":
+        return verb.capitalize()
+    if style == "upper":
+        return verb.upper()
+    return "".join(char.upper() if index % 2 == 0 else char.lower()
+                   for index, char in enumerate(verb))
+
+
+def has_closing_reference(text, reference):
+    verbs = "|".join(CLOSING_VERBS)
+    pattern = re.compile(
+        r"(?<![A-Za-z0-9_])(?:" + verbs + r")\b\s*:?\s*"
+        + re.escape(reference) + r"\b",
+        re.IGNORECASE,
+    )
+    return bool(pattern.search(text))
 
 
 def packet(**kw):
@@ -1185,6 +1219,43 @@ index 1111111..2222222 100644
         ],
         "truncated": False,
     }
+
+
+@pytest.mark.parametrize("verb", CLOSING_VERBS)
+@pytest.mark.parametrize("reference", CLOSING_REFERENCE_SHAPES)
+@pytest.mark.parametrize("case", CLOSING_CASES)
+def test_weakened_test_evidence_neutralizes_closing_references(
+        verb, reference, case):
+    rendered_verb = closing_verb_case(verb, case)
+    plain = "{} {}".format(rendered_verb, reference)
+    colon = "{}: {}".format(rendered_verb, reference)
+    diff = """diff --git a/tests/test_evidence.py b/tests/test_evidence.py
+index 1111111..2222222 100644
+--- a/tests/test_evidence.py
++++ b/tests/test_evidence.py
+@@ -1,3 +1,3 @@
+-def test_before():
+-    assert first  # {plain}
+-    assert second  # {colon}
++def test_after():
++    pytest.skip("{plain}")
++    pytest.skip("{colon}")
+""".format(plain=plain, colon=colon)
+
+    report = review._test_weakening(diff)
+    lines = (
+        report["deleted_test_functions"]["items"]
+        + report["removed_assert_lines"]["items"]
+        + report["added_skip_or_xfail"]["items"]
+    )
+
+    assert report["deleted_test_functions"]["items"] == [
+        "tests/test_evidence.py::test_before"]
+    assert len(report["removed_assert_lines"]["items"]) == 2
+    assert len(report["added_skip_or_xfail"]["items"]) == 2
+    assert all("Prior ticket: {}".format(reference) in line
+               for line in lines[1:])
+    assert not any(has_closing_reference(line, reference) for line in lines)
 
 
 def test_packet_does_not_report_moved_or_renamed_tests_as_deleted():

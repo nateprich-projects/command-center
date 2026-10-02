@@ -60,6 +60,9 @@ def test_old_or_incomplete_records_do_not_create_a_figure(monkeypatch):
 
 
 def test_brief_reports_the_ratios(monkeypatch, capsys):
+    monkeypatch.setattr(
+        heartbeat, "read_brief", lambda agent, timeout=None: []
+    )
     monkeypatch.setattr(funnel, "recent_resend_ratio", lambda now: {"codex": 4.0})
 
     assert funnel.cmd_brief([], NOW) == 0

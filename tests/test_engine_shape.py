@@ -1123,8 +1123,10 @@ def test_preview_and_risk_write_share_the_rendered_escalation_scan(
     expected_scan_body = shape.render_plan(shape.validate_answer(candidate))
     assert "Backfill recent records" in expected_scan_body
     assert expected_scan_body != candidate["plan_markdown"]
-    assert len(scan_bodies) == 3
-    assert scan_bodies == [expected_scan_body] * 3
+    # The preview above, then the live path's one decision record (#2137):
+    # apply no longer scans a second time for its Risk write.
+    assert len(scan_bodies) == 2
+    assert scan_bodies == [expected_scan_body] * 2
 
 
 def test_a_clear_declaration_with_a_clear_scan_is_ready():

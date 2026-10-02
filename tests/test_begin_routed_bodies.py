@@ -367,3 +367,166 @@ def test_an_edited_acceptance_makes_the_routed_bug_startable_again(
     assert bug.ref in startable
     assert other.ref in startable
     assert board.body_reads == [[bug.item_id]]
+
+
+REVISED = ORIGINAL + "\n\nAccept revised: the check now runs offline."
+
+
+def test_a_withhold_found_after_claim_moves_on_to_the_next_pick(
+    monkeypatch, capsys,
+):
+    """The race: the listing read a revised body, the claim a reverted one."""
+    rows = _bug_and_improve(REVISED)
+    bug, other = rows[1], rows[3]
+    board = _board(monkeypatch, rows, {bug.ref: UNSATISFIABLE})
+    writes = _stub_begin(monkeypatch, board.events)
+    view = _begin_view()
+    assert bug.ref in [item.ref for item in view.startable_candidates]
+    bug.body = ORIGINAL  # reverted between the listing and the claim
+
+    result = _run_begin(monkeypatch, capsys, view, _hydrating(view))
+
+    assert result["do"] == "ticket"
+    assert result["work"]["ref"] == other.ref
+    assert "why" not in result
+    assert result["withheld_after_claim"] == [
+        {"ref": bug.ref, "reason": WITHHELD},
+    ]
+    assert writes == [(bug.ref, CLAIM), (bug.ref, ""), (other.ref, CLAIM)]
+    assert board.events == [
+        ("body", [bug.item_id]),
+        ("claim", bug.ref, CLAIM),
+        ("body", [bug.item_id]),
+        ("claim", bug.ref, ""),
+        ("claim", other.ref, CLAIM),
+        ("body", [other.item_id]),
+    ]
+
+
+def test_the_move_on_tries_each_pick_once_then_stops(monkeypatch, capsys):
+    rows = [
+        Row(1, "Gates: none", klass="Bug", children=2),
+        Row(2, REVISED, parent=1, needs="agent",
+            updated="2026-09-10T00:00:00Z"),
+        Row(3, REVISED, parent=1, needs="agent",
+            updated="2026-09-12T00:00:00Z"),
+    ]
+    first, second = rows[1], rows[2]
+    board = _board(monkeypatch, rows, {
+        first.ref: UNSATISFIABLE, second.ref: UNSATISFIABLE,
+    })
+    writes = _stub_begin(monkeypatch, board.events)
+    view = _begin_view()
+    first.body = second.body = ORIGINAL
+
+    result = _run_begin(monkeypatch, capsys, view, _hydrating(view))
+
+    assert result["do"] == "stop"
+    assert result["why"] == "nothing — " + WITHHELD
+    assert result["withheld_after_claim"] == [
+        {"ref": first.ref, "reason": WITHHELD},
+        {"ref": second.ref, "reason": WITHHELD},
+    ]
+    assert writes == [
+        (first.ref, CLAIM), (first.ref, ""),
+        (second.ref, CLAIM), (second.ref, ""),
+    ]
+
+
+def test_the_move_on_spends_the_same_begin_envelope(monkeypatch, capsys):
+    rows = _bug_and_improve(REVISED)
+    bug, other = rows[1], rows[3]
+    board = _board(monkeypatch, rows, {bug.ref: UNSATISFIABLE})
+    writes = _stub_begin(monkeypatch, board.events)
+    view = _begin_view()
+    bug.body = ORIGINAL
+    loaded = {item.ref: item for item in view}
+    one_refresh = funnel.begin_detail_hydration_work(view, [loaded[bug.ref]])
+    assert one_refresh == funnel.begin_detail_hydration_work(
+        view, [loaded[other.ref]]
+    )
+    # Room for the first post-claim refresh and not a second.
+    envelope = funnel.BeginWorkEnvelope(limit=2 * one_refresh - 1)
+    monkeypatch.setattr(funnel, "_ACTIVE_BEGIN_ENVELOPE", envelope)
+
+    with pytest.raises(funnel.BeginCannotComplete):
+        _run_begin(monkeypatch, capsys, view, _hydrating(view))
+
+    assert envelope.hydrated_fields == one_refresh
+    assert writes == [(bug.ref, CLAIM), (bug.ref, "")]
+
+
+def test_a_pending_gate_route_reads_only_the_gate_body_before_ranking(
+    monkeypatch,
+):
+    gate_body = "Gates: is the plan good?"
+    rows = [
+        Row(1, "Gates: none", klass="Improve", children=1),
+        Row(2, "What: wait for the gate.\n\nRisk: standard", parent=1,
+            needs="external-event"),
+        Row(5, gate_body, klass="Improve", status="Shaped"),
+    ]
+    ticket, gate = rows[1], rows[2]
+    route = {"type": "pending-gate-answer", "gate_ref": gate.ref}
+    board = _board(monkeypatch, rows, {ticket.ref: route})
+
+    view = _begin_view()
+
+    assert view.startable_candidates == []
+    assert board.body_reads == [[gate.item_id]]
+
+    gate.body = gate_body + "\n\n" + funnel.gates_answer_block(
+        "the plan is good", "Nate",
+    )
+    board.body_reads.clear()
+    view = _begin_view()
+
+    assert [item.ref for item in view.startable_candidates] == [ticket.ref]
+    assert board.body_reads == [[gate.item_id]]
+
+
+def test_unrouted_rows_are_never_read_before_ranking(monkeypatch):
+    rows = _bug_and_improve(ORIGINAL)
+    board = _board(monkeypatch, rows, {})
+
+    view = _begin_view()
+
+    assert [item.ref for item in view.startable_candidates] == [
+        rows[1].ref, rows[3].ref,
+    ]
+    assert board.body_reads == []
+    assert not any(item.body_loaded for item in view)
+
+
+def test_the_routed_read_is_charged_to_the_begin_envelope(monkeypatch):
+    rows = _bug_and_improve(ORIGINAL)
+    bug = rows[1]
+    board = _board(monkeypatch, rows, {bug.ref: UNSATISFIABLE})
+    envelope = funnel.BeginWorkEnvelope()
+    monkeypatch.setattr(funnel, "_ACTIVE_BEGIN_ENVELOPE", envelope)
+
+    view = _begin_view()
+
+    loaded = {item.ref: item for item in view}
+    assert envelope.hydrated_fields == funnel.begin_detail_hydration_work(
+        view, [loaded[bug.ref]]
+    )
+    assert envelope.remaining >= funnel.BEGIN_DETAIL_WORK_RESERVE
+
+
+def test_a_routed_read_that_would_spend_the_claim_reserve_refuses(
+    monkeypatch,
+):
+    rows = _bug_and_improve(ORIGINAL)
+    board = _board(monkeypatch, rows, {rows[1].ref: UNSATISFIABLE})
+    # The listing fits beside the reserve; the routed read does not.
+    envelope = funnel.BeginWorkEnvelope(
+        limit=funnel.BEGIN_DETAIL_WORK_RESERVE + 200
+    )
+    monkeypatch.setattr(funnel, "_ACTIVE_BEGIN_ENVELOPE", envelope)
+
+    with pytest.raises(funnel.BeginCannotComplete):
+        _begin_view()
+
+    assert board.body_reads == []
+    assert envelope.hydrated_fields == 0

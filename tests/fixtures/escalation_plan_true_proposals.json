@@ -53,5 +53,20 @@
     "source": "Decided by the agent: add an auth scheme (#1678)",
     "body": "## Decided by the agent\n\n- Add OAuth to the connector before cutover.\n",
     "expected_reasons": ["authorisation"]
+  },
+  {
+    "source": "Ticket #2181: enter verb inside the credentials phrase",
+    "body": "## What it is\n\nEnter the deploy credentials at the runner prompt.\n",
+    "expected_reasons": ["credentials"]
+  },
+  {
+    "source": "Ticket #2181: run verb inside the destructive phrase",
+    "body": "## What it is\n\nRun destructive operations against the stale ticket branches.\n",
+    "expected_reasons": ["destructive"]
+  },
+  {
+    "source": "Ticket #2181: enter verb before a named credentials term",
+    "body": "## What it is\n\nWe will enter the API key at the runner prompt.\n",
+    "expected_reasons": ["credentials"]
   }
 ]

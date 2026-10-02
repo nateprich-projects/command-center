@@ -124,7 +124,8 @@ BODY_READERS: Dict[str, str] = {
     "funnel.py:recorded_cause_regressions": _PLAN_BODY,
     "metrics.py:_project_has_prior_cause": _PLAN_BODY,
     "engine/shape.py:shape_inputs": _PLAN_BODY,
-    "engine/shape.py:apply_shape": _PLAN_BODY,
+    "engine/shape.py:carried_override_blocks": _PLAN_BODY,
+    "engine/shape.py:read_back_mismatches": _PLAN_BODY,
     "engine/breakdown.py:apply": _PLAN_BODY,
     "engine/review.py:pr_body_section":
         "a funnel PR's body (#1794), which only its author and collaborators "
@@ -160,6 +161,7 @@ WRITERS = frozenset({
     "decline_classifier.py:declined_unsatisfiable_acceptance_comment",
     "decline_classifier.py:declined_pending_gate_answer_comment",
     "engine/breakdown.py:apply_question",
+    "engine/shape.py:render_plan",
     "engine/implement.py:render_closed_step_route",
     "engine/implement.py:finish_declined",
     "engine/implement.py:close_declined_defer_note_proof",

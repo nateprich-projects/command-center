@@ -19,6 +19,19 @@ through the GitHub Contents API. Not on `main`, because a commit per run would
 bury the history of the code; and on GitHub rather than the Mac mini, because
 **the watchdog cannot live inside the thing it watches** — an app that quit is
 invisible to every other signal on a machine that is otherwise fine.
+
+**Readers pair records through one per-run view** (`run_views`, #2174, plan
+#1750). It groups the distinct records by run id — a record read twice, on
+GitHub and still in the spool after a PUT whose reply was lost, is one record
+(#1225) — into the run's start, its finish (a same-session re-begin close
+flagged as such), its binding, job and api_cost events, and how the start was
+paired with its end: open, finished, re-begun, or closed by an unresolved
+finish. Each API cost field states whether it was measured (zero included),
+missing (no event) or lost (an event with no readable value), so an
+unreadable value never reads as zero or as nothing measured. An errored finish
+written before `error_class` was recorded is classified on read. `open_starts`
+and `api_cost_for_run` are thin adapters over it. The view is derived on every
+read: the spool format and the records on GitHub are unchanged.
 """
 
 from __future__ import annotations
@@ -800,44 +813,233 @@ def one_record_per_run(records: List[Dict]) -> List[Dict]:
     return list(newest.values()) + unattributed
 
 
+#: How a run's start was paired with its end, in the per-run view (#2174).
+#: ``open``: a start and nothing that closes it. ``finished``: a finish names
+#: the run. ``re-begun``: that finish is the synthetic close a same-session
+#: begin writes (`is_rebegin_finish`). ``closed-unresolved``: no finish names
+#: it, but an unresolved finish cleared it as its oldest open candidate.
+#: ``no-start``: the run's other records were read and its start was not.
+PAIRING_OPEN = "open"
+PAIRING_FINISHED = "finished"
+PAIRING_REBEGUN = "re-begun"
+PAIRING_CLOSED_UNRESOLVED = "closed-unresolved"
+PAIRING_NO_START = "no-start"
+
+#: The state of one API cost field for one run (#2174). ``measured``: every
+#: event for the run carried a readable value, and zero is a measurement.
+#: ``missing``: the run has no api_cost event, so nothing was measured.
+#: ``lost``: an event exists but this field could not be read from it.
+#: Only a measured field carries a value; the other two never become zero.
+API_COST_MEASURED = "measured"
+API_COST_MISSING = "missing"
+API_COST_LOST = "lost"
+
+
+def _view_stamp(record: Dict) -> float:
+    """A record's ts for ordering, with an unreadable one sorting first."""
+    stamp = _finite_number(record.get("ts"))
+    return stamp if stamp is not None else 0.0
+
+
+def _run_api_cost(events: List[Dict]) -> Dict[str, Dict[str, Optional[int]]]:
+    """Sum one run's api_cost events field by field, with each field's state.
+
+    Only the ``api_cost`` object is read, which both event shapes carry: the
+    caller map (``graphql_by_caller``) is additive since #1456, and an event
+    without it reads the same.
+    """
+    found: Dict[str, Dict[str, Optional[int]]] = {}
+    for name in API_COST_FIELDS:
+        if not events:
+            found[name] = {"state": API_COST_MISSING, "value": None}
+            continue
+        values = []
+        for event in events:
+            cost = event.get("api_cost")
+            value = (
+                _api_cost_number(cost.get(name))
+                if isinstance(cost, dict) else None
+            )
+            if value is None:
+                break
+            values.append(value)
+        if len(values) == len(events):
+            found[name] = {"state": API_COST_MEASURED, "value": sum(values)}
+        else:
+            found[name] = {"state": API_COST_LOST, "value": None}
+    return found
+
+
+def _view_error_class(finish: Optional[Dict]) -> Optional[str]:
+    """An errored finish's class: as recorded, else as `classify_error` reads it.
+
+    Finishes written before the class was recorded carry no ``error_class``;
+    they are classified on read from their own note and runtime, and the
+    record itself is never rewritten.
+    """
+    if not isinstance(finish, dict) or finish.get("outcome") != "errored":
+        return None
+    recorded = finish.get("error_class")
+    if isinstance(recorded, str) and recorded.strip():
+        return recorded
+    return classify_error(finish.get("note"), finish.get("runtime"))
+
+
+def run_views(records: List[Dict]) -> Dict[str, Dict]:
+    """One view per run id over `distinct_records`, the shared read (#2174).
+
+    The per-run reading that `open_starts` and `api_cost_for_run` are thin
+    adapters over. Built on the distinct records, so a record read twice — on
+    GitHub and still in the spool after a PUT whose reply was lost — is one
+    record, and two unfinished runs are two runs rather than four (#1225).
+
+    Each view carries:
+
+    - ``run`` and ``agent`` (the start's, else the finish's, else the first
+      record's);
+    - ``start``: the run's latest start by ts;
+    - ``finish``: the finish that names the run — a same-session re-begin
+      close when there is one, as `run_summary` lets it win, else the latest;
+    - ``closed_by``: the unresolved finish that cleared the run, when one did;
+    - ``pairing``: one of the ``PAIRING_*`` values above;
+    - ``outcome`` and ``error_class`` from the finish (`_view_error_class`);
+    - ``binding`` as `bindings` reads the run's own bind records, and
+      ``job`` as `job_for_run` reads it for the run's agent;
+    - ``api_cost_events`` and ``api_cost``, each field a ``state`` and a
+      ``value`` (the ``API_COST_*`` values above).
+
+    Runs with a start come first, oldest start first, which is the order
+    `open_starts` reports; runs with no start follow in the order read. A
+    record with no string run id belongs to no run, except an unresolved
+    finish, which names its candidates instead. Nothing here is written back:
+    the view is derived on every read and the records are never edited.
+    """
+    distinct = distinct_records(records)
+    rows: Dict[str, Dict[str, List[Dict]]] = {}
+    unresolved = []
+    position = {id(record): index for index, record in enumerate(distinct)}
+    for record in distinct:
+        phase = record.get("phase")
+        if phase == "finish" and record.get("unresolved"):
+            unresolved.append(record)
+        run = record.get("run")
+        if not isinstance(run, str) or not run:
+            continue
+        found = rows.setdefault(run, {
+            "all": [], "start": [], "finish": [], "bind": [], "api_cost": [],
+            "job": [],
+        })
+        found["all"].append(record)
+        if phase in found:
+            found[phase].append(record)
+
+    views: Dict[str, Dict] = {}
+    for run, found in rows.items():
+        start = None
+        if found["start"]:
+            start = max(
+                found["start"],
+                key=lambda row: (
+                    _finite_number(row.get("ts")) is not None,
+                    _view_stamp(row),
+                ),
+            )
+        finishes = (
+            [row for row in found["finish"] if is_rebegin_finish(row)]
+            or found["finish"]
+        )
+        finish = None
+        for row in finishes:
+            if finish is None or _view_stamp(row) >= _view_stamp(finish):
+                finish = row
+
+        agent = next(
+            (row.get("agent") for row in [start, finish] + found["all"]
+             if isinstance(row, dict) and isinstance(row.get("agent"), str)),
+            None,
+        )
+        jobs = {
+            row["job"] for row in found["job"]
+            if row.get("agent") == agent
+            and isinstance(row.get("job"), str) and row["job"].strip()
+        }
+
+        if finish is not None:
+            pairing = (
+                PAIRING_REBEGUN if is_rebegin_finish(finish)
+                else PAIRING_FINISHED
+            )
+        elif start is not None:
+            pairing = PAIRING_OPEN
+        else:
+            pairing = PAIRING_NO_START
+
+        views[run] = {
+            "run": run,
+            "agent": agent,
+            "start": start,
+            "finish": finish,
+            "closed_by": None,
+            "pairing": pairing,
+            "outcome": finish.get("outcome") if finish is not None else None,
+            "error_class": _view_error_class(finish),
+            "binding": bindings(found["bind"]).get(run),
+            "job": next(iter(jobs)) if len(jobs) == 1 else None,
+            "api_cost_events": list(found["api_cost"]),
+            "api_cost": _run_api_cost(found["api_cost"]),
+        }
+
+    started = sorted(
+        (view for view in views.values() if view["start"] is not None),
+        key=lambda view: (
+            _view_stamp(view["start"]), position[id(view["start"])]
+        ),
+    )
+    # An unresolved finish means one of its candidates ended, so it clears
+    # the oldest of them still open: clearing all would hide a run that died,
+    # clearing none would report a completed run as dying.
+    for record in sorted(unresolved, key=_view_stamp):
+        candidates = record.get("candidates")
+        candidates = {
+            run for run in (candidates if isinstance(candidates, list) else [])
+            if isinstance(run, str)
+        }
+        for view in started:
+            if view["pairing"] == PAIRING_OPEN and view["run"] in candidates:
+                view["pairing"] = PAIRING_CLOSED_UNRESOLVED
+                view["closed_by"] = record
+                break
+
+    ordered = {view["run"]: view for view in started}
+    for run, view in views.items():
+        ordered.setdefault(run, view)
+    return ordered
+
+
+def run_view(records: List[Dict], run: Optional[str]) -> Optional[Dict]:
+    """The `run_views` entry for one run id, or ``None`` when none was read."""
+    if not isinstance(run, str) or not run:
+        return None
+    return run_views(records).get(run)
+
+
 def api_cost_for_run(records: List[Dict], run: Optional[str]) -> Dict[str, Optional[int]]:
     """Sum the per-command API events for one run, independently by field.
 
-    No matching event means the run issued no funnel command.  If any command
-    could not provide one field, that field stays null while a separately
-    measurable field may still be summed.  Malformed telemetry is treated the
-    same way; this function is diagnostic and must never make finish fail.
+    A thin adapter over the per-run view (#2174), and the finish record's
+    ``api_cost`` value: a measured field is its sum, zero included, and a
+    missing field (no event: the run issued no funnel command) and a lost one
+    (an event without a readable value) are both null, as they always were.
+    The view keeps the two apart for readers that need to know which. Exact
+    duplicate events count once (#1225); this function is diagnostic and must
+    never make finish fail.
     """
-    result = {name: None for name in API_COST_FIELDS}
-    if not run:
-        return result
-
-    # Exact duplicates only: a run writes one api_cost event per funnel
-    # command, so collapsing by run id would throw away real numbers, while
-    # the same event twice is always a duplicate write (#1225).
-    events = [
-        record.get("api_cost")
-        for record in distinct_records(records)
-        if record.get("phase") == "api_cost" and record.get("run") == run
-    ]
-    if not events:
-        return result
-
-    for name in API_COST_FIELDS:
-        values = []
-        readable = True
-        for event in events:
-            if not isinstance(event, dict):
-                readable = False
-                break
-            value = _api_cost_number(event.get(name))
-            if value is None:
-                readable = False
-                break
-            values.append(value)
-        if readable:
-            result[name] = sum(values)
-    return result
+    view = run_view(records, run)
+    if view is None:
+        return {name: None for name in API_COST_FIELDS}
+    return {
+        name: view["api_cost"][name]["value"] for name in API_COST_FIELDS
+    }
 
 
 def _clean_graphql_readings(value: object) -> List[Dict[str, object]]:
@@ -1971,28 +2173,15 @@ def open_starts(records: List[Dict]) -> List[Dict]:
     started first. Clearing all of them would hide a run that really did die;
     clearing none would report a completed run as a start that never came back,
     which is the false alarm this whole mechanism exists to avoid.
-    """
-    starts = sorted(
-        (r for r in records if r.get("phase") == "start" and r.get("run")),
-        key=lambda r: r.get("ts") or 0,
-    )
-    named = {
-        r.get("run") for r in records
-        if r.get("phase") == "finish" and r.get("run")
-    }
-    opens = [r for r in starts if r.get("run") not in named]
 
-    for rec in sorted(
-        (r for r in records
-         if r.get("phase") == "finish" and r.get("unresolved")),
-        key=lambda r: r.get("ts") or 0,
-    ):
-        candidates = set(rec.get("candidates") or [])
-        for i, start in enumerate(opens):
-            if start.get("run") in candidates:
-                opens.pop(i)
-                break
-    return opens
+    A thin adapter over the per-run view (#2174): one start per run, so a run
+    read twice — on GitHub and still spooled — is one open start, not two
+    (#1225).
+    """
+    return [
+        view["start"] for view in run_views(records).values()
+        if view["pairing"] == PAIRING_OPEN
+    ]
 
 
 def is_rebegin_finish(record: Dict) -> bool:

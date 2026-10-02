@@ -221,6 +221,152 @@ class _HTMLTables(HTMLParser):
             self._cell.append(data)
 
 
+class _MetaPricingTables(HTMLParser):
+    """Collect Meta's tier model lists alongside their usage-price tables."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.tables: List[Tuple[Tuple[str, ...], List[List[str]]]] = []
+        self._tier: Optional[str] = None
+        self._models_by_tier: Dict[str, Tuple[str, ...]] = {}
+        self._heading: Optional[List[str]] = None
+        self._paragraph: Optional[List[str]] = None
+        self._paragraph_models: List[str] = []
+        self._paragraph_code: Optional[List[str]] = None
+        self._table: Optional[List[List[str]]] = None
+        self._table_models: Tuple[str, ...] = ()
+        self._row: Optional[List[str]] = None
+        self._cell: Optional[List[str]] = None
+
+    def handle_starttag(self, tag: str, attrs: Sequence[Tuple[str, Optional[str]]]) -> None:
+        if tag in ("h2", "h3"):
+            self._heading = []
+            self._tier = None
+        elif tag == "p":
+            self._paragraph = []
+            self._paragraph_models = []
+        elif tag == "code" and self._paragraph is not None:
+            self._paragraph_code = []
+        elif tag == "table" and self._table is None:
+            self._table = []
+            self._table_models = self._models_by_tier.get(self._tier or "", ())
+        elif self._table is not None and tag == "tr":
+            self._row = []
+        elif self._row is not None and tag in ("th", "td"):
+            self._cell = []
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "code" and self._paragraph_code is not None:
+            model = " ".join("".join(self._paragraph_code).split())
+            if model:
+                self._paragraph_models.append(model)
+            self._paragraph_code = None
+        elif tag == "p" and self._paragraph is not None:
+            text = " ".join("".join(self._paragraph).split())
+            if _table_label(text).startswith("models:") and self._tier is not None:
+                self._models_by_tier[self._tier] = tuple(self._paragraph_models)
+            self._paragraph = None
+        elif tag in ("h2", "h3") and self._heading is not None:
+            heading = _table_label("".join(self._heading))
+            if heading in ("standard tier", "contributor tier"):
+                self._tier = heading
+            self._heading = None
+        elif tag in ("th", "td") and self._cell is not None:
+            self._row.append(" ".join("".join(self._cell).split()))
+            self._cell = None
+        elif tag == "tr" and self._row is not None:
+            if self._row:
+                self._table.append(self._row)
+            self._row = None
+        elif tag == "table" and self._table is not None:
+            self.tables.append((self._table_models, self._table))
+            self._table = None
+
+    def handle_data(self, data: str) -> None:
+        if self._heading is not None:
+            self._heading.append(data)
+        if self._paragraph is not None:
+            self._paragraph.append(data)
+        if self._paragraph_code is not None:
+            self._paragraph_code.append(data)
+        if self._cell is not None:
+            self._cell.append(data)
+
+
+def _meta_html_catalog(
+    payload: Mapping[str, object],
+    target_models: Sequence[str],
+) -> Dict[str, Dict[str, object]]:
+    body = payload.get("body")
+    if isinstance(body, bytes):
+        try:
+            body = body.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise CouldNotCheck("response is not UTF-8") from exc
+    if not isinstance(body, str):
+        raise CouldNotCheck("response body is not text")
+
+    parser = _MetaPricingTables()
+    try:
+        parser.feed(body)
+        parser.close()
+    except Exception as exc:
+        raise CouldNotCheck("response HTML could not be read") from exc
+
+    aliases = {
+        "input": "fresh_input_tokens",
+        "cached input": "cache_read_input_tokens",
+        "output": "output_tokens",
+    }
+    targets = {model.casefold(): model for model in target_models}
+    found: Dict[str, Dict[str, object]] = {}
+    for models, table in parser.tables:
+        header_index = next((
+            index for index, row in enumerate(table)
+            if len(row) >= 2
+            and _table_label(row[0]) == "usage"
+            and _table_label(row[1]) == "price per 1m tokens"
+        ), None)
+        if header_index is None:
+            continue
+
+        raw_rates: Dict[str, str] = {}
+        for row in table[header_index + 1:]:
+            if len(row) < 2:
+                continue
+            token_kind = aliases.get(_table_label(row[0]))
+            if token_kind is None:
+                continue
+            if token_kind in raw_rates:
+                raise CouldNotCheck("response repeats a rate kind")
+            raw_rates[token_kind] = row[1]
+
+        for model in models:
+            key = model.casefold()
+            if key not in targets:
+                continue
+            if key in found:
+                raise CouldNotCheck("response repeats model {!r}".format(model))
+            try:
+                rates = _normalized_rates("meta", raw_rates)
+            except CouldNotCheck as exc:
+                raise CouldNotCheck("model pricing table is incomplete") from exc
+            found[key] = {
+                "model": targets[key],
+                "rates": rates,
+                "effective_from": _timestamp(payload.get("effective_from")),
+                "source_url": payload.get("source_url"),
+                "source_note": payload.get("source_note"),
+            }
+
+    if not parser.tables or not found:
+        raise CouldNotCheck("response has no recognizable pricing table for models in use")
+    effective_value = payload.get("effective_from")
+    if effective_value is not None and _timestamp(effective_value) is None:
+        raise CouldNotCheck("effective time is invalid")
+    return found
+
+
 def _table_label(value: object) -> str:
     return " ".join(str(value).strip().casefold().split())
 
@@ -248,6 +394,10 @@ def _html_catalog(
             raise CouldNotCheck("response is not UTF-8") from exc
     if not isinstance(body, str):
         raise CouldNotCheck("response body is not text")
+    provider_key = provider.casefold()
+    if provider_key == "meta":
+        return _meta_html_catalog(payload, target_models)
+
     parser = _HTMLTables()
     try:
         parser.feed(body)
@@ -255,7 +405,6 @@ def _html_catalog(
     except Exception as exc:
         raise CouldNotCheck("response HTML could not be read") from exc
 
-    provider_key = provider.casefold()
     aliases = {
         "input": "fresh_input_tokens",
         "cached input": "cache_read_input_tokens",

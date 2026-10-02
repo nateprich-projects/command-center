@@ -111,7 +111,7 @@ def test_shaped_project_reaches_done_through_every_documented_transition(
 
     assert funnel.cmd_claim(items, NOW, ticket.ref) == 0
     assert project.status == "Building"
-    assert lock_writes == [(ticket.ref, "2026-09-09T12:00:00Z")]
+    assert lock_writes == [(ticket.ref, "2026-09-09T12:00:00.000000Z")]
 
     ticket.state = "CLOSED"
     project.children_done = 1

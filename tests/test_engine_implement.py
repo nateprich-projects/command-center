@@ -231,6 +231,264 @@ def test_claim_state_refuses_when_heartbeat_bindings_are_unreadable(monkeypatch)
         implement._claim_state(ref, "run-42", "codex")
 
 
+def test_finish_ticket_accepts_the_exact_timestamp_from_a_same_session_claim(
+        tmp_path, monkeypatch, capsys):
+    """A direct funnel claim has no heartbeat bind to identify its owner."""
+    from contextlib import nullcontext
+
+    ref = REPO + "#42"
+    claim_time = datetime(
+        2026, 9, 27, 18, 30, 12, 345678, tzinfo=timezone.utc,
+    )
+    claim_timestamp = "2026-09-27T18:30:12.345678Z"
+    item = SimpleNamespace(
+        ref=ref, item_id="PVTI_42", in_motion_since=claim_time,
+    )
+    monkeypatch.setattr(funnel, "load_project_items_by_refs",
+                        lambda refs: [item])
+    monkeypatch.setattr(heartbeat, "read_github_strict", lambda agent: [])
+    monkeypatch.setattr(
+        implement, "checkout_context",
+        lambda: {"root": tmp_path, "number": 42, "branch": "ticket/42"},
+    )
+    monkeypatch.setattr(
+        implement, "resolve_checkout_repo", lambda root, repo=None: REPO,
+    )
+    monkeypatch.setattr(funnel, "graphql_caller_for_run",
+                        lambda run, agent: None)
+    monkeypatch.setattr(funnel, "graphql_caller",
+                        lambda caller: nullcontext())
+
+    released = []
+    monkeypatch.setattr(
+        implement, "release_claim",
+        lambda target, **kwargs: released.append((target, kwargs)),
+    )
+
+    def finish_declined(reason, *, release, **kwargs):
+        release(ref)
+        return {"ticket": ref, "declined": reason}
+
+    monkeypatch.setattr(implement, "finish_declined", finish_declined)
+    answer_path = tmp_path / "answer.json"
+    answer_path.write_text(json.dumps({"declined": "scoped reproduction"}))
+
+    assert implement.finish_main([
+        "--answer-file", str(answer_path), "--run", "run-42",
+        "--repo", REPO, "--claim-timestamp", claim_timestamp,
+    ]) == 0
+
+    assert json.loads(capsys.readouterr().out) == {
+        "ticket": ref, "declined": "scoped reproduction",
+    }
+    assert released == [(ref, {
+        "run": "run-42", "agent": "codex",
+        "claim_timestamp": claim_timestamp,
+    })]
+
+
+def test_finish_ticket_forwards_claim_timestamp_to_human_step_finish(
+        tmp_path, monkeypatch, capsys):
+    from contextlib import nullcontext
+
+    ref = REPO + "#42"
+    claim_timestamp = "2026-09-27T18:30:12.345678Z"
+    claim_time = datetime(
+        2026, 9, 27, 18, 30, 12, 345678, tzinfo=timezone.utc,
+    )
+    item = SimpleNamespace(
+        ref=ref, item_id="PVTI_42", in_motion_since=claim_time,
+    )
+    monkeypatch.setattr(funnel, "load_project_items_by_refs",
+                        lambda refs: [item])
+    monkeypatch.setattr(heartbeat, "read_github_strict", lambda agent: [])
+    monkeypatch.setattr(
+        implement, "checkout_context",
+        lambda: {"root": tmp_path, "number": 42, "branch": "ticket/42"},
+    )
+    monkeypatch.setattr(
+        implement, "resolve_checkout_repo", lambda root, repo=None: REPO,
+    )
+    monkeypatch.setattr(funnel, "graphql_caller_for_run",
+                        lambda run, agent: None)
+    monkeypatch.setattr(funnel, "graphql_caller",
+                        lambda caller: nullcontext())
+
+    released = []
+    monkeypatch.setattr(
+        implement, "release_claim",
+        lambda target, **kwargs: released.append((target, kwargs)),
+    )
+    forwarded = []
+
+    def finish_blocked(blocked, *, release, claim_timestamp, **kwargs):
+        forwarded.append(claim_timestamp)
+        release(ref)
+        return {"ticket": ref, "blocked_on_human": blocked}
+
+    monkeypatch.setattr(implement, "finish_blocked_on_human", finish_blocked)
+    answer_path = tmp_path / "answer.json"
+    answer_path.write_text(json.dumps({
+        "blocked_on_human": {
+            "reason": "entering a credential", "action": "connect the account",
+        },
+    }))
+
+    assert implement.finish_main([
+        "--answer-file", str(answer_path), "--run", "run-42",
+        "--repo", REPO, "--claim-timestamp", claim_timestamp,
+    ]) == 0
+
+    assert json.loads(capsys.readouterr().out) == {
+        "ticket": ref,
+        "blocked_on_human": {
+            "reason": "entering a credential", "action": "connect the account",
+        },
+    }
+    assert forwarded == [claim_timestamp]
+    assert released == [(ref, {
+        "run": "run-42", "agent": "codex",
+        "claim_timestamp": claim_timestamp,
+    })]
+
+
+def test_preserve_human_step_work_carries_claim_timestamp_to_push_guards(
+        tmp_path, monkeypatch):
+    claim_timestamp = "2026-09-27T18:30:12.345678Z"
+    calls = []
+    monkeypatch.setattr(
+        implement, "_tracked_working_tree_paths", lambda root: ["tracked.py"],
+    )
+    monkeypatch.setattr(implement, "_is_run_scratch", lambda path: False)
+    monkeypatch.setattr(
+        implement, "_require_current_claim",
+        lambda ref, run, agent, **kwargs: calls.append(("check", kwargs)),
+    )
+    monkeypatch.setattr(
+        implement, "_run", lambda *args, **kwargs: SimpleNamespace(
+            stdout="saved-head\n"),
+    )
+    monkeypatch.setattr(
+        implement, "_push_ticket_branch",
+        lambda root, branch, **kwargs: calls.append(("push", kwargs)),
+    )
+
+    assert implement._preserve_human_step_work(
+        tmp_path, 42, "ticket/42", ref=REPO + "#42", run="run-42",
+        agent="codex", claim_timestamp=claim_timestamp,
+    ) == "saved-head"
+    assert calls == [
+        ("check", {"claim_timestamp": claim_timestamp}),
+        ("push", {
+            "ref": REPO + "#42", "run": "run-42", "agent": "codex",
+            "claim_timestamp": claim_timestamp,
+        }),
+    ]
+
+
+def test_an_exact_old_claim_timestamp_does_not_own_a_later_takeover(
+        monkeypatch):
+    ref = REPO + "#42"
+    original_timestamp = "2026-09-27T18:30:12.345678Z"
+    current_lock = datetime(
+        2026, 9, 27, 18, 30, 13, 123456, tzinfo=timezone.utc,
+    )
+    item = SimpleNamespace(
+        ref=ref, item_id="PVTI_42", in_motion_since=current_lock,
+    )
+    monkeypatch.setattr(funnel, "load_project_items_by_refs",
+                        lambda refs: [item])
+    records = {
+        "codex": [{
+            "run": "old-run", "phase": "bind",
+            "ts": int(datetime(
+                2026, 9, 27, 18, 30, 12, tzinfo=timezone.utc,
+            ).timestamp()),
+            "do": "ticket", "work": ref,
+        }],
+        "claude": [{
+            "run": "successor", "phase": "bind",
+            "ts": int(current_lock.timestamp()),
+            "do": "ticket", "work": ref,
+        }],
+    }
+    monkeypatch.setattr(
+        heartbeat, "read_github_strict", lambda agent: records.get(agent, []),
+    )
+
+    assert implement._claim_state(
+        ref, "old-run", "codex", claim_timestamp=original_timestamp,
+    )[0] == "other"
+
+
+def test_finish_ticket_records_superseded_when_a_later_claim_replaced_its_timestamp(
+        tmp_path, monkeypatch, capsys):
+    from contextlib import nullcontext
+
+    ref = REPO + "#42"
+    original_timestamp = "2026-09-27T18:30:12.345678Z"
+    current_lock = datetime(
+        2026, 9, 27, 18, 30, 13, 123456, tzinfo=timezone.utc,
+    )
+    item = SimpleNamespace(
+        ref=ref, item_id="PVTI_42", in_motion_since=current_lock,
+    )
+    monkeypatch.setattr(funnel, "load_project_items_by_refs",
+                        lambda refs: [item])
+    records = {
+        "codex": [{
+            "run": "old-run", "phase": "bind",
+            "ts": int(datetime(
+                2026, 9, 27, 18, 30, 12, tzinfo=timezone.utc,
+            ).timestamp()),
+            "do": "ticket", "work": ref,
+        }],
+        "claude": [{
+            "run": "successor", "phase": "bind",
+            "ts": int(current_lock.timestamp()),
+            "do": "ticket", "work": ref,
+        }],
+    }
+    monkeypatch.setattr(
+        heartbeat, "read_github_strict", lambda agent: records.get(agent, []),
+    )
+    monkeypatch.setattr(
+        implement, "checkout_context",
+        lambda: {"root": tmp_path, "number": 42, "branch": "ticket/42"},
+    )
+    monkeypatch.setattr(
+        implement, "resolve_checkout_repo", lambda root, repo=None: REPO,
+    )
+    monkeypatch.setattr(funnel, "graphql_caller_for_run",
+                        lambda run, agent: None)
+    monkeypatch.setattr(funnel, "graphql_caller",
+                        lambda caller: nullcontext())
+    finished = []
+    monkeypatch.setattr(
+        implement, "finish_heartbeat",
+        lambda *args: finished.append(args),
+    )
+    monkeypatch.setattr(
+        implement, "finish_declined",
+        lambda *args, **kwargs: pytest.fail(
+            "a superseded run must not process the answer"
+        ),
+    )
+    answer_path = tmp_path / "answer.json"
+    answer_path.write_text(json.dumps({"declined": "scoped reproduction"}))
+
+    assert implement.finish_main([
+        "--answer-file", str(answer_path), "--run", "old-run",
+        "--repo", REPO, "--claim-timestamp", original_timestamp,
+    ]) == 0
+
+    assert json.loads(capsys.readouterr().out) == {
+        "ticket": ref, "superseded": True, "work_kept": False,
+    }
+    assert finished[0][1:3] == ("old-run", "errored")
+    assert "another run holds the claim" in finished[0][3]
+
+
 def test_release_claim_noops_when_the_claim_is_empty(monkeypatch):
     ref = REPO + "#42"
     _stub_claim_state(monkeypatch, "empty")

@@ -8,6 +8,7 @@ never differ) instead of testing ref membership in the live set.
 
 from __future__ import annotations
 
+import json
 import pathlib
 import sys
 from datetime import datetime, timedelta, timezone
@@ -90,5 +91,33 @@ def test_a_claim_on_a_stale_lock_still_takes_over(monkeypatch, capsys):
     assert "took over stale claim on {}".format(target.ref) not in err
     assert writes == [
         (other.ref, ""),
-        (target.ref, "2026-09-18T08:30:00Z"),
+        (target.ref, "2026-09-18T08:30:00.000000Z"),
     ]
+
+
+def test_claim_returns_the_exact_fractional_timestamp_it_wrote(
+        monkeypatch, capsys):
+    target = _ticket(2, 1)
+    writes = []
+    monkeypatch.setattr(
+        funnel, "write_lock", lambda item, value: writes.append((item.ref, value))
+    )
+    monkeypatch.setattr(funnel, "_begin_parent", lambda *args: None)
+
+    assert funnel.cmd_claim([_project(), target], NOW, target.ref) == 0
+
+    assert json.loads(capsys.readouterr().out) == {
+        "claim_timestamp": "2026-09-18T08:30:00.000000Z",
+        "ref": target.ref,
+        "url": target.url,
+    }
+    assert writes == [(target.ref, "2026-09-18T08:30:00.000000Z")]
+
+
+def test_claim_timestamp_parser_preserves_fractional_seconds():
+    expected = datetime(2026, 9, 18, 8, 30, 0, 345678, tzinfo=timezone.utc)
+
+    assert funnel.parse_claim_timestamp(
+        "2026-09-18T08:30:00.345678Z"
+    ) == expected
+    assert funnel.parse_time("2026-09-18T08:30:00.345678Z") is None

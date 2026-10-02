@@ -11,6 +11,7 @@ import json
 import pathlib
 import re
 import sys
+from datetime import datetime, timezone
 
 import pytest
 
@@ -239,6 +240,25 @@ def test_from_node_accepts_shared_startable_projection_aliases():
         source["status"]["updatedAt"]
     )
     assert item.body_loaded is False
+
+
+def test_from_node_preserves_fractional_claim_timestamp():
+    source = _node(2, lock="2026-09-28T10:00:00.123456Z")
+    item = funnel._from_node({
+        "id": source["id"],
+        "claim": source["lock"],
+        "status": source["status"],
+        "class": source["class"],
+        "gate": source["needs"],
+        "risk": source["risk"],
+        "pinned": None,
+        "startable": source["content"],
+    })
+
+    assert item is not None
+    assert item.in_motion_since == datetime(
+        2026, 9, 28, 10, 0, 0, 123456, tzinfo=timezone.utc,
+    )
 
 
 def test_begin_default_project_and_anchor_reads_omit_issue_bodies(monkeypatch):

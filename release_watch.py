@@ -33,6 +33,7 @@ class TickTickTask:
     provider: str
     current_model: str
     newer_model: str
+    source_url: Optional[str] = None
 
     @property
     def title(self) -> str:
@@ -40,10 +41,13 @@ class TickTickTask:
 
     @property
     def content(self) -> str:
-        return (
+        content = (
             "{} is using {}. Vendor catalogues now include {}. "
             "Review the release; this watch never changes configuration."
         ).format(self.provider, self.current_model, self.newer_model)
+        if self.source_url:
+            content += " Release evidence: {}".format(self.source_url)
+        return content
 
     def payload(self, project_id: str) -> Dict[str, Any]:
         """Return the documented task fields without performing a network write."""
@@ -63,6 +67,7 @@ class WatchFault:
     provider: str
     reason: str
     kind: str = "could-not-check"
+    source_url: Optional[str] = None
 
     def __str__(self) -> str:
         return "{}: {} ({})".format(self.kind, self.provider, self.reason)
@@ -74,10 +79,22 @@ class WatchResult:
 
     notifications: Tuple[TickTickTask, ...] = ()
     faults: Tuple[WatchFault, ...] = ()
+    checks: Tuple["ProviderCheck", ...] = ()
 
     @property
     def clean(self) -> bool:
         return not self.notifications and not self.faults
+
+
+@dataclass(frozen=True)
+class ProviderCheck:
+    """A sourced provider check and the release evidence it found."""
+
+    provider: str
+    source_url: Optional[str]
+    status: str
+    current_models: Tuple[str, ...]
+    notifications: Tuple[TickTickTask, ...] = ()
 
 
 # Provider responses commonly expose a model list under one of these names.
@@ -244,31 +261,67 @@ def watch(
     """
     notifications: List[TickTickTask] = []
     faults: List[WatchFault] = []
+    checks: List[ProviderCheck] = []
 
     for provider in sorted(current_models):
         models = tuple(sorted(set(current_models[provider])))
         if provider not in responses:
             faults.append(WatchFault(provider, "no model catalogue response"))
             continue
+        response = responses[provider]
+        source_url: Optional[str] = None
+        if isinstance(response, Mapping) and "source_url" in response:
+            source = response.get("source_url")
+            source_url = source.strip() if isinstance(source, str) else None
+            error = response.get("error")
+            if isinstance(error, str) and error.strip():
+                faults.append(WatchFault(
+                    provider, error.strip(), source_url=source_url,
+                ))
+                continue
+            if not source_url:
+                faults.append(WatchFault(
+                    provider, "model catalogue source URL is missing",
+                ))
+                continue
+            response = {"models": response.get("models")}
+        if not models:
+            faults.append(WatchFault(
+                provider, "no in-use models to compare", source_url=source_url,
+            ))
+            continue
         try:
-            published = parse_model_catalog(responses[provider])
+            published = parse_model_catalog(response)
         except CouldNotCheck as exc:
-            faults.append(WatchFault(provider, str(exc)))
+            faults.append(WatchFault(provider, str(exc), source_url=source_url))
             continue
 
+        provider_notifications: List[TickTickTask] = []
+        faults_before_comparison = len(faults)
         for current_model in models:
             try:
                 releases = newer_versions(current_model, published)
             except CouldNotCheck as exc:
-                faults.append(WatchFault(provider, str(exc)))
+                faults.append(WatchFault(provider, str(exc), source_url=source_url))
                 continue
             for newer_model in releases:
-                task = TickTickTask(provider, current_model, newer_model)
+                task = TickTickTask(
+                    provider, current_model, newer_model, source_url=source_url,
+                )
                 notifications.append(task)
+                provider_notifications.append(task)
                 if notify is not None:
                     notify(task)
+        if len(faults) == faults_before_comparison:
+            checks.append(ProviderCheck(
+                provider=provider,
+                source_url=source_url,
+                status="changed" if provider_notifications else "unchanged",
+                current_models=models,
+                notifications=tuple(provider_notifications),
+            ))
 
-    return WatchResult(tuple(notifications), tuple(faults))
+    return WatchResult(tuple(notifications), tuple(faults), tuple(checks))
 
 
 def watch_in_use(

@@ -22,6 +22,17 @@ PRICE_FIXTURE = json.loads(
 RELEASE_FIXTURE = json.loads(
     (ROOT / "tests" / "fixtures" / "release_responses.json").read_text()
 )
+RELEASE_SOURCE_FIXTURES = {
+    "https://developers.openai.com/api/docs/models/all.md": (
+        ROOT / "tests" / "fixtures" / "model_release_sources" / "openai.md"
+    ).read_bytes(),
+    "https://platform.claude.com/docs/en/models/overview.md": (
+        ROOT / "tests" / "fixtures" / "model_release_sources" / "anthropic.md"
+    ).read_bytes(),
+    "https://dev.meta.ai/docs/models": (
+        ROOT / "tests" / "fixtures" / "model_release_sources" / "meta.html"
+    ).read_bytes(),
+}
 NOW = datetime(2026, 10, 1, 8, 0, tzinfo=timezone.utc)
 OPENAI_PRICE_URL = nightly_watch.PRICE_URLS["openai"]
 OPENAI_CATALOGUE_URL = nightly_watch.MODEL_CATALOGUES["openai"]["url"]
@@ -36,14 +47,22 @@ def _write_rate_table(path):
 
 def _fetcher(catalogue, *, fail_url=None):
     price_body = PRICE_FIXTURE["captured_gpt_6_luna_rates"]["body"].encode()
+    model_ids = [
+        row["id"] for row in catalogue.get("data", [])
+        if isinstance(row, dict) and isinstance(row.get("id"), str)
+    ]
+    model_page = "\n".join(
+        "- [`{}`](/api/docs/models/{}.md)".format(model_id, model_id)
+        for model_id in model_ids
+    ).encode()
 
     def fetch(url, headers):
         if url == fail_url:
             raise OSError("fixture fetch failed")
         if url == OPENAI_PRICE_URL:
             return price_body
-        if url == OPENAI_CATALOGUE_URL or url.startswith(OPENAI_CATALOGUE_URL + "?"):
-            return json.dumps(catalogue).encode()
+        if url == OPENAI_CATALOGUE_URL:
+            return model_page
         raise AssertionError("unexpected URL: {}".format(url))
 
     return fetch
@@ -113,6 +132,7 @@ def test_newer_model_is_recorded_once_across_repeated_runs(monkeypatch, tmp_path
     )
 
     assert [event["newer_model"] for event in first.model_releases] == ["gpt-5.7-sol"]
+    assert first.model_releases[0]["source_url"] == OPENAI_CATALOGUE_URL
     assert second.model_releases == ()
     assert len(nightly_watch.recent_entries(NOW, path=record)["model_releases"]) == 1
 
@@ -186,6 +206,8 @@ def test_one_failed_capture_is_recorded_while_the_other_check_runs(
     else:
         assert result.price_result.clean
         assert result.release_result.faults
+        assert result.release_result.faults[0].source_url == OPENAI_CATALOGUE_URL
+        assert result.watch_faults[0]["source_url"] == OPENAI_CATALOGUE_URL
 
 
 def test_recent_entries_expire_after_seven_days(tmp_path):
@@ -212,11 +234,124 @@ def test_recent_entries_expire_after_seven_days(tmp_path):
     assert [fault["provider"] for fault in entries["watch_faults"]] == ["anthropic"]
 
 
-def test_a_failed_catalogue_fetch_is_omitted_for_release_watch_to_fault():
+def test_a_failed_public_catalogue_fetch_keeps_source_for_release_fault():
     responses = nightly_watch.capture_release_responses(
         {"openai": ("gpt-6-luna",)},
         {"OPENAI_API_KEY": "fixture-key"},
         fetcher=lambda *_args: (_ for _ in ()).throw(OSError("offline")),
     )
 
-    assert responses == {}
+    assert responses == {
+        "openai": {
+            "source_url": OPENAI_CATALOGUE_URL,
+            "error": "public model page fetch failed",
+        },
+    }
+    result = nightly_watch.release_watch.watch(
+        {"openai": ("gpt-6-luna",)}, responses,
+    )
+    assert len(result.faults) == 1
+    assert result.faults[0].kind == "could-not-check"
+    assert result.faults[0].source_url == OPENAI_CATALOGUE_URL
+
+
+def test_public_model_pages_check_all_three_providers_without_credentials():
+    models = {
+        "openai": ("gpt-5.6-sol",),
+        "anthropic": ("claude-opus-5",),
+        "meta": ("muse-spark-1.2-contributor",),
+    }
+    requests = []
+
+    def fetch(url, headers):
+        requests.append((url, headers))
+        return RELEASE_SOURCE_FIXTURES.get(url)
+
+    responses = nightly_watch.capture_release_responses(models, {}, fetcher=fetch)
+    result = nightly_watch.release_watch.watch(models, responses)
+
+    # Before the keyless sources were wired in, this yielded three
+    # missing-key could-not-check faults at the capture/parse seam.
+    assert result.faults == (), [str(fault) for fault in result.faults]
+    assert set(requests) == {(url, None) for url in RELEASE_SOURCE_FIXTURES}
+    assert {
+        (check.provider, check.status, check.source_url)
+        for check in result.checks
+    } == {
+        ("openai", "changed", "https://developers.openai.com/api/docs/models/all.md"),
+        ("anthropic", "changed", "https://platform.claude.com/docs/en/models/overview.md"),
+        ("meta", "changed", "https://dev.meta.ai/docs/models"),
+    }
+    assert {
+        (task.provider, task.current_model, task.newer_model, task.source_url)
+        for task in result.notifications
+    } == {
+        ("openai", "gpt-5.6-sol", "gpt-6-sol", "https://developers.openai.com/api/docs/models/all.md"),
+        ("openai", "gpt-5.6-sol", "gpt-6.1-sol", "https://developers.openai.com/api/docs/models/all.md"),
+        ("anthropic", "claude-opus-5", "claude-opus-5-5", "https://platform.claude.com/docs/en/models/overview.md"),
+        ("meta", "muse-spark-1.2-contributor", "muse-spark-1.3-contributor", "https://dev.meta.ai/docs/models"),
+    }
+    assert all(task.source_url in task.content for task in result.notifications)
+
+
+def test_latest_public_models_produce_sourced_unchanged_checks():
+    models = {
+        "openai": ("gpt-6-luna",),
+        "anthropic": ("claude-opus-5-5",),
+        "meta": ("muse-spark-1.3-contributor",),
+    }
+    responses = nightly_watch.capture_release_responses(
+        models,
+        fetcher=lambda url, _headers: RELEASE_SOURCE_FIXTURES[url],
+    )
+
+    result = nightly_watch.release_watch.watch(models, responses)
+
+    assert result.faults == ()
+    assert result.notifications == ()
+    assert {
+        (check.provider, check.status, check.source_url)
+        for check in result.checks
+    } == {
+        ("openai", "unchanged", "https://developers.openai.com/api/docs/models/all.md"),
+        ("anthropic", "unchanged", "https://platform.claude.com/docs/en/models/overview.md"),
+        ("meta", "unchanged", "https://dev.meta.ai/docs/models"),
+    }
+
+
+def test_unrecognized_public_pages_are_sourced_could_not_check_faults():
+    models = {
+        "openai": ("gpt-6-luna",),
+        "anthropic": ("claude-opus-5-5",),
+        "meta": ("muse-spark-1.3-contributor",),
+    }
+    requests = []
+
+    def fetch(url, headers):
+        requests.append((url, headers))
+        return b"public page without a recognizable model list"
+
+    responses = nightly_watch.capture_release_responses(
+        models,
+        {
+            "OPENAI_API_KEY": "unused",
+            "ANTHROPIC_API_KEY": "unused",
+            "MODEL_API_KEY": "unused",
+        },
+        fetcher=fetch,
+    )
+    result = nightly_watch.release_watch.watch(models, responses)
+
+    assert set(requests) == {(url, None) for url in RELEASE_SOURCE_FIXTURES}
+    assert result.notifications == ()
+    assert result.checks == ()
+    assert {fault.provider for fault in result.faults} == set(models)
+    assert all(fault.kind == "could-not-check" for fault in result.faults)
+    assert {
+        (fault.provider, fault.source_url)
+        for fault in result.faults
+    } == {
+        ("openai", "https://developers.openai.com/api/docs/models/all.md"),
+        ("anthropic", "https://platform.claude.com/docs/en/models/overview.md"),
+        ("meta", "https://dev.meta.ai/docs/models"),
+    }

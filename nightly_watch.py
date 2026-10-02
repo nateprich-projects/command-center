@@ -12,12 +12,14 @@ import argparse
 import fcntl
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
@@ -33,39 +35,29 @@ PRICE_URLS = {
     "meta": "https://dev.meta.ai/docs/pricing-rate-limits",
 }
 
-# Model-list endpoints use each vendor's documented model catalogue API. The
-# z.ai route follows the Anthropic-compatible base already used by zai-exec.
+# Public, provider-authored model pages avoid API-key requirements and give
+# every check a durable source to carry into its result.
 MODEL_CATALOGUES = {
     "openai": {
-        "url": "https://api.openai.com/v1/models",
-        "key": "OPENAI_API_KEY",
-        "header": "Authorization",
-        "prefix": "Bearer ",
-        "cursor": "after",
+        "url": "https://developers.openai.com/api/docs/models/all.md",
+        "format": "openai-markdown",
     },
     "anthropic": {
-        "url": "https://api.anthropic.com/v1/models",
-        "key": "ANTHROPIC_API_KEY",
-        "header": "x-api-key",
-        "prefix": "",
-        "extra_headers": {"anthropic-version": "2023-06-01"},
-        "cursor": "after_id",
-    },
-    "zai": {
-        "url": "https://api.z.ai/api/anthropic/v1/models",
-        "key": "ZAI_API_KEY",
-        "header": "x-api-key",
-        "prefix": "",
-        "extra_headers": {"anthropic-version": "2023-06-01"},
-        "cursor": "after_id",
+        "url": "https://platform.claude.com/docs/en/models/overview.md",
+        "format": "anthropic-markdown",
     },
     "meta": {
-        "url": "https://api.meta.ai/v1/models",
-        "key": "MODEL_API_KEY",
-        "header": "Authorization",
-        "prefix": "Bearer ",
-        "cursor": "after",
+        "url": "https://dev.meta.ai/docs/models",
+        "format": "meta-html",
     },
+}
+ZAI_MODEL_CATALOGUE = {
+    "url": "https://api.z.ai/api/anthropic/v1/models",
+    "key": "ZAI_API_KEY",
+    "header": "x-api-key",
+    "prefix": "",
+    "extra_headers": {"anthropic-version": "2023-06-01"},
+    "cursor": "after_id",
 }
 
 ENV_FILE = Path.home() / ".claude" / "command-center" / ".env"
@@ -122,14 +114,14 @@ def _credentials(
     environ: Optional[Mapping[str, str]] = None,
     env_file: Optional[Path] = None,
 ) -> Dict[str, str]:
-    """Read credentials from the environment first, then the gitignored file."""
+    """Read credentials for the legacy z.ai catalogue route only."""
     values = publisher.parse_dotenv(env_file or ENV_FILE)
     values.update(dict(os.environ if environ is None else environ))
     return values
 
 
 def _zai_key() -> Optional[str]:
-    """Reuse the Keychain lookup that zai-exec uses; never log the key."""
+    """Reuse the existing Keychain lookup for the legacy z.ai route."""
     try:
         import usage
 
@@ -138,17 +130,16 @@ def _zai_key() -> Optional[str]:
         return None
 
 
-def _headers(provider: str, values: Mapping[str, str]) -> Optional[Dict[str, str]]:
-    spec = MODEL_CATALOGUES.get(provider)
-    if spec is None:
-        return None
-    key = values.get(str(spec["key"]), "").strip()
-    if not key and provider == "zai":
+def _zai_headers(values: Mapping[str, str]) -> Optional[Dict[str, str]]:
+    key = values.get(str(ZAI_MODEL_CATALOGUE["key"]), "").strip()
+    if not key:
         key = _zai_key() or ""
     if not key:
         return None
-    result = dict(spec.get("extra_headers", {}))
-    result[str(spec["header"])] = str(spec["prefix"]) + key
+    result = dict(ZAI_MODEL_CATALOGUE["extra_headers"])
+    result[str(ZAI_MODEL_CATALOGUE["header"])] = (
+        str(ZAI_MODEL_CATALOGUE["prefix"]) + key
+    )
     result["Accept"] = "application/json"
     return result
 
@@ -219,14 +210,13 @@ def _with_cursor(url: str, name: str, value: str) -> str:
     ))
 
 
-def _fetch_catalogue(
-    provider: str,
+def _fetch_zai_catalogue(
     headers: Mapping[str, str],
     fetcher: Callable[[str, Optional[Mapping[str, str]]], Optional[bytes]],
 ) -> Optional[object]:
-    spec = MODEL_CATALOGUES[provider]
-    url = str(spec["url"])
-    cursor_name = str(spec["cursor"])
+    """Preserve the existing authenticated z.ai pagination path."""
+    url = str(ZAI_MODEL_CATALOGUE["url"])
+    cursor_name = str(ZAI_MODEL_CATALOGUE["cursor"])
     collected: List[object] = []
     first_payload: Optional[Mapping[str, object]] = None
     entries_key: Optional[str] = None
@@ -261,9 +251,105 @@ def _fetch_catalogue(
             return None
         if page_number + 1 == MAX_CATALOG_PAGES:
             return None
-        url = _with_cursor(str(spec["url"]), cursor_name, cursor.strip())
-
+        url = _with_cursor(
+            str(ZAI_MODEL_CATALOGUE["url"]), cursor_name, cursor.strip(),
+        )
     return None
+
+
+def _page_text(raw: bytes) -> str:
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError("public model page is not UTF-8") from exc
+
+
+def _openai_model_ids(raw: bytes) -> Tuple[str, ...]:
+    """Read model slugs from OpenAI's published Markdown model index."""
+    text = _page_text(raw)
+    ids = re.findall(
+        r"\]\(/api/docs/models/([A-Za-z0-9][A-Za-z0-9._-]*)\.md\)", text,
+    )
+    if not ids:
+        raise ValueError("OpenAI model index has no recognized model links")
+    return tuple(sorted(set(ids)))
+
+
+def _anthropic_model_ids(raw: bytes) -> Tuple[str, ...]:
+    """Read the API IDs row from Anthropic's public models overview."""
+    text = _page_text(raw)
+    for line in text.splitlines():
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        if cells and cells[0].casefold() == "claude api id":
+            ids = re.findall(r"`(claude-[A-Za-z0-9._-]+)`", line)
+            if ids:
+                return tuple(sorted(set(ids)))
+            raise ValueError("Anthropic API ID row contains no model IDs")
+    raise ValueError("Anthropic models page has no Claude API ID row")
+
+
+class _MetaModelIdsParser(HTMLParser):
+    """Extract model IDs from the Muse Spark section of Meta's docs page."""
+
+    _MODEL_ID = re.compile(r"muse-spark-\d+(?:\.\d+)*(?:-contributor)?")
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._in_heading = False
+        self._heading: List[str] = []
+        self._in_spark_section = False
+        self._in_code = False
+        self._code: List[str] = []
+        self.model_ids: List[str] = []
+
+    def handle_starttag(
+        self, tag: str, _attrs: List[Tuple[str, Optional[str]]],
+    ) -> None:
+        if tag == "h2":
+            self._in_heading = True
+            self._heading = []
+        elif tag == "code" and self._in_spark_section:
+            self._in_code = True
+            self._code = []
+
+    def handle_data(self, data: str) -> None:
+        if self._in_heading:
+            self._heading.append(data)
+        if self._in_code:
+            self._code.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "h2" and self._in_heading:
+            heading = "".join(self._heading).strip().casefold()
+            self._in_spark_section = heading == "muse spark"
+            self._in_heading = False
+            self._heading = []
+        elif tag == "code" and self._in_code:
+            model_id = "".join(self._code).strip()
+            if self._MODEL_ID.fullmatch(model_id):
+                self.model_ids.append(model_id)
+            self._in_code = False
+            self._code = []
+
+
+def _meta_model_ids(raw: bytes) -> Tuple[str, ...]:
+    """Read model IDs from Meta's public Muse Spark model documentation."""
+    parser = _MetaModelIdsParser()
+    try:
+        parser.feed(_page_text(raw))
+        parser.close()
+    except Exception as exc:
+        raise ValueError("Meta models page could not be parsed") from exc
+    if not parser.model_ids:
+        raise ValueError("Meta models page has no Muse Spark model IDs")
+    return tuple(sorted(set(parser.model_ids)))
+
+
+_PUBLIC_MODEL_PARSERS = {
+    "openai-markdown": _openai_model_ids,
+    "anthropic-markdown": _anthropic_model_ids,
+    "meta-html": _meta_model_ids,
+}
 
 
 def capture_price_responses(
@@ -288,19 +374,72 @@ def capture_price_responses(
 
 def capture_release_responses(
     current_models: Mapping[str, Iterable[str]],
-    values: Mapping[str, str],
+    values: Optional[Mapping[str, str]] = None,
     fetcher: Callable[[str, Optional[Mapping[str, str]]], Optional[bytes]] = _fetch_url,
 ) -> Dict[str, object]:
-    """Fetch each in-use provider catalogue; omit failures so checks fault."""
+    """Use public catalogues, retaining z.ai's existing keyed API route."""
+    # The public providers never consult credentials or send request headers.
+    # Retain the already-supported z.ai API path for that separate provider.
+    values = {} if values is None else values
     responses: Dict[str, object] = {}
     for provider in sorted(current_models):
-        spec = MODEL_CATALOGUES.get(provider)
-        headers = _headers(provider, values)
-        if spec is None or headers is None:
+        if provider == "zai":
+            url = str(ZAI_MODEL_CATALOGUE["url"])
+            headers = _zai_headers(values)
+            if headers is None:
+                responses[provider] = {
+                    "source_url": url,
+                    "error": "z.ai API credential is unavailable",
+                }
+                continue
+            response = _fetch_zai_catalogue(headers, fetcher)
+            if response is None:
+                responses[provider] = {
+                    "source_url": url,
+                    "error": "z.ai model API fetch failed",
+                }
+                continue
+            try:
+                models = release_watch.parse_model_catalog(response)
+            except release_watch.CouldNotCheck as exc:
+                responses[provider] = {
+                    "source_url": url,
+                    "error": str(exc),
+                }
+                continue
+            responses[provider] = {
+                "source_url": url,
+                "models": list(models),
+            }
             continue
-        response = _fetch_catalogue(provider, headers, fetcher)
-        if response is not None:
-            responses[provider] = response
+        spec = MODEL_CATALOGUES.get(provider)
+        if spec is None:
+            responses[provider] = {
+                "source_url": None,
+                "error": "no public model source is configured",
+            }
+            continue
+        url = str(spec["url"])
+        raw = _safe_fetch(fetcher, url, None)
+        if raw is None:
+            responses[provider] = {
+                "source_url": url,
+                "error": "public model page fetch failed",
+            }
+            continue
+        parser = _PUBLIC_MODEL_PARSERS[str(spec["format"])]
+        try:
+            models = parser(raw)
+        except ValueError as exc:
+            responses[provider] = {
+                "source_url": url,
+                "error": str(exc),
+            }
+            continue
+        responses[provider] = {
+            "source_url": url,
+            "models": list(models),
+        }
     return responses
 
 
@@ -343,11 +482,14 @@ def _record_events(
         if key in seen:
             continue
         seen.add(key)
-        releases.append({
+        release: Dict[str, object] = {
             "provider": task.provider,
             "current_model": task.current_model,
             "newer_model": task.newer_model,
-        })
+        }
+        if task.source_url:
+            release["source_url"] = task.source_url
+        releases.append(release)
 
     faults: List[Dict[str, object]] = []
     for source, result in (("pricing", price_result), ("release", release_result)):
@@ -358,6 +500,9 @@ def _record_events(
                 "kind": fault.kind,
                 "reason": str(fault),
             }
+            source_url = getattr(fault, "source_url", None)
+            if source_url:
+                entry["source_url"] = source_url
             model = getattr(fault, "model", None)
             if isinstance(model, str) and model:
                 entry["model"] = model
@@ -517,13 +662,16 @@ def run(
 ) -> RunOutcome:
     """Run both existing checks even when capture or one check fails."""
     observed_at = _utc(now)
-    values = _credentials(environ=environ, env_file=env_file)
     if current_models is None:
         try:
             current_models = release_watch.models_in_use()
         except Exception:
             # Each watch is still called below and reports its own read fault.
             current_models = {}
+    values = (
+        _credentials(environ=environ, env_file=env_file)
+        if "zai" in current_models else {}
+    )
 
     try:
         price_responses = capture_price_responses(current_models, fetcher)

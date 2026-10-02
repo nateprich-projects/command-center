@@ -190,14 +190,22 @@ def test_derive_prices_each_run_and_keeps_missing_tokens_unknown():
     assert record["runs"][0]["notional_api_cost"]["value"] == pytest.approx(.003)
     assert record["notional_api_cost"]["value"] == pytest.approx(.003)
 
+    # #2178: unknown cache reads leave the run valued at its observed kinds
+    # (100 x $1 + 300 x $3 + 400 x $4 per million) and flagged partial; the
+    # ticket total stays unknown.
     observation["token_usage"]["cache_read_input_tokens"] = None
     incomplete = outcomes.derive_outcome(
         ticket(43), now=NOW, run_observations=[observation], rate_rows=rates
     )
-    assert incomplete["runs"][0]["notional_api_cost"]["value"] is None
+    assert incomplete["runs"][0]["notional_api_cost"]["status"] == "partial"
+    assert incomplete["runs"][0]["notional_api_cost"]["value"] == pytest.approx(
+        .0026
+    )
     assert incomplete["runs"][0]["notional_api_cost"]["missing_token_kinds"] == [
         "cache_read_input_tokens"
     ]
+    assert incomplete["token_usage"] is None
+    assert incomplete["notional_api_cost"]["status"] == "incomplete"
     assert incomplete["notional_api_cost"]["value"] is None
 
 

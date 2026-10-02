@@ -3220,6 +3220,10 @@ def _idea(number, title, body, klass=None, labels=None):
         url="https://github.com/nateprich-projects/command-center/issues/{}".format(number),
         title=title,
         body=body,
+        # What ``ideas()`` yields; the picker checks it (#2139).
+        state="OPEN",
+        status="Ideas",
+        children_total=0,
         origin="agent",
         risk=("escalated" if "Risk: escalated" in body else "standard"),
         needs="none",

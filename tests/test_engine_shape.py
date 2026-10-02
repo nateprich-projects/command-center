@@ -124,7 +124,7 @@ def stub_gh(monkeypatch, item):
 
     monkeypatch.setattr(
         shape, "_read_fresh_shape_facts",
-        lambda target: (target.status, target.children_total),
+        lambda target: (target.state, target.status, target.children_total),
         raising=False,
     )
 
@@ -1123,8 +1123,10 @@ def test_preview_and_risk_write_share_the_rendered_escalation_scan(
     expected_scan_body = shape.render_plan(shape.validate_answer(candidate))
     assert "Backfill recent records" in expected_scan_body
     assert expected_scan_body != candidate["plan_markdown"]
-    assert len(scan_bodies) == 3
-    assert scan_bodies == [expected_scan_body] * 3
+    # The preview above, then the live path's one decision record (#2137):
+    # apply no longer scans a second time for its Risk write.
+    assert len(scan_bodies) == 2
+    assert scan_bodies == [expected_scan_body] * 2
 
 
 def test_a_clear_declaration_with_a_clear_scan_is_ready():
@@ -1649,6 +1651,7 @@ def packet(**kw):
         "idea": idea_dict(),
         "origin_voice": "agent",
         "override_target": None,
+        "output_review": False,
         "plan_md": "# design record",
         "plan_md_missing": False,
         "agents_md": "# rule book",
@@ -1678,9 +1681,25 @@ def test_packet_carries_every_field():
     json.dumps(found)  # the packet is JSON by contract
 
 
+def collected_packet(monkeypatch, item):
+    """The packet ``collect`` builds for one idea, offline."""
+    monkeypatch.setattr(
+        shape, "fetch_repo_text",
+        lambda repo, path: ("{} text".format(path), False))
+    return shape.collect(item.repo, item.number,
+                         items_loader=lambda: [item], now=NOW)
+
+
+def test_packet_carries_the_review_policy_exactly_when_flagged():
+    assert packet(output_review=True)["output_review"] == \
+        shape.AGENT_SELF_APPROVABLE_OUTPUT_REVIEW
+    assert "output_review" not in packet(output_review=False)
+
+
 @pytest.mark.parametrize("klass", sorted(funnel.SELF_APPROVABLE_CLASSES))
-def test_agent_self_approvable_packet_carries_its_output_review(klass):
-    found = packet(idea=idea_dict(klass=klass))
+def test_agent_self_approvable_packet_carries_its_output_review(
+        klass, monkeypatch):
+    found = collected_packet(monkeypatch, idea(42, klass=klass))
     assert found["output_review"] == \
         shape.AGENT_SELF_APPROVABLE_OUTPUT_REVIEW
     assert "concrete unresolved stakeholder tradeoff" \
@@ -1691,13 +1710,16 @@ def test_agent_self_approvable_packet_carries_its_output_review(klass):
         in found["output_review"]["escalated_risk"]
 
 
-def test_other_origins_and_classes_do_not_get_agent_broken_review():
-    assert "output_review" not in packet()
-    assert "output_review" not in packet(
-        idea=idea_dict(klass="Broken"), origin_voice="nate-relayed")
+def test_other_origins_and_classes_do_not_get_agent_broken_review(
+        monkeypatch):
+    # An agent-origin idea with no Class does get it since #2136: the
+    # review judges it by the Class its answer proposes
+    # (tests/test_shape_agreement.py).
+    assert "output_review" not in collected_packet(
+        monkeypatch, idea(42, klass="Broken", origin="Nate"))
     for klass in ("New", "Replace"):
-        assert "output_review" not in packet(
-            idea=idea_dict(klass=klass))
+        assert "output_review" not in collected_packet(
+            monkeypatch, idea(42, klass=klass))
 
 
 def test_packet_marks_missing_instruction_files():
@@ -1781,7 +1803,7 @@ def test_apply_refuses_when_fresh_status_has_left_ideas(monkeypatch, capsys):
 
     def read_fresh(target):
         reads.append(target.ref)
-        return fresh.status, fresh.children_total
+        return fresh.state, fresh.status, fresh.children_total
 
     monkeypatch.setattr(shape, "_read_fresh_shape_facts", read_fresh)
 
@@ -1822,7 +1844,7 @@ def test_apply_refuses_when_fresh_project_item_has_children(
     )
     monkeypatch.setattr(
         shape, "_read_fresh_shape_facts",
-        lambda target: (fresh.status, fresh.children_total),
+        lambda target: (fresh.state, fresh.status, fresh.children_total),
     )
 
     assert shape.apply_shape(
@@ -1862,6 +1884,84 @@ def test_shape_picker_does_not_reoffer_with_children_idea_on_consecutive_fires(
 
     assert selected == [None, None]
     assert capsys.readouterr().out == ""
+
+
+#: apply_shape's own fresh re-read, kept here because ``stub_gh`` replaces it.
+READ_FRESH_SHAPE_FACTS = shape._read_fresh_shape_facts
+
+
+def stub_fresh_project_row(monkeypatch, fresh):
+    """Serve ``fresh`` as the Project row to apply_shape's real re-read."""
+    monkeypatch.setattr(
+        shape, "_read_fresh_shape_facts", READ_FRESH_SHAPE_FACTS)
+    stub_project_ref_load(monkeypatch, fresh)
+
+
+def test_apply_refuses_an_idea_the_fresh_read_shows_closed(
+        monkeypatch, capsys):
+    """Reproduction (#2139): a closed idea still at Ideas was rewritten and
+    written Ready, because the fresh read never looked at the issue state."""
+    item = idea(42)
+    fresh = idea(42, state="CLOSED")
+    calls = stub_gh(monkeypatch, item)
+    stub_fresh_project_row(monkeypatch, fresh)
+    project_writes = []
+    status_writes = []
+    monkeypatch.setattr(
+        funnel, "write_project_select",
+        lambda item_id, field, value, ref:
+            project_writes.append((item_id, field, value, ref)),
+    )
+    monkeypatch.setattr(
+        funnel, "_write_status",
+        lambda target, status, now: status_writes.append((target.ref, status)),
+    )
+
+    assert shape.apply_shape(
+        [item], NOW, item.ref, answer(),
+        run="shape-run", agent="muse") == 0
+
+    assert gh_calls(calls, "gh", "issue", "edit") == []
+    assert gh_calls(calls, "gh", "issue", "comment") == []
+    assert not [call for call in calls
+                if call[0] == "graphql" and call[1] == funnel.SET_FIELD]
+    assert project_writes == []
+    assert status_writes == []
+    assert (item.status, item.labels) == ("Ideas", ["needs-shaping"])
+    output = capsys.readouterr().out
+    assert ("run outcome: skipped-stale-shape ref=owner/repo#42 "
+            "reason=not-open") in output
+    assert "state=CLOSED" in output
+
+
+#: The rows #2139 names, as the Project would return them: closed at Ideas,
+#: moved to Shaped, with a child (#2092), and clean.
+SHAPEABLE_NOW_ROWS = {
+    "closed": {"state": "CLOSED"},
+    "shaped": {"status": "Shaped"},
+    "with-children": {"children_total": 1},
+    "clean": {},
+}
+
+
+@pytest.mark.parametrize("row", sorted(SHAPEABLE_NOW_ROWS))
+def test_shape_picker_offers_exactly_the_rows_fresh_apply_proceeds_on(
+        monkeypatch, capsys, row):
+    """#2139: the picker and the stale-apply refusal share one predicate."""
+    fresh = idea(42, **SHAPEABLE_NOW_ROWS[row])
+    monkeypatch.setattr(usage, "shaping_allowed", lambda reading: True)
+    offered = funnel.shapeable_idea([fresh], None, {}) is fresh
+
+    snapshot = idea(42)
+    calls = stub_gh(monkeypatch, snapshot)
+    stub_fresh_project_row(monkeypatch, fresh)
+    assert shape.apply_shape(
+        [snapshot], NOW, snapshot.ref, answer(),
+        run="shape-run", agent="muse") == 0
+    proceeded = bool(gh_calls(calls, "gh", "issue", "edit"))
+
+    assert offered == proceeded
+    assert offered is (row == "clean")
 
 
 def test_fresh_shape_facts_read_the_exact_project_item(monkeypatch):
@@ -1906,7 +2006,7 @@ def test_fresh_shape_facts_read_the_exact_project_item(monkeypatch):
     monkeypatch.setattr(funnel, "member_repos", lambda: [REPO])
     monkeypatch.setattr(funnel, "gh_graphql", read_project)
 
-    assert shape._read_fresh_shape_facts(item) == ("Shaped", 3)
+    assert shape._read_fresh_shape_facts(item) == ("OPEN", "Shaped", 3)
     (query, variables), = calls
     assert variables == {"login": funnel.PROJECT_OWNER,
                          "number": funnel.PROJECT_NUMBER}
@@ -1931,7 +2031,7 @@ def test_body_only_edit_in_fresh_project_read_still_applies(
     calls = stub_gh(monkeypatch, item)
     monkeypatch.setattr(
         shape, "_read_fresh_shape_facts",
-        lambda target: (fresh.status, fresh.children_total),
+        lambda target: (fresh.state, fresh.status, fresh.children_total),
     )
 
     assert shape.apply_shape(
@@ -2139,8 +2239,11 @@ def test_apply_honours_and_carries_an_override_to_agents(
         + funnel.origin_block(
             "nate-relayed", at=NOW, run="capture-run", agent="muse")
         + "\n\n"
+        # Recorded before the shaping that carries it: a Nate voice dated
+        # at the write itself is refused (#2138).
         + funnel.provenance_block(
-            "nate-relayed", at=NOW, run="shape-run", agent="muse")
+            "nate-relayed", at=NOW - timedelta(hours=1), run="shape-run",
+            agent="muse")
         + "\n\n" + override_block)
     assert funnel.parse_origin_override(body)["target"] == "agents"
     item = idea(42, body=body, origin="Nate")
@@ -2157,7 +2260,8 @@ def test_apply_honours_and_carries_an_override_to_agents(
 def test_apply_reports_an_unconfirmed_status_without_marking(monkeypatch):
     item = idea(42)
     monkeypatch.setattr(
-        shape, "_read_fresh_shape_facts", lambda target: ("Ideas", 0))
+        shape, "_read_fresh_shape_facts",
+        lambda target: ("OPEN", "Ideas", 0))
 
     def graphql(query, **variables):
         raise funnel.GitHubError("boom")

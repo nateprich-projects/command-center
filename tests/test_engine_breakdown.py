@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import re
 import stat
 import sys
 from types import SimpleNamespace
@@ -1540,6 +1541,172 @@ def test_apply_main_reports_an_unreadable_project_risk(
     assert "could not read the Risk of project owner/repo#1" in err
     assert "Traceback" not in err
     assert calls["created"] == []
+
+
+# -- one routing record per ticket (#2140) ------------------------------------
+#
+# apply_create wrote each ticket's Origin, Risk and Needs fields and then built
+# its coverage row from a second copy of the same expressions; #1292 (resume,
+# already-exists add) and #1757 (the project's Risk) each patched that loop.
+# What GitHub holds and what the coverage comment names must be one reading.
+
+COVERAGE_ROW = re.compile(
+    r"^- (?P<ref>\S+): .* \(Risk: (?P<risk>standard|escalated)"
+    r"(?P<inherited>, inherited from the project)?, "
+    r"Needs: (?P<needs>[a-z-]+)")
+
+
+def coverage_rows(body):
+    """Each coverage-comment row as {ref: {Risk, Needs, inherited}}."""
+    rows = {}
+    for line in body.splitlines()[1:]:
+        match = COVERAGE_ROW.match(line)
+        assert match, line
+        rows[match.group("ref")] = {
+            "Risk": match.group("risk"),
+            "Needs": match.group("needs"),
+            "inherited": bool(match.group("inherited")),
+        }
+    return rows
+
+
+def field_writes_by_ref(calls):
+    """Every funnel.write_project_select call, grouped by ticket ref.
+
+    Each field may be written once per ticket, always to the same item.
+    """
+    written = {}
+    for item_id, field, value, ref in calls["fields"]:
+        row = written.setdefault(ref, {"item": item_id})
+        assert row["item"] == item_id, (ref, field)
+        assert field not in row, (ref, field)
+        row[field] = value
+    return written
+
+
+def stub_routing_apply(monkeypatch, **kw):
+    """stub_apply with Needs going through funnel.write_project_select.
+
+    stub_apply replaces write_needs with its own recorder; these tests need
+    all three fields on one writer to compare them with the coverage rows.
+    """
+    real_write_needs = breakdown.write_needs
+    calls = stub_apply(monkeypatch, **kw)
+    monkeypatch.setattr(breakdown, "write_needs", real_write_needs)
+    return calls
+
+
+@pytest.mark.parametrize("project_risk", ["escalated", "standard", None])
+def test_field_writes_equal_the_coverage_rows_on_every_path(
+        monkeypatch, project_risk):
+    # "resumed" survived an earlier half-applied run (#1292 ticket 2);
+    # "on the board" is created but its Project add answers already-exists
+    # (#1292 ticket 1); "fresh" is a plain create.
+    calls = stub_routing_apply(
+        monkeypatch, project_risk=project_risk,
+        siblings=[sibling(201, title="resumed")],
+        project_add_error_on="101",
+        project_add_error=(
+            "GraphQL: Content already exists in this project "
+            "(addProjectV2Item)"))
+    monkeypatch.setattr(funnel, "load_items", lambda include_details=True: [
+        SimpleNamespace(url="https://github.com/owner/repo/issues/101",
+                        item_id="existing-item-101")])
+    errors, normalized, _ = validate({"tickets": [
+        raw_ticket(title="resumed", risk="standard", needs="human"),
+        raw_ticket(title="on the board", risk="escalated",
+                   needs="claude-code-environment"),
+        raw_ticket(title="fresh", risk="standard", needs="none"),
+    ]})
+    assert errors == []
+    assert normalized is not None
+
+    result = breakdown.apply(REPO, 1, normalized)
+
+    assert [row["ticket"]["title"] for row in calls["created"]] == [
+        "on the board", "fresh"]
+    # #1757: an escalated project escalates every ticket; a standard or
+    # unset one keeps each ticket's own Risk.
+    inherited = project_risk == "escalated"
+    expected_risk = {
+        "owner/repo#201": "escalated" if inherited else "standard",
+        "owner/repo#101": "escalated",
+        "owner/repo#102": "escalated" if inherited else "standard",
+    }
+    expected_needs = {
+        "owner/repo#201": "human",
+        "owner/repo#101": "claude-code-environment",
+        "owner/repo#102": "none",
+    }
+    written = field_writes_by_ref(calls)
+    assert written == {
+        ref: {"item": item, "Origin": "agent", "Risk": expected_risk[ref],
+              "Needs": expected_needs[ref]}
+        for ref, item in (("owner/repo#201", "item-201"),
+                          ("owner/repo#101", "existing-item-101"),
+                          ("owner/repo#102", "item-102"))}
+
+    assert len(calls["comments"]) == 1
+    rows = coverage_rows(calls["comments"][0][2])
+    assert rows == {
+        ref: {"Risk": fields["Risk"], "Needs": fields["Needs"],
+              "inherited": inherited}
+        for ref, fields in written.items()}
+    assert {row["ref"]: {"Risk": row["risk"], "Needs": row["needs"],
+                         "inherited": row["risk_inherited"]}
+            for row in result["created"]} == rows
+
+
+@pytest.mark.parametrize("project_risk, ticket_risk, risk, inherited", [
+    ("escalated", "standard", "escalated", True),
+    ("escalated", "escalated", "escalated", True),
+    ("standard", "standard", "standard", False),
+    ("standard", "escalated", "escalated", False),
+    (None, "standard", "standard", False),
+    (None, "escalated", "escalated", False),
+])
+def test_one_routing_record_per_ticket(
+        project_risk, ticket_risk, risk, inherited):
+    ticket = {"title": "t", "body": "b", "risk": ticket_risk,
+              "needs": "human", "depends_on": []}
+    assert breakdown.ticket_routing(ticket, project_risk) == {
+        "origin": "agent", "risk": risk, "risk_inherited": inherited,
+        "needs": "human"}
+
+
+def test_field_writes_and_coverage_rows_both_read_the_routing_record(
+        monkeypatch):
+    calls = stub_routing_apply(monkeypatch, project_risk="standard",
+                               siblings=[sibling(201, title="resumed")])
+    seen = []
+
+    def routing(ticket, project_risk):
+        seen.append((ticket["title"], project_risk))
+        # No answer and no standard project produces this record, so a
+        # consumer that recomputed its own reading would disagree with it.
+        return {"origin": "Nate", "risk": "escalated",
+                "risk_inherited": True, "needs": "human"}
+
+    monkeypatch.setattr(breakdown, "ticket_routing", routing)
+    errors, normalized, _ = validate({"tickets": [
+        raw_ticket(title="resumed"), raw_ticket(title="fresh"),
+    ]})
+    assert errors == []
+    assert normalized is not None
+
+    breakdown.apply(REPO, 1, normalized)
+
+    # Created and resumed tickets pass through the same step, once each.
+    assert seen == [("resumed", "standard"), ("fresh", "standard")]
+    written = field_writes_by_ref(calls)
+    assert {ref: (row["Origin"], row["Risk"], row["Needs"])
+            for ref, row in written.items()} == {
+        "owner/repo#201": ("Nate", "escalated", "human"),
+        "owner/repo#101": ("Nate", "escalated", "human"),
+    }
+    assert coverage_rows(calls["comments"][0][2]) == {
+        ref: {"Risk": "escalated", "Needs": "human", "inherited": True}
+        for ref in ("owner/repo#201", "owner/repo#101")}
 
 
 def test_apply_main_rejects_an_invalid_answer_with_exit_2(

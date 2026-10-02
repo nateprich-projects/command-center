@@ -48,6 +48,7 @@ def packet(siblings=(), **kw):
               "status": "Ideas", "klass": "Improve"},
         origin_voice="agent",
         override_target=None,
+        output_review=True,
         plan_md="# plan.md rules",
         plan_md_missing=False,
         agents_md="# AGENTS.md rules",

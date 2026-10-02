@@ -495,10 +495,21 @@ def test_dashboard_muse_usage_maps_the_seven_day_window(monkeypatch):
     monkeypatch.setattr(usage, "read_muse", lambda now: _muse_reading())
 
     assert funnel._dashboard_muse_usage(1_788_000_000.0) == {
+        "source": "Local Muse session journal estimate",
+        "captured_at": 1_788_000_000.0,
         "spent_dollars": 14.30,
         "cap_dollars": 200.0,
         "used_percent": 7.15,
         "calls": 42,
+    }
+
+
+def test_dashboard_muse_panel_usage_records_latest_validated_reading():
+    assert funnel._dashboard_muse_panel_usage() == {
+        "used_percent": 15.0,
+        "sampled_at": "2026-09-29T20:55:00-07:00",
+        "source": "Muse account panel",
+        "source_url": "https://github.com/nateprich-projects/command-center/issues/1673#issuecomment-5903766309",
     }
 
 
@@ -579,6 +590,8 @@ def test_successful_brief_spools_muse_usage(monkeypatch, tmp_path, capsys):
 
     monkeypatch.setattr(funnel, "cmd_brief", fake_cmd_brief)
     row = {
+        "source": "Local Muse session journal estimate",
+        "captured_at": 1_788_000_000.0,
         "spent_dollars": 14.30,
         "cap_dollars": 200.0,
         "used_percent": 7.15,
@@ -590,7 +603,10 @@ def test_successful_brief_spools_muse_usage(monkeypatch, tmp_path, capsys):
 
     assert funnel.main(["brief"]) == 0
     assert capsys.readouterr().out == expected + "\n"
-    assert _spooled(spool)["usage"] == {"muse": row}
+    assert _spooled(spool)["usage"] == {
+        "muse": row,
+        "muse_panel": funnel._dashboard_muse_panel_usage(),
+    }
 
 
 def test_successful_brief_spools_only_claude_weekly_sample_fields(
@@ -608,7 +624,9 @@ def test_successful_brief_spools_only_claude_weekly_sample_fields(
         return 0
 
     monkeypatch.setattr(funnel, "cmd_brief", fake_cmd_brief)
-    muse = {"spent_dollars": 14.30, "cap_dollars": 200.0,
+    muse = {"source": "Local Muse session journal estimate",
+            "captured_at": 1_788_000_000.0,
+            "spent_dollars": 14.30, "cap_dollars": 200.0,
             "used_percent": 7.15, "calls": 42}
     monkeypatch.setattr(funnel, "_dashboard_muse_usage", lambda _now: muse)
     sample_t = 1_790_000_000_123
@@ -627,6 +645,7 @@ def test_successful_brief_spools_only_claude_weekly_sample_fields(
     snapshot = _spooled(spool)
     assert snapshot["usage"] == {
         "muse": muse,
+        "muse_panel": funnel._dashboard_muse_panel_usage(),
         "claude": {"u": {"sd": 63.25}, "t": sample_t},
     }
     assert "private-org-id" not in next(spool.glob("*.json")).read_text()

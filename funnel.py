@@ -730,6 +730,13 @@ BRIEF_SECTION_BUDGETS = {
     "stale_locks_taken_over": 0.25,
     "maintenance_load": 0.25,
     "disposal": 0.25,
+    # The former resend_ratio section read codex and zcode together in
+    # 1.86–3.61 s (ticket #2132). Give each provider up to that observed pair
+    # maximum; the four-provider pass stays inside the 120 s brief envelope.
+    "heartbeat_claude": 4.0,
+    "heartbeat_codex": 4.0,
+    "heartbeat_muse": 4.0,
+    "heartbeat_zcode": 4.0,
     "resend_ratio": 3.0,
     "unattended_merges": 3.0,
     "unattended_approvals": 49.0,
@@ -9585,10 +9592,25 @@ def check_block_conditions(
                 _dependency_ref(item, value) or str(value).strip()
                 for value in item.open_blockers
             ))
+        elif item.block_reason is None and item.block_comments_error:
+            # Unread, not unparseable: ``check_block_comments`` names the
+            # error, and the block is not stranded (#2135).
+            detail = "block comments unread"
         elif item.block_reason is None:
             detail = "block comment is not parseable"
         else:
             details = []
+            if item.block_event is not None:
+                # A well-formed event wait is a condition, not an absence of
+                # one, now that it is no longer reported as stranded (#2135).
+                details.append(
+                    "until event agent={} job={} outcome={} after={}".format(
+                        item.block_event.get("agent"),
+                        item.block_event.get("job"),
+                        item.block_event.get("outcome"),
+                        item.block_event.get("after"),
+                    )
+                )
             if item.block_references:
                 resolved = [
                     _dependency_ref(item, value) or str(value).strip()
@@ -13573,11 +13595,11 @@ def dashboard_board(
 
 
 def _dashboard_muse_usage(now_epoch: float) -> Optional[Dict[str, object]]:
-    """Return the compact Muse spend row for the dashboard snapshot.
+    """Return the compact Muse local-spend estimate for the dashboard.
 
     Rolling seven-day dollars against the cap only; the 2026-09-18 decision
     declined a 24-hour companion line. Best effort like the rest of the
-    snapshot: an unreadable reader yields None and the page hides the row,
+    snapshot: an unreadable reader yields None and the page shows unavailable,
     never a failed brief.
     """
     try:
@@ -13598,6 +13620,7 @@ def _dashboard_muse_usage(now_epoch: float) -> Optional[Dict[str, object]]:
     cap = reading.get("cap_dollars")
     percent = window.get("used_percent")
     calls = window.get("calls")
+    captured_at = reading.get("captured_at")
     for value in (spent, cap, percent):
         if (
             not isinstance(value, (int, float))
@@ -13606,6 +13629,13 @@ def _dashboard_muse_usage(now_epoch: float) -> Optional[Dict[str, object]]:
             or value in (float("inf"), float("-inf"))
         ):
             return None
+    if (
+        not isinstance(captured_at, (int, float))
+        or isinstance(captured_at, bool)
+        or not math.isfinite(captured_at)
+        or captured_at < 0
+    ):
+        return None
     if cap <= 0 or spent < 0:
         return None
     if (
@@ -13615,6 +13645,8 @@ def _dashboard_muse_usage(now_epoch: float) -> Optional[Dict[str, object]]:
     ):
         return None
     row: Dict[str, object] = {
+        "source": "Local Muse session journal estimate",
+        "captured_at": float(captured_at),
         "spent_dollars": float(spent),
         "cap_dollars": float(cap),
         "used_percent": float(percent),
@@ -13638,6 +13670,24 @@ def _dashboard_muse_usage(now_epoch: float) -> Optional[Dict[str, object]]:
                 row[key] = float(value)
         break
     return row
+
+
+def _dashboard_muse_panel_usage() -> Dict[str, object]:
+    """Return the latest validated account-panel sample recorded on GitHub.
+
+    The source issue comment records 15% at Tue 2026-09-29 20:55 PDT. Keep
+    the source timestamp intact; the measurement owner in #2123 owns future
+    refreshes, while the dashboard marks this seed stale after 90 minutes.
+    """
+    return {
+        "used_percent": 15.0,
+        "sampled_at": "2026-09-29T20:55:00-07:00",
+        "source": "Muse account panel",
+        "source_url": (
+            "https://github.com/nateprich-projects/command-center/"
+            "issues/1673#issuecomment-5903766309"
+        ),
+    }
 
 
 def _dashboard_claude_usage(now_epoch: float) -> Optional[Dict[str, object]]:
@@ -14667,6 +14717,21 @@ def _abandoned_ticket(blocker: Item, dependent: Item,
     return dependent.parent != blocker.parent
 
 
+def _block_event_can_clear(item: Item) -> bool:
+    """Whether ``clear_satisfied_blocks`` can ever lift this event wait.
+
+    The clear reads GitHub heartbeat finishes only for agents in
+    ``heartbeat.PROVIDERS`` and matches every other agent against no records,
+    so an event naming any other agent (a member repo's own job, say) never
+    lifts. ``satisfied_block_refs`` needs every parsed condition, so nothing
+    beside such an event can lift the block either (#2135).
+    """
+    import heartbeat
+
+    event = item.block_event
+    return isinstance(event, dict) and event.get("agent") in heartbeat.PROVIDERS
+
+
 def unclearable_block(item: Item) -> bool:
     """Whether a blocked item has no condition that can lift it and no asker.
 
@@ -14675,12 +14740,20 @@ def unclearable_block(item: Item) -> bool:
     ``agent`` still gets an Unblock question for the watch; an ordinary
     agent-owned block without that decline marker remains stranded. The
     funnel watch also supports ``claude-code-environment`` blocks.
+
+    The comment conditions are read through ``block_condition`` (#2135), so
+    a well-formed event spec counts as a condition, as it does for the clear
+    (#1451), and a block whose comments could not be read is never called
+    unclearable: its condition is unknown, not absent (#1417's dry window).
+    An event counts only when its agent is one whose heartbeat the clear
+    reads (``_block_event_can_clear``); any other agent's event never lifts.
     """
     if item.state != "OPEN" or not item.is_blocked:
         return False
-    if item.block_references or item.open_blockers:
-        return False
-    if _item_blocked_until(item) is not None:
+    condition = block_condition(item)
+    if condition == "event" and not _block_event_can_clear(item):
+        condition = None
+    if condition is not None or item.open_blockers:
         return False
     if item.needs == "claude-code-environment":
         return False
@@ -15049,6 +15122,200 @@ def _block_cycle_reasons(
     return reasons
 
 
+@dataclass(frozen=True)
+class _StrandFacts:
+    """What the named stranded checks read besides the item itself (#2135).
+
+    Built once per ``stranded_items`` call from the loaded rows, so each
+    check stays a pure function of one item and these shared facts.
+    ``pr_facts`` keeps its three-way meaning: ``None`` means no PR lookups
+    were requested, a missing key means that fact was not fetched, and a
+    ``None`` value is a known absence.
+    """
+
+    by_ref: Dict[str, Item]
+    pr_facts: Optional[Dict[str, Optional[Dict[str, object]]]]
+    stale: FrozenSet[str]
+    cycles: Dict[str, List[str]]
+
+    def pr(self, item: Item) -> Optional[Dict[str, object]]:
+        return None if self.pr_facts is None else self.pr_facts.get(item.ref)
+
+    def pr_known(self, item: Item) -> bool:
+        return self.pr_facts is None or item.ref in self.pr_facts
+
+
+def _strand_facts(
+    rows: Sequence[Item], now: datetime,
+    pr_facts: Optional[Dict[str, Optional[Dict[str, object]]]] = None,
+) -> _StrandFacts:
+    """Derive the shared facts for ``STRANDED_CHECKS`` from loaded rows."""
+    by_ref = {item.ref: item for item in rows}
+    return _StrandFacts(
+        by_ref=by_ref,
+        pr_facts=pr_facts,
+        stale=frozenset(
+            item.ref for item in stale_locks(rows, now, pr_facts=pr_facts)
+        ),
+        cycles=_block_cycle_reasons(rows, by_ref),
+    )
+
+
+def _open_pr_fact(pr: Optional[Dict[str, object]]) -> bool:
+    return isinstance(pr, dict) and str(pr.get("state") or "").upper() == "OPEN"
+
+
+def _strand_open_pr_on_closed_ticket(
+    item: Item, facts: _StrandFacts,
+) -> Optional[str]:
+    """A ticket closed while its PR stayed open. The only check on closed rows."""
+    if (
+        item.state == "CLOSED"
+        and item.parent is not None
+        and _open_pr_fact(facts.pr(item))
+    ):
+        return "open PR on closed ticket"
+    return None
+
+
+def _strand_pr_under_non_building_project(
+    item: Item, facts: _StrandFacts,
+) -> Optional[str]:
+    """An open ticket's open PR whose project is not ``Building``.
+
+    The merge gate refuses it, so it cannot land however good it is. A
+    project that is not loaded is not evidence either way.
+    """
+    if (
+        item.state != "OPEN"
+        or item.parent is None
+        or not _open_pr_fact(facts.pr(item))
+    ):
+        return None
+    parent = facts.by_ref.get(item.parent)
+    if parent is None or parent.status == "Building":
+        return None
+    return (
+        "open PR on open ticket whose project Status is {}; "
+        "merge gate will refuse it".format(parent.status or "unset")
+    )
+
+
+def _strand_approved_conflicting_head(
+    item: Item, facts: _StrandFacts,
+) -> Optional[str]:
+    """An approved current head that cannot merge for a conflict."""
+    pr = facts.pr(item)
+    if (
+        item.state == "OPEN"
+        and _open_pr_fact(pr)
+        and str(pr.get("mergeable") or "").upper() == "CONFLICTING"
+        and _approved_current_head(pr)
+    ):
+        return "approved verdict against an unmergeable branch"
+    return None
+
+
+def _strand_stale_claim(item: Item, facts: _StrandFacts) -> Optional[str]:
+    """A claim past its TTL whose PR is known to be absent."""
+    if (
+        item.state == "OPEN"
+        and item.ref in facts.stale
+        and facts.pr_known(item)
+        and facts.pr(item) is None
+    ):
+        return "claim past its TTL with no PR"
+    return None
+
+
+def _strand_childless_building_project(
+    item: Item, facts: _StrandFacts,
+) -> Optional[str]:
+    """A project at ``Building`` with no tickets to build."""
+    if (
+        item.state == "OPEN"
+        and item.parent is None
+        and item.status == "Building"
+        and not item.children_total
+    ):
+        return "Building project has no tickets"
+    return None
+
+
+def _strand_closed_parent(item: Item, facts: _StrandFacts) -> Optional[str]:
+    """An open ticket under a closed project that was not parked (#1169).
+
+    It has nowhere to go: no gate is watching it, the ladder ranks it through
+    a parent that is finished, and nothing will close it. Parked parents are
+    excluded on purpose — parking is a decision, and its tickets are meant to
+    sit. Detection only; nothing here closes anything.
+    """
+    parent = facts.by_ref.get(item.parent or "")
+    if (
+        item.state == "OPEN"
+        and parent is not None
+        and parent.state != "OPEN"
+        and parent.status != "Parked"
+    ):
+        return "parent {} is closed with Status {}".format(
+            parent.ref, parent.status or "unset"
+        )
+    return None
+
+
+def _strand_finished_upkeep_project(
+    item: Item, facts: _StrandFacts,
+) -> Optional[str]:
+    """A project that has earned its unattended close but is still open."""
+    if _auto_closeable_project(item):
+        return "finished upkeep project not closed"
+    return None
+
+
+def _strand_dead_blocker(item: Item, facts: _StrandFacts) -> Optional[str]:
+    """A native or named blocker that will never close (#1432)."""
+    if item.state != "OPEN":
+        return None
+    dead = _dead_dependency_refs(item, facts.by_ref)
+    if dead:
+        return "blocked on blocker that will never close: {}".format(
+            ", ".join(dead))
+    return None
+
+
+def _strand_unclearable_block(
+    item: Item, facts: _StrandFacts,
+) -> Optional[str]:
+    """A block nothing can lift and nobody is asked about (#1393, #1432)."""
+    if unclearable_block(item):
+        return _unclearable_block_reason(item)
+    return None
+
+
+def _strand_block_cycle(item: Item, facts: _StrandFacts) -> Optional[str]:
+    """A block cycle, reported once on its lowest-numbered member."""
+    if item.state != "OPEN":
+        return None
+    return "; ".join(facts.cycles.get(item.ref, [])) or None
+
+
+#: Every reason ``stranded_items`` can give, one named check each (#2135),
+#: in the order the reasons are joined. Each check guards its own state, so
+#: a closed row reaches only the open-PR-on-closed-ticket check.
+STRANDED_CHECKS: Tuple[Callable[[Item, _StrandFacts], Optional[str]], ...] = (
+    _strand_open_pr_on_closed_ticket,
+    _strand_pr_under_non_building_project,
+    _strand_approved_conflicting_head,
+    _strand_stale_claim,
+    _strand_childless_building_project,
+    _strand_closed_parent,
+    _strand_finished_upkeep_project,
+    _strand_dead_blocker,
+    _strand_unclearable_block,
+    _strand_block_cycle,
+)
+
+
 def stranded_items(
     items: Iterable[Item],
     now: datetime,
@@ -15067,96 +15334,25 @@ def stranded_items(
     ``Building``. Missing CI history is intentionally absent; no fetched fact
     distinguishes that from a PR whose first check is still pending.
 
+    Each reason is one named check in ``STRANDED_CHECKS`` (#2135), which also
+    holds the open ticket under a closed, unparked project (#1169) and the
+    block nothing can lift and nobody is asked about (#1432). An item's
+    reasons are joined in that order.
+
     ``pr_facts`` is optional so the function remains fixture-pure. ``None``
     means the caller has not requested PR lookups and therefore treats a stale
     claim as having no PR; a supplied mapping distinguishes a known no-PR
     result from a fact that was not fetched.
     """
     rows = list(items)
-    by_ref = {item.ref: item for item in rows}
-    stale = {
-        item.ref for item in stale_locks(rows, now, pr_facts=pr_facts)
-    }
-    cycle_reasons = _block_cycle_reasons(rows, by_ref)
+    facts = _strand_facts(rows, now, pr_facts)
     found: List[Dict[str, object]] = []
 
     for item in rows:
-        reasons: List[str] = []
-        pr_known = pr_facts is None or item.ref in pr_facts
-        pr = None if pr_facts is None else pr_facts.get(item.ref)
-
-        if (
-            isinstance(pr, dict)
-            and str(pr.get("state") or "").upper() == "OPEN"
-            and item.parent is not None
-        ):
-            if item.state == "CLOSED":
-                reasons.append("open PR on closed ticket")
-            elif item.state == "OPEN":
-                parent = by_ref.get(item.parent)
-                if parent is not None and parent.status != "Building":
-                    status = parent.status or "unset"
-                    reasons.append(
-                        "open PR on open ticket whose project Status is {}; "
-                        "merge gate will refuse it".format(status)
-                    )
-
-        if item.state != "OPEN":
-            if reasons:
-                found.append({
-                    "ref": item.ref,
-                    "title": item.title,
-                    "url": item.url,
-                    "reason": "; ".join(reasons),
-                })
-            continue
-
-        if (
-            pr
-            and str(pr.get("state") or "").upper() == "OPEN"
-            and str(pr.get("mergeable") or "").upper() == "CONFLICTING"
-            and _approved_current_head(pr)
-        ):
-            reasons.append("approved verdict against an unmergeable branch")
-
-        if item.ref in stale and pr_known and pr is None:
-            reasons.append("claim past its TTL with no PR")
-
-        if item.parent is None and item.status == "Building" and not item.children_total:
-            reasons.append("Building project has no tickets")
-
-        # An open ticket under a closed project has nowhere to go: no gate is
-        # watching it, the ladder ranks it through a parent that is finished,
-        # and nothing will close it. Parked parents are excluded on purpose —
-        # parking is a decision, and its tickets are meant to sit. Detection
-        # only; nothing here closes anything.
-        parent = by_ref.get(item.parent or "")
-        if (
-            parent is not None
-            and parent.state != "OPEN"
-            and parent.status != "Parked"
-        ):
-            reasons.append(
-                "parent {} is closed with Status {}".format(
-                    parent.ref, parent.status or "unset"
-                )
-            )
-
-        if _auto_closeable_project(item):
-            reasons.append("finished upkeep project not closed")
-
-        dead = _dead_dependency_refs(item, by_ref)
-        if dead:
-            reasons.append(
-                "blocked on blocker that will never close: {}".format(
-                    ", ".join(dead))
-            )
-
-        if unclearable_block(item):
-            reasons.append(_unclearable_block_reason(item))
-
-        reasons.extend(cycle_reasons.get(item.ref, []))
-
+        reasons = [
+            reason for reason in (check(item, facts) for check in STRANDED_CHECKS)
+            if reason
+        ]
         if reasons:
             found.append({
                 "ref": item.ref,
@@ -15673,6 +15869,9 @@ _BRIEF_UNAVAILABLE = object()
 _ACTIVE_BRIEF_CACHE: contextvars.ContextVar = contextvars.ContextVar(
     "active_brief_cache", default=None
 )
+_ACTIVE_BRIEF_HEARTBEAT_CACHE: contextvars.ContextVar = contextvars.ContextVar(
+    "active_brief_heartbeat_cache", default=None
+)
 _BRIEF_SECTION_STATE: contextvars.ContextVar = contextvars.ContextVar(
     "brief_section_state", default=None
 )
@@ -15708,12 +15907,16 @@ class BriefCache:
     def __init__(self):
         self._pr_facts = _BRIEF_UNAVAILABLE
         self._heartbeat_rows: Dict[str, List[Dict]] = {}
+        self._strict_heartbeat_rows: Dict[str, List[Dict]] = {}
+        self._strict_heartbeat_errors: Dict[str, Exception] = {}
         self._comment_tails: Dict[str, List[Dict]] = {}
 
     def clear(self) -> None:
         """Forget auxiliary reads after a command may have mutated GitHub."""
         self._pr_facts = _BRIEF_UNAVAILABLE
         self._heartbeat_rows.clear()
+        self._strict_heartbeat_rows.clear()
+        self._strict_heartbeat_errors.clear()
         self._comment_tails.clear()
 
     def get_pr_facts(self, items: Sequence[Item]):
@@ -15746,6 +15949,8 @@ class BriefCache:
         return self.comment_tails(items)
 
     def heartbeat_rows(self, agent: str) -> List[Dict]:
+        if agent in self._strict_heartbeat_rows:
+            return self._strict_heartbeat_rows[agent]
         if agent in self._heartbeat_rows:
             return self._heartbeat_rows[agent]
 
@@ -15774,9 +15979,49 @@ class BriefCache:
         self._heartbeat_rows[agent] = rows
         return rows
 
+    def brief_heartbeat_rows(self, agent: str) -> List[Dict]:
+        """Read strict heartbeat history once for the five published sections."""
+        if agent in self._strict_heartbeat_rows:
+            return self._strict_heartbeat_rows[agent]
+        if agent in self._strict_heartbeat_errors:
+            raise self._strict_heartbeat_errors[agent]
+
+        import heartbeat
+
+        timeout = _brief_timeout_remaining()
+        try:
+            if timeout is None:
+                rows = heartbeat.read_brief(agent)
+            else:
+                try:
+                    rows = heartbeat.read_brief(agent, timeout=timeout)
+                except TypeError as exc:
+                    # Keep fixture-era one-argument test doubles compatible
+                    # while the real heartbeat reader uses the bound.
+                    if "timeout" not in str(exc):
+                        raise
+                    rows = heartbeat.read_brief(agent)
+        except subprocess.TimeoutExpired as exc:
+            state = _BRIEF_SECTION_STATE.get()
+            section = state[0] if state else "unknown"
+            error = BriefSectionTimeout(
+                section, "heartbeat read timed out"
+            )
+            self._strict_heartbeat_errors[agent] = error
+            raise error from exc
+        except Exception as exc:
+            self._strict_heartbeat_errors[agent] = exc
+            raise
+
+        self._strict_heartbeat_rows[agent] = rows
+        return rows
+
 
 def _brief_heartbeat_rows(agent: str) -> List[Dict]:
     """Read one heartbeat spool, reusing the active brief cache when present."""
+    brief_cache = _ACTIVE_BRIEF_HEARTBEAT_CACHE.get()
+    if brief_cache is not None:
+        return brief_cache.brief_heartbeat_rows(agent)
     cache = _ACTIVE_BRIEF_CACHE.get()
     if cache is not None:
         return cache.heartbeat_rows(agent)
@@ -15945,6 +16190,7 @@ def cmd_brief(
         deadline = time.perf_counter() + BRIEF_TOTAL_BUDGET_SECONDS
     cache = brief_cache or _ACTIVE_BRIEF_CACHE.get() or BriefCache()
     cache_token = _ACTIVE_BRIEF_CACHE.set(cache)
+    heartbeat_cache_token = _ACTIVE_BRIEF_HEARTBEAT_CACHE.set(cache)
     deferred_pure: Dict[str, Callable[[], object]] = {}
     deferred_section = object()
 
@@ -15967,6 +16213,68 @@ def cmd_brief(
         return decisions, by_ref, [
             item_json(i, now, by_ref) for i in decisions
         ], [watch_gate_json(i, now, by_ref) for i in watched]
+
+    try:
+        import heartbeat
+
+        heartbeat_providers = sorted(heartbeat.PROVIDERS)
+        heartbeat_agents = sorted(
+            set(heartbeat_providers) | set(METERED_AGENTS)
+        )
+        active_heartbeat_agents = [
+            agent for agent in heartbeat_providers
+            if agent not in heartbeat.RETIRED_AGENTS
+        ]
+        heartbeat_module_error = None
+    except Exception as exc:
+        heartbeat_providers = []
+        heartbeat_agents = []
+        active_heartbeat_agents = []
+        heartbeat_module_error = _brief_error(exc)
+
+    heartbeat_errors: Dict[str, str] = (
+        {"unknown": heartbeat_module_error}
+        if heartbeat_module_error else {}
+    )
+
+    def read_provider_heartbeat(agent: str) -> None:
+        name = "heartbeat_" + agent
+        rows = section(
+            name, lambda agent=agent: cache.brief_heartbeat_rows(agent)
+        )
+        if rows is not None:
+            return
+        error = "heartbeat read failed"
+        for entry in missing:
+            if entry.get("section") == name:
+                entry.setdefault("agent", agent)
+                error = entry.get("error", error)
+        heartbeat_errors[agent] = error
+
+    def heartbeat_section(
+        name: str, agents: Sequence[str], reader: Callable[[], object]
+    ):
+        failures = (
+            [("unknown", heartbeat_module_error)]
+            if heartbeat_module_error else [
+                (agent, heartbeat_errors[agent])
+                for agent in agents if agent in heartbeat_errors
+            ]
+        )
+        for agent, error in failures:
+            missing.append({
+                "section": name,
+                "agent": agent,
+                "error": "heartbeat read unavailable for {}: {}".format(
+                    agent, error
+                ),
+            })
+        if failures:
+            # The provider read already established that this section's input
+            # is unavailable. Publish null without asking its consumer to read
+            # the same heartbeat again.
+            return section(name, lambda: None)
+        return section(name, reader)
 
     try:
         decision_result = section("items", decision_payload)
@@ -16045,9 +16353,21 @@ def cmd_brief(
             "maintenance_load", lambda: maintenance_load(items, now)
         )
         disposal_report = section("disposal", lambda: disposal(items, now))
-        resend = section("resend_ratio", lambda: recent_resend_ratio(now))
-        merges = section(
-            "unattended_merges", lambda: unattended_merges(now)
+
+        for agent in heartbeat_agents:
+            read_provider_heartbeat(agent)
+
+        all_heartbeat_agents = (
+            heartbeat_providers
+            if heartbeat_module_error is None else []
+        )
+        resend = heartbeat_section(
+            "resend_ratio", METERED_AGENTS,
+            lambda: recent_resend_ratio(now),
+        )
+        merges = heartbeat_section(
+            "unattended_merges", all_heartbeat_agents,
+            lambda: unattended_merges(now),
         )
         approvals = section(
             "unattended_approvals",
@@ -16057,10 +16377,17 @@ def cmd_brief(
             "connector_gate_answers",
             lambda: connector_gate_answers(items, now, brief_cache=cache),
         )
-        run_summary = section("run_summary", lambda: agent_run_summary(now))
-        health = section("agent_health", lambda: agent_health(now))
-        touched = section(
-            "working_tree_touched", lambda: working_tree_touched(now)
+        run_summary = heartbeat_section(
+            "run_summary", active_heartbeat_agents,
+            lambda: agent_run_summary(now),
+        )
+        health = heartbeat_section(
+            "agent_health", active_heartbeat_agents,
+            lambda: agent_health(now),
+        )
+        touched = heartbeat_section(
+            "working_tree_touched", all_heartbeat_agents,
+            lambda: working_tree_touched(now),
         )
         rejected = section(
             "rejected_merges", lambda: rejected_merges(items, now)
@@ -16222,6 +16549,7 @@ def cmd_brief(
         print(json.dumps(brief, indent=2))
         return 0
     finally:
+        _ACTIVE_BRIEF_HEARTBEAT_CACHE.reset(heartbeat_cache_token)
         _ACTIVE_BRIEF_CACHE.reset(cache_token)
 
 
@@ -18865,6 +19193,27 @@ def review_queue(
     return found
 
 
+def unshapeable_reason(state: Optional[str], status: Optional[str],
+                       children_total: int) -> Optional[str]:
+    """Why a row cannot be shaped now, or ``None`` when it can (#2139).
+
+    The one shapeable-now predicate: ``shapeable_idea`` filters with it, and
+    ``shape.apply_shape`` refuses a stale apply with it on its fresh re-read,
+    so the picker offers a row exactly when apply would proceed on it. A
+    closed issue is never shaped, nor is one that has left Ideas or already
+    has children. The needs-shaping label, tier and headroom are not here:
+    they are the picker's alone, because ``shape-apply --voice nate-relayed``
+    shapes unlabelled ideas in session.
+    """
+    if state != "OPEN":
+        return "not-open"
+    if status != "Ideas":
+        return "status-changed"
+    if children_total > 0:
+        return "with-children"
+    return None
+
+
 def shapeable_idea(items: Sequence[Item], tier: Optional[str],
                    reading: Dict,
                    skipped: Optional[List[Dict[str, str]]] = None
@@ -18873,9 +19222,10 @@ def shapeable_idea(items: Sequence[Item], tier: Optional[str],
 
     Shaping starts new work, so it is the last optional job after review and
     breakdown. The ordering itself stays in ``ideas()``; this function only
-    filters that shared order through the existing tier and headroom rules.
-    Ideas with children are ineligible here; ``shape.apply_shape`` keeps its
-    fresh-read refusal as a backstop for children added after this selection.
+    filters that shared order through the existing tier and headroom rules
+    and ``unshapeable_reason``, the predicate ``shape.apply_shape``'s
+    fresh-read refusal shares (#2139). That refusal is the backstop for a
+    row that closes, moves or gains children after this selection.
 
     Each tier shapes its own ideas: an escalated run is offered the
     first escalated-tier idea, a standard run the first standard-tier
@@ -18896,11 +19246,14 @@ def shapeable_idea(items: Sequence[Item], tier: Optional[str],
         )
         if tier is not None and needed != tier:
             continue
-        if getattr(item, "children_total", 0) > 0:
+        reason = unshapeable_reason(
+            getattr(item, "state", None), getattr(item, "status", None),
+            getattr(item, "children_total", 0))
+        if reason is not None:
             if skipped is not None:
                 skipped.append({
                     "ref": item.ref,
-                    "reason": "with-children",
+                    "reason": reason,
                 })
             continue
         return item
@@ -19132,17 +19485,47 @@ def sweep_shaped_self_approvals(
 
     The Shaped gate is re-checked by the same predicate used when a plan is
     first written. Other live questions, such as an unblock question, remain
-    owned by their existing gate and are not swept.
+    owned by their existing gate and are not swept. The compact begin view
+    carries the row fields needed to select candidates but omits their bodies;
+    read only those bodies, oldest at the gate first, before applying the
+    predicate. If the begin envelope cannot cover another body read, leave
+    that candidate and every later one at Shaped for a later run.
     """
     by_ref = {item.ref: item for item in items}
     advanced: List[Dict[str, str]] = []
     errors: List[Dict[str, str]] = []
+    candidates = []
     for item in items:
-        if item.state != "OPEN" or item.status != "Shaped":
+        if (
+            item.state != "OPEN"
+            or item.status != "Shaped"
+            or item.origin != "agent"
+            or item.needs != "none"
+        ):
             continue
         question = gate_question(item)
+        # The Shaped question is this sweep's own gate; other live questions
+        # (for example, Unblock) stay with their existing owner.
         if question is not None and question != GATES["Shaped"]:
             continue
+        candidates.append(item)
+
+    oldest_unknown = datetime.max.replace(tzinfo=timezone.utc)
+    candidates.sort(key=lambda item: (
+        question_since(item) is None,
+        question_since(item) or oldest_unknown,
+        item.repo,
+        item.number,
+    ))
+
+    for item in candidates:
+        if not getattr(item, "body_loaded", True):
+            try:
+                _load_close_candidate_bodies(items, [item])
+            except BeginCannotComplete:
+                break
+            if not getattr(item, "body_loaded", True):
+                continue
         if not shaped_self_approvable(item, by_ref):
             continue
 
@@ -23279,6 +23662,7 @@ def main(argv: Optional[Sequence[str]] = None, *,
                         )
                     snapshot_usage = {
                         "muse": _dashboard_muse_usage(now.timestamp()),
+                        "muse_panel": _dashboard_muse_panel_usage(),
                         "claude": _dashboard_claude_usage(now.timestamp()),
                     }
                     if snapshot_usage["claude"] is None:

@@ -262,9 +262,9 @@ def render_blocked(reason: object, on: Sequence[object] = (),
                    until: Optional[date] = None) -> str:
     """``**Blocked[ until DATE][ on #N and #M]:** reason``.
 
-    ``on`` lists issue numbers; the block lifts once all of them close and
-    ``until`` (a calendar date) has arrived. With neither, only a person
-    lifts it.
+    ``on`` lists issue numbers and ``until`` is a calendar date; the funnel
+    lifts the block once every condition named is met. With neither, only
+    a person lifts it.
     """
     if isinstance(on, (str, bytes, int)):
         raise TypeError("on takes a sequence of issue numbers")
@@ -285,8 +285,8 @@ def render_blocked_until_event(spec: Mapping[str, object],
                                reason: object) -> str:
     """``**Blocked until event:**``, the fenced JSON spec, then the reason.
 
-    The spec must be one the parser accepts; anything else would post a
-    block nothing can lift, so it is refused here instead.
+    The spec must be one the parser accepts; any other would read back as a
+    malformed header with no condition, so it is refused here instead.
     """
     raw = json.dumps(dict(spec), indent=2)
     if _parse_block_event_spec(raw) is None:

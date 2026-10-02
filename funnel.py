@@ -15993,7 +15993,6 @@ def cmd_brief(
         active_heartbeat_agents = []
         heartbeat_module_error = _brief_error(exc)
 
-    heartbeat_rows: Dict[str, List[Dict]] = {}
     heartbeat_errors: Dict[str, str] = (
         {"unknown": heartbeat_module_error}
         if heartbeat_module_error else {}
@@ -16003,7 +16002,6 @@ def cmd_brief(
         name = "heartbeat_" + agent
         rows = section(name, lambda agent=agent: cache.heartbeat_rows(agent))
         if rows is not None:
-            heartbeat_rows[agent] = rows
             return
         error = "heartbeat read failed"
         for entry in missing:
@@ -16030,6 +16028,11 @@ def cmd_brief(
                     agent, error
                 ),
             })
+        if failures:
+            # The provider read already established that this section's input
+            # is unavailable. Publish null without asking its consumer to read
+            # the same heartbeat again.
+            return section(name, lambda: None)
         return section(name, reader)
 
     try:

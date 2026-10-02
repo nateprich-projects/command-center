@@ -2666,7 +2666,10 @@ def test_cmd_brief_heartbeat_timeouts_publish_dependent_sections_as_unknown(
 ):
     import heartbeat
 
+    calls = []
+
     def timed_out(agent, timeout=None):
+        calls.append(agent)
         raise subprocess.TimeoutExpired(["gh", "api", agent], timeout)
 
     monkeypatch.setattr(heartbeat, "read_brief", timed_out)
@@ -2690,6 +2693,7 @@ def test_cmd_brief_heartbeat_timeouts_publish_dependent_sections_as_unknown(
     assert set(dependent) <= {
         entry["section"] for entry in brief["missing"]
     }
+    assert calls == sorted(heartbeat.PROVIDERS)
 
 
 def test_cmd_brief_raised_heartbeat_reads_name_the_unavailable_agent(

@@ -63,7 +63,10 @@ def test_default_archive_base_uses_the_machine_local_ssd(tmp_path, monkeypatch):
 
     assert source.exists()
     assert destinations == [
-        Path("/Volumes/External SSD/Agent-Logs/muse/2026/09/session.jsonl.gz")
+        Path(
+            "/Volumes/External SSD/Archives/session-logs/muse/"
+            "2026/09/session.jsonl.gz"
+        )
     ]
 
 
@@ -102,6 +105,55 @@ def test_archive_pass_copies_then_deletes_only_a_verified_gzip(tmp_path):
         "status": "ok", "copied": 2, "deleted": 2,
         "retained": 0, "errors": 0,
     }
+
+
+def test_base_creation_failure_is_reported_non_ok_without_deleting_source(
+        tmp_path):
+    muse, codex, volume, _archive = roots(tmp_path)
+    source = archive_fixture(
+        muse, "2026/09/session.jsonl.gz", gzip.compress(b"keep me", mtime=0)
+    )
+    blocked_base = tmp_path / "base-is-a-file"
+    blocked_base.write_text("not a directory")
+
+    summary = run_pass(muse, codex, volume, blocked_base)
+
+    assert source.exists()
+    assert summary == {
+        "status": "error", "copied": 0, "deleted": 0,
+        "retained": 1, "errors": 1,
+    }
+
+
+def test_per_file_archive_error_is_reported_non_ok_with_counts(tmp_path):
+    muse, codex, volume, archive = roots(tmp_path)
+    source = archive_fixture(
+        muse, "2026/09/session.jsonl.gz", gzip.compress(b"source", mtime=0)
+    )
+    destination = archive / "muse" / "2026/09/session.jsonl.gz"
+    destination.parent.mkdir(parents=True)
+    destination.write_bytes(gzip.compress(b"other!", mtime=0))
+
+    summary = run_pass(muse, codex, volume, archive)
+
+    assert source.exists()
+    assert summary == {
+        "status": "error", "copied": 0, "deleted": 0,
+        "retained": 1, "errors": 1,
+    }
+
+
+def test_module_entrypoint_runs_daily_pass_once(monkeypatch):
+    calls = []
+
+    def run_daily_pass():
+        calls.append("called")
+        return 7
+
+    monkeypatch.setattr(session_log_archive, "run_daily_pass", run_daily_pass)
+
+    assert session_log_archive.main() == 7
+    assert calls == ["called"]
 
 
 def test_codex_archival_is_limited_to_non_user_thread_sources(tmp_path):

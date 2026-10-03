@@ -114,7 +114,7 @@ def test_codex_archive_override_resolves_through_prior_run(
 
     monkeypatch.delenv(session_logs.ARCHIVE_ROOT_ENV, raising=False)
     assert session_logs.archive_root("codex") == (
-        "/Volumes/External SSD/Agent-Logs/codex")
+        "/Volumes/External SSD/Archives/session-logs/codex")
 
     monkeypatch.setitem(session_logs.STORE_ROOTS, "codex", str(store))
     monkeypatch.setenv(session_logs.ARCHIVE_ROOT_ENV, str(archive_base))

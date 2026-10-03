@@ -248,6 +248,8 @@ def archive_pass(
             else:
                 summary["retained"] = int(summary["retained"]) + 1
                 summary["errors"] = int(summary["errors"]) + 1
+    if summary["errors"]:
+        summary["status"] = "error"
     return summary
 
 

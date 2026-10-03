@@ -1,0 +1,10 @@
+[
+  {"change_id":"bad-1","version":"v1","truth":"bad","a_verdict":"rejected","b_verdict":"rejected"},
+  {"change_id":"bad-2","version":"v1","truth":"bad","a_verdict":"rejected","b_verdict":"approved"},
+  {"change_id":"bad-3","version":"v1","truth":"bad","a_verdict":"approved","b_verdict":"rejected"},
+  {"change_id":"bad-4","version":"v1","truth":"bad","a_verdict":"approved","b_verdict":"approved"},
+  {"change_id":"bad-5","version":"v1","truth":"bad","a_verdict":"approved","b_verdict":"rejected"},
+  {"change_id":"good-1","version":"v1","truth":"good","a_verdict":"approved","b_verdict":"approved"},
+  {"change_id":"good-2","version":"v1","truth":"good","a_verdict":"rejected","b_verdict":"approved"},
+  {"change_id":"good-3","version":"v1","truth":"good","a_verdict":"approved","b_verdict":"rejected"}
+]

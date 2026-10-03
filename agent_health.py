@@ -196,36 +196,39 @@ def _window_label(history_window_seconds: int = HISTORY_WINDOW_SECONDS) -> str:
 
 
 def _completed_run_durations(
-    rows: List[Dict],
+    runs: List[Dict],
     now: float,
     *,
     history_window_seconds: int = HISTORY_WINDOW_SECONDS,
 ) -> List[float]:
-    """Return named start-to-finish durations completed in the history window."""
+    """Return per-run start-to-finish durations completed in the history window."""
     import heartbeat
 
     cutoff = now - history_window_seconds
-    starts = {
-        row.get("run"): float(row["ts"])
-        for row in rows
-        if row.get("phase") == "start"
-        and row.get("run")
-        and isinstance(row.get("ts"), (int, float))
-        and float(row["ts"]) <= now
-    }
     durations = []
-    for row in rows:
+    for run in runs:
+        start = run.get("start")
+        finish = run.get("finish")
         if (
-            row.get("phase") != "finish"
-            or not row.get("run")
-            or not isinstance(row.get("ts"), (int, float))
-            or heartbeat.is_rebegin_finish(row)
+            run.get("pairing") != heartbeat.PAIRING_FINISHED
+            or not isinstance(start, dict)
+            or not isinstance(finish, dict)
+            or heartbeat.is_rebegin_finish(finish)
         ):
             continue
-        finished_at = float(row["ts"])
-        started_at = starts.get(row.get("run"))
+        started_at = start.get("ts")
+        finished_at = finish.get("ts")
         if (
-            started_at is None
+            isinstance(started_at, bool)
+            or not isinstance(started_at, (int, float))
+            or isinstance(finished_at, bool)
+            or not isinstance(finished_at, (int, float))
+        ):
+            continue
+        started_at = float(started_at)
+        finished_at = float(finished_at)
+        if (
+            started_at > now
             or finished_at < cutoff
             or finished_at < started_at
             or finished_at > now
@@ -236,32 +239,53 @@ def _completed_run_durations(
 
 
 def _recent_outcomes(
-    rows: List[Dict],
+    runs: List[Dict],
     now: float,
     outcome: str,
     week: int,
 ) -> List[Dict]:
-    """Return one record per run with ``outcome`` in the diagnostic week.
+    """Return per-run finishes with ``outcome`` in the diagnostic week.
 
-    A count read from these rows is a count of *runs*. Reading rows instead
-    made the alarm report the heartbeat's own write duplication: 67 muse errors
-    against 55 true runs, measured 2026-09-21 (#1225). The canonical rule lives
-    in ``heartbeat.one_record_per_run``; this is the thin adapter to it.
+    The view has already collapsed the duplicate start, finish, and bind reads
+    for a run. Retain the finish's diagnostic fields beside the view so callers
+    can keep the established wording without reading raw rows again.
     """
-    import heartbeat
-
     found = []
-    for row in rows:
-        timestamp = row.get("ts")
+    for run in runs:
+        finish = run.get("finish")
+        if not isinstance(finish, dict) or run.get("outcome") != outcome:
+            continue
+        timestamp = finish.get("ts")
         if (
-            row.get("outcome") != outcome
-            or isinstance(timestamp, bool)
+            isinstance(timestamp, bool)
             or not isinstance(timestamp, (int, float))
             or now - float(timestamp) >= week
         ):
             continue
-        found.append(row)
-    return heartbeat.one_record_per_run(found)
+        record = dict(run)
+        record["ts"] = timestamp
+        record["note"] = finish.get("note")
+        record["runtime"] = finish.get("runtime")
+        found.append(record)
+    return found
+
+
+def _open_muse_auth_outage_finish(rows: List[Dict]) -> Optional[Dict]:
+    """Return the finish that currently leaves Muse's auth outage open."""
+    import heartbeat
+
+    if not heartbeat.muse_auth_outage_open(rows):
+        return None
+    # The state helper follows the append-only record order. When it says the
+    # outage is open, the latest auth-outage finish is the one that opened it.
+    return next((
+        row for row in reversed(rows)
+        if isinstance(row, dict)
+        and row.get("agent") == "muse"
+        and row.get("phase") == "finish"
+        and row.get("outcome") == "errored"
+        and row.get("note") == heartbeat.MUSE_AUTH_OUTAGE_NOTE
+    ), None)
 
 
 def _runtime_head(row: Dict) -> Optional[str]:
@@ -310,6 +334,9 @@ def assess(
     unclassified finishes and requires the recorded runtime head so every
     surfaced regression can be traced to its code revision. The watchdog keeps
     the default all-error assessment.
+
+    An open Muse authentication outage replaces the silence alarm with the
+    opening finish's time and the successful-login recovery instruction.
     """
     normal_percentile = (
         NORMAL_PERCENTILE if normal_percentile is None else normal_percentile
@@ -343,6 +370,23 @@ def assess(
     import heartbeat
 
     retired = getattr(heartbeat, "RETIRED_AGENTS", frozenset())
+    runs = list(heartbeat.run_views(rows).values())
+    auth_outage_finish = (
+        _open_muse_auth_outage_finish(rows) if agent == "muse" else None
+    )
+    auth_outage_open = auth_outage_finish is not None
+    if auth_outage_open:
+        opened_at = auth_outage_finish.get("ts")
+        if isinstance(opened_at, bool) or not isinstance(opened_at, (int, float)):
+            opened_when = "at an unknown time"
+        else:
+            opened_when = "at <t:{}:f>".format(int(opened_at))
+        problems.append(
+            "`muse`: Muse auth outage is open; the finish that opened it was "
+            "{}. A successful login probe clears it, so someone must sign in.".format(
+                opened_when
+            )
+        )
     inferred = _normal_gap(
         rows,
         now,
@@ -358,7 +402,7 @@ def assess(
                 agent, _hold_stamp(hold_until), int(inferred[1])
             )
         )
-    elif inferred is not None:
+    elif not auth_outage_open and inferred is not None:
         normal, latest, record_count = inferred
         if hold_until is not None:
             # The park is over. Silence since the reset is the honest gap;
@@ -389,7 +433,7 @@ def assess(
             "`{}`: parked until {} (provider quota); no silence alarm while "
             "the park holds.".format(agent, _hold_stamp(hold_until))
         )
-    elif inferred is None and agent not in retired:
+    elif not auth_outage_open and inferred is None and agent not in retired:
         timestamps = [
             float(row["ts"])
             for row in rows
@@ -420,9 +464,13 @@ def assess(
     # An unresolved finish counts as a finish for one of its candidates. A run
     # that completed but could not name itself must not be reported as dying —
     # that false alarm is the failure this signal exists to avoid.
-    open_starts = heartbeat.open_starts(rows)
+    open_starts = [
+        run["start"] for run in runs
+        if run.get("pairing") == heartbeat.PAIRING_OPEN
+        and isinstance(run.get("start"), dict)
+    ]
     completed_durations = _completed_run_durations(
-        rows, now, history_window_seconds=history_window_seconds
+        runs, now, history_window_seconds=history_window_seconds
     )
     if len(open_starts) == 1 and completed_durations:
         open_start = open_starts[0]
@@ -449,7 +497,9 @@ def assess(
                     )
                 )
 
-    bound_runs = set(heartbeat.bindings(rows))
+    bound_runs = {
+        run.get("run") for run in runs if isinstance(run.get("binding"), dict)
+    }
     dying = [
         r for r in open_starts
         if now - (r.get("ts") or 0) > unfinished_seconds
@@ -477,7 +527,7 @@ def assess(
             )
         )
 
-    errored = _recent_outcomes(rows, now, "errored", week)
+    errored = _recent_outcomes(runs, now, "errored", week)
     if regressions_only:
         errored = [
             row for row in errored
@@ -529,7 +579,7 @@ def assess(
             )
 
     drifted = _recent_outcomes(
-        rows, now, CONFIG_DRIFT_OUTCOME, CONFIG_DRIFT_WINDOW)
+        runs, now, CONFIG_DRIFT_OUTCOME, CONFIG_DRIFT_WINDOW)
     if drifted:
         newest = max(drifted, key=lambda r: r.get("ts") or 0)
         problems.append(

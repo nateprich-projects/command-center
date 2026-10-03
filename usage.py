@@ -298,6 +298,10 @@ MUSE_WEEKLY_RESERVE = round(
     100.0 * MUSE_SESSION_RESERVE_DOLLARS / MUSE_WEEKLY_CAP_DOLLARS, 2
 )
 
+# The bounded reviewer trial has its own total ceiling inside the existing
+# Muse allowance. This does not authorize trial activation or evaluation calls.
+MUSE_TRIAL_TOTAL_CAP_DOLLARS = 20.0
+
 #: Nate's dated release of the Muse pace brake (#1341), for the one window that
 #: resets on Sunday 2026-09-27 at 17:00 PDT. It names that window by its reset
 #: time, so it lapses there by construction: the next window reads against the
@@ -403,6 +407,97 @@ def muse_pace_override(resets_at: float, now: float) -> Optional[Dict]:
     if reopened is not None and now >= float(reopened):
         found["reopened_at"] = float(reopened)
     return found
+
+
+def _finite_nonnegative_dollars(value) -> Optional[float]:
+    """Parse a recorded dollar amount without treating malformed data as zero."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        amount = float(value)
+    except (OverflowError, TypeError, ValueError):
+        return None
+    if not math.isfinite(amount) or amount < 0.0:
+        return None
+    return amount
+
+
+def muse_trial_allowance_dollars(now: Optional[float] = None) -> Optional[float]:
+    """Return the current Muse weekly cap that contains the trial's total.
+
+    The verified configuration has a $109 panel-paired cap through its
+    2026-10-05 reset and a $200 baseline cap. Read the active cap each time so
+    later allowance changes cannot silently create room for a new allowance.
+    """
+    now = time.time() if now is None else now
+    now = _finite_nonnegative_dollars(now)
+    if now is None:
+        return None
+    try:
+        resets_at = muse_window_start(now) + SEVEN_DAY
+        override = muse_pace_override(resets_at, now)
+        allowance = (
+            override["cap_dollars"] if override
+            else MUSE_WEEKLY_CAP_DOLLARS
+        )
+    except (KeyError, OverflowError, TypeError, ValueError):
+        return None
+    return _finite_nonnegative_dollars(allowance)
+
+
+def muse_trial_counter_read(spent_dollars, now: Optional[float] = None) -> Dict:
+    """Read a caller-supplied trial total and decide whether another run fits.
+
+    The caller supplies the previously recorded total from GitHub, the durable
+    state of this repository. No local counter file is written. Stop if the
+    total is unreadable, the $20 ceiling no longer fits the active Muse
+    allowance, or one reserved Muse session could take the total over $20.
+    """
+    spent = _finite_nonnegative_dollars(spent_dollars)
+    cap = _finite_nonnegative_dollars(MUSE_TRIAL_TOTAL_CAP_DOLLARS)
+    reserve = _finite_nonnegative_dollars(MUSE_SESSION_RESERVE_DOLLARS)
+    allowance = muse_trial_allowance_dollars(now)
+    known = all(value is not None for value in (spent, cap, reserve, allowance))
+    contained = (
+        cap is not None and allowance is not None and cap <= allowance
+    )
+    stop = (
+        not known or not contained
+        or spent + reserve > cap
+    )
+    return {
+        "known": known,
+        "spent_dollars": spent,
+        "cap_dollars": cap,
+        "allowance_dollars": allowance,
+        "reserve_dollars": reserve,
+        "contained": contained,
+        "stop": stop,
+    }
+
+
+def muse_trial_counter_increment(
+        spent_dollars, increment_dollars,
+        now: Optional[float] = None) -> Dict:
+    """Add observed trial usage to the caller's recorded total, failing closed."""
+    now = time.time() if now is None else now
+    reading = muse_trial_counter_read(spent_dollars, now)
+    increment = _finite_nonnegative_dollars(increment_dollars)
+    if not reading["known"] or increment is None:
+        reading["known"] = False
+        reading["stop"] = True
+        reading["increment_dollars"] = None
+        return reading
+
+    total = round(reading["spent_dollars"] + increment, 6)
+    if not math.isfinite(total):
+        reading["known"] = False
+        reading["stop"] = True
+        reading["increment_dollars"] = None
+        return reading
+    updated = muse_trial_counter_read(total, now)
+    updated["increment_dollars"] = increment
+    return updated
 
 
 #: The provider's weekly window opens on the same lattice every week: Monday

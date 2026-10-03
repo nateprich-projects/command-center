@@ -30,8 +30,14 @@ finish. Each API cost field states whether it was measured (zero included),
 missing (no event) or lost (an event with no readable value), so an
 unreadable value never reads as zero or as nothing measured. An errored finish
 written before `error_class` was recorded is classified on read. `open_starts`
-and `api_cost_for_run` are thin adapters over it. The view is derived on every
-read: the spool format and the records on GitHub are unchanged.
+and `api_cost_for_run` are thin adapters over it, and `agent_health.assess`
+takes its open starts, bindings, completed durations, per-run outcomes (the
+finish, or one of the run's non-terminal events, where a `config-drift`
+refusal lives), and auth-outage state from it (#2176). A successful login
+probe has no run id, so the view associates it with the run whose finish
+opened the outage. `muse_auth_outage` is a thin adapter over that view, shared
+by the lanes' gate. The view is derived on every read: the spool format and
+the records on GitHub are unchanged.
 
 **Start and finish read GitHub strictly** (`read(strict=True)`, #2175). A
 GitHub read that fails is lost, never "no records"; only a missing file is an
@@ -965,7 +971,15 @@ def run_views(records: List[Dict]) -> Dict[str, Dict]:
     - ``binding`` as `bindings` reads the run's own bind records, and
       ``job`` as `job_for_run` reads it for the run's agent;
     - ``api_cost_events`` and ``api_cost``, each field a ``state`` and a
-      ``value`` (the ``API_COST_*`` values above).
+      ``value`` (the ``API_COST_*`` values above);
+    - ``events``: the run's non-terminal ``event`` records in the order read
+      — an outcome filed against the run without closing it, such as a
+      gate's ``config-drift`` refusal (#1316) or a misfiled finish
+      re-attached to its run (#2176);
+    - ``muse_auth_outage``: the auth-outage finish opened by this run, plus
+      the successful login probe that cleared it if one followed. A probe has
+      no run id, so the view associates it with the run whose finish opened
+      the outage (#2176).
 
     Runs with a start come first, oldest start first, which is the order
     `open_starts` reports; runs with no start follow in the order read. A
@@ -976,17 +990,41 @@ def run_views(records: List[Dict]) -> Dict[str, Dict]:
     distinct = distinct_records(records)
     rows: Dict[str, Dict[str, List[Dict]]] = {}
     unresolved = []
+    auth_outages: Dict[str, Dict[str, object]] = {}
+    open_auth_outage: Optional[Dict[str, object]] = None
     position = {id(record): index for index, record in enumerate(distinct)}
     for record in distinct:
         phase = record.get("phase")
         if phase == "finish" and record.get("unresolved"):
             unresolved.append(record)
         run = record.get("run")
+        if record.get("agent") == "muse":
+            if (
+                phase == "finish"
+                and record.get("outcome") == "errored"
+                and record.get("note") == MUSE_AUTH_OUTAGE_NOTE
+            ):
+                if open_auth_outage is None:
+                    open_auth_outage = {
+                        "run": run if isinstance(run, str) and run else None,
+                        "opened": record,
+                        "cleared_by": None,
+                    }
+                    outage_run = open_auth_outage["run"]
+                    if outage_run is not None:
+                        auth_outages[outage_run] = open_auth_outage
+            elif (
+                phase == "auth_probe"
+                and record.get("result") == "success"
+                and open_auth_outage is not None
+            ):
+                open_auth_outage["cleared_by"] = record
+                open_auth_outage = None
         if not isinstance(run, str) or not run:
             continue
         found = rows.setdefault(run, {
             "all": [], "start": [], "finish": [], "bind": [], "api_cost": [],
-            "job": [],
+            "job": [], "event": [],
         })
         found["all"].append(record)
         if phase in found:
@@ -1046,6 +1084,8 @@ def run_views(records: List[Dict]) -> Dict[str, Dict]:
             "job": next(iter(jobs)) if len(jobs) == 1 else None,
             "api_cost_events": list(found["api_cost"]),
             "api_cost": _run_api_cost(found["api_cost"]),
+            "events": list(found["event"]),
+            "muse_auth_outage": auth_outages.get(run),
         }
 
     started = sorted(
@@ -2246,29 +2286,28 @@ def read_brief(agent: str, timeout: Optional[float] = None) -> List[Dict]:
 MUSE_AUTH_OUTAGE_NOTE = "Muse provider outage: missing meta credentials"
 
 
+def muse_auth_outage(records: List[Dict]) -> Optional[Dict]:
+    """The finish that opened a still-open Muse auth outage, or ``None``.
+
+    A successful login probe has no run id. `run_views` associates it with the
+    run whose finish opened the outage, so this adapter and `agent_health`
+    consume the same per-run reading (#2176). Duplicate GitHub/spool records
+    are collapsed before the view is built (#1225).
+    """
+    for view in run_views(records).values():
+        outage = view.get("muse_auth_outage")
+        if isinstance(outage, dict) and outage.get("cleared_by") is None:
+            opened = outage.get("opened")
+            return opened if isinstance(opened, dict) else None
+    return None
+
+
 def muse_auth_outage_open(records: List[Dict]) -> bool:
     """Whether durable Muse records leave the authentication outage open.
 
-    The append-only order on GitHub is authoritative: the exact auth-outage
-    finish opens the park, and only a successful smoke probe closes it. Other
-    run failures and unsuccessful probes do not change the state.
+    A thin adapter over `muse_auth_outage`, which holds the rule.
     """
-    open_outage = False
-    for record in records:
-        if not isinstance(record, dict) or record.get("agent") != "muse":
-            continue
-        if (
-            record.get("phase") == "finish"
-            and record.get("outcome") == "errored"
-            and record.get("note") == MUSE_AUTH_OUTAGE_NOTE
-        ):
-            open_outage = True
-        elif (
-            record.get("phase") == "auth_probe"
-            and record.get("result") == "success"
-        ):
-            open_outage = False
-    return open_outage
+    return muse_auth_outage(records) is not None
 
 
 def read(agent: str, timeout: Optional[float] = None,

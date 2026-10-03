@@ -150,8 +150,13 @@ is not already a symlink, and refuses to touch a `settings.json` it cannot parse
   binding, job, api_cost events and pairing (open, finished, re-begun, closed by an
   unresolved finish), with each API cost field measured, missing or lost rather than a
   bare null. `open_starts` and `api_cost_for_run` are thin adapters over it, so a run
-  read twice (GitHub plus spool) is one run. Built and fixture-tested; not yet checked
-  against the live branch (#2179).
+  read twice (GitHub plus spool) is one run. `agent_health.assess` takes its open
+  starts, bindings, completed durations and per-run outcomes (the finish, or one of the
+  run's events, where `config-drift` lives) from the same view; an outcome that names
+  no run (an unresolved finish) still counts, once. It also carries the Muse auth-outage
+  finish and associates an unbound successful login probe with that opener's run (#2176).
+  Built and fixture-tested;
+  not yet checked against the live branch (#2179).
   `heartbeat start` and `finish` read GitHub strictly (#2175): a failed read is lost,
   never "no records", and only a missing file is an empty history. They carry on from
   the spool alone; `finish` trusts the run id it was given instead of refusing ("no
@@ -162,7 +167,11 @@ is not already a symlink, and refuses to touch a `settings.json` it cannot parse
 - `.github/workflows/watchdog.yml` + `.github/scripts/watchdog.py` — hourly. Reports
   silence, dying runs, and repeated errors; deliberately silent on over-pace, locked and
   nothing-to-do, which are the system working. Full cycle verified live: opened an issue,
-  detected recovery, closed it.
+  detected recovery, closed it. A Muse lane parked on an open auth outage (#1946)
+  reports as that park — the finish that opened it, and that a successful login probe
+  clears it — in place of the silence alarm, in the watchdog and the brief alike;
+  `heartbeat.run_views` carries that state, and the lane gate's `muse_auth_outage` is a
+  thin adapter over the same view (#2176). Fixture-tested only.
 - `routines/codex-work.md` and `routines/claude-review.md` — the prompts to paste into
   Codex Scheduled and a Claude Code Routine.
 

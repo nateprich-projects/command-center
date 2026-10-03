@@ -533,6 +533,53 @@ def test_a_future_hold_reports_parked_instead_of_silence():
     assert "<t:{}:f>".format(int(rows[0]["ts"])) in parked[0]
 
 
+def test_open_auth_outage_and_recovery_are_read_from_the_run_view(monkeypatch):
+    rows = _muse_rows(12, first_minutes_ago=190, gap_minutes=10)
+    opened_at = NOW.timestamp() - 3 * 3600
+    rows.append({
+        "run": "auth-outage",
+        "phase": "finish",
+        "ts": opened_at,
+        "agent": "muse",
+        "outcome": "errored",
+        "note": heartbeat.MUSE_AUTH_OUTAGE_NOTE,
+    })
+    outage_view = heartbeat.run_views(rows)["auth-outage"]["muse_auth_outage"]
+    assert outage_view["opened"] == rows[-1]
+    assert outage_view["cleared_by"] is None
+
+    def raw_auth_reader_used(_rows):
+        raise AssertionError("assess must read auth-outage state from run_views")
+
+    monkeypatch.setattr(
+        heartbeat, "muse_auth_outage", raw_auth_reader_used, raising=False
+    )
+
+    conditions = assess("muse", rows, NOW.timestamp())
+
+    parked = [condition for condition in conditions if "auth outage" in condition]
+    assert len(parked) == 1
+    assert "Nothing recorded for" not in parked[0]
+    assert "<t:{}:f>".format(int(opened_at)) in parked[0]
+    assert "successful login probe clears it" in parked[0]
+
+    probe = {
+        "phase": "auth_probe",
+        "ts": opened_at + 60,
+        "agent": "muse",
+        "result": "success",
+    }
+    recovered = rows + [probe]
+    recovered_view = heartbeat.run_views(recovered)["auth-outage"][
+        "muse_auth_outage"
+    ]
+    assert recovered_view["cleared_by"] == probe
+    conditions = assess("muse", recovered, NOW.timestamp())
+
+    assert not any("auth outage" in condition for condition in conditions)
+    assert any("Nothing recorded for" in condition for condition in conditions)
+
+
 def test_an_expired_hold_returns_the_normal_alarm():
     rows = _muse_rows(12, first_minutes_ago=600, gap_minutes=10)
     hold_until = NOW.timestamp() - 10 * 3600

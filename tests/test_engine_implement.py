@@ -4288,6 +4288,79 @@ def test_finish_main_routes_blocked_and_declined_answers(
         ["--answer-file", str(path), "--run", "run-42"]) == 1
 
 
+def test_failed_decline_removes_a_clean_content_safe_checkout(
+        tmp_path, monkeypatch, capsys):
+    # Reproduction: run d969170d07f3's declined finish-ticket for #2076
+    # exited 1 on the GitHub API rate limit before _finish_exit. The retained
+    # ticket-2076 checkout was clean with HEAD equal to origin/ticket/2076,
+    # so its bytes were already durable; the CLI error path never offered it
+    # to _remove_codex_run_checkout.
+    remote, clone = make_heartbeat_codex_run_clone(
+        tmp_path, monkeypatch, number=2076)
+    run_git("branch", "--quiet", "--move", "ticket/2076", cwd=clone)
+    run_git("push", "--quiet", "--set-upstream", "origin", "ticket/2076",
+            cwd=clone)
+    head = run_git("rev-parse", "HEAD", cwd=clone).stdout.strip()
+    remote_head = run_git(
+        "rev-parse", "refs/remotes/origin/ticket/2076", cwd=clone,
+    ).stdout.strip()
+    assert head == remote_head
+    assert run_git("status", "--porcelain", cwd=clone).stdout == ""
+    assert run_git("--git-dir", str(remote), "rev-parse",
+                   "refs/heads/ticket/2076").stdout.strip() == head
+
+    answer_path = tmp_path / "answer.json"
+    answer_path.write_text(json.dumps({"declined": "The run hit the API limit."}))
+    _stub_claim_state(monkeypatch, "owned")
+
+    def rate_limited_decline(*args, **kwargs):
+        raise funnel.GitHubError(
+            "gh: API rate limit already exceeded for user ID 263208503.")
+
+    monkeypatch.setattr(implement, "finish_declined", rate_limited_decline)
+    monkeypatch.chdir(clone)
+
+    assert implement.finish_main([
+        "--answer-file", str(answer_path), "--run", "d969170d07f3",
+        "--repo", REPO,
+    ]) == 1
+
+    assert "API rate limit" in capsys.readouterr().err
+    assert not clone.exists()
+
+
+def test_failed_decline_keeps_a_dirty_codex_run_checkout(
+        tmp_path, monkeypatch, capsys):
+    remote, clone = make_heartbeat_codex_run_clone(
+        tmp_path, monkeypatch, number=2076)
+    run_git("branch", "--quiet", "--move", "ticket/2076", cwd=clone)
+    run_git("push", "--quiet", "--set-upstream", "origin", "ticket/2076",
+            cwd=clone)
+    local_work = clone / "local-only.txt"
+    local_work.write_text("keep this unpushed work\n")
+
+    answer_path = tmp_path / "answer.json"
+    answer_path.write_text(json.dumps({"declined": "The run hit the API limit."}))
+    _stub_claim_state(monkeypatch, "owned")
+
+    def rate_limited_decline(*args, **kwargs):
+        raise funnel.GitHubError("gh: API rate limit already exceeded")
+
+    monkeypatch.setattr(implement, "finish_declined", rate_limited_decline)
+    monkeypatch.chdir(clone)
+
+    assert implement.finish_main([
+        "--answer-file", str(answer_path), "--run", "run-2076",
+        "--repo", REPO,
+    ]) == 1
+
+    assert "API rate limit" in capsys.readouterr().err
+    assert clone.is_dir()
+    assert local_work.read_text() == "keep this unpushed work\n"
+    assert run_git("--git-dir", str(remote), "rev-parse",
+                   "refs/heads/ticket/2076").returncode == 0
+
+
 def test_finish_main_accepts_inline_json(monkeypatch, capsys):
     _stub_claim_state(monkeypatch, "empty")
     routed = {}
@@ -6218,9 +6291,10 @@ def test_run_tests_missing_executable_uses_fixed_start_failure(tmp_path):
 
 # --- One shared tail ends every finish-ticket exit (#2167) ---
 #
-# Every exit releases its claim once, finishes its heartbeat once and offers
-# its checkout for removal exactly where it did before #2167, all inside
-# ``_finish_exit``. The rows replay #1494 (a no-diff close releases and
+# Completed exits release their claim once, finish their heartbeat once and
+# offer checkout removal through ``_finish_exit``. A failed declined-answer
+# handoff also offers clean, already-durable checkouts for removal from the
+# CLI error path. The rows replay #1494 (a no-diff close releases and
 # finishes), #1638 (a superseded run releases nothing), #1795 (a member
 # note carries no test id), #1825 (a pushed checkout under the heartbeat's
 # runs root is removed) and #2014 (a decline removes a pushed clean
@@ -6261,11 +6335,14 @@ def test_only_the_shared_tail_releases_finishes_or_removes_the_checkout():
     ]
 
     # The superseded finish records its heartbeat alone: it releases
-    # nothing and keeps its checkout (#1638, #1856).
+    # nothing and keeps its checkout (#1638, #1856). A failed decline offers
+    # its checkout directly, subject to the shared clean/content-safe guard.
     assert [call for call in calls
             if call[0] != "_finish_exit"
             and call != ("_record_superseded_finish", "finish_heartbeat")
+            and call != ("_finish_ticket", "_remove_codex_run_checkout")
             ] == []
+    assert calls.count(("_finish_ticket", "_remove_codex_run_checkout")) == 1
     assert sorted(TAIL_EFFECTS[callee] for name, callee in calls
                   if name == "_finish_exit") == [
         "cleanup", "heartbeat", "release"]

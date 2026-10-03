@@ -2906,8 +2906,10 @@ def _remove_codex_run_checkout(root: pathlib.Path, number: int,
     ``review-evidence-*``, so no guard below can match them; they are
     removed by review_evidence itself.
 
-    Only ``_finish_exit`` calls it, after the exit's heartbeat finish has
-    recorded its outcome (#2167).
+    Completed exits call it through ``_finish_exit`` after the heartbeat has
+    recorded its outcome (#2167). A failed declined-answer path also offers
+    the checkout directly from ``_finish_ticket``; the same clean/content-safe
+    checks retain any work that is not already durable.
     The branch may have been pushed by this run or an earlier one; a clean
     tree whose HEAD is already on main or at the remote ticket tip holds no
     unique Git work. A stray-file refusal, a ``_keep_work`` failure before its
@@ -3843,6 +3845,15 @@ def _finish_ticket(args: argparse.Namespace) -> int:
         return _record_superseded_finish(args, exc.ref, exc.reason)
     except (funnel.GitHubError, ImplementError, OSError,
             subprocess.SubprocessError) as exc:
+        # A declined finish can fail before it reaches _finish_exit (for
+        # example, when GitHub refuses the first decline write). Its ticket
+        # checkout is still safe to remove when the shared clean/content-safe
+        # guard proves all work is already durable; dirty or unknown checkouts
+        # remain for recovery.
+        if "declined" in answer and context is not None:
+            _remove_codex_run_checkout(
+                context["root"], context["number"], args.agent,
+            )
         print("finish-ticket: {}".format(exc), file=sys.stderr)
         return 1
     print(json.dumps(result, sort_keys=True))

@@ -16449,6 +16449,8 @@ def claim_ticket(
     now: datetime,
     target: Item,
     pr_facts: Optional[Dict[str, Optional[Dict[str, object]]]] = None,
+    run: Optional[str] = None,
+    agent: Optional[str] = None,
 ) -> Optional[str]:
     """Write a ticket claim, or return the reason it must be refused."""
     running = in_motion(items, now, pr_facts=pr_facts)
@@ -16480,6 +16482,20 @@ def claim_ticket(
         print("took over stale claim on {}".format(item.ref), file=sys.stderr)
 
     write_lock(target, now.strftime("%Y-%m-%dT%H:%M:%SZ"))
+    if run and agent:
+        try:
+            import heartbeat
+
+            by_ref = {item.ref: item for item in items}
+            heartbeat.record_binding(
+                agent, run, "ticket", target.ref,
+                repo=target.repo,
+                klass=effective_class(target, by_ref),
+            )
+        except Exception:
+            # Binding is bookkeeping; keep the successful claim as the
+            # correctness-bearing write, like begin's run binding.
+            pass
     # `Ready -> Building` is written on the first claim, here in the shared
     # implementation so `funnel begin` (#349) and `funnel claim` promote alike.
     _begin_parent(items, target)
@@ -16566,6 +16582,8 @@ def cmd_claim(
     now: datetime,
     ref: str,
     pr_facts: Optional[Dict[str, Optional[Dict[str, object]]]] = None,
+    run: Optional[str] = None,
+    agent: Optional[str] = None,
 ) -> int:
     """Claim a ticket, or refuse. Two separate refusals, deliberately.
 
@@ -16580,8 +16598,14 @@ def cmd_claim(
     Refusing is the normal outcome and is not an error worth shouting about; the
     caller distinguishes by exit code.
     """
+    if bool(run) != bool(agent):
+        print("refused — --run and --agent must be supplied together",
+              file=sys.stderr)
+        return 1
     target = find(items, ref)
-    refusal = claim_ticket(items, now, target, pr_facts=pr_facts)
+    refusal = claim_ticket(
+        items, now, target, pr_facts=pr_facts, run=run, agent=agent,
+    )
     if refusal is not None:
         print(refusal, file=sys.stderr)
         return 1
@@ -22659,6 +22683,14 @@ def main(argv: Optional[Sequence[str]] = None, *,
     )
     claim = sub.add_parser("claim", help="take the single-in-motion lock on a ticket")
     claim.add_argument("ref", help="issue number, owner/repo#number, or URL")
+    claim.add_argument(
+        "--run", default=None,
+        help="heartbeat run id to bind after the claim succeeds",
+    )
+    claim.add_argument(
+        "--agent", default=None, choices=tuple(AGENTS_BY_ROLE["implement"]),
+        help="implementing agent that owns the heartbeat run",
+    )
     release = sub.add_parser("release", help="give up the lock on a ticket")
     release.add_argument("ref", help="issue number, owner/repo#number, or URL")
     for verb, help_text in (
@@ -22877,6 +22909,9 @@ def main(argv: Optional[Sequence[str]] = None, *,
             parser.error("--because is required with --blocked-on")
         if args.because is not None and not args.blocked_on:
             parser.error("--because requires --blocked-on")
+    if (args.command == "claim"
+            and bool(args.run) != bool(args.agent)):
+        parser.error("--run and --agent must be supplied together")
     if (args.command == "capture" and args.origin == "agent"
             and args.klass is None):
         parser.error("--class is required with --origin agent")
@@ -23213,7 +23248,8 @@ def main(argv: Optional[Sequence[str]] = None, *,
                 ) = pr_facts_future.result()
         if args.command == "claim":
             return cmd_claim(
-                items, now, args.ref, pr_facts=ticket_pr_facts(items)
+                items, now, args.ref, pr_facts=ticket_pr_facts(items),
+                run=args.run, agent=args.agent,
             )
         if args.command == "release":
             return cmd_release(items, now, args.ref)

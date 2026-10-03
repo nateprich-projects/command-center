@@ -1641,6 +1641,10 @@ def make_clean_main_ancestor_with_newer_ticket_tip(tmp_path, monkeypatch):
     return checkout
 
 
+# Baseline origin/main f4a13cae7 at engine/implement.py:2979-2984 had the
+# strict `head.stdout.strip() != remote_head.stdout.strip()` guard. A clean
+# ticket-2202 checkout had HEAD == origin/main (68c50ae), differed from
+# origin/ticket/2202 (d24c1a8), and had empty status, so that guard kept it.
 def test_heartbeat_root_cleanup_removes_clean_main_ancestor_with_newer_ticket_tip(
         tmp_path, monkeypatch):
     checkout = make_clean_main_ancestor_with_newer_ticket_tip(

@@ -193,6 +193,11 @@ def test_comment_blocked_on_reads_back_its_references(monkeypatch):
     assert funnel._event_block_mismatch(item) is None
 
 
+# Pre-fix verification in run 126d507ebade against origin/main e9705259:
+# funnel.py:17485-17504 applied Needs and the blocked label only for
+# apply_blocked; funnel.py:23345-23358 built the --blocked-on header but set
+# apply_blocked only for --needs-decision. The baseline command posted a header
+# with no routing or blocked label.
 def test_comment_blocked_on_shaped_writes_a_routed_hold_record(monkeypatch):
     item = shaped_project()
     calls = _record_gh(monkeypatch, [item])
@@ -234,6 +239,9 @@ def test_comment_blocked_on_shaped_writes_a_routed_hold_record(monkeypatch):
     ]
     assert item.needs == "external-event"
     assert item.is_blocked
+    assert item.status == "Shaped"
+    assert item.klass == "New"
+    assert "approval" not in funnel._visible_comment(posted).lower()
     _load(monkeypatch, item, posted)
     assert item.shaped_hold == expected
 

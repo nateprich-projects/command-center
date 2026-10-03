@@ -249,6 +249,9 @@ def shaped_project(**overrides):
     return funnel.Item(**fields)
 
 
+# Pre-fix verification in run 126d507ebade against origin/main e9705259:
+# funnel.py:17191-17195 refused a Shaped item as "not Building"; this public-
+# interface reproduction exited 2 before posting a comment or adding a label.
 def test_reproduction_owner_authorized_shaped_hold_writes_block_and_header(
         monkeypatch):
     item = shaped_project()

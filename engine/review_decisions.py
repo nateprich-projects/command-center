@@ -17,8 +17,11 @@ expects the sequentially calibrated p-value for the pre-registered decline.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from math import sqrt
-from typing import Literal
+from typing import Literal, Sequence
+
+import usage
 
 
 START_RUNS = 40
@@ -82,7 +85,9 @@ def _validate_count(successes: int, total: int, label: str) -> None:
             label))
 
 
-def _wilson(successes: int, total: int) -> tuple[float, float]:
+def wilson_interval(successes: int, total: int) -> tuple[float, float]:
+    """Return the two-sided 95% Wilson score interval for a binomial rate."""
+    _validate_count(successes, total, "Wilson")
     rate = successes / total
     z2 = _WILSON_Z * _WILSON_Z
     denominator = 1 + z2 / total
@@ -91,6 +96,175 @@ def _wilson(successes: int, total: int) -> tuple[float, float]:
         rate * (1 - rate) / total + z2 / (4 * total * total)
     ) / denominator)
     return max(0.0, center - radius), min(1.0, center + radius)
+
+
+def _wilson(successes: int, total: int) -> tuple[float, float]:
+    """Compatibility wrapper for the review-margin helpers below."""
+    return wilson_interval(successes, total)
+
+
+def _rate(successes: int, total: int) -> dict[str, object]:
+    """Describe a rate with counts and its 95% Wilson interval."""
+    if total == 0:
+        return {"successes": successes, "total": total,
+                "rate": None, "interval_95": None}
+    low, high = wilson_interval(successes, total)
+    return {"successes": successes, "total": total,
+            "rate": successes / total, "interval_95": [low, high]}
+
+
+def _timestamp(value: object, label: str) -> datetime:
+    """Parse an offset-bearing ISO timestamp from a run record."""
+    if not isinstance(value, str) or not value:
+        raise ValueError("{} must be an ISO timestamp with a UTC offset".format(
+            label))
+    try:
+        parsed = datetime.fromisoformat(
+            value[:-1] + "+00:00" if value.endswith("Z") else value)
+    except ValueError as exc:
+        raise ValueError("{} must be an ISO timestamp with a UTC offset".format(
+            label)) from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError("{} must include a UTC offset".format(label))
+    return parsed
+
+
+def _score_run(record: object, label: str) -> tuple[str, float, datetime,
+                                                        datetime]:
+    """Validate one review-run record and price its observed token usage."""
+    if not isinstance(record, dict):
+        raise ValueError("{} run must be an object".format(label))
+    verdict = record.get("verdict")
+    if verdict not in ("approved", "rejected"):
+        raise ValueError("{} verdict must be approved or rejected".format(
+            label))
+    tokens = usage._muse_tokens(record.get("token_usage"))
+    if tokens is None:
+        raise ValueError("{} token usage must be completely reported".format(
+            label))
+    cost = usage._muse_price(tokens, usage._muse_rates(record.get("model")))
+    started_at = _timestamp(record.get("started_at"),
+                            "{}.started_at".format(label))
+    ended_at = _timestamp(record.get("ended_at"),
+                          "{}.ended_at".format(label))
+    if ended_at < started_at:
+        raise ValueError("{}.ended_at must not precede started_at".format(
+            label))
+    return verdict, round(cost, 6), started_at, ended_at
+
+
+def _paired_run_record(record: object, index: int) -> dict[str, object]:
+    """Validate and summarize a paired A/B run for one versioned change."""
+    label = "paired_runs[{}]".format(index)
+    if not isinstance(record, dict):
+        raise ValueError("{} must be an object".format(label))
+    change_id = record.get("change_id")
+    version = record.get("version")
+    truth = record.get("truth")
+    if not isinstance(change_id, str) or not change_id:
+        raise ValueError("{}.change_id must be a non-empty string".format(label))
+    if not isinstance(version, str) or not version:
+        raise ValueError("{}.version must be a non-empty string".format(label))
+    if truth not in ("bad", "good"):
+        raise ValueError("{}.truth must be bad or good".format(label))
+
+    a_verdict, a_cost, a_start, a_end = _score_run(
+        record.get("a"), label + ".a")
+    b_verdict, b_cost, b_start, b_end = _score_run(
+        record.get("b"), label + ".b")
+    return {
+        "change_id": change_id,
+        "version": version,
+        "truth": truth,
+        "a_verdict": a_verdict,
+        "b_verdict": b_verdict,
+        "a": {"cost_usd": a_cost,
+              "latency_seconds": (a_end - a_start).total_seconds()},
+        "b": {"cost_usd": b_cost,
+              "latency_seconds": (b_end - b_start).total_seconds()},
+        "paired_latency_seconds": (
+            max(a_end, b_end) - min(a_start, b_start)).total_seconds(),
+    }
+
+
+def score_paired_runs(paired_runs: Sequence[dict]) -> dict[str, object]:
+    """Score paired A/B verdicts and attribute each run's cost and latency.
+
+    Each input row is one paired execution of reviewers A and B against the
+    same change and packet-set ``version``. It contains ``change_id``,
+    ``version``, ``truth`` (``bad`` or ``good``), and nested ``a``/``b`` run
+    records. A run has ``verdict`` (``approved`` or ``rejected``), optional
+    ``model``, complete ``token_usage`` (``input_tokens``, ``cached_tokens``,
+    ``output_tokens``), and offset-bearing ``started_at``/``ended_at`` values.
+
+    Bad-change misses are approvals. Good-change false blocks are rejections.
+    Every measured rate carries its own Wilson interval; undefined rates and
+    correlations remain ``None`` instead of being represented as zero.
+    """
+    if isinstance(paired_runs, (str, bytes)) or not isinstance(
+            paired_runs, Sequence):
+        raise ValueError("paired_runs must be a sequence of paired run records")
+    scored = [_paired_run_record(record, index)
+              for index, record in enumerate(paired_runs)]
+    bad = [row for row in scored if row["truth"] == "bad"]
+    good = [row for row in scored if row["truth"] == "good"]
+    if not bad or not good:
+        raise ValueError("paired runs must include bad and good changes")
+
+    a_misses = both_miss = b_catches = joint_detected = 0
+    only_a_misses = only_b_misses = both_detected = 0
+    for row in bad:
+        a_missed = row["a_verdict"] == "approved"
+        b_missed = row["b_verdict"] == "approved"
+        a_misses += a_missed
+        both_miss += a_missed and b_missed
+        b_catches += a_missed and not b_missed
+        joint_detected += not (a_missed and b_missed)
+        only_a_misses += a_missed and not b_missed
+        only_b_misses += not a_missed and b_missed
+        both_detected += not a_missed and not b_missed
+
+    denominator = sqrt(
+        (both_miss + only_a_misses)
+        * (only_b_misses + both_detected)
+        * (both_miss + only_b_misses)
+        * (only_a_misses + both_detected)
+    )
+    phi = ((both_miss * both_detected - only_a_misses * only_b_misses)
+           / denominator if denominator else None)
+    if phi is not None:
+        phi = max(-1.0, min(1.0, phi))
+
+    false_blocks = sum(
+        row["a_verdict"] == "rejected" or row["b_verdict"] == "rejected"
+        for row in good)
+    runs = []
+    for row in scored:
+        runs.append({
+            "change_id": row["change_id"],
+            "version": row["version"],
+            "truth": row["truth"],
+            "a": row["a"],
+            "b": row["b"],
+            "paired_latency_seconds": row["paired_latency_seconds"],
+        })
+    total_cost = sum(row["a"]["cost_usd"] + row["b"]["cost_usd"]
+                     for row in scored)
+    return {
+        "bad_changes": len(bad),
+        "good_changes": len(good),
+        "b_catch_rate_among_a_misses": _rate(b_catches, a_misses),
+        "both_miss_overlap": {
+            **_rate(both_miss, len(bad)),
+            "phi_correlation": phi,
+        },
+        "joint_detection_on_bad_changes": _rate(joint_detected, len(bad)),
+        "joint_false_block_on_good_changes": _rate(false_blocks, len(good)),
+        "paired_runs": runs,
+        "total_cost_usd": round(total_cost, 6),
+        "total_paired_latency_seconds": sum(
+            row["paired_latency_seconds"] for row in scored),
+    }
 
 
 def _difference(comparison: RateComparison) -> tuple[float, tuple[float, float]]:

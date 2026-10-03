@@ -87,6 +87,12 @@ def test_each_variant_carries_only_its_recovered_rule(name, question, judge,
 
 
 def test_variant_rules_match_the_reverted_pr_2060_source():
+    # CI checks out at depth 1, so the reverted commit is only present in a
+    # full clone (finish-ticket's local suite runs there).
+    if subprocess.run(
+            ["git", "cat-file", "-e", "be86e2524^{commit}"],
+            cwd=ROOT, capture_output=True).returncode != 0:
+        pytest.skip("be86e2524 is not in this clone (shallow checkout)")
     question_source = subprocess.run(
         ["git", "show", "be86e2524:routines/muse-review.md"],
         cwd=ROOT, check=True, capture_output=True, text=True,

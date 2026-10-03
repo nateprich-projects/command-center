@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "active_variant": "baseline",
+  "trial_enabled": false,
+  "rounds": [
+    {
+      "name": "round-1",
+      "variants": ["baseline", "r1", "r2", "r4"]
+    },
+    {
+      "name": "round-2",
+      "variants": ["baseline", "best_round_1_single"]
+    }
+  ],
+  "round_2_selection": {
+    "variant": "best_round_1_single",
+    "candidates": ["r1", "r2", "r4"],
+    "max_selected": 1,
+    "evaluation": "Use #2072's paired A+B method and inconclusive rules once established."
+  },
+  "restore": {
+    "variant": "baseline",
+    "runs": 3,
+    "replays": [
+      {"name": "must-reject", "expected": "rejected"},
+      {"name": "must-approve", "expected": "approved"}
+    ]
+  },
+  "variant_files": {
+    "baseline": "baseline.json",
+    "r1": "r1.json",
+    "r2": "r2.json",
+    "r4": "r4.json"
+  }
+}

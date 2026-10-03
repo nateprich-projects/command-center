@@ -28,6 +28,9 @@ import uuid
 import pytest
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+from engine import review_prompts  # noqa: E402
+
 SCRIPT = ROOT / "scripts" / "muse-review-engine"
 ROUTINE = ROOT / "routines" / "muse-review.md"
 ROUTINE_BREAKDOWN = ROOT / "routines" / "muse-breakdown.md"
@@ -769,12 +772,14 @@ def _python_without_session_id(tmp_path, mode):
 
 def _stubbed_runner(tmp_path, begin, packet, *, args=(), answers=(),
                     routine_body=None, bound_seconds=20, extra_env=None,
-                    timeout=40, muse_model_body=None, muse_call_body=None):
+                    timeout=40, muse_model_body=None, muse_call_body=None,
+                    active_variant=None, trial_enabled=None):
     """Run the engine against stub funnel/heartbeat/packet/apply/gh/muse."""
     repo, env = _stub_repo(
         tmp_path, begin, packet, answers=answers, routine_body=routine_body,
         bound_seconds=bound_seconds, extra_env=extra_env,
-        muse_model_body=muse_model_body, muse_call_body=muse_call_body)
+        muse_model_body=muse_model_body, muse_call_body=muse_call_body,
+        active_variant=active_variant, trial_enabled=trial_enabled)
     proc = subprocess.run(
         ["/bin/bash", str(SCRIPT)] + list(args),
         env=env,
@@ -788,7 +793,8 @@ def _stubbed_runner(tmp_path, begin, packet, *, args=(), answers=(),
 
 def _stub_repo(tmp_path, begin, packet, *, answers=(), routine_body=None,
                bound_seconds=20, extra_env=None, muse_model_body=None,
-               muse_call_body=None):
+               muse_call_body=None, active_variant=None,
+               trial_enabled=None):
     """The stub repository and the environment that points the engine at it."""
     repo = tmp_path / "repo"
     # exist_ok: the flag-rejection test drives the runner four times in one
@@ -797,6 +803,18 @@ def _stub_repo(tmp_path, begin, packet, *, answers=(), routine_body=None,
     (repo / "routines" / "muse-review.md").write_text(
         routine_body if routine_body is not None else ROUTINE.read_text()
     )
+    shutil.copytree(
+        ROOT / "engine" / "review_variants",
+        repo / "engine" / "review_variants",
+        dirs_exist_ok=True,
+    )
+    manifest_path = repo / "engine" / "review_variants" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    if active_variant is not None:
+        manifest["active_variant"] = active_variant
+    if trial_enabled is not None:
+        manifest["trial_enabled"] = trial_enabled
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
     # The engine checks every prompt before begin, so the stub repo carries
     # all three real routines: a run must never take work it cannot ask
     # about, whatever the job turns out to be.
@@ -815,6 +833,8 @@ def _stub_repo(tmp_path, begin, packet, *, answers=(), routine_body=None,
     engine = repo / "engine"
     engine.mkdir(exist_ok=True)
     (engine / "__init__.py").write_text("")
+    (engine / "review_prompts.py").write_text(
+        (ROOT / "engine" / "review_prompts.py").read_text())
     (engine / "review.py").write_text((ROOT / "engine" / "review.py").read_text())
     # engine/review.py reads the evidence markers from the module that writes
     # them (#1812), and that module imports the decline classifier.
@@ -940,10 +960,11 @@ def test_the_review_prompt_is_judgement_text_under_500_words():
     """#794's Phase 1 bar for the routine file: the question, the schema,
     the packet placeholder — and no protocol, because the model has no tool
     to execute one with."""
-    body = ROUTINE.read_text()
+    body = review_prompts.load_active_prompt(ROOT).routine
     assert len(body.split()) < 500
-    assert "\n---\n" in body, "the runner splits the prompt on the --- separator"
-    prompt = body.split("\n---\n", 1)[1]
+    assert "\n---\n" in ROUTINE.read_text(), \
+        "the baseline routine retains its human and prompt separator"
+    prompt = body
     assert prompt.count("PACKET_JSON") == 1
     normalized = " ".join(prompt.split()).lower()
     assert "does this diff do what its tickets ask" in normalized
@@ -4280,6 +4301,42 @@ def test_the_routine_asks_for_cited_met_results_and_concrete_blocks():
             "outcome") in prompt
 
 
+def test_the_active_variant_reaches_both_reviewers_from_one_definition(
+        tmp_path):
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), _packet(),
+        answers=_review_answers(_judge_answer()),
+        active_variant="r2", trial_enabled=True)
+
+    assert proc.returncode == 0, proc.stderr
+    lister = (repo / "muse.prompt.1").read_text()
+    judge = (repo / "muse.prompt.2").read_text()
+    question_rule = (
+        "A `test_weakening` entry no ticket or Departure authorises "
+        "is blocking."
+    )
+    judge_rule = (
+        "A deleted, skipped or weakened test in `test_weakening` that "
+        "no ticket or Departure authorises is blocking: mark unmet each "
+        "assigned requirement it bears on."
+    )
+    assert question_rule in lister
+    assert question_rule in judge
+    assert judge_rule in judge
+    assert "If `evidence` says the diff rewrites fix #N" not in lister
+    assert "So is `passes-on-base` on any other ticket." not in lister
+
+
+def test_an_unwired_trial_variant_is_refused_before_begin(tmp_path):
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), _packet(),
+        active_variant="r1", trial_enabled=False)
+
+    assert proc.returncode == 1
+    assert "cannot be active before trial wiring is enabled" in proc.stderr
+    assert not (repo / "funnel.calls").exists()
+
+
 def test_the_count_rule_keeps_its_full_paragraph():
     """#1852: trimming "one" and "per day" from this list made the
     must-reject corpus packet approve 0 of 4 times (#1853 bisect). Pin the
@@ -4732,8 +4789,7 @@ def _judge_prompt_is_the_routine_over_the_packet_file(repo, judge):
     where PACKET_JSON stands, byte for byte: what the engine sent before
     #1866. Everything after the routine's first `---` line, trailing
     newlines dropped, as the engine reads it."""
-    routine = (repo / "routines" / "muse-review.md").read_text()
-    template = routine.split("\n---\n", 1)[1].rstrip("\n")
+    template = review_prompts.load_active_prompt(repo).routine.rstrip("\n")
     packet_text = (repo / "packet.json").read_text()
     return judge.endswith(
         "\n\n" + template.replace("PACKET_JSON", packet_text))
@@ -5280,12 +5336,14 @@ REFUSAL = ("API error 429: Subscription quota exhausted. Your usage "
 
 def _replay_runner(tmp_path, packet=None, *, answers=(), extra_env=None,
                    routine_body=None, bound_seconds=20, timeout=40,
-                   muse_model_body=None, replay_env=None):
+                   muse_model_body=None, replay_env=None,
+                   active_variant=None, trial_enabled=None):
     """Run the replay entry on a packet file; everything it must skip is
     forbidden. Returns the process, the stub repo and the answer path."""
     repo, env = _stub_repo(
         tmp_path, _begin(), _packet(), answers=answers,
-        bound_seconds=bound_seconds, muse_model_body=muse_model_body)
+        bound_seconds=bound_seconds, muse_model_body=muse_model_body,
+        active_variant=active_variant, trial_enabled=trial_enabled)
     for name in FORBIDDEN_COMMANDS:
         (repo / name).write_text(FORBIDDEN_STUB)
     forbidden_bin = tmp_path / "forbidden-bin"
@@ -5372,6 +5430,22 @@ def test_a_replay_runs_the_lister_and_judges_on_its_packet(tmp_path):
         assert "--disable-shell" in args
         assert "--session-id" not in args
     assert json.loads(answer_path.read_text())["verdict"] == "approved"
+    assert _forbidden(repo) == ""
+
+
+def test_a_replay_without_an_explicit_routine_uses_the_active_variant(
+        tmp_path):
+    proc, repo, answer_path = _replay_runner(
+        tmp_path, answers=_review_answers(_judge_answer()),
+        replay_env={"MUSE_REVIEW_ENGINE_REPLAY_ROUTINE": None},
+        active_variant="r4", trial_enabled=True)
+
+    assert proc.returncode == 0, proc.stderr
+    lister = (repo / "muse.prompt.1").read_text()
+    judge = (repo / "muse.prompt.2").read_text()
+    assert "So is `passes-on-base` on any other ticket." in lister
+    assert "On any other ticket `reproduction: passes-on-base` is weighed, not blocking." in judge
+    assert answer_path.exists()
     assert _forbidden(repo) == ""
 
 

@@ -941,6 +941,35 @@ def test_the_packet_carries_either_form_of_a_prior_fix_line(line):
         + line + "\n- (+2 more prior fixes)")
 
 
+def test_reviewer_rules_receive_existing_1850_1851_packet_facts():
+    """Both established reviewer inputs already reach one packet."""
+    prior_fix = "- rewrites #42's prior fix (engine/implement.py:finish_done)"
+    body = MODEL_TEXT + "\n" + evidence_block(
+        HEAD40, "reproduction: red", prior_fix)
+    marker = "pytest.mark." + "skip"
+    diff = (
+        "diff --git a/tests/test_reviewer_input.py "
+        "b/tests/test_reviewer_input.py\n"
+        "new file mode 100644\n"
+        "index 0000000..1111111\n"
+        "--- /dev/null\n"
+        "+++ b/tests/test_reviewer_input.py\n"
+        "@@ -0,0 +1 @@\n"
+        "+@" + marker + '(reason="fixture unavailable")\n'
+    )
+
+    found = packet(
+        pr_view=pr_view(headRefOid=HEAD40, body=body), diff=diff)
+
+    assert found["evidence"].endswith(prior_fix)
+    assert found["test_weakening"]["added_skip_or_xfail"] == {
+        "count": 1,
+        "items": ["tests/test_reviewer_input.py: @" + marker
+                  + '(reason="fixture unavailable")'],
+        "truncated": False,
+    }
+
+
 @pytest.mark.parametrize("sha", [
     OTHER40,              # an earlier push's block
     HEAD40[:12],          # a prefix is not the head

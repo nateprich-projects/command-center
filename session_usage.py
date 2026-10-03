@@ -396,10 +396,14 @@ def usage_for_sessions(
     started_at: Optional[datetime] = None,
     finished_at: Optional[datetime] = None,
 ) -> Tuple[Optional[Dict[str, Optional[int]]], Dict[str, object]]:
-    """Sum session usage only when every recorded call has readable usage.
+    """Sum the usage of every readable recorded call and state its coverage.
 
-    A missing id or journal is coverage information, not a zero-cost call. A
-    malformed persisted list is a fault and is never partially summed.
+    A missing id or journal is coverage information, not a zero-cost call:
+    when some calls are unread, the readable journals' own tokens come back
+    with coverage ``partial`` (#2178), never scaled up to the calls made and
+    never padded with zeros for the rest. With no journal readable there is
+    no observation, so no tokens. A malformed persisted list is a fault and
+    is never partially summed.
     """
     made = _number(calls_made)
     problems = set()
@@ -480,7 +484,7 @@ def usage_for_sessions(
     if reasons:
         coverage["status"] = "partial"
         coverage["reasons"] = sorted(reasons)
-        return None, coverage
+        return (totals if readable_journals else None), coverage
 
     coverage["status"] = "complete"
     return totals, coverage

@@ -567,6 +567,14 @@ def _aggregate_token_usage(
         return None
     totals = {kind: 0 for kind in session_usage.TOKEN_KINDS}
     for run in runs:
+        coverage = run.get("token_usage_coverage")
+        if coverage is not None and (
+            not isinstance(coverage, Mapping)
+            or coverage.get("status") != "complete"
+        ):
+            # A partial Muse run carries its observed tokens only (#2178);
+            # they are not the run's total, so the ticket has none either.
+            return None
         usage = run.get("token_usage")
         if not isinstance(usage, Mapping):
             return None
@@ -581,7 +589,11 @@ def _aggregate_token_usage(
 def _aggregate_notional_api_cost(
     runs: Sequence[Mapping[str, object]],
 ) -> Optional[Dict[str, object]]:
-    """Sum complete per-run API estimates without hiding an unknown run."""
+    """Sum complete per-run API estimates without hiding an unknown run.
+
+    A ``partial`` run estimate (#2178) is not complete, so it keeps the
+    ticket's total incomplete exactly as an unpriced run does.
+    """
     if not runs:
         return None
     total = Decimal("0")

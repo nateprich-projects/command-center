@@ -131,14 +131,103 @@ def test_missing_usage_stays_unpriced(complete_run, complete_rate_rows):
     assert result["reason"] == "missing_token_usage"
 
 
-def test_partial_usage_stays_unpriced(complete_run, complete_rate_rows):
+def test_partly_known_token_kinds_are_valued_at_observed_kinds_only(
+    complete_run, complete_rate_rows
+):
+    # #2178: 100 fresh x $1 + 300 written x $3 + 400 out x $4 per million is
+    # $0.0026. The unknown cache reads are listed, never priced as zero.
     complete_run["token_usage"]["cache_read_input_tokens"] = None
 
     result = api_pricing.price_run(complete_run, complete_rate_rows)
 
+    assert result["status"] == "partial"
+    assert result["value"] == pytest.approx(.0026)
+    assert result["missing_token_kinds"] == ["cache_read_input_tokens"]
+    assert "cache_read_input_tokens" not in result["effective_rates"]
+
+
+def test_no_known_token_kind_stays_unpriced(complete_run, complete_rate_rows):
+    complete_run["token_usage"] = {
+        kind: None for kind in session_usage.TOKEN_KINDS
+    }
+
+    result = api_pricing.price_run(complete_run, complete_rate_rows)
+
+    assert result["status"] == "incomplete"
     assert result["value"] is None
     assert result["reason"] == "missing_token_counts"
-    assert result["missing_token_kinds"] == ["cache_read_input_tokens"]
+    assert result["missing_token_kinds"] == list(session_usage.TOKEN_KINDS)
+
+
+def test_partial_call_coverage_is_valued_at_observed_tokens_only(
+    complete_run, complete_rate_rows
+):
+    # #2178: three calls made, two journals read. The two observed calls'
+    # tokens are valued as they are; the third is listed, not estimated.
+    complete_run["token_usage_coverage"] = {
+        "status": "partial",
+        "captured_calls": 3,
+        "made_calls": 3,
+        "readable_journals": 2,
+        "unreadable_journals": 1,
+        "uncaptured_calls": 0,
+        "reasons": ["unreadable_session_journals_or_usage"],
+    }
+
+    result = api_pricing.price_run(complete_run, complete_rate_rows)
+
+    assert result["status"] == "partial"
+    assert result["value"] == pytest.approx(.003)
+    assert result["missing_calls"] == 1
+    assert result["missing_call_reasons"] == [
+        "unreadable_session_journals_or_usage"
+    ]
+
+
+def test_complete_call_coverage_is_priced(complete_run, complete_rate_rows):
+    complete_run["token_usage_coverage"] = {
+        "status": "complete",
+        "captured_calls": 2,
+        "made_calls": 2,
+        "readable_journals": 2,
+        "unreadable_journals": 0,
+        "uncaptured_calls": 0,
+    }
+
+    result = api_pricing.price_run(complete_run, complete_rate_rows)
+
+    assert result["status"] == "priced"
+    assert result["value"] == pytest.approx(.003)
+    assert "missing_calls" not in result
+
+
+def test_faulted_call_coverage_stays_unpriced(complete_run, complete_rate_rows):
+    complete_run["token_usage_coverage"] = {
+        "status": "fault",
+        "reasons": ["call_count_mismatch"],
+    }
+
+    result = api_pricing.price_run(complete_run, complete_rate_rows)
+
+    assert result["status"] == "incomplete"
+    assert result["value"] is None
+
+
+def test_partial_usage_with_an_unpriced_observed_kind_stays_unpriced(
+    complete_run
+):
+    complete_run["token_usage"]["cache_read_input_tokens"] = None
+    rows = [
+        row for row in rate_rows([("2026-07-01T00:00:00Z", [1, 2, 3, 4])])
+        if row["token_kind"] != "output_tokens"
+    ]
+
+    result = api_pricing.price_run(complete_run, rows)
+
+    assert result["status"] == "incomplete"
+    assert result["value"] is None
+    assert result["reason"] == "missing_effective_rate"
+    assert result["missing_rate_token_kinds"] == ["output_tokens"]
 
 
 def test_run_before_first_effective_rate_stays_unpriced():

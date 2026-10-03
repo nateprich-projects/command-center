@@ -1,0 +1,2 @@
+{"stream": {"kind": "session", "id": "0191dead-beef"}, "recorded_at": 1789425963000000, "payload_type": "runtime.session.metadata", "payload": {"kind": "metadata", "record": {"workspace_root": "/tmp/work", "model_id": "muse-spark-1.3"}}}
+{"stream": {"kind": "session", "id": "0191dead-beef"}, "recorded_at": 1789425963000000, "payload_type": "runtime.session", "payload": {"kind": "run", "event": {"prompt": "Work issue #42.", "kind": "started"}}}

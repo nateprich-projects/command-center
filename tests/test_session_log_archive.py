@@ -206,8 +206,23 @@ def test_daily_pass_retries_the_same_day_after_an_unwritable_base(tmp_path):
 
 
 def test_module_runs_as_a_script(tmp_path):
+    # Hold the subprocess after 03:00 so the script must reach
+    # __main__ -> main() -> run_daily_pass() and emit its mount result.
+    (tmp_path / "sitecustomize.py").write_text(
+        "import datetime as _datetime\n"
+        "class _FixedDateTime(_datetime.datetime):\n"
+        "    @classmethod\n"
+        "    def now(cls, tz=None):\n"
+        "        return cls(2026, 10, 3, 15, 0, tzinfo=_datetime.timezone.utc)\n"
+        "_datetime.datetime = _FixedDateTime\n",
+        encoding="utf-8",
+    )
     env = dict(os.environ)
     env[session_logs.ARCHIVE_ROOT_ENV] = str(tmp_path / "not-mounted" / "logs")
+    pythonpath = [str(tmp_path)]
+    if env.get("PYTHONPATH"):
+        pythonpath.append(env["PYTHONPATH"])
+    env["PYTHONPATH"] = os.pathsep.join(pythonpath)
 
     completed = subprocess.run(
         [sys.executable, str(ROOT / "session_log_archive.py")],
@@ -216,10 +231,9 @@ def test_module_runs_as_a_script(tmp_path):
     )
 
     assert completed.returncode == 0, completed.stderr
-    # Before 03:00 local the pass is quiet; after it, the unmounted volume
-    # is reported and nothing is touched.
-    assert completed.stdout in (
-        "", "session-log archive: skipped; external volume is not mounted\n")
+    assert completed.stdout == (
+        "session-log archive: skipped; external volume is not mounted\n"
+    )
 
 
 def test_per_file_archive_error_is_reported_non_ok_with_counts(tmp_path):

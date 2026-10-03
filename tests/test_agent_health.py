@@ -533,6 +533,38 @@ def test_a_future_hold_reports_parked_instead_of_silence():
     assert "<t:{}:f>".format(int(rows[0]["ts"])) in parked[0]
 
 
+def test_open_auth_outage_replaces_silence_until_a_successful_probe():
+    rows = _muse_rows(12, first_minutes_ago=190, gap_minutes=10)
+    opened_at = NOW.timestamp() - 3 * 3600
+    rows.append({
+        "run": "auth-outage",
+        "phase": "finish",
+        "ts": opened_at,
+        "agent": "muse",
+        "outcome": "errored",
+        "note": heartbeat.MUSE_AUTH_OUTAGE_NOTE,
+    })
+
+    conditions = assess("muse", rows, NOW.timestamp())
+
+    assert len(conditions) == 1
+    assert "auth outage" in conditions[0].lower()
+    assert "Nothing recorded for" not in conditions[0]
+    assert "<t:{}:f>".format(int(opened_at)) in conditions[0]
+    assert "successful login probe clears it" in conditions[0]
+
+    recovered = rows + [{
+        "phase": "auth_probe",
+        "ts": opened_at + 60,
+        "agent": "muse",
+        "result": "success",
+    }]
+    conditions = assess("muse", recovered, NOW.timestamp())
+
+    assert not any("auth outage" in condition.lower() for condition in conditions)
+    assert any("Nothing recorded for" in condition for condition in conditions)
+
+
 def test_an_expired_hold_returns_the_normal_alarm():
     rows = _muse_rows(12, first_minutes_ago=600, gap_minutes=10)
     hold_until = NOW.timestamp() - 10 * 3600

@@ -60,6 +60,11 @@ QUOTA_HOLD_DEFAULT = "~/.claude/command-center-muse-quota-hold"
 #: any other lane's silence.
 QUOTA_HOLD_AGENT = "muse"
 
+#: Which agent an open auth outage parks (#1946). Unlike the hold, it is read
+#: from the heartbeat records themselves (`heartbeat.muse_auth_outage`, the
+#: reader the lanes' gate also uses), so the Actions watchdog sees it too.
+AUTH_OUTAGE_AGENT = "muse"
+
 
 def quota_hold_path() -> str:
     """Where the hold lives: the environment's answer, else the default."""
@@ -240,52 +245,75 @@ def _completed_run_durations(
 
 def _recent_outcomes(
     runs: List[Dict],
+    unattributed: List[Dict],
     now: float,
     outcome: str,
     week: int,
 ) -> List[Dict]:
-    """Return per-run finishes with ``outcome`` in the diagnostic week.
+    """Return one record per run with ``outcome`` in the diagnostic week.
 
-    The view has already collapsed the duplicate start, finish, and bind reads
-    for a run. Retain the finish's diagnostic fields beside the view so callers
-    can keep the established wording without reading raw rows again.
+    A count read from these records is a count of *runs*. Reading rows instead
+    made the alarm report the heartbeat's own write duplication: 67 muse errors
+    against 55 true runs, measured 2026-09-21 (#1225).
+
+    Read from the per-run view (#2176). A run's outcome is on its finish or on
+    one of its non-terminal events — a gate's ``config-drift`` refusal is an
+    event, usually with no finish for that run (#1316), and so is a misfiled
+    finish re-attached to its run — and the newest of those carrying
+    ``outcome`` stands for the run, the finish on a tie. A finish carries the
+    view's error class, so one written before the class was recorded is
+    classified on read.
+
+    ``unattributed`` are the distinct records that name no run: an unresolved
+    finish, an event filed against no open run. They cannot be attributed, so
+    each counts on its own, as `heartbeat.one_record_per_run` always kept them;
+    dropping them would quietly lose history.
     """
+    def recent(record) -> bool:
+        timestamp = record.get("ts") if isinstance(record, dict) else None
+        return (
+            isinstance(record, dict)
+            and record.get("outcome") == outcome
+            and not isinstance(timestamp, bool)
+            and isinstance(timestamp, (int, float))
+            and now - float(timestamp) < week
+        )
+
     found = []
     for run in runs:
         finish = run.get("finish")
-        if not isinstance(finish, dict) or run.get("outcome") != outcome:
-            continue
-        timestamp = finish.get("ts")
-        if (
-            isinstance(timestamp, bool)
-            or not isinstance(timestamp, (int, float))
-            or now - float(timestamp) >= week
-        ):
-            continue
-        record = dict(run)
-        record["ts"] = timestamp
-        record["note"] = finish.get("note")
-        record["runtime"] = finish.get("runtime")
-        found.append(record)
+        candidates = [
+            dict(finish, error_class=run.get("error_class"))
+            if isinstance(finish, dict) else None
+        ] + list(run.get("events") or [])
+        newest = None
+        for record in candidates:
+            if recent(record) and (
+                newest is None or float(record["ts"]) > float(newest["ts"])
+            ):
+                newest = record
+        if newest is not None:
+            found.append(newest)
+    found.extend(record for record in unattributed if recent(record))
     return found
 
 
-def _open_muse_auth_outage_finish(rows: List[Dict]) -> Optional[Dict]:
-    """Return the finish that currently leaves Muse's auth outage open."""
-    import heartbeat
+def _auth_outage_condition(agent: str, opened: Dict) -> str:
+    """The Muse auth-outage park, in place of the silence alarm (#2176).
 
-    if not heartbeat.muse_auth_outage_open(rows):
-        return None
-    # The state helper follows the append-only record order. When it says the
-    # outage is open, the latest auth-outage finish is the one that opened it.
-    return next((
-        row for row in reversed(rows)
-        if isinstance(row, dict)
-        and row.get("agent") == "muse"
-        and row.get("phase") == "finish"
-        and row.get("outcome") == "errored"
-        and row.get("note") == heartbeat.MUSE_AUTH_OUTAGE_NOTE
-    ), None)
+    ``opened`` is the finish that opened the outage, as
+    `heartbeat.muse_auth_outage` returns it.
+    """
+    opened_at = opened.get("ts")
+    if isinstance(opened_at, bool) or not isinstance(opened_at, (int, float)):
+        opened_when = "an unrecorded time"
+    else:
+        opened_when = "<t:{}:f>".format(int(opened_at))
+    return (
+        "`{}`: parked by an open Muse auth outage, opened by the finish at "
+        "{}; no silence alarm while it holds. A person has to sign Muse in "
+        "again: a successful login probe clears it.".format(agent, opened_when)
+    )
 
 
 def _runtime_head(row: Dict) -> Optional[str]:
@@ -335,8 +363,19 @@ def assess(
     surfaced regression can be traced to its code revision. The watchdog keeps
     the default all-error assessment.
 
-    An open Muse authentication outage replaces the silence alarm with the
-    opening finish's time and the successful-login recovery instruction.
+    An open Muse auth outage (#1946) is the second park, and it is read from
+    the records rather than passed in (#2176). While no successful login
+    probe has cleared it, Muse's silence reports as that park — naming the
+    outage and the time of the finish that opened it — in place of the
+    silence alarm, and it stays a raised condition however recent the
+    outage, because a person has to sign in again. Once a probe clears it,
+    silence reads as normal again, measured from the newest record (the probe
+    is one). A quota hold keeps its own wording beside it, and every other
+    condition is unchanged by it.
+
+    The run-level inputs — open starts, bindings, completed durations and
+    per-run outcomes — come from the per-run heartbeat view
+    (`heartbeat.run_views`, #2174), built once here (#2176).
     """
     normal_percentile = (
         NORMAL_PERCENTILE if normal_percentile is None else normal_percentile
@@ -370,23 +409,22 @@ def assess(
     import heartbeat
 
     retired = getattr(heartbeat, "RETIRED_AGENTS", frozenset())
+    # The run-level inputs come from the per-run view (#2176), built once:
+    # each is a count of runs, not of rows (#1225).
     runs = list(heartbeat.run_views(rows).values())
+    unattributed = [
+        row for row in heartbeat.distinct_records(rows)
+        if not isinstance(row.get("run"), str) or not row.get("run")
+    ]
+    # The second park (#1946): read from the records through the same reader
+    # the lanes' gate uses, so the watchdog and the lanes cannot disagree.
     auth_outage_finish = (
-        _open_muse_auth_outage_finish(rows) if agent == "muse" else None
+        heartbeat.muse_auth_outage(rows)
+        if agent == AUTH_OUTAGE_AGENT and agent not in retired else None
     )
     auth_outage_open = auth_outage_finish is not None
     if auth_outage_open:
-        opened_at = auth_outage_finish.get("ts")
-        if isinstance(opened_at, bool) or not isinstance(opened_at, (int, float)):
-            opened_when = "at an unknown time"
-        else:
-            opened_when = "at <t:{}:f>".format(int(opened_at))
-        problems.append(
-            "`muse`: Muse auth outage is open; the finish that opened it was "
-            "{}. A successful login probe clears it, so someone must sign in.".format(
-                opened_when
-            )
-        )
+        problems.append(_auth_outage_condition(agent, auth_outage_finish))
     inferred = _normal_gap(
         rows,
         now,
@@ -527,7 +565,7 @@ def assess(
             )
         )
 
-    errored = _recent_outcomes(runs, now, "errored", week)
+    errored = _recent_outcomes(runs, unattributed, now, "errored", week)
     if regressions_only:
         errored = [
             row for row in errored
@@ -579,7 +617,7 @@ def assess(
             )
 
     drifted = _recent_outcomes(
-        runs, now, CONFIG_DRIFT_OUTCOME, CONFIG_DRIFT_WINDOW)
+        runs, unattributed, now, CONFIG_DRIFT_OUTCOME, CONFIG_DRIFT_WINDOW)
     if drifted:
         newest = max(drifted, key=lambda r: r.get("ts") or 0)
         problems.append(

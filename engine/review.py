@@ -3570,6 +3570,10 @@ def fetch_scope(repo: str, base_ref: str,
     return (changed, diff, merge_sha)
 
 
+# The independent-review brief's item 8 has exactly these three blocking
+# cases: a defect with a realistic reproduction; a missing Do item or missing/
+# base-passing Accept test; and a merged-main suite failure. The packet IDs
+# below preserve that source rule when prior findings are carried forward.
 SCOPED_REREVIEW_KINDS = {
     "code_defect",
     "missing_requirement_or_accept_test",

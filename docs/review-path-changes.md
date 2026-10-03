@@ -59,6 +59,10 @@ pins which rule each variant carries. Its source check,
 question and judge rule directly with those files at `be86e2524`.
 The excerpts above preserve the source wording and punctuation; the test
 normalizes only source line wrapping before comparing them with JSON strings.
+The source check starts from `git show` of the reverted source. Every checkout
+compares the variants with the recovered exact sentences; a full clone also
+compares them with the original files. A shallow checkout therefore runs the
+wording check instead of treating a skip as confirmation.
 
 The packet facts those rules use were already present, so this ticket leaves the
 packet builder unchanged. #1850 prior-fix evidence passes through
@@ -70,4 +74,6 @@ Existing coverage is in `tests/test_engine_review_packet.py`, including
 `test_packet_lists_deleted_test_functions`,
 `test_packet_lists_removed_assert_lines_from_test_files`,
 `test_packet_lists_added_skip_xfail_markers_and_pytest_skip_calls`, and
-`test_packet_carries_every_field`.
+`test_packet_carries_every_field`. This ticket adds
+`test_reviewer_rules_receive_existing_1850_1851_packet_facts`, which assembles
+both rule inputs in one packet without changing the packet builder.

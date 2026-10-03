@@ -16,6 +16,28 @@ sys.path.insert(0, str(ROOT))
 
 from engine import review_prompts  # noqa: E402
 
+RECOVERED_SOURCE_RULES = {
+    "r1": (
+        "If `evidence` says the diff rewrites fix #N, confirm it still "
+        "prevents that fix's failure; cite its test.",
+        "If `evidence` has a `rewrites prior fix: #N` line, confirm the diff "
+        "still prevents that fix's failure and cite its test; mark unmet each "
+        "assigned requirement it bears on when it does not.",
+    ),
+    "r2": (
+        "A `test_weakening` entry no ticket or Departure authorises is "
+        "blocking.",
+        "A deleted, skipped or weakened test in `test_weakening` that no "
+        "ticket or Departure authorises is blocking: mark unmet each "
+        "assigned requirement it bears on.",
+    ),
+    "r4": (
+        "So is `passes-on-base` on any other ticket.",
+        "On any other ticket `reproduction: passes-on-base` is weighed, "
+        "not blocking.",
+    ),
+}
+
 
 def _variant_repo(tmp_path):
     repo = tmp_path / "repo"
@@ -58,20 +80,20 @@ def test_baseline_prompt_is_byte_identical_to_the_pretrial_prompt():
     [
         (
             "r1",
-            "If `evidence` says the diff rewrites fix #N, confirm it still prevents that fix's failure; cite its test.",
-            "If `evidence` has a `rewrites prior fix: #N` line, confirm the diff still prevents that fix's failure and cite its test; mark unmet each assigned requirement it bears on when it does not.",
+            RECOVERED_SOURCE_RULES["r1"][0],
+            RECOVERED_SOURCE_RULES["r1"][1],
             "test_weakening",
         ),
         (
             "r2",
-            "A `test_weakening` entry no ticket or Departure authorises is blocking.",
-            "A deleted, skipped or weakened test in `test_weakening` that no ticket or Departure authorises is blocking: mark unmet each assigned requirement it bears on.",
+            RECOVERED_SOURCE_RULES["r2"][0],
+            RECOVERED_SOURCE_RULES["r2"][1],
             "rewrites fix #N",
         ),
         (
             "r4",
-            "So is `passes-on-base` on any other ticket.",
-            "On any other ticket `reproduction: passes-on-base` is weighed, not blocking.",
+            RECOVERED_SOURCE_RULES["r4"][0],
+            RECOVERED_SOURCE_RULES["r4"][1],
             "test_weakening",
         ),
     ],
@@ -87,24 +109,34 @@ def test_each_variant_carries_only_its_recovered_rule(name, question, judge,
 
 
 def test_variant_rules_match_the_reverted_pr_2060_source():
-    # CI checks out at depth 1, so the reverted commit is only present in a
-    # full clone (finish-ticket's local suite runs there).
-    if subprocess.run(
+    # The source excerpts were recovered with git show before variant checks.
+    # Shallow CI verifies each file against those pinned excerpts; a full clone
+    # additionally compares the excerpts with the reverted source commit.
+    source_available = subprocess.run(
             ["git", "cat-file", "-e", "be86e2524^{commit}"],
-            cwd=ROOT, capture_output=True).returncode != 0:
-        pytest.skip("be86e2524 is not in this clone (shallow checkout)")
-    question_source = subprocess.run(
-        ["git", "show", "be86e2524:routines/muse-review.md"],
-        cwd=ROOT, check=True, capture_output=True, text=True,
-    ).stdout
-    judge_source = subprocess.run(
-        ["git", "show", "be86e2524:scripts/muse-review-engine"],
-        cwd=ROOT, check=True, capture_output=True, text=True,
-    ).stdout
-    question_source = " ".join(question_source.split())
-    judge_source = " ".join(judge_source.split())
+            cwd=ROOT, capture_output=True).returncode == 0
+    if not source_available:
+        shallow = subprocess.run(
+            ["git", "rev-parse", "--is-shallow-repository"],
+            cwd=ROOT, check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        assert shallow == "true", (
+            "be86e2524 must be available in a full clone"
+        )
+        question_source = judge_source = None
+    else:
+        question_source = subprocess.run(
+            ["git", "show", "be86e2524:routines/muse-review.md"],
+            cwd=ROOT, check=True, capture_output=True, text=True,
+        ).stdout
+        judge_source = subprocess.run(
+            ["git", "show", "be86e2524:scripts/muse-review-engine"],
+            cwd=ROOT, check=True, capture_output=True, text=True,
+        ).stdout
+        question_source = " ".join(question_source.split())
+        judge_source = " ".join(judge_source.split())
 
-    for name in ("r1", "r2", "r4"):
+    for name, (expected_question, expected_judge) in RECOVERED_SOURCE_RULES.items():
         variant = json.loads(
             (ROOT / "engine" / "review_variants" / "{}.json".format(name))
             .read_text()
@@ -113,8 +145,11 @@ def test_variant_rules_match_the_reverted_pr_2060_source():
         assert len(variant["judge_rules"]) == 1
         question = variant["question_rules"][0]
         judge = variant["judge_rules"][0]
-        assert question_source.count(" ".join(question.split())) == 1
-        assert judge_source.count(" ".join(judge.split())) == 1
+        assert question == expected_question
+        assert judge == expected_judge
+        if source_available:
+            assert question_source.count(" ".join(question.split())) == 1
+            assert judge_source.count(" ".join(judge.split())) == 1
 
 
 def test_active_trial_variant_fails_closed_until_trial_wiring_is_enabled(

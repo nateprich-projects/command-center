@@ -118,14 +118,18 @@ CALL_EFFORT="$EFFORT"
 # derivation the lanes run rather than from a second copy of them: replay kept
 # one max call over the whole packet when #1233 split review, and that call
 # went stream-idle on the must-approve seed (#1698). Environment variables,
-# not flags, because the parse above refuses every flag. All three or none:
+# not flags, because the parse above refuses every flag. The packet and answer
+# are required; the routine can be omitted to use the active versioned prompt:
 #
 #   MUSE_REVIEW_ENGINE_REPLAY_PACKET   the review packet to judge
-#   MUSE_REVIEW_ENGINE_REPLAY_ROUTINE  the review routine to ask it with
+#   MUSE_REVIEW_ENGINE_REPLAY_ROUTINE  optional explicit routine; by default
+#                                      the active versioned prompt is used
 #   MUSE_REVIEW_ENGINE_REPLAY_ANSWER   where the derived answer goes; must
 #                                      not exist yet
 #
-# A replay records nothing. It starts no funnel session and runs no begin,
+# A replay needs the packet and answer variables. The routine is optional and
+# defaults to the same active versioned prompt as a live review. A replay
+# records nothing. It starts no funnel session and runs no begin,
 # heartbeat, packet fetch, gh or review-apply, and it skips the precheck and
 # CI branches: a corpus packet is frozen evidence about a PR that has long
 # since moved on, and the question is what the judges make of it. It writes
@@ -139,12 +143,16 @@ REPLAY_ANSWER="${MUSE_REVIEW_ENGINE_REPLAY_ANSWER:-}"
 REPLAY=0
 if [[ -n "$REPLAY_PACKET$REPLAY_ROUTINE$REPLAY_ANSWER" ]]; then
   REPLAY=1
-  if [[ -z "$REPLAY_PACKET" || -z "$REPLAY_ROUTINE" || -z "$REPLAY_ANSWER" ]]; then
-    echo "muse-review-engine: a replay needs MUSE_REVIEW_ENGINE_REPLAY_PACKET, MUSE_REVIEW_ENGINE_REPLAY_ROUTINE and MUSE_REVIEW_ENGINE_REPLAY_ANSWER together" >&2
+  if [[ -z "$REPLAY_PACKET" || -z "$REPLAY_ANSWER" ]]; then
+    echo "muse-review-engine: a replay needs MUSE_REVIEW_ENGINE_REPLAY_PACKET and MUSE_REVIEW_ENGINE_REPLAY_ANSWER" >&2
     exit 1
   fi
   if [[ ! -f "$REPLAY_PACKET" || ! -r "$REPLAY_PACKET" ]]; then
     echo "muse-review-engine: cannot read the replay packet $REPLAY_PACKET" >&2
+    exit 1
+  fi
+  if [[ -n "$REPLAY_ROUTINE" && ( ! -f "$REPLAY_ROUTINE" || ! -r "$REPLAY_ROUTINE" ) ]]; then
+    echo "muse-review-engine: cannot read the replay routine $REPLAY_ROUTINE" >&2
     exit 1
   fi
   # Refused rather than overwritten: a file already there could be read as
@@ -212,12 +220,6 @@ else
 fi
 #: zai-exec's status for a spent z.ai window; see its docstring.
 ZAI_QUOTA_EXIT=75
-ROUTINE_REVIEW="$REPO/routines/muse-review.md"
-# A replay asks with the routine it was given, under the same template check
-# (#1730).
-if (( REPLAY )); then
-  ROUTINE_REVIEW="$REPLAY_ROUTINE"
-fi
 ROUTINE_BREAKDOWN="$REPO/routines/muse-breakdown.md"
 ROUTINE_SHAPE="$REPO/routines/muse-shape.md"
 # An empty directory on purpose, shared with the old reviewer. The model has
@@ -261,10 +263,35 @@ check_routine() {
   printf '%s' "$template"
 }
 
-# Bare assignments, not `local x=$(...)`: the assignment keeps the
-# substitution's status, so `if !` sees a bad routine.
-if ! PROMPT_REVIEW="$(check_routine "$ROUTINE_REVIEW")"; then
+# The reviewer question and its per-requirement header both use the same
+# versioned variant data. A replay uses it too unless it was given an
+# explicit routine (#1730).
+if [[ ! -r "$REPO/routines/muse-review.md" ]]; then
+  echo "muse-review-engine: cannot read $REPO/routines/muse-review.md — refusing to run without a prompt" >&2
   exit 1
+fi
+if ! REVIEW_PROMPT_JSON="$(python3 "$REPO/engine/review_prompts.py" active 2>&1)"; then
+  echo "muse-review-engine: cannot load the active reviewer prompt: $REVIEW_PROMPT_JSON" >&2
+  exit 1
+fi
+if ! PROMPT_REVIEW="$(printf '%s' "$REVIEW_PROMPT_JSON" | python3 -c 'import json,sys; sys.stdout.write(json.load(sys.stdin)["routine"])')"; then
+  echo "muse-review-engine: the active reviewer prompt is invalid" >&2
+  exit 1
+fi
+if ! PROMPT_REVIEW_JUDGE_RULES="$(printf '%s' "$REVIEW_PROMPT_JSON" | python3 -c 'import json,sys; print("\n".join(json.load(sys.stdin)["judge_rules"]))')"; then
+  echo "muse-review-engine: the active reviewer judge rules are invalid" >&2
+  exit 1
+fi
+# An explicit path to the canonical routine still means the active variant;
+# other routine paths retain the path-based override and template check.
+if (( REPLAY )) && [[ -n "$REPLAY_ROUTINE" ]]; then
+  EXPLICIT_ROUTINE="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$REPLAY_ROUTINE")"
+  ACTIVE_ROUTINE="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$REPO/routines/muse-review.md")"
+  if [[ "$EXPLICIT_ROUTINE" != "$ACTIVE_ROUTINE" ]]; then
+    if ! PROMPT_REVIEW="$(check_routine "$REPLAY_ROUTINE")"; then
+      exit 1
+    fi
+  fi
 fi
 if ! PROMPT_BREAKDOWN="$(check_routine "$ROUTINE_BREAKDOWN")"; then
   exit 1
@@ -2548,6 +2575,11 @@ line that does the work; an unmet result names the input, the path through
 the diff and the wrong outcome. The `Risks:` in `pr_body` are where to look hardest. When `evidence`
 is `unavailable`, or the packet has none, say so and judge as you otherwise
 would.
+HEADER
+  if [[ -n "$PROMPT_REVIEW_JUDGE_RULES" ]]; then
+    printf '\n%s\n' "$PROMPT_REVIEW_JUDGE_RULES"
+  fi
+  cat <<'HEADER'
 
 Return exactly one JSON object with one result for every assigned requirement
 and no others:

@@ -288,6 +288,19 @@ def test_the_engine_runs_from_this_checkout_on_the_given_inputs(
     assert run["routine"] == str(routine_path.resolve())
 
 
+def test_the_default_replay_leaves_prompt_selection_to_the_active_adapter(
+        tmp_path, stub_engine):
+    packet = private_packet(tmp_path)
+
+    result = replay.replay(packet, runs=1, expected="approved",
+                           runtime_root=tmp_path)
+
+    assert result["pass"] is True
+    calls = stub_engine()
+    assert len(calls) == 1
+    assert calls[0]["routine"] is None
+
+
 def test_the_default_engine_is_this_checkouts_runner():
     assert replay.ENGINE == ROOT / "scripts" / "muse-review-engine"
     assert replay.ENGINE.stat().st_mode & stat.S_IXUSR

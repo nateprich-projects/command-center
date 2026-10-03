@@ -92,7 +92,7 @@ def test_already_merged_finish_note_is_rendered_from_the_done_record(monkeypatch
 
 def test_retired_merges_stop_at_cutoff_but_stay_out_of_silence_alarms(monkeypatch):
     retired_at = datetime.fromtimestamp(
-        heartbeat.ZAI_STANDARD_UNTIL, timezone.utc
+        heartbeat.RETIRED_AGENT_CUTOFFS["zcode"], timezone.utc
     )
     now = retired_at + timedelta(days=1)
     spools = {

@@ -5,8 +5,8 @@ assembles the evidence. A passing review calls one lister and bounded judges
 in parallel; the runner validates every chunk and derives the final verdict.
 Breakdown uses one model answer; shape on Muse asks a framer, then sibling
 checks, deciders and an auditor in parallel, and the runner merges them
-(#1599); shape on z.ai uses one model answer. Malformed model output retries
-once, and the apply command performs every side effect.
+(#1599). Malformed model output retries once, and the apply command performs
+every side effect.
 
 The harness below stubs the funnel, heartbeat, packet, apply, gh, and muse
 binaries; the routine text is the real files, so the prompt-substitution
@@ -229,7 +229,6 @@ FUNNEL_STUB = (
     "        if os.environ.get('AUTH_RECOVERED_REQUIRED') == '1' and not (root / 'auth.recovered').exists():\n"
     "            raise SystemExit('auth recovery was not recorded before begin')\n"
     "        (root / 'begin.session_id').write_text(os.environ.get('MUSE_SESSION_ID', ''))\n"
-    "        (root / 'begin.zcode_session_id').write_text(os.environ.get('ZCODE_SESSION_ID', ''))\n"
     "        print((root / 'begin.json').read_text(), end='')\n"
     "        status = int(os.environ.get('FUNNEL_STATUS', '0'))\n"
     "        if status:\n"
@@ -589,8 +588,8 @@ MUSE_STUB = (
     "if (( judge_call )) && [[ -n \"${MUSE_JUDGE_DELAY_IF:-}\" ]] \\\n      && grep -Fq -- \"$MUSE_JUDGE_DELAY_IF\" \"$prompt_file\"; then\n"
     "  sleep \"${MUSE_JUDGE_DELAY_SECONDS:-1}\"\n"
     "fi\n"
-    # #1411: the converse probe. A judge that finds another judge in flight
-    # leaves an overlap marker; the z.ai path must never leave one.
+    # #1411: the concurrency probe. A judge that finds another judge in flight
+    # leaves an overlap marker.
     "if (( judge_call )) && [[ -n \"${MUSE_JUDGE_EXCLUSIVE:-}\" ]]; then\n"
     "  if mkdir \"$MUSE_COUNT.inflight\" 2>/dev/null; then\n"
     "    sleep 0.3\n"
@@ -842,11 +841,8 @@ def _stub_repo(tmp_path, begin, packet, *, answers=(), routine_body=None,
     (repo / "shape-apply").write_text(SHAPE_APPLY_STUB)
     muse = tmp_path / "muse"
     _executable(muse, MUSE_STUB)
-    # The same answering stub stands in for zai-exec: both take the prompt by
-    # --prompt-file and print the raw answer, so one counter orders every
-    # model call. A test tells the two apart by argv — Muse's starts `exec`.
-    zai = tmp_path / "zai-exec"
-    _executable(zai, MUSE_STUB)
+    retired_backend = tmp_path / "retired-backend"
+    _executable(retired_backend, MUSE_STUB)
     gh = tmp_path / "gh"
     _executable(gh, GH_STUB)
     env = dict(
@@ -855,10 +851,7 @@ def _stub_repo(tmp_path, begin, packet, *, answers=(), routine_body=None,
         TMPDIR=str(tmp_path),
         MUSE_REVIEW_ENGINE_REPO=str(repo),
         MUSE_BIN=str(muse),
-        ZAI_EXEC_BIN=str(zai),
-        # Muse's behaviour is what every test above the z.ai section pins, so
-        # the harness puts the z.ai cutoff in the past unless a test moves it.
-        MUSE_REVIEW_ENGINE_ZAI_UNTIL="0",
+        ZAI_EXEC_BIN=str(retired_backend),
         GH_BIN=str(gh),
         MUSE_REVIEW_ENGINE_BOUND_SECONDS=str(bound_seconds),
         MUSE_COUNT=str(repo / "muse.count"),
@@ -1272,15 +1265,11 @@ def test_a_failing_precheck_applies_rejected_without_calling_muse(tmp_path):
     )
 
 
-@pytest.mark.parametrize("backend", ["muse", "zcode"])
 def test_a_covered_verdict_with_another_failing_reason_still_rejects(
-        tmp_path, backend):
+        tmp_path):
     packet = _covered_verdict_packet()
     packet["precheck"]["reasons"].append("stop: stop_auto_merging set")
-    if backend == "zcode":
-        proc, repo = _zai_standard(tmp_path, _begin(), packet)
-    else:
-        proc, repo = _stubbed_runner(tmp_path, _begin(), packet)
+    proc, repo = _stubbed_runner(tmp_path, _begin(), packet)
 
     assert proc.returncode == 0, proc.stderr
     assert _muse_calls(repo) == 0
@@ -2786,8 +2775,7 @@ def test_the_issue_model_call_carries_the_no_tool_shape(tmp_path):
 @pytest.mark.parametrize("job", ("breakdown",))
 def test_a_malformed_issue_answer_retries_once_with_the_parse_error(
         tmp_path, job):
-    """Breakdown's one call. Shape on Muse is split (#1599): its retries
-    are pinned per part below, and its one call is z.ai's."""
+    """Breakdown's one call. Shape's split retries are pinned per part below."""
     proc, repo = _stubbed_runner(
         tmp_path, _issue_begin(job), _issue_packet(job),
         answers=("{not json", _issue_answer(job)))
@@ -2921,7 +2909,7 @@ def test_a_refused_breakdown_apply_finishes_errored(tmp_path):
 # One framer in the foreground, bound to the run's session; then sibling
 # checks of at most three siblings, deciders of at most three points and the
 # auditor, together and unbound. The runner merges their answers and applies
-# once. z.ai keeps shape's one call.
+# once.
 
 SHAPE_PART_MARKERS = (
     ("This call is the shape framer", "framer"),
@@ -3540,37 +3528,6 @@ def test_a_large_framer_idle_count_spans_its_parse_retry(tmp_path):
     assert PARSE_RETRY in (repo / "muse.prompt.3").read_text()
     assert _apply_calls(repo) == []
     assert _shape_timing(proc) == {"shape.framer": (4, "failed")}
-
-
-def test_a_zai_shape_is_still_one_call(tmp_path):
-    proc, repo = _zai_standard(
-        tmp_path, _issue_begin("shape"), _issue_packet("shape"),
-        answers=(_shape_answer(),))
-
-    assert proc.returncode == 0, proc.stderr
-    assert _muse_calls(repo) == 1
-    prompt = (repo / "muse.prompt.1").read_text()
-    assert not any(prompt.startswith(marker)
-                   for marker, _ in SHAPE_PART_MARKERS)
-    assert "What is the plan, what is settled" in prompt
-    assert json.loads((repo / "apply.answer").read_text()) == \
-        json.loads(_shape_answer())
-
-
-def test_a_malformed_zai_shape_answer_retries_its_one_call(tmp_path):
-    proc, repo = _zai_standard(
-        tmp_path, _issue_begin("shape"), _issue_packet("shape"),
-        answers=("{not json", _shape_answer()))
-
-    assert proc.returncode == 0, proc.stderr
-    assert _muse_calls(repo) == 2
-    retry_prompt = (repo / "muse.prompt.2").read_text()
-    assert "Your previous answer could not be parsed" in retry_prompt
-    calls = _apply_calls(repo)
-    assert len(calls) == 2
-    assert "--attempt 1" in calls[0]
-    assert "--attempt 2" in calls[1]
-    assert (repo / "applied.marker").exists()
 
 
 def _engine_model(repo):
@@ -4811,8 +4768,7 @@ def test_a_ticket_unlike_every_entry_keeps_both_in_full(tmp_path):
 # At max the escalated lister went stream-idle in 2 of 4 live reviews on
 # 2026-09-28, once after #1866's lean copy (#1886). Listing is the easy half
 # of a review (#1233), so on a max lane every lister call asks at high; the
-# judges keep the lane's effort. Below max nothing changes, and z.ai, which
-# takes no effort, is unchanged.
+# judges keep the lane's effort. Below max nothing changes.
 
 def _lister_and_judge_efforts(tmp_path, lane):
     """Each Muse call's --reasoning-effort, split by the prompt's header, over
@@ -4862,29 +4818,7 @@ def test_below_max_the_lister_asks_at_the_lanes_effort(tmp_path):
     }
 
 
-def test_a_zai_lister_on_a_max_lane_asks_exactly_as_its_judge_does(tmp_path):
-    proc, repo = _zai_standard(
-        tmp_path, _begin(), _packet(),
-        answers=_review_answers(_judge_answer()))
-
-    assert proc.returncode == 0, proc.stderr
-    lister, judge = _model_argvs(repo)
-    assert "This call is not the review." in \
-        (repo / "muse.prompt.1").read_text()
-    # zai-exec takes the prompt and its own deadline and nothing else: no
-    # effort for the lister to lower (#1411).
-    assert lister[0::2] == judge[0::2] == ["--prompt-file", "--timeout"]
-    assert lister[3] == judge[3]
-
-
-# -- the z.ai standard tier (Nate, 2026-09-23) ---------------------------------
-#
-# Before heartbeat.ZAI_STANDARD_UNTIL (2026-09-27 06:00 PDT since #1694;
-# first 2026-10-06 09:00 PDT) the standard tier was answered by GLM-5.3
-# through scripts/zai-exec and recorded as agent `zcode`, its judges one at a
-# time (#1411); the escalated tier stays on Muse, and at the cutoff the
-# standard tier returns to Muse by itself. These tests move the cutoff with
-# MUSE_REVIEW_ENGINE_ZAI_UNTIL.
+# -- standard-tier route retirement (#1987) -----------------------------------
 
 FUTURE = "9999999999"
 
@@ -4897,348 +4831,27 @@ def _model_argvs(repo):
     ]
 
 
-def _zai_standard(tmp_path, begin, packet, **kwargs):
-    extra = dict(kwargs.pop("extra_env", None) or {})
-    extra.setdefault("MUSE_REVIEW_ENGINE_ZAI_UNTIL", FUTURE)
-    return _stubbed_runner(tmp_path, begin, packet, args=("standard", "max"),
-                           extra_env=extra, **kwargs)
-
-
-@pytest.mark.parametrize("backend", ["muse", "zcode"])
-def test_a_sole_covered_verdict_stands_down_without_overwriting_approval(
-        tmp_path, backend):
-    packet = _covered_verdict_packet()
-    if backend == "zcode":
-        proc, repo = _zai_standard(tmp_path, _begin(), packet)
-    else:
-        proc, repo = _stubbed_runner(tmp_path, _begin(), packet)
-
-    assert packet["verdict"]["verdict"] == "approved"  # recorded #1509 shape
-    assert proc.returncode == 0, proc.stderr
-    assert _muse_calls(repo) == 0
-    assert _apply_calls(repo) == []
-    assert not (repo / "applied.marker").exists()
-    assert not (repo / "gh.log").exists()
-    assert _heartbeat_without_muse_call_record(repo) == (
-        "finish --agent {} --run engine-run --outcome done "
-        "--note review skipped — a verdict already covers head {}; "
-        "no verdict recorded\n".format(backend, HEAD)
-    )
-
-
-def test_the_engine_cutoff_is_the_one_heartbeat_retires_zcode_at():
-    """One instant, two readers: the runner routes on it and heartbeat stops
-    reading zcode's silence as a dying lane on it. A drifted copy would leave
-    a lane running unwatched, or a stopped lane alarming."""
-    import heartbeat
-
-    runner = SCRIPT.read_text()
-    assert 'MUSE_REVIEW_ENGINE_ZAI_UNTIL:-{}}}'.format(
-        heartbeat.ZAI_STANDARD_UNTIL) in runner
-    assert heartbeat.ZAI_STANDARD_UNTIL == 1790514000
-
-
-def test_a_standard_review_before_the_cutoff_runs_on_zai_as_zcode(tmp_path):
-    proc, repo = _zai_standard(
-        tmp_path, _begin(), _packet(),
-        answers=_review_answers(_judge_answer()))
-
-    assert proc.returncode == 0, proc.stderr
-    calls = (repo / "funnel.calls").read_text()
-    assert "begin --agent zcode --tier standard --breakdown --role review" \
-        in calls
-    assert "--agent muse" not in calls
-    # The lister and the judge both went to zai-exec, never to Muse.
-    argvs = _model_argvs(repo)
-    assert len(argvs) == 2
-    for argv in argvs:
-        assert argv[0] == "--prompt-file"
-        assert "exec" not in argv
-        assert "--model" not in argv
-        assert "--reasoning-effort" not in argv
-        assert "--session-id" not in argv
-        timeout = float(argv[argv.index("--timeout") + 1])
-        assert 0 < timeout < 20, "zai-exec's own deadline sits inside the bound"
-    applies = _apply_calls(repo)
-    assert len(applies) == 1 and "--agent zcode" in applies[0]
-    assert _heartbeat_without_muse_call_record(repo) == (
-        "finish --agent zcode --run engine-run --outcome done "
-        "--note reviewed PR #7 in owner/repo at {}: approved "
-        "--review-result approved\n".format(HEAD)
-    )
-
-
-def test_the_zai_run_binds_zcodes_session_and_never_muses(tmp_path):
-    proc, repo = _zai_standard(
-        tmp_path, _begin(), _packet(),
-        answers=_review_answers(_judge_answer()),
-        extra_env={"MUSE_SESSION_ID": "inherited-muse-session"})
-
-    assert proc.returncode == 0, proc.stderr
-    assert (repo / "begin.session_id").read_text() == ""
-    session = (repo / "begin.zcode_session_id").read_text()
-    assert str(uuid.UUID(session)) == session
-
-
-@pytest.mark.parametrize("job", ("breakdown", "shape"))
-def test_a_standard_issue_job_before_the_cutoff_runs_on_zai(tmp_path, job):
-    proc, repo = _zai_standard(
-        tmp_path, _issue_begin(job), _issue_packet(job),
-        answers=(_issue_answer(job),))
-
-    assert proc.returncode == 0, proc.stderr
-    assert [argv[0] for argv in _model_argvs(repo)] == ["--prompt-file"]
-    assert "--agent zcode" in _apply_calls(repo)[0]
-    assert _heartbeat(repo).startswith(
-        "finish --agent zcode --run engine-run --outcome done")
-
-
-def test_the_escalated_tier_stays_on_muse_before_the_cutoff(tmp_path):
+def test_standard_tier_stays_on_muse_with_a_future_legacy_cutoff(tmp_path):
+    """The retired bridge cannot be reactivated by a stale cutoff override."""
     proc, repo = _stubbed_runner(
-        tmp_path, _begin(), _packet(), args=("escalated", "max"),
+        tmp_path, _begin(), _packet(), args=("standard", "max"),
         answers=_review_answers(_judge_answer()),
         extra_env={"MUSE_REVIEW_ENGINE_ZAI_UNTIL": FUTURE})
 
     assert proc.returncode == 0, proc.stderr
-    assert "begin --agent muse --tier escalated --role review" in \
-        (repo / "funnel.calls").read_text()
+    calls = (repo / "funnel.calls").read_text()
+    assert "begin --agent muse --tier standard --breakdown --role review" \
+        in calls
+    assert "--agent zcode" not in calls
     assert all(argv[0] == "exec" for argv in _model_argvs(repo))
     assert _heartbeat(repo).startswith("finish --agent muse ")
 
 
-@pytest.mark.parametrize("cutoff", ("1", "tomorrow", "-5", "1791302400.5"))
-def test_the_standard_tier_is_muses_from_the_cutoff_or_on_a_bad_one(
-        tmp_path, cutoff):
-    """Past the cutoff the standard tier goes back to Muse with nothing to
-    undo; a cutoff that is not a plain epoch keeps the unchanged behaviour
-    rather than guessing."""
-    proc, repo = _stubbed_runner(
-        tmp_path, _begin(), _packet(), args=("standard", "max"),
-        answers=_review_answers(_judge_answer()),
-        extra_env={"MUSE_REVIEW_ENGINE_ZAI_UNTIL": cutoff})
-
-    assert proc.returncode == 0, proc.stderr
-    assert "begin --agent muse --tier standard --breakdown --role review" \
-        in (repo / "funnel.calls").read_text()
-    argvs = _model_argvs(repo)
-    assert argvs and all(argv[0] == "exec" for argv in argvs)
-    assert all("--model" in argv for argv in argvs)
-
-
-def test_a_spent_zai_window_skips_the_run_and_parks_nothing(tmp_path):
-    """No fallback to Muse and no hold file: z.ai publishes its windows, so
-    the next begin stops on the reading; Muse's lanes are not z.ai's to park."""
-    proc, repo = _zai_standard(
-        tmp_path, _begin(), _packet(),
-        extra_env={
-            "MUSE_STATUS": "75",
-            "MUSE_STDERR": "zai-exec: quota-exhausted: HTTP 429 code 1308: "
-                           "Usage limit reached for 5 hour",
-        })
-
-    assert proc.returncode == 0, proc.stderr
-    assert _muse_calls(repo) == 1
-    assert _apply_calls(repo) == []
-    heartbeat = _heartbeat(repo)
-    assert heartbeat.startswith(
-        "finish --agent zcode --run engine-run --outcome skipped-provider-quota")
-    assert "z.ai quota exhausted: HTTP 429 code 1308" in heartbeat
-    assert "errored" not in heartbeat
-    assert not (tmp_path / ".claude" / "command-center-muse-quota-hold").exists()
-
-
-def test_muses_hold_does_not_park_the_zai_lane(tmp_path):
-    hold_dir = tmp_path / ".claude"
-    hold_dir.mkdir(parents=True, exist_ok=True)
-    hold = hold_dir / "command-center-muse-quota-hold"
-    hold.write_text("2099-01-01T00:00:00Z\n")
-
-    proc, repo = _zai_standard(
-        tmp_path, _begin(), _packet(),
-        answers=_review_answers(_judge_answer()))
-
-    assert proc.returncode == 0, proc.stderr
-    assert "parked until" not in proc.stderr
-    assert _muse_calls(repo) == 2
-    assert hold.read_text() == "2099-01-01T00:00:00Z\n", \
-        "Muse's hold is left as found"
-
-    # The same hold still parks Muse's own escalated lane.
-    proc, repo = _stubbed_runner(
-        tmp_path / "escalated", _begin(), _packet(),
-        extra_env={"MUSE_REVIEW_ENGINE_ZAI_UNTIL": FUTURE,
-                   "HOME": str(tmp_path)})
-    assert proc.returncode == 0, proc.stderr
-    assert "parked until" in proc.stderr
-    assert _muse_calls(repo) == 0
-
-
-def test_a_muse_shaped_refusal_on_the_zai_lane_writes_no_muse_hold(tmp_path):
-    """Muse's refusal text arriving on the z.ai path is only a failure there."""
-    proc, repo = _zai_standard(
-        tmp_path, _begin(), _packet(),
-        extra_env={
-            "MUSE_STATUS": "1",
-            "MUSE_STDERR": "API error 429: Subscription quota exhausted. Your "
-                           "usage window resets at 2099-01-01T00:00:00Z.",
-        })
-
-    assert proc.returncode == 1
-    assert not (tmp_path / ".claude" / "command-center-muse-quota-hold").exists()
-    assert "zai-exec failed (exit 1)" in _heartbeat(repo)
-
-
-def test_a_zai_failure_finishes_errored_as_zcode(tmp_path):
-    proc, repo = _zai_standard(
-        tmp_path, _begin(), _packet(),
-        extra_env={"MUSE_STATUS": "1",
-                   "MUSE_STDERR": "zai-exec: model mismatch: asked for "
-                                  "glm-5.3 and glm-5.3-flash answered"})
-
-    assert proc.returncode == 1
-    assert _apply_calls(repo) == []
-    heartbeat = _heartbeat(repo)
-    assert heartbeat.startswith("finish --agent zcode --run engine-run "
-                                "--outcome errored")
-    assert "zai-exec failed (exit 1)" in heartbeat
-    assert "model mismatch" in heartbeat
-
-
-def test_a_zai_call_past_the_bound_is_killed_like_a_muse_one(tmp_path):
-    proc, repo = _zai_standard(
-        tmp_path, _begin(), _packet(), bound_seconds=1,
-        extra_env={"MUSE_SLEEP": "30"}, timeout=60)
-
-    assert proc.returncode == 124
-    heartbeat = _heartbeat(repo)
-    assert heartbeat.startswith("finish --agent zcode ")
-    assert "#392" in heartbeat
-
-
-def test_a_missing_zai_exec_refuses_before_begin(tmp_path):
-    proc, repo = _zai_standard(
-        tmp_path, _begin(), _packet(),
-        extra_env={"ZAI_EXEC_BIN": str(tmp_path / "no-such-zai-exec")})
-
-    assert proc.returncode == 1
-    assert "refusing to run the z.ai standard tier" in proc.stderr
-    assert not (repo / "funnel.calls").exists()
-    assert _muse_calls(repo) == 0
-
-
-# -- #1411: the z.ai judges and a spent window mid-review ----------------------
-
-SEVEN = ["requirement {}".format(i) for i in range(1, 8)]
-
-
-def test_zai_judges_run_one_at_a_time_and_muse_judges_together(tmp_path):
-    """The Lite plan refuses concurrent requests (1302); parallel judges past
-    the limit would read `unsure` and reject a good PR."""
-    proc, repo = _zai_standard(
-        tmp_path / "zai", _begin(), _packet(),
-        answers=(_requirements_answer(*SEVEN),),
-        extra_env={"MUSE_DYNAMIC_JUDGES": "1", "MUSE_JUDGE_EXCLUSIVE": "1"})
-
-    assert proc.returncode == 0, proc.stderr
-    assert _muse_calls(repo) == 4
-    assert not (repo / "muse.count.overlap").exists(), \
-        "a z.ai judge started while another was in flight"
-    answer = json.loads((repo / "apply.answer").read_text())
-    assert answer["verdict"] == "approved"
-    assert [entry["requirement"] for entry in answer["requirements"]] == SEVEN
-    assert _heartbeat(repo).startswith("finish --agent zcode ")
-
-    # The probe can see overlap: the same review on Muse overlaps.
-    proc, repo = _stubbed_runner(
-        tmp_path / "on-muse", _begin(), _packet(),
-        answers=(_requirements_answer(*SEVEN),),
-        extra_env={"MUSE_DYNAMIC_JUDGES": "1", "MUSE_JUDGE_EXCLUSIVE": "1"})
-    assert proc.returncode == 0, proc.stderr
-    assert (repo / "muse.count.overlap").exists()
-
-
-@pytest.mark.parametrize("spent_on", ("requirement 1", "requirement 4",
-                                      "requirement 7"))
-def test_a_judge_meeting_a_spent_window_skips_the_whole_review(tmp_path,
-                                                               spent_on):
-    """No verdict from a review nobody finished judging: a judge that exits
-    75 ends the run as a quota skip, before any apply, and no later judge
-    spends credits on it."""
-    proc, repo = _zai_standard(
-        tmp_path, _begin(), _packet(),
-        answers=(_requirements_answer(*SEVEN),),
-        extra_env={
-            "MUSE_DYNAMIC_JUDGES": "1",
-            "MUSE_JUDGE_FAIL_IF": spent_on,
-            "MUSE_JUDGE_FAIL_STATUS": "75",
-            "MUSE_JUDGE_FAILURE": "zai-exec: quota-exhausted: HTTP 429 code "
-                                  "1308: Usage limit reached for 5 hour",
-        })
-
-    assert proc.returncode == 0, proc.stderr
-    assert _apply_calls(repo) == [], "no verdict may be applied"
-    assert not (repo / "applied.marker").exists()
-    heartbeat = _heartbeat(repo)
-    assert heartbeat == (
-        "finish --agent zcode --run engine-run --outcome "
-        "skipped-provider-quota --note z.ai quota exhausted: HTTP 429 code "
-        "1308: Usage limit reached for 5 hour\n")
-    # Lister, then judges up to and including the one that met the wall.
-    chunk = SEVEN.index(spent_on) // 3
-    assert _muse_calls(repo) == 1 + chunk + 1
-    assert not (tmp_path / ".claude" / "command-center-muse-quota-hold").exists()
-
-
-def test_a_judge_whose_retries_ran_out_still_fails_closed(tmp_path):
-    """zai-exec retries a concurrency refusal until its deadline. A judge
-    that still could not get an answer is `unsure`, as on Muse: the verdict
-    is rejected rather than approved on requirements nobody judged."""
-    proc, repo = _zai_standard(
-        tmp_path, _begin(), _packet(),
-        answers=(_requirements_answer(*SEVEN[:4]),),
-        extra_env={
-            "MUSE_DYNAMIC_JUDGES": "1",
-            "MUSE_JUDGE_FAIL_IF": "requirement 4",
-            "MUSE_JUDGE_FAIL_STATUS": "1",
-            "MUSE_JUDGE_FAILURE": "zai-exec: HTTP 429 code 1302: High "
-                                  "concurrency; no time left to retry",
-        })
-
-    assert proc.returncode == 0, proc.stderr
-    answer = json.loads((repo / "apply.answer").read_text())
-    assert answer["verdict"] == "rejected"
-    assert [entry["status"] for entry in answer["requirements"]] == \
-        ["met", "met", "met", "unsure"]
-    assert "code 1302" in answer["requirements"][3]["evidence"]
-    assert "skipped-provider-quota" not in _heartbeat(repo)
-
-
-def test_a_muse_shaped_refusal_in_a_zai_judge_never_parks_muse(tmp_path):
-    """The judge loop's hold guard: on Muse a judge's refusal text records
-    the shared hold; on z.ai the same text is only that judge's failure."""
-    refusal = ("API error 429: Subscription quota exhausted. Your usage "
-               "window resets at 2099-01-01T00:00:00Z.")
-    env = {"MUSE_DYNAMIC_JUDGES": "1",
-           "MUSE_JUDGE_FAIL_IF": "requirement 4",
-           "MUSE_JUDGE_FAILURE": refusal}
-    hold = tmp_path / ".claude" / "command-center-muse-quota-hold"
-
-    proc, repo = _zai_standard(
-        tmp_path, _begin(), _packet(),
-        answers=(_requirements_answer(*SEVEN[:4]),), extra_env=env)
-    assert proc.returncode == 0, proc.stderr
-    assert not hold.exists(), "a z.ai judge must not park Muse's lanes"
-    assert json.loads((repo / "apply.answer").read_text())["verdict"] == \
-        "rejected"
-
-    # The guard, not the text, is what spared Muse: the same judge on Muse
-    # records the hold.
-    proc, repo = _stubbed_runner(
-        tmp_path / "on-muse", _begin(), _packet(),
-        answers=(_requirements_answer(*SEVEN[:4]),),
-        extra_env=dict(env, HOME=str(tmp_path)))
-    assert proc.returncode == 0, proc.stderr
-    assert hold.read_text().strip() == "2099-01-01T00:00:00Z"
+def test_review_engine_has_no_clock_or_zai_exec_route():
+    runner = SCRIPT.read_text()
+    for retired_route in ("ZAI_STANDARD_UNTIL",
+                          "MUSE_REVIEW_ENGINE_ZAI_UNTIL", "zai-exec"):
+        assert retired_route not in runner
 
 
 # -- the replay entry (#1730) ---------------------------------------------------

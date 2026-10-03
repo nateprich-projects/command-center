@@ -36,3 +36,23 @@ python3 review-variant restore --must-reject "$MUST_REJECT_PACKET" --must-approv
 This sets the active variant to baseline, disables trial selection, and replays
 each packet three times. It prints verdicts and pass/fail only; packet paths and
 contents stay local. Post the two verdict-only results to the trial's PR.
+
+## Candidate wording and existing packet facts
+
+The candidate wording was recovered first with `git show be86e2524` (#2060):
+the R1, R2 and R4 question rules come from `routines/muse-review.md`, and the
+corresponding judge rules come from `scripts/muse-review-engine` at that commit.
+`tests/test_review_prompts.py::test_each_variant_carries_only_its_recovered_rule`
+pins each variant's question and judge wording.
+
+The packet facts those rules use were already present, so this ticket leaves the
+packet builder unchanged. #1850 prior-fix evidence passes through
+`engine.review.packet_evidence` into `build_packet`'s `evidence`; #1851's
+`test_weakening` field is assembled from the PR diff in `engine.review.build_packet`.
+Existing coverage is in `tests/test_engine_review_packet.py`, including
+`test_the_block_finish_writes_is_the_block_the_packet_reads`,
+`test_the_packet_carries_either_form_of_a_prior_fix_line`,
+`test_packet_lists_deleted_test_functions`,
+`test_packet_lists_removed_assert_lines_from_test_files`,
+`test_packet_lists_added_skip_xfail_markers_and_pytest_skip_calls`, and
+`test_packet_carries_every_field`.

@@ -19,7 +19,7 @@ merge gate. The reviewer checks that the PR has verdicts for both packets.
 
 ## Versioned reviewer trial variants
 
-`routines/muse-review-variants/` holds the versioned baseline, R1, R2 and R4
+`engine/review_variants/` holds the versioned baseline, R1, R2 and R4
 prompt rules. The manifest fixes Round 1 to baseline plus each single rule and
 Round 2 to baseline plus at most one Round 1 winner selected under #2072's
 method. The active selector stays on baseline while `trial_enabled` is false;

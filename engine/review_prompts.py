@@ -15,10 +15,14 @@ from typing import Callable, Optional, Sequence
 
 
 CHECKOUT = pathlib.Path(__file__).resolve().parents[1]
-VARIANT_DIR = pathlib.Path("routines") / "muse-review-variants"
+# Outside routines/: the variants are data this loader owns, and the live
+# routine stays byte-identical to main while the baseline is active.
+VARIANT_DIR = pathlib.Path("engine") / "review_variants"
 MANIFEST = VARIANT_DIR / "manifest.json"
 BASE_ROUTINE = pathlib.Path("routines") / "muse-review.md"
-RULE_MARKER = "<!-- REVIEW_VARIANT_RULES -->"
+#: A variant's question rules follow the routine's one ``evidence`` bullet,
+#: the rule they qualify.
+RULE_ANCHOR = "- `evidence`"
 RUNTIME_ROOT = pathlib.Path(
     os.environ.get("COMMAND_CENTER_RUNTIME_ROOT",
                    str(pathlib.Path.home() / ".claude"))
@@ -150,13 +154,19 @@ def render_variant(repo: str | pathlib.Path, name: str) -> ReviewPrompt:
         raise ReviewPromptError(
             "the reviewer routine must hold PACKET_JSON exactly once"
         )
-    if source.count(RULE_MARKER + "\n") != 1:
-        raise ReviewPromptError(
-            "the reviewer routine must contain one variant rule marker"
-        )
-    bullets = "".join("- {}\n".format(rule)
-                      for rule in variant["question_rules"])
-    rendered = source.replace(RULE_MARKER + "\n", bullets, 1)
+    rendered = source
+    if variant["question_rules"]:
+        lines = source.splitlines(keepends=True)
+        anchors = [index for index, line in enumerate(lines)
+                   if line.startswith(RULE_ANCHOR)]
+        if len(anchors) != 1:
+            raise ReviewPromptError(
+                "the reviewer routine must hold one `evidence` bullet"
+            )
+        bullets = ["- {}\n".format(rule)
+                   for rule in variant["question_rules"]]
+        index = anchors[0] + 1
+        rendered = "".join(lines[:index] + bullets + lines[index:])
     template = rendered.split("\n---\n", 1)[1]
     if template.count("PACKET_JSON") != 1:
         raise ReviewPromptError(

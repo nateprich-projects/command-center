@@ -22,15 +22,15 @@ def _variant_repo(tmp_path):
     shutil.copy2(ROOT / "routines" / "muse-review.md",
                  repo / "routines" / "muse-review.md")
     shutil.copytree(
-        ROOT / "routines" / "muse-review-variants",
-        repo / "routines" / "muse-review-variants",
+        ROOT / "engine" / "review_variants",
+        repo / "engine" / "review_variants",
     )
     return repo
 
 
 def test_rounds_are_four_first_round_variants_and_one_round_two_winner():
     manifest = json.loads(
-        (ROOT / "routines" / "muse-review-variants" / "manifest.json")
+        (ROOT / "engine" / "review_variants" / "manifest.json")
         .read_text())
 
     assert manifest["rounds"] == [
@@ -82,14 +82,13 @@ def test_each_variant_carries_only_its_recovered_rule(name, question, judge,
     assert "- " + question in prompt.routine
     assert prompt.judge_rules == (judge,)
     assert absent not in prompt.routine
-    assert "<!-- REVIEW_VARIANT_RULES -->" not in prompt.routine
     assert prompt.routine.count("PACKET_JSON") == 1
 
 
 def test_active_trial_variant_fails_closed_until_trial_wiring_is_enabled(
         tmp_path):
     repo = _variant_repo(tmp_path)
-    manifest_path = repo / "routines" / "muse-review-variants" / "manifest.json"
+    manifest_path = repo / "engine" / "review_variants" / "manifest.json"
     manifest = json.loads(manifest_path.read_text())
     manifest["active_variant"] = "r1"
     manifest["trial_enabled"] = False
@@ -103,7 +102,7 @@ def test_active_trial_variant_fails_closed_until_trial_wiring_is_enabled(
 def test_restore_baseline_disables_trial_then_replays_both_known_verdicts(
         tmp_path):
     repo = _variant_repo(tmp_path)
-    manifest_path = repo / "routines" / "muse-review-variants" / "manifest.json"
+    manifest_path = repo / "engine" / "review_variants" / "manifest.json"
     manifest = json.loads(manifest_path.read_text())
     manifest["active_variant"] = "r2"
     manifest["trial_enabled"] = True

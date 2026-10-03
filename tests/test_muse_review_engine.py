@@ -804,11 +804,11 @@ def _stub_repo(tmp_path, begin, packet, *, answers=(), routine_body=None,
         routine_body if routine_body is not None else ROUTINE.read_text()
     )
     shutil.copytree(
-        ROOT / "routines" / "muse-review-variants",
-        repo / "routines" / "muse-review-variants",
+        ROOT / "engine" / "review_variants",
+        repo / "engine" / "review_variants",
         dirs_exist_ok=True,
     )
-    manifest_path = repo / "routines" / "muse-review-variants" / "manifest.json"
+    manifest_path = repo / "engine" / "review_variants" / "manifest.json"
     manifest = json.loads(manifest_path.read_text())
     if active_variant is not None:
         manifest["active_variant"] = active_variant

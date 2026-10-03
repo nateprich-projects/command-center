@@ -252,7 +252,8 @@ OPTIONS = [
     {"id": "opt-{}".format(name), "name": name}
     for name in (
         "Ideas", "Shaped", "Ready", "Building", "Done", "Parked",
-        "Pinned", "human", "none", "Nate", "agent", "standard", "escalated",
+        "Pinned", "human", "external-event", "none", "Nate", "agent",
+        "standard", "escalated",
         "Broken", "Improve", "New", "Replace",
     )
 ]

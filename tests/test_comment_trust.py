@@ -52,6 +52,7 @@ TEXT_PARSERS = frozenset({
     "block_record.py:_unconditioned_event_reason",
     "block_record.py:_parse_block_comment_details",
     "block_record.py:parse_block_comment",
+    "block_record.py:parse_shaped_hold_comment",
     "block_record.py:unparseable_block_comment_lines",
     "funnel.py:parse_needs_decision_comment",
     "block_record.py:parse_decline_comment",
@@ -157,6 +158,7 @@ WRITERS = frozenset({
     # apply_question render through these, so name no marker themselves
     # (#2169).
     "block_record.py:render_blocked",
+    "block_record.py:render_shaped_hold",
     "block_record.py:render_blocked_until_event",
     "block_record.py:render_needs_decision",
     "block_record.py:render_declined",

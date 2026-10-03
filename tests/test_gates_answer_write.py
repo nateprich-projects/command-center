@@ -374,3 +374,79 @@ def test_the_single_line_case_is_unaffected():
     """The guard above must not have narrowed the ordinary path."""
     assert funnel.parse_gates_answer(written()) is not None
     assert len(gates_lines(written())) == 1
+
+
+def test_answering_gates_rechecks_a_delegated_nate_shaped_plan(monkeypatch):
+    """A valid Nate override hands this one Shaped plan to agents."""
+    body = "\n\n".join((
+        PLAN,
+        funnel.ORIGIN_OVERRIDE_MARKER,
+        '```json\n{"target": "agents"}\n```',
+        funnel.provenance_block(
+            "nate-direct", at=AT, run="override-run", agent="claude"),
+    ))
+    item = _item(body=body, status="Shaped")
+    item.klass = "Broken"
+    calls = _capture_edits(monkeypatch)
+    status_writes = []
+
+    def write_status(target, status, now):
+        status_writes.append(status)
+        target.status = status
+        return None
+
+    monkeypatch.setattr(funnel, "_write_status", write_status)
+
+    assert funnel.cmd_answer_gates(
+        [item], AT, item.ref, ANSWER, "Nate",
+        run="answer-run", agent="claude") == 0
+
+    assert funnel.parse_origin_override(item.body) == {"target": "agents"}
+    assert funnel.parse_gates_answer(item.body)["answer"] == ANSWER
+    assert item.needs == "none"
+    assert item.status == "Ready"
+    assert status_writes == ["Ready"]
+    approval_comments = [
+        call[-1] for call in calls
+        if call[:3] == ["gh", "issue", "comment"]
+    ]
+    assert len(approval_comments) == 1
+    assert "origin override to agents" in approval_comments[0]
+
+
+def test_answering_gates_keeps_nate_shaped_plan_without_valid_override(
+        monkeypatch):
+    body = "\n\n".join((
+        PLAN,
+        funnel.ORIGIN_OVERRIDE_MARKER,
+        '```json\n{"target": "agents"}\n```',
+        funnel.provenance_block(
+            "agent", at=AT, run="untrusted-run", agent="claude"),
+    ))
+    item = _item(body=body, status="Shaped")
+    item.klass = "Broken"
+    calls = _capture_edits(monkeypatch)
+    status_writes = []
+
+    def write_status(target, status, now):
+        status_writes.append(status)
+        target.status = status
+        return None
+
+    monkeypatch.setattr(funnel, "_write_status", write_status)
+
+    assert funnel.parse_origin_override(body) is None
+    assert funnel.cmd_answer_gates(
+        [item], AT, item.ref, ANSWER, "Nate",
+        run="answer-run", agent="claude") == 0
+    advanced, errors = funnel.sweep_shaped_self_approvals([item], AT)
+
+    assert advanced == []
+    assert errors == []
+    assert item.needs == "none"
+    assert item.status == "Shaped"
+    assert status_writes == []
+    assert not [
+        call for call in calls
+        if call[:3] == ["gh", "issue", "comment"]
+    ]

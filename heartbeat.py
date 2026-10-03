@@ -2305,9 +2305,28 @@ def muse_auth_outage(records: List[Dict]) -> Optional[Dict]:
 def muse_auth_outage_open(records: List[Dict]) -> bool:
     """Whether durable Muse records leave the authentication outage open.
 
-    A thin adapter over `muse_auth_outage`, which holds the rule.
+    The append-only order on GitHub is authoritative for this lane gate: the
+    exact auth-outage finish opens the park, and only a successful smoke probe
+    closes it. Keep accepting these durable legacy rows even when they have no
+    run id; `agent_health.assess` reads the run-attributed state from
+    `run_views` separately (#2176).
     """
-    return muse_auth_outage(records) is not None
+    open_outage = False
+    for record in distinct_records(records):
+        if not isinstance(record, dict) or record.get("agent") != "muse":
+            continue
+        if (
+            record.get("phase") == "finish"
+            and record.get("outcome") == "errored"
+            and record.get("note") == MUSE_AUTH_OUTAGE_NOTE
+        ):
+            open_outage = True
+        elif (
+            record.get("phase") == "auth_probe"
+            and record.get("result") == "success"
+        ):
+            open_outage = False
+    return open_outage
 
 
 def read(agent: str, timeout: Optional[float] = None,

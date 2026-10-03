@@ -1972,6 +1972,30 @@ elif field == "ci_rerun_run":
 elif field == "ci_rerun_overlaps":
     overlaps = (packet.get("ci_rerun") or {}).get("overlaps") or []
     print(", ".join("#{}".format(pr) for pr in overlaps))
+elif field == "review_scope":
+    # "scoped" only for a live scope from the runner (#2001): a rejected
+    # head, its blocking items under the stopping rule kinds, an interdiff,
+    # and the fallback flag clear. Anything else, malformed included, is the
+    # full review (#2002). The kinds are engine/review.py SCOPED_REREVIEW_KINDS.
+    scope = packet.get("scoped_rereview")
+    if not isinstance(scope, dict):
+        scope = {}
+    head = scope.get("prior_rejected_head")
+    items = scope.get("prior_blocking_items")
+    kinds = ("code_defect", "missing_requirement_or_accept_test",
+             "merged_main_suite_failure")
+    live = (scope.get("enabled") is True
+            and scope.get("active") is True
+            and scope.get("full_review_fallback") is False
+            and isinstance(head, str) and bool(head.strip())
+            and isinstance(scope.get("interdiff"), str)
+            and isinstance(items, list) and bool(items)
+            and all(isinstance(item, dict)
+                    and item.get("kind") in kinds
+                    and isinstance(item.get("finding"), str)
+                    and bool(item["finding"].strip())
+                    for item in items))
+    print("scoped" if live else "full")
 ' "$PACKET_FILE" "$1"
 }
 
@@ -1983,7 +2007,8 @@ if ! PACKET_PASS="$(packet_field precheck_pass)" \
   || ! PACKET_COVERED_VERDICT_ONLY="$(packet_field covered_verdict_only)" \
   || ! CI_RERUN_ACTION="$(packet_field ci_rerun_action)" \
   || ! CI_RERUN_RUN="$(packet_field ci_rerun_run)" \
-  || ! CI_RERUN_OVERLAPS="$(packet_field ci_rerun_overlaps)"; then
+  || ! CI_RERUN_OVERLAPS="$(packet_field ci_rerun_overlaps)" \
+  || ! REVIEW_SCOPE="$(packet_field review_scope)"; then
   echo "muse-review-engine: the packet for PR #$BEGIN_PR is not valid JSON" >&2
   failure "review-packet for PR #$BEGIN_PR in $BEGIN_REPO printed invalid JSON" || true
   exit 1
@@ -2186,7 +2211,19 @@ LISTER_PROMPT="${PROMPT_TEMPLATE//PACKET_JSON/$LISTER_PACKET_JSON}"
 # prompt, which carries the packet. The routine file is frozen ground while
 # #794 lands, and #794 is moving this prose into the runner anyway, so the
 # lister composes rather than edits.
+#
+# A scoped re-review (#2002, plan #1838) asks for a different list, so it gets
+# its own header instead of this one: one requirement per blocking item the
+# runner carried from the rejected head (#2001), and one for a new blocking
+# defect in the interdiff, nothing from the tickets or the plan, which were
+# listed and judged at that head. REVIEW_SCOPE is `scoped` only for a live
+# scope with the fallback flag clear; every other packet, a large rewrite
+# included, gets the full review's header unchanged.
 lister_header() {
+  if [[ "${REVIEW_SCOPE:-full}" == "scoped" ]]; then
+    scoped_lister_header
+    return
+  fi
   cat <<'HEADER'
 This call is not the review. Record no verdict and judge nothing: do not say
 whether the diff meets anything, and do not comment on its quality.
@@ -2255,6 +2292,56 @@ requirement to reject it explicitly as a labeling error and preserve its exact
 evidence pointer. Do not defer that entry or leave it `unsure`: the packet has
 verified that the pointer names an open ticket that cannot run before the
 reviewed ticket.
+
+Answer with exactly one JSON object and nothing else:
+
+{"requirements": ["the first requirement", "the second requirement"]}
+
+The text after this paragraph is the review question, included for the packet
+it carries. Read its packet; ignore its instructions about verdicts and about
+the shape of your answer, which this paragraph replaces.
+HEADER
+}
+
+# The scoped re-review's list (#2002). The two questions are the plan's: each
+# carried item addressed or not, and any new defect in the interdiff, judged
+# by the stopping rule's three kinds. The override paragraph is the full
+# header's, narrowed to the carried items, so an explicit Nate override of a
+# prior blocking item still reaches the judges' check (#2057).
+scoped_lister_header() {
+  cat <<'HEADER'
+This call is not the review. Record no verdict and judge nothing: do not say
+whether the diff meets anything, and do not comment on its quality.
+
+This review is a scoped re-review. An earlier review rejected this PR at
+`scoped_rereview.prior_rejected_head`. The packet's `scoped_rereview` carries
+that rejection's blocking items, `prior_blocking_items`, and `interdiff`, the
+change to the PR since that head with nothing a merge of main brought in. The
+judges answer two questions only: was each prior blocking item addressed, and
+does the interdiff add a new blocking defect. Code the fix did not touch was
+judged at the rejected head and is not judged again.
+
+List exactly these requirements, in this order, and nothing else:
+
+- for each entry of `scoped_rereview.prior_blocking_items`, in order, one
+  requirement reading `Prior blocking item addressed (<kind>): <finding>`,
+  with the entry's `kind` and `finding` copied verbatim;
+- last, this requirement, copied verbatim:
+  `No new blocking defect: the interdiff adds no code defect, missing requirement or Accept test, or merged-main suite failure.`
+
+Do not list the tickets' Do or Accept, the plan's or the repository's rules,
+or the plan's Rejected options: they were listed and judged at the rejected
+head.
+
+An explicit Nate override can supersede a prior blocking item. A comment in
+`ticket.comments`, `tickets[].comments`, each ticket's `parent.comments` or
+`pr_comments.comments` qualifies only when its packet fields show `author` is
+the trusted owner `nateprich` (case insensitive), `voice` is `nate-direct` or
+`nate-relayed`, `url` is present, and `withheld` is not true, and its body
+names that item and says override, overriding, supersede, waive, or set
+aside. Keep that item's requirement and append
+`Superseded by Nate's override — <url> — "<short exact quote>"`. No other
+comment supersedes anything.
 
 Answer with exactly one JSON object and nothing else:
 
@@ -2549,6 +2636,32 @@ the diff and the wrong outcome. The `Risks:` in `pr_body` are where to look hard
 is `unavailable`, or the packet has none, say so and judge as you otherwise
 would.
 
+HEADER
+  # A scoped re-review (#2002) adds its two questions after every rule above,
+  # which still applies to them; the full review's header is unchanged.
+  if [[ "${REVIEW_SCOPE:-full}" == "scoped" ]]; then
+    cat <<'HEADER'
+This review is a scoped re-review. An earlier review rejected this PR at
+`scoped_rereview.prior_rejected_head`; `scoped_rereview.interdiff` is the
+change since that head, with nothing a merge of main brought in. A
+`Prior blocking item addressed` requirement asks whether that finding is
+addressed: met when the change now resolves it, citing the interdiff line
+that does; unmet when it is not addressed, saying what is still wrong. The
+`No new blocking defect` requirement is unmet when the interdiff adds a code
+defect, removes or weakens something a ticket's Do or Accept requires, or
+brings a merged-main suite failure absent on main: name each such defect
+with its input, its path through the interdiff and the wrong outcome.
+Otherwise it is met. Search only the interdiff and the prior blocking items;
+read `diff` for context. Code the interdiff does not touch was judged at the
+rejected head: do not judge it again. A fault you come across outside the
+interdiff blocks only when it is one of those three kinds and you can name
+its input, path and wrong outcome: then mark `No new blocking defect` unmet
+and say the fault lies outside the interdiff. Anything else you notice
+outside it is a note in `evidence`, never a reason for unmet or unsure.
+
+HEADER
+  fi
+  cat <<'HEADER'
 Return exactly one JSON object with one result for every assigned requirement
 and no others:
 

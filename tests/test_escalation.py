@@ -702,3 +702,209 @@ def test_ticket_1770_credentials_direct_actions_reuse_existing_vocabulary():
     assert matcher.endswith(
         r"\s+" + funnel._CREDENTIALS_MATCHER_ACTION_NOUN + r"\b"
     )
+
+
+# -- one region filter decides what the plan scan reads (#2180) -------------
+#
+# Each recorded body below was hit on main only by a line the plan cites or
+# records rather than proposes: a Siblings checked line, a Premises line, or
+# an item in a label-form Rejected list. The hit sentences live in the
+# fixtures as ``pre_change_line``.
+
+REGION_HOLDS = (
+    json.loads((FIXTURES / "escalation_plan_scan_only_holds.json").read_text(
+        encoding="utf-8"))
+    + json.loads((FIXTURES / "escalation_plan_region_holds.json").read_text(
+        encoding="utf-8"))
+)
+REGION_HOLD_IDS = [fixture["source"].split(" ")[0] for fixture in REGION_HOLDS]
+
+
+def _region_hold(ref):
+    return next(fixture for fixture in REGION_HOLDS
+                if fixture["source"].startswith(ref + " "))
+
+
+def _recorded_hits(fixture):
+    return [{"reason": reason, "line": fixture["pre_change_line"]}
+            for reason in fixture["pre_change_reasons"]]
+
+
+@pytest.mark.parametrize("fixture", REGION_HOLDS, ids=REGION_HOLD_IDS)
+def test_ticket_2180_recorded_region_hits_no_longer_match(fixture):
+    assert funnel.plan_escalation_matches(fixture["body"]) == [], \
+        "{} used to match {}".format(
+            fixture["source"], fixture["pre_change_reasons"])
+    assert funnel.plan_is_escalated(fixture["body"]) == []
+
+
+@pytest.mark.parametrize("fixture", REGION_HOLDS, ids=REGION_HOLD_IDS)
+def test_ticket_2180_the_same_sentence_under_what_it_is_still_matches(
+        fixture):
+    """The filter reads the section a line sits in, not its wording: the
+    sentence the scan hit inside a region still matches as active prose,
+    alone and ahead of the regions of its own body."""
+    sentence = fixture["pre_change_line"]
+    alone = "## What it is\n\n{}\n".format(sentence)
+    ahead = "## What it is\n\n{}\n\n{}".format(sentence, fixture["body"])
+
+    assert funnel.plan_escalation_matches(alone) == _recorded_hits(fixture)
+    assert funnel.plan_escalation_matches(ahead) == _recorded_hits(fixture)
+
+
+@pytest.mark.parametrize("label", [
+    "Rejected:", "**Rejected:**", "**Rejected**:", "__Rejected:__",
+    "Rejected:\n",
+], ids=["plain", "bold", "bold-colon-outside", "underscore-bold",
+        "blank-line-before-list"])
+def test_ticket_2180_a_plain_or_bold_rejected_label_hides_its_list(label):
+    fixture = _region_hold("nateprich-projects/command-center#2029")
+    body = fixture["body"].replace(
+        "\nRejected:\n", "\n{}\n".format(label), 1)
+    assert "\n{}\n".format(label) in body
+
+    assert funnel.plan_escalation_matches(body) == []
+
+
+def test_ticket_2180_a_rejected_label_list_ends_at_its_paragraph():
+    """Prose after the list's closing blank line is read again."""
+    listed = _region_hold("nateprich-projects/command-center#2029")
+    prose = _region_hold("nateprich-projects/command-center#1739")
+    sentence = prose["pre_change_line"][len("- "):]
+    body = "## What it is\n\nRejected:\n{}\n\n{}\n".format(
+        listed["pre_change_line"], sentence)
+
+    assert funnel.plan_escalation_matches(body) == [
+        {"reason": reason, "line": sentence}
+        for reason in prose["pre_change_reasons"]]
+
+
+@pytest.mark.parametrize("ref, old, new", [
+    ("nateprich-projects/command-center#1739",
+     "\n## Premises\n", "\n##Premises\n"),
+    ("nateprich-projects/command-center#1739",
+     "\n## Premises\n", "\n### Premises\n"),
+    ("nateprich-projects/command-center#1739",
+     "\n## Premises\n", "\n## Premises\n\n##Notes\n"),
+    ("nateprich-projects/command-center#1739",
+     "\n## Decided from precedent\n",
+     "\n## Premises\n\nNone recorded.\n\n## Decided from precedent\n"),
+    ("nateprich-projects/command-center#1658",
+     "\n## Siblings checked\n", "\n##Siblings checked\n"),
+    ("nateprich-projects/command-center#2029",
+     "\n\n## Siblings checked\n", "\nSee the thread.\n\n## Siblings checked\n"),
+    ("nateprich-projects/command-center#2029",
+     "\nRejected:\n", "\nRejected:\nSee the thread.\n\n"),
+], ids=["malformed-premises-heading", "premises-heading-at-level-3",
+        "malformed-heading-inside-premises", "second-premises-section",
+        "malformed-siblings-heading", "unindented-line-after-rejected-list",
+        "rejected-label-without-a-list"])
+def test_ticket_2180_an_ambiguous_boundary_scans_the_whole_body(
+        ref, old, new):
+    fixture = _region_hold(ref)
+    assert fixture["body"].count(old) == 1
+    body = fixture["body"].replace(old, new)
+
+    matches = funnel.plan_escalation_matches(body)
+
+    for hit in _recorded_hits(fixture):
+        assert hit in matches
+
+
+def test_ticket_2180_plan_scan_text_keeps_region_headings_and_line_count():
+    fixture = _region_hold("nateprich-projects/command-center#1658")
+    body = fixture["body"]
+
+    text = funnel.plan_scan_text(body)
+    lines = text.splitlines()
+
+    assert len(lines) == len(body.splitlines())
+    for heading in ("## Siblings checked", "## Premises",
+                    "## Decided from precedent", "## Decided by the agent"):
+        assert heading in lines
+    assert fixture["pre_change_line"] not in text
+    siblings = lines.index("## Siblings checked")
+    premises = lines.index("## Premises")
+    decided = lines.index("## Decided from precedent")
+    assert all(not line.strip() for line in lines[siblings + 1:premises])
+    assert all(not line.strip() for line in lines[premises + 1:decided])
+    assert "Rejected:" not in lines
+    assert lines[0] == body.splitlines()[0]
+
+
+def test_ticket_2180_plan_scan_text_keeps_a_rejected_heading_line():
+    body = (FIXTURES / "escalation_plan_1503_recorded.md").read_text(
+        encoding="utf-8")
+
+    lines = funnel.plan_scan_text(body).splitlines()
+
+    assert lines[0] == "## Rejected"
+    assert not lines[2].strip()
+
+
+def test_ticket_2180_a_risk_rationale_after_premises_still_declares():
+    """The rationale the runner renders after Premises is outside it."""
+    fixture = _region_hold("nateprich-projects/command-center#2029")
+
+    assert funnel.plan_declared_risks(fixture["body"]) == [
+        "credentials", "authorisation", "concurrency"]
+
+
+def test_ticket_2180_one_table_names_every_ignored_region():
+    assert funnel.PLAN_SCAN_IGNORED_REGIONS == (
+        ("quoted", "code block"),
+        ("quoted", "block quote"),
+        ("quoted", "inline code"),
+        ("quoted", "prose quote"),
+        ("section", "Rejected"),
+        ("section", "Premises"),
+        ("section", "Siblings checked"),
+        ("label", "Rejected"),
+        ("clause", "Decided by the agent"),
+    )
+
+
+@pytest.mark.parametrize("ref, region", [
+    ("nateprich-projects/command-center#1739", ("section", "Premises")),
+    ("nateprich-projects/command-center#1658",
+     ("section", "Siblings checked")),
+    ("nateprich-projects/command-center#2029", ("label", "Rejected")),
+])
+def test_ticket_2180_the_table_drives_the_filter(monkeypatch, ref, region):
+    """Taking a region out of the table reads it again."""
+    fixture = _region_hold(ref)
+    monkeypatch.setattr(funnel, "PLAN_SCAN_IGNORED_REGIONS", tuple(
+        entry for entry in funnel.PLAN_SCAN_IGNORED_REGIONS
+        if entry != region))
+
+    assert funnel.plan_escalation_matches(fixture["body"]) == \
+        _recorded_hits(fixture)
+
+
+# -- region boundaries that must not hide active prose (#2180 rework) --------
+#
+# Each body puts a proposal where the old scan read it and a misread region
+# boundary could blank it: quotes that cross a boundary, list shapes after a
+# Rejected label, a setext heading, a non-Markdown line separator, and the
+# review's gap cases.
+
+REGION_EDGES = json.loads(
+    (FIXTURES / "escalation_plan_region_edges.json").read_text(
+        encoding="utf-8"))
+
+
+@pytest.mark.parametrize(
+    "fixture", [entry for entry in REGION_EDGES if "expected" in entry],
+    ids=lambda entry: entry["name"])
+def test_ticket_2180_a_misread_boundary_never_hides_active_prose(fixture):
+    assert funnel.plan_escalation_matches(fixture["body"]) == \
+        fixture["expected"], fixture["source"]
+
+
+@pytest.mark.parametrize(
+    "fixture", [entry for entry in REGION_EDGES
+                if "expected_declared" in entry],
+    ids=lambda entry: entry["name"])
+def test_ticket_2180_a_line_inside_premises_declares_nothing(fixture):
+    assert funnel.plan_declared_risks(fixture["body"]) == \
+        fixture["expected_declared"], fixture["source"]

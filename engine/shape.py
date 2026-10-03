@@ -575,7 +575,8 @@ def _plan_escalation_scan_body(answer: Dict) -> str:
 
     Declared risks are evaluated separately from the wording scan. Every
     other rendered section must be in the scan so preview and the persisted
-    Risk field read the same plan.
+    Risk field read the same plan; ``funnel.plan_scan_text`` then decides
+    which regions of it the scan reads (#2180).
     """
     scan_answer = dict(answer)
     scan_answer["escalated_risk"] = []

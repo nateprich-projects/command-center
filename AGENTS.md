@@ -161,54 +161,41 @@ wrong.
   2026-09-18 to 2026-09-22 Muse implemented both tiers, because Codex's Plus week was
   nearly spent. _(confirmed by Nate 2026-09-22)_
 
-  **z.ai judged the standard tier from 2026-09-23 until 2026-09-27 06:00 PDT** (Nate,
-  2026-09-23, #1411; ended early on 2026-09-27, #1694). On 2026-09-23 Muse's week was
-  nearly spent until its Sunday 2026-09-27 17:00 PDT reset, and Nate's z.ai GLM Coding
-  Plan (Lite: 2,000 credits per five hours, 10,000 per week) was cancelled but active
-  until 2026-10-07, so its credits were use-it-or-lose-it. `scripts/muse-review-engine`
-  routed on the clock: a `standard` run before `heartbeat.ZAI_STANDARD_UNTIL` ran as
-  agent `zcode` and asked GLM-5.3 through `scripts/zai-exec`, one Messages call with no
-  tools offered to z.ai's Anthropic-compatible endpoint, refused unless `glm-5.3`
-  answered. Review and breakdown used the same questions, packets and apply steps on both
-  backends, except that z.ai's review judges ran one at a time because the Lite plan
-  refused concurrent requests; z.ai shape was one call. A spent z.ai window ended the run
-  cleanly as `skipped-provider-quota`, applying nothing, and while the bridge ran the lane
-  never fell back to Muse. The `zai` pace line and the 15% five-hour shaping boundary were
-  off for the duration, because credits left at the expiry were worth nothing.
+  **z.ai judged the standard tier from 2026-09-23 until 2026-09-27 06:00 PDT**
+  (Nate, 2026-09-23, #1411; cutoff brought forward on 2026-09-27, #1694). During
+  that temporary bridge, `scripts/muse-review-engine` routed standard runs to agent
+  `zcode` through `scripts/zai-exec`; the lane had no fallback to Muse. The bridge
+  also used z.ai's uncapped provider pace policy and bypassed the normal 15% shaping
+  boundary because its purchased credits would lapse.
 
-  **The cutoff.** It was first 1791302400 (2026-10-07 00:00 Beijing time, 2026-10-06
-  09:00 PDT), the earliest reading of the plan's expiry date. On 2026-09-27 z.ai's weekly
-  window was spent (99.8%, reopening 2026-10-03 00:22 PDT): from 04:15 PDT every
-  standard fire stopped over pace, and every standard-tier review, breakdown and shape
-  would have stopped for six days while Muse had used 19% of its week. The no-fallback rule assumed Muse's week was nearly spent, which no longer held,
-  so the cutoff was brought forward to 1790514000 (2026-09-27 06:00 PDT) under Nate's
-  2026-09-27 instruction to override directives strongly likely to be creating problems.
-  Since then the standard tier is Muse's with nothing else to undo, and
-  `heartbeat.retired_agents` retires `zcode` at the cutoff. Returning to z.ai for its last
-  window (2026-10-03 00:22 to 2026-10-06 09:00 PDT) was not planned.
-  _(agent rule, unconfirmed — advisory)_
+  **The bridge ended at 2026-09-27 06:00 PDT (1790514000).** Its first cutoff was
+  2026-10-06 09:00 PDT, the start of z.ai's expiry day in Beijing time. On 2026-09-27,
+  the z.ai weekly window was 99.8% spent until 2026-10-03 00:22 PDT, which would have
+  stopped standard fires for six days while Muse had used 19% of its week. Nate brought
+  the cutoff forward under his instruction to override directives strongly likely to
+  be creating problems. The standard tier has used Muse since then. `heartbeat.py`
+  keeps the zcode retirement instant in `RETIRED_AGENT_CUTOFFS` for health history;
+  it no longer controls model routing. The review engine no longer references the
+  clock or `scripts/zai-exec`; that helper remains untouched and unreferenced.
+
+  Nate approved plan #1590 as written on 2026-09-29, explicitly keeping the final z.ai
+  window (2026-10-03 00:22 to 2026-10-06 09:00 PDT) retired. The standard and escalated
+  tiers both use Muse, with the repository posture below selecting the model. The
+  z.ai-specific unpaced line and shaping exception are gone; any direct zcode usage
+  follows the shared pacing defaults and shaping boundary. _(Nate, #1590.)_
+
+  **Historical terms and exposure.** During the bridge, standard-tier packets from
+  every member repository went to z.ai (Zhipu), under terms nobody here had read. That
+  included private repositories such as `jeffy-finance-agent` and `career-toolset`, and
+  `The-League`, which a collaborator can see. This bypassed the per-repository posture
+  Muse keeps in `muse_model.CONTRIBUTOR_REPOS`. Asked exactly this, with those private
+  repositories named, Nate chose "All repos" on 2026-09-23. Since the cutoff, standard
+  packets follow Muse's per-repository posture below.
 
   Shape on Muse runs the framer → sibling → decider → auditor split through
   `engine/shape_split.py`, per Nate's 2026-09-26 ruling on #1581 that escalated shaping
-  stays at `max` and is split, not lowered; breakdown is one call. The review-engine plists
-  did not change for the bridge or its end.
-
-  **It was his risk call on unread terms, as Muse's is.** This was headless use of a
-  Coding Plan key from launchd, and z.ai's terms were not read here. Nothing in this
-  paragraph establishes that they permitted it; do not upgrade the wording to "permitted"
-  or "sanctioned". The caveat was stated in the option he answered, and the worst case
-  named was losing a subscription he had already cancelled. The in-app-only rule above is
-  specific to Anthropic and OpenAI and decides nothing here either way.
-
-  **The exposure, plainly.** For the duration, every member repository's standard-tier
-  packets — diffs, tickets, plans and repository rules — went to z.ai (Zhipu), under
-  data-use terms nobody here has read. That included private repositories such as
-  `jeffy-finance-agent` and `career-toolset`, and `The-League`, which a collaborator can
-  see. It bypassed the per-repository posture Muse keeps in
-  `muse_model.CONTRIBUTOR_REPOS`, where sending a repository to a discounted tier is a
-  deliberate edit per name. Asked exactly this, with those private repositories named,
-  Nate chose "All repos" on 2026-09-23. _(Nate, 2026-09-23.)_ Since the cutoff,
-  standard-tier packets follow Muse's per-repository posture below.
+  stays at `max` and is split, not lowered; breakdown is one call. The review-engine
+  plists did not change for the bridge or its end.
 
   **On Muse, tiers 1 and 3 run on the contributor model; tier 2 does not.**
   `muse_model.CONTRIBUTOR_REPOS` names `command-center`, `github-runners`, `workbench`,

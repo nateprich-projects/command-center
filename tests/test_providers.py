@@ -197,15 +197,17 @@ def test_zcode_spends_the_zai_pool():
 
 @pytest.mark.parametrize(("five_spent", "week_spent", "gate"), (
     (0, 0, "ok"),
-    (1500, 9000, "ok"),
+    (1500, 9000, "over"),
     (2000, 0, "over"),
     (0, 10000, "over"),
 ))
 def test_begin_for_zcode_gates_on_zais_own_windows(monkeypatch, five_spent,
                                                    week_spent, gate):
-    """The engine's z.ai lane opens with `begin --agent zcode`. Its preflight
-    must read the z.ai quota endpoint — not Muse's journal, not Claude's
-    cache — and stop before any Project read once a window is spent."""
+    """A direct zcode preflight reads z.ai's windows and uses shared pacing.
+
+    The retired standard route no longer gets an unpaced exception: 75% in
+    the five-hour window is over the common 80% ceiling after reserve.
+    """
     from datetime import datetime, timezone
 
     import funnel
@@ -246,54 +248,18 @@ def test_begin_for_zcode_fails_closed_without_a_zai_reading(monkeypatch):
 
 # -- pacing policy is per provider, not global --------------------------------
 
-def test_the_lapsing_zai_pool_is_spendable_all_week_not_paced():
-    """The cancelled plan's credits lapse when it expires on 2026-10-07
-    (Nate, 2026-09-23), so no line holds any of the week back: the allowance
-    is 100% from the first hour to the last, on z.ai's own policy rather than
-    the shared default."""
-    allowed = [
-        usage.pace(seven_day(10.0, fraction), NOW, provider="zai")["windows"][0]
-        for fraction in (0.0, 0.05, 0.5, 1.0)
-    ]
-    assert [window["allowed_percent"] for window in allowed] == [100.0] * 4
-    assert allowed[1]["allowed_percent"] != usage.WEEKLY_FLOOR  # not the shared line
-    assert allowed[1]["reserve"] == 0.5                         # its own reserve, not 5
-    assert allowed[1]["reserve"] != usage.WEEKLY_RESERVE
-    # 90% on Monday is not "ahead": nothing later is worth saving it for.
-    assert not usage.pace(seven_day(90.0, 0.05), NOW, provider="zai")["over_pace"]
+def test_zai_uses_common_pacing_instead_of_the_retired_unpaced_line():
+    reading = {"source": "zai", "captured_at": NOW, "windows": {
+        "five_hour": {"used_percent": 85.0, "resets_at": NOW + 3 * 3600},
+        "seven_day": {"used_percent": 10.0, "resets_at": NOW + 5 * 86400},
+    }}
 
-
-@pytest.mark.parametrize(("five_spent", "week_spent", "over"), (
-    (0, 0, False),
-    (1900, 5000, False),       # 95% + 2.5 reserve = 97.5, under 100
-    (1960, 5000, True),        # 98% + 2.5 reserve: one run would not finish
-    (2000, 5000, True),        # the five-hour window is spent
-    (0, 9940, False),          # 99.4% + 0.5 reserve = 99.9, under 100
-    (0, 9960, True),           # 99.6% + 0.5 reserve: one run would not finish
-    (0, 10000, True),          # the week is spent
-))
-def test_a_spent_zai_window_still_stops_begin(monkeypatch, five_spent,
-                                              week_spent, over):
-    """Unpaced is not unbounded: either window z.ai reports stops the lane
-    once one more run could not finish inside it."""
-    fake_curl(monkeypatch, zai_payload(five_spent, week_spent, NOW))
-    verdict = usage.pace(usage.read_zai(NOW), NOW,
-                         provider=usage.provider_of("zcode"))
-    assert verdict["known"]
-    week = next(w for w in verdict["windows"] if w["window"] == "seven_day")
-    five = next(w for w in verdict["windows"] if w["window"] == "five_hour")
-    assert five["allowed_percent"] == 100.0 and five["reserve"] == 2.5
-    assert week["allowed_percent"] == 100.0 and week["reserve"] == 0.5
-    assert verdict["over_pace"] is over
-
-
-def test_the_dedicated_pool_reserve_is_sized_to_its_own_runs():
-    """The z.ai pool reserves 0.5%, while the shared default reserves 5%."""
-    window = usage.pace(seven_day(54.0, 0.5), NOW, provider="zai")["windows"][0]
-    assert window["reserve"] == 0.5
-    assert not window["over"]                        # 54.5 < 56 allowed
-    # The shared default refuses the same reading because its reserve is 5.
-    assert usage.pace(seven_day(54.0, 0.5), NOW)["windows"][0]["over"]
+    verdict = usage.pace(reading, NOW, provider="zai")
+    five = next(window for window in verdict["windows"]
+                if window["window"] == "five_hour")
+    assert five["allowed_percent"] == usage.FIVE_HOUR_CEILING
+    assert five["reserve"] == usage.FIVE_HOUR_RESERVE
+    assert verdict["over_pace"]
 
 
 def test_an_unknown_provider_gets_the_shared_defaults():
@@ -311,7 +277,7 @@ def test_an_unknown_provider_gets_the_shared_defaults():
   # shared: 94 > 45
 
 
-# -- shaping on the lapsing z.ai pool (#1411) ----------------------------------
+# -- shaping applies the common boundary to z.ai readings ----------------------
 
 def _zai_reading(five_spent, week_spent):
     now = usage.time.time()
@@ -323,27 +289,11 @@ def _zai_reading(five_spent, week_spent):
     }}
 
 
-def test_zai_shapes_past_the_idle_boundary_while_the_lane_runs(monkeypatch):
-    """The 15% five-hour boundary keeps shaping off a window someone may be
-    working in. Nobody else spends the cancelled z.ai plan, and what it does
-    not spend lapses, so it shapes up to its own stop."""
-    import heartbeat
-
-    monkeypatch.setattr(heartbeat, "ZAI_STANDARD_UNTIL",
-                        usage.time.time() + 86400)
-    assert usage.shaping_allowed(_zai_reading(1200, 4000))       # 60% used
-    assert not usage.shaping_allowed(_zai_reading(1980, 4000))   # spent
-    assert not usage.shaping_allowed(_zai_reading(0, 10000))     # week spent
-    # Other pools keep the idle boundary.
-    other = dict(_zai_reading(1200, 4000), source="openai")
-    assert not usage.shaping_allowed(other)
-
-
-def test_zai_shaping_returns_to_the_idle_boundary_after_the_cutoff(
+def test_zai_shaping_keeps_the_common_boundary_with_a_future_legacy_cutoff(
         monkeypatch):
     import heartbeat
 
     monkeypatch.setattr(heartbeat, "ZAI_STANDARD_UNTIL",
-                        usage.time.time() - 1)
-    assert not usage.shaping_allowed(_zai_reading(1200, 4000))
-    assert usage.shaping_allowed(_zai_reading(200, 4000))        # 10% used
+                        usage.time.time() + 86400, raising=False)
+    assert not usage.shaping_allowed(_zai_reading(1200, 4000))  # 60% used
+    assert usage.shaping_allowed(_zai_reading(200, 4000))       # 10% used

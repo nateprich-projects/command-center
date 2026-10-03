@@ -1303,9 +1303,6 @@ def shaping_allowed(reading: Dict) -> bool:
     """
     if isinstance(reading, dict) and reading.get("unmetered"):
         return True
-    if isinstance(reading, dict) and reading.get("source") == "zai" \
-            and _zai_lane_live(time.time()):
-        return _zai_has_headroom(reading)
     try:
         windows = reading.get("windows") or {}
         five = windows.get("five_hour") or {}
@@ -1318,32 +1315,6 @@ def shaping_allowed(reading: Dict) -> bool:
     except (AttributeError, TypeError, ValueError):
         return False
     return IDLE_WINDOW_START <= used <= IDLE_WINDOW_CEILING
-
-
-def _zai_lane_live(now: float) -> bool:
-    """Whether the engine's z.ai standard tier is still routing (#1411)."""
-    import heartbeat
-
-    return now < heartbeat.ZAI_STANDARD_UNTIL
-
-
-def _zai_has_headroom(reading: Dict) -> bool:
-    """Shaping headroom on the z.ai lane: the pool's own stop, nothing lower.
-
-    The idle rule's 15% five-hour boundary keeps shaping off a window someone
-    may be working in, and keeps the committed review and breakdown jobs'
-    reserve. Neither applies here while the z.ai lane runs: the plan is
-    cancelled, nobody else spends it, and credits left at its expiry are worth
-    nothing, so the pool is unpaced by design (Nate, 2026-09-23). Holding
-    shaping to 15% would leave 85% of every five-hour window to lapse. What
-    still refuses is the pool's own stop — a spent five-hour or weekly window —
-    and a reading `pace` cannot judge. _(agent rule, unconfirmed — advisory.)_
-    """
-    try:
-        verdict = pace(reading, time.time(), "zai")
-    except (AttributeError, KeyError, TypeError, ValueError):
-        return False
-    return bool(verdict.get("known")) and not verdict.get("over_pace")
 
 
 def _rolling_week_has_headroom(reading: Dict, windows: Dict) -> bool:
@@ -1542,70 +1513,9 @@ DOWNSTREAM_RESERVE = 20.0
 # this is the half that was missed.
 
 PROVIDER_POLICY = {
-    # **Unpaced from 2026-09-23: spend it before it lapses.** Nate cancelled
-    # the Coding Plan; it stays active until it expires on 2026-10-07, and
-    # the engine's standard judgement tier runs on it until the start of that
-    # day in Beijing time (AGENTS.md; `heartbeat.ZAI_STANDARD_UNTIL`). The
-    # idle-window shaping gate is lifted for it too (`_zai_has_headroom`). Credits left at the expiry are worth
-    # nothing, so a line that holds the week back for later is holding it
-    # back for no later at all — the same reasoning that took `openai` to a
-    # floor of 100 on 2026-09-07. Floor and target are therefore both 100.
-    #
-    # What still stops `begin` is an actually spent window, in both of the
-    # windows z.ai reports: `used + reserve > 100`. Each reserve is one run,
-    # not a share held back — a real zcode routine run measured ~43 credits
-    # (below), about 2.2% of the five-hour window's 2,000 credits and 0.4%
-    # of the week's 10,000, so 2.5 and 0.5 refuse a run that could not
-    # finish rather than one that merely spends late. z.ai also refuses a
-    # spent window itself; `scripts/zai-exec` reports that as a quota skip,
-    # and the next `begin` stops here on the reading. _(agent rule,
-    # unconfirmed — advisory; Nate chose to use the credits, 2026-09-23.)_
-    #
-    # The history below explains the paced values this replaced, and is
-    # what to restore if the pool is ever bought again rather than run out.
-    #
-    # Bought for the automations and used for nothing else, so there is no
-    # interactive share to protect. Set to 90 on 2026-09-06 and lowered to 15 the
-    # same day, once a real routine run was measured at ~43 credits rather than
-    # the ~3 a trivial session had suggested.
-    #
-    # At 90 the floor equalled `WEEKLY_TARGET`, so the proportional line was inert
-    # and the whole week was spendable on Monday. At 15 the floor stops mattering
-    # after about a day and the rising line governs, which makes the schedule
-    # **self-limiting**: poll as often as you like and the gate simply refuses
-    # once the week is ahead of itself. Cadence stops being a number anyone has to
-    # choose. Below about 10 the floor stops doing its job and Monday morning
-    # becomes a dead zone again.
-    #
-    # The reserve moves with it. 5% of a weekly window is calibrated for Anthropic,
-    # where one run is ~1.5% of the budget. Measured here, a whole session cost
-    # **3 credits of 10,000** — 0.03% — so the shared reserve would hold back 500
-    # credits against a run that costs three, and the cap would really bite at 85%.
-    # **Temporarily 22, raised from 15 on 2026-09-07 by Nate's instruction.**
-    # zcode had been over pace for 35 consecutive runs since 00:38 — last real
-    # work 00:30, breaking #59 into #76-#81 — sitting at 19.1% used against 15.0
-    # allowed, 12.7% into a fresh weekly window. Proportional pacing would not
-    # have cleared it until 2026-09-08 00:33.
-    #
-    # This is a workaround for #93, not a revision of the reasoning below. The
-    # defect is that `allowed = max(floor, target * elapsed)` makes the floor a
-    # *plateau*: allowed stays exactly at the floor until the rising line
-    # overtakes it, so any pool that spends past its floor stalls until the
-    # calendar catches up. All three pools were blocked at once for that reason.
-    #
-    # The obvious fix — anchoring the line at the floor — was tried and reverted
-    # the same day: `floor + (target - floor) * elapsed` is **uniformly looser**,
-    # by `floor * (1 - elapsed)`, peaking around +17.5 points a third of the way
-    # through the week. Two tests correctly caught it. Removing the plateau
-    # without loosening is not possible, so the trade is real and belongs in #93.
-    #
-    # 22 clears the current 19.6% (used + reserve) with a little room. **Restore
-    # to 15 once #93 settles the model** — the measured reasoning for 15 is
-    # unchanged and is recorded below.
-    "zai": {"weekly_floor": 100.0, "weekly_target": 100.0,
-            "weekly_reserve": 0.5,
-            "five_hour_ceiling": 100.0, "five_hour_reserve": 2.5},
-
+    # zcode remains readable for historical quota records, but the retired
+    # standard tier has no provider-specific pace override. Any direct use
+    # follows the shared provider defaults.
     # Muse's pool is metered from local session attribution at the standard
     # rate card, counted from the provider's weekly reset (#1190). 100% is the
     # $200 cap, the flat ceiling that stops a run, and the $4.50 session

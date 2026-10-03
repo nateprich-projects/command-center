@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
+import os
 import pathlib
 import re
 import shlex
@@ -1087,9 +1088,27 @@ def test_pre_pr_stray_check_catches_other_run_scratch(tmp_path, name):
         implement._commit_if_needed(clone, 42, "Added the implementation.")
 
 
-def test_pre_pr_stray_check_passes_a_clean_checkout(tmp_path):
+def test_pre_pr_stray_check_rejects_pytest_tmp_with_file_and_absolute_symlink(
+        tmp_path):
+    _, clone = make_clone(tmp_path)
+    scratch = clone / ".pytest-tmp"
+    scratch.mkdir()
+    (scratch / "scratch.bin").write_text("temporary output\n")
+    target = tmp_path / "outside-target"
+    target.write_text("local target\n")
+    link = scratch / "absolute-target-link"
+    link.symlink_to(target.resolve())
+
+    assert link.is_symlink()
+    assert pathlib.Path(os.readlink(link)).is_absolute()
+    with pytest.raises(implement.StrayFileError, match=r"\.pytest-tmp"):
+        implement._check_no_run_scratch(clone)
+
+
+def test_pre_pr_stray_check_passes_without_pytest_tmp(tmp_path):
     _, clone = make_clone(tmp_path)
 
+    assert not (clone / ".pytest-tmp").exists()
     implement._check_no_run_scratch(clone)
 
 

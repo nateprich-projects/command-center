@@ -1451,7 +1451,9 @@ _RUN_SCRATCH_PREFIXES = (
     "prompt.", "prompt-", "run.", "run-", "scratch.", "scratch-",
 )
 _RUN_SCRATCH_SUFFIXES = (".scratch", ".tmp")
-_RUN_SCRATCH_DIRECTORIES = frozenset({".scratch", "scratch", ".tmp", "tmp"})
+_RUN_SCRATCH_DIRECTORIES = frozenset({
+    ".scratch", "scratch", ".tmp", ".pytest-tmp", "tmp",
+})
 
 
 def _git_name_paths(root: pathlib.Path, command: Sequence[str]) -> List[str]:

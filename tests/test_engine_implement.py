@@ -1627,6 +1627,56 @@ def test_heartbeat_root_cleanup_removes_ticket_1950_shaped_pushed_checkout(
     assert not checkout.exists()
 
 
+def make_clean_main_ancestor_with_newer_ticket_tip(tmp_path, monkeypatch):
+    _remote, checkout = make_heartbeat_codex_run_clone(tmp_path, monkeypatch)
+    run_git("switch", "--quiet", "main", cwd=checkout)
+    (checkout / "ticket-only.txt").write_text("remote ticket tip\n")
+    run_git("add", "ticket-only.txt", cwd=checkout)
+    run_git("commit", "--quiet", "-m", "advance remote ticket tip",
+            cwd=checkout)
+    run_git("push", "--quiet", "origin", "HEAD:refs/heads/ticket/42",
+            cwd=checkout)
+    run_git("fetch", "--quiet", "origin", cwd=checkout)
+    run_git("switch", "--quiet", "ticket/42", cwd=checkout)
+    return checkout
+
+
+def test_heartbeat_root_cleanup_removes_clean_main_ancestor_with_newer_ticket_tip(
+        tmp_path, monkeypatch):
+    checkout = make_clean_main_ancestor_with_newer_ticket_tip(
+        tmp_path, monkeypatch)
+
+    head = run_git("rev-parse", "HEAD", cwd=checkout).stdout.strip()
+    main = run_git("rev-parse", "refs/remotes/origin/main",
+                   cwd=checkout).stdout.strip()
+    ticket = run_git("rev-parse", "refs/remotes/origin/ticket/42",
+                     cwd=checkout).stdout.strip()
+    assert head == main
+    assert head != ticket
+    assert run_git("status", "--porcelain", cwd=checkout).stdout == ""
+
+    assert implement._remove_codex_run_checkout(checkout, 42, "codex")
+    assert not checkout.exists()
+
+
+def test_heartbeat_root_cleanup_keeps_dirty_main_ancestor_with_newer_ticket_tip(
+        tmp_path, monkeypatch):
+    checkout = make_clean_main_ancestor_with_newer_ticket_tip(
+        tmp_path, monkeypatch)
+    head = run_git("rev-parse", "HEAD", cwd=checkout).stdout.strip()
+    main = run_git("rev-parse", "refs/remotes/origin/main",
+                   cwd=checkout).stdout.strip()
+    ticket = run_git("rev-parse", "refs/remotes/origin/ticket/42",
+                     cwd=checkout).stdout.strip()
+    assert head == main
+    assert head != ticket
+    (checkout / "local-only.txt").write_text("uncommitted local work\n")
+    assert run_git("status", "--porcelain", cwd=checkout).stdout
+
+    assert not implement._remove_codex_run_checkout(checkout, 42, "codex")
+    assert checkout.is_dir()
+
+
 @pytest.mark.parametrize("work_state", ("unpushed", "dirty"))
 def test_heartbeat_root_cleanup_keeps_unpushed_or_dirty_git_checkouts(
         tmp_path, monkeypatch, work_state):
@@ -5000,15 +5050,15 @@ def test_finish_git_invocation_sites_match_the_recorded_inventory():
         ("diff", "--name-status"): 1,
         ("rev-list", "--count"): 2,
         ("fetch", "origin"): 2,
-        ("merge-base", "--is-ancestor"): 1,
+        ("merge-base", "--is-ancestor"): 2,
         ("merge", "-s"): 1,
         ("push", "--set-upstream"): 1,
     })
     assert actual == expected
 
     inventory = (ROOT / "docs" / "finish-subprocess-bounds.md").read_text()
-    assert "27 bounded Git callsites" in inventory
-    assert "26 static callsites" in inventory
+    assert "28 bounded Git callsites" in inventory
+    assert "27 static callsites" in inventory
     for command in (
         "git diff --name-only -z",
         "git diff --cached --name-only -z",

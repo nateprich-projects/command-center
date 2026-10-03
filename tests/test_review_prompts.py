@@ -6,6 +6,7 @@ import hashlib
 import json
 import pathlib
 import shutil
+import subprocess
 import sys
 
 import pytest
@@ -83,6 +84,31 @@ def test_each_variant_carries_only_its_recovered_rule(name, question, judge,
     assert prompt.judge_rules == (judge,)
     assert absent not in prompt.routine
     assert prompt.routine.count("PACKET_JSON") == 1
+
+
+def test_variant_rules_match_the_reverted_pr_2060_source():
+    question_source = subprocess.run(
+        ["git", "show", "be86e2524:routines/muse-review.md"],
+        cwd=ROOT, check=True, capture_output=True, text=True,
+    ).stdout
+    judge_source = subprocess.run(
+        ["git", "show", "be86e2524:scripts/muse-review-engine"],
+        cwd=ROOT, check=True, capture_output=True, text=True,
+    ).stdout
+    question_source = " ".join(question_source.split())
+    judge_source = " ".join(judge_source.split())
+
+    for name in ("r1", "r2", "r4"):
+        variant = json.loads(
+            (ROOT / "engine" / "review_variants" / "{}.json".format(name))
+            .read_text()
+        )
+        assert len(variant["question_rules"]) == 1
+        assert len(variant["judge_rules"]) == 1
+        question = variant["question_rules"][0]
+        judge = variant["judge_rules"][0]
+        assert question_source.count(" ".join(question.split())) == 1
+        assert judge_source.count(" ".join(judge.split())) == 1
 
 
 def test_active_trial_variant_fails_closed_until_trial_wiring_is_enabled(

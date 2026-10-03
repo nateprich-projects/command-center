@@ -39,11 +39,26 @@ contents stay local. Post the two verdict-only results to the trial's PR.
 
 ## Candidate wording and existing packet facts
 
-The candidate wording was recovered first with `git show be86e2524` (#2060):
-the R1, R2 and R4 question rules come from `routines/muse-review.md`, and the
-corresponding judge rules come from `scripts/muse-review-engine` at that commit.
+The candidate wording was recovered from the reverted PR #2060 source using
+`git show be86e2524:routines/muse-review.md` and
+`git show be86e2524:scripts/muse-review-engine`. These are the exact source
+sentences carried into the versioned variants:
+
+```text
+If `evidence` says the diff rewrites fix #N, confirm it still prevents that fix's failure; cite its test.
+A `test_weakening` entry no ticket or Departure authorises is blocking.
+So is `passes-on-base` on any other ticket.
+If `evidence` has a `rewrites prior fix: #N` line, confirm the diff still prevents that fix's failure and cite its test; mark unmet each assigned requirement it bears on when it does not.
+A deleted, skipped or weakened test in `test_weakening` that no ticket or Departure authorises is blocking: mark unmet each assigned requirement it bears on.
+On any other ticket `reproduction: passes-on-base` is weighed, not blocking.
+```
+
 `tests/test_review_prompts.py::test_each_variant_carries_only_its_recovered_rule`
-pins each variant's question and judge wording.
+pins which rule each variant carries. Its source check,
+`test_variant_rules_match_the_reverted_pr_2060_source`, compares every stored
+question and judge rule directly with those files at `be86e2524`.
+The excerpts above preserve the source wording and punctuation; the test
+normalizes only source line wrapping before comparing them with JSON strings.
 
 The packet facts those rules use were already present, so this ticket leaves the
 packet builder unchanged. #1850 prior-fix evidence passes through

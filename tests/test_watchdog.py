@@ -251,9 +251,8 @@ def test_sparse_silence_floor_reaches_the_watchdog_issue_body(monkeypatch):
     calls = []
 
     monkeypatch.setattr(watchdog.time, "time", lambda: now)
-    # zcode is the retired control since Codex came back (#1325), pinned
-    # rather than read from the clock: it is live as the z.ai standard tier
-    # until `heartbeat.ZAI_STANDARD_UNTIL`.
+    # Pin zcode as retired here so this test isolates the watchdog's handling
+    # of a known retired agent from the cutoff reader.
     monkeypatch.setattr(
         watchdog.heartbeat, "RETIRED_AGENTS", frozenset({"zcode"}))
     monkeypatch.setattr(watchdog.heartbeat, "PROVIDERS", {

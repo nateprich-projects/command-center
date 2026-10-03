@@ -1,0 +1,9 @@
+{
+  "id": "r2",
+  "question_rules": [
+    "A \u0060test_weakening\u0060 entry no ticket or Departure authorises is blocking."
+  ],
+  "judge_rules": [
+    "A deleted, skipped or weakened test in \u0060test_weakening\u0060 that no ticket or Departure authorises is blocking: mark unmet each assigned requirement it bears on."
+  ]
+}

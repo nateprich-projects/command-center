@@ -3,7 +3,8 @@
 
 Each replay runs ``scripts/muse-review-engine``'s replay entry from this
 checkout: the same lister, judges and derived answer the review lanes run,
-on the given packet and routine, recording nothing (#1730). Replay used to
+on the given packet and active versioned prompt (or an explicitly supplied
+routine), recording nothing (#1730). Replay used to
 make one max call over the routine and packet, and on a large packet that
 call went silent past Muse's stream-idle limit where the lanes' split would
 not have (#1698).
@@ -44,10 +45,6 @@ RUNTIME_ROOT = pathlib.Path(funnel.CLAUDE_DIR)
 #: branch's engine, routine and judges rather than the maintained clone's.
 CHECKOUT = pathlib.Path(__file__).resolve().parents[1]
 ENGINE = CHECKOUT / "scripts" / "muse-review-engine"
-ROUTINE_DEFAULT = (
-    pathlib.Path(__file__).resolve().parents[1]
-    / "routines" / "muse-review.md"
-)
 #: One engine timing line, exactly as `log_call_timing` in
 #: scripts/muse-review-engine writes it (#1719):
 #:
@@ -219,7 +216,8 @@ def _report_failed_run(run: int, status: int, failed_parts: Sequence[str],
           file=sys.stderr)
 
 
-def _engine_run(packet_path: pathlib.Path, routine_path: pathlib.Path, *,
+def _engine_run(packet_path: pathlib.Path,
+                routine_path: Optional[pathlib.Path], *,
                 runtime_root: pathlib.Path, run: int = 1
                 ) -> tuple[str, list[str]]:
     """Run the engine's replay entry once; return its answer and failed parts.
@@ -241,9 +239,12 @@ def _engine_run(packet_path: pathlib.Path, routine_path: pathlib.Path, *,
                 os.environ,
                 MUSE_REVIEW_ENGINE_REPO=str(CHECKOUT),
                 MUSE_REVIEW_ENGINE_REPLAY_PACKET=str(packet_path),
-                MUSE_REVIEW_ENGINE_REPLAY_ROUTINE=str(routine_path),
                 MUSE_REVIEW_ENGINE_REPLAY_ANSWER=str(answer_path),
             )
+            if routine_path is not None:
+                env["MUSE_REVIEW_ENGINE_REPLAY_ROUTINE"] = str(routine_path)
+            else:
+                env.pop("MUSE_REVIEW_ENGINE_REPLAY_ROUTINE", None)
             # The escalated tier at max, which is Muse's whatever the z.ai
             # cutoff says; /bin/bash because launchd runs the lanes with it.
             result = subprocess.run(
@@ -268,10 +269,14 @@ def _engine_run(packet_path: pathlib.Path, routine_path: pathlib.Path, *,
         raise ReplayError("the review engine could not run") from exc
 
 
-def replay(packet: str | pathlib.Path, routine: str | pathlib.Path, *,
+def replay(packet: str | pathlib.Path,
+           routine: Optional[str | pathlib.Path] = None, *,
            runs: int = DEFAULT_RUNS, expected: str,
            runtime_root: str | pathlib.Path = RUNTIME_ROOT) -> dict:
     """Replay one packet N times and return verdict-only summary data.
+
+    With no explicit routine, the engine loads the active versioned reviewer
+    prompt through the same adapter as a live review.
 
     Any run that fails, or leaves an answer review-apply would refuse, fails
     the whole replay with no verdicts: a lister that went silent records no
@@ -290,7 +295,9 @@ def replay(packet: str | pathlib.Path, routine: str | pathlib.Path, *,
     check_budget(runs)
     root = pathlib.Path(runtime_root).expanduser().resolve()
     packet_path = resolve_packet_path(packet, root)
-    routine_path = resolve_routine_path(routine)
+    routine_path = (
+        resolve_routine_path(routine) if routine is not None else None
+    )
 
     verdicts = []
     failed_parts = []
@@ -316,8 +323,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         description="Replay a private review packet and print only its "
                     "verdicts and failed part names")
     parser.add_argument("packet", help="packet path relative to the runtime root")
-    parser.add_argument("--routine", default=str(ROUTINE_DEFAULT),
-                        help="review routine path (default: live review routine)")
+    parser.add_argument("--routine", default=None,
+                        help="explicit review routine path (default: active variant)")
     parser.add_argument("--runs", type=int, default=DEFAULT_RUNS,
                         help="number of replays (default: 3)")
     parser.add_argument("--expected-verdict", required=True,

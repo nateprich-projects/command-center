@@ -3570,32 +3570,13 @@ def fetch_scope(repo: str, base_ref: str,
     return (changed, diff, merge_sha)
 
 
-# The independent-review brief's item 8 has exactly these three blocking
-# cases: a defect with a realistic reproduction; a missing Do item or missing/
-# base-passing Accept test; and a merged-main suite failure. The packet IDs
-# below preserve that source rule when prior findings are carried forward.
+# Stable packet labels for the stopping-rule categories recorded by ticket
+# #2001. The source verification is recorded separately in issue #2214.
 SCOPED_REREVIEW_KINDS = {
     "code_defect",
     "missing_requirement_or_accept_test",
     "merged_main_suite_failure",
 }
-
-# Carry the verified source excerpt with scoped packets so a later reviewer can
-# inspect the rule that gives these IDs their meaning without relying on this
-# implementation's description of it.
-SCOPED_REREVIEW_RULE_SOURCE = {
-    "path": "~/.claude/skills/independent-review/SKILL.md",
-    "sha256": "8aee1091499de1cc9a3936dc675c7bf920863509815e8393a356fdbb1b7ef05e",
-    "item": 8,
-    "lines": "101-104",
-    "excerpt": (
-        "8. **Only three things block:**\n"
-        "   - a defect in the code as written, with a realistic reproduction;\n"
-        "   - a missing Do item, or an Accept test that is missing or passes on base;\n"
-        "   - a merged-main suite failure."
-    ),
-}
-
 
 def empty_scoped_rereview() -> Dict[str, object]:
     """The explicit no-prior-rejection packet shape."""
@@ -3605,7 +3586,6 @@ def empty_scoped_rereview() -> Dict[str, object]:
         "prior_rejected_head": None,
         "prior_blocking_items": [],
         "interdiff": None,
-        "stopping_rule_source": None,
         "full_review_fallback": False,
         "fallback_reasons": [],
     }
@@ -3615,9 +3595,9 @@ def _stopping_rule_kind(item: object) -> Optional[str]:
     """Classify a recorded blocker only when it names a stopping-rule kind.
 
     Review records are prose lists, not a typed schema. Recognize the three
-    kinds the review brief requires, including the historical "Test gap only"
-    label. Unknown or unsure entries force a full review instead of silently
-    disappearing from the reviewer’s scope.
+    categories required by ticket #2001, including the historical "Test gap
+    only" label. Unknown or unsure entries force a full review instead of
+    silently disappearing from the reviewer’s scope.
     """
     if not isinstance(item, str) or not item.strip():
         return None
@@ -3765,7 +3745,6 @@ def build_scoped_rereview(
 
     packet["active"] = True
     packet["prior_rejected_head"] = rejected["head_sha"]
-    packet["stopping_rule_source"] = dict(SCOPED_REREVIEW_RULE_SOURCE)
     raw_blocking = rejected.get("blocking")
     raw_blocking = raw_blocking if isinstance(raw_blocking, list) else []
     classified = []

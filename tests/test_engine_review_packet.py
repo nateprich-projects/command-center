@@ -1157,7 +1157,6 @@ def test_packet_carries_every_field():
         "prior_rejected_head": None,
         "prior_blocking_items": [],
         "interdiff": None,
-        "stopping_rule_source": None,
         "full_review_fallback": False,
         "fallback_reasons": [],
     }
@@ -1279,7 +1278,7 @@ def test_scoped_rereview_interdiff_excludes_changes_from_merged_main(
     assert "main-only.txt" not in result["interdiff"]
 
 
-def test_scoped_rereview_carries_independent_stopping_rule_source(monkeypatch):
+def test_scoped_rereview_does_not_claim_external_rule_source(monkeypatch):
     prior_head = "2" * 40
     current_head = "3" * 40
     comments = {"status": "available", "comments": [
@@ -1295,18 +1294,8 @@ def test_scoped_rereview_carries_independent_stopping_rule_source(monkeypatch):
     result, _ = review.build_scoped_rereview(
         REPO, 7, "main", current_head, comments)
 
-    assert result["stopping_rule_source"] == {
-        "path": "~/.claude/skills/independent-review/SKILL.md",
-        "sha256": "8aee1091499de1cc9a3936dc675c7bf920863509815e8393a356fdbb1b7ef05e",
-        "item": 8,
-        "lines": "101-104",
-        "excerpt": (
-            "8. **Only three things block:**\n"
-            "   - a defect in the code as written, with a realistic reproduction;\n"
-            "   - a missing Do item, or an Accept test that is missing or passes on base;\n"
-            "   - a merged-main suite failure."
-        ),
-    }
+    assert result["active"] is True
+    assert "stopping_rule_source" not in result
 
 
 def test_plan_replaces_fresh_read_rule_with_scoped_rereview():

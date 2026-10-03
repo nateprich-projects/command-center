@@ -2891,9 +2891,10 @@ def _remove_codex_run_checkout(root: pathlib.Path, number: int,
     owner-only. Restrict removal to that exact direct child; finish-ticket also
     runs from session workspaces and other agents' checkouts, which must remain
     untouched. For Git checkouts, remove only when the tree is clean and HEAD
-    exactly matches ``origin/ticket/<number>``. A non-Git directory retains the
-    prior cleanup behavior; the production finish path obtains its root from a
-    validated Git checkout.
+    is an ancestor of ``origin/main`` or exactly matches
+    ``origin/ticket/<number>``. A non-Git directory retains the prior cleanup
+    behavior; the production finish path obtains its root from a validated Git
+    checkout.
 
     Live runs clone into the heartbeat directory's ``codex-runs/``
     (``heartbeat.SPOOL_DIR``), because that is the Codex sandbox's only
@@ -2907,11 +2908,12 @@ def _remove_codex_run_checkout(root: pathlib.Path, number: int,
 
     Only ``_finish_exit`` calls it, after the exit's heartbeat finish has
     recorded its outcome (#2167).
-    The branch may have been pushed by this run or an earlier one; an exact
-    remote-tip match and a clean tree prove that this checkout holds no unique
-    Git work. A stray-file refusal, a ``_keep_work`` failure before its push,
-    or a superseded run can still hold the only copy, so those paths do not
-    call this cleanup and the pushed/clean guard keeps any other unsafe tree.
+    The branch may have been pushed by this run or an earlier one; a clean
+    tree whose HEAD is already on main or at the remote ticket tip holds no
+    unique Git work. A stray-file refusal, a ``_keep_work`` failure before its
+    push, or a superseded run can still hold the only copy, so those paths do
+    not call this cleanup and the clean/content-safe guard keeps any other
+    unsafe tree.
     """
     if agent != "codex":
         return False
@@ -2977,12 +2979,28 @@ def _remove_codex_run_checkout(root: pathlib.Path, number: int,
             except (ImplementError, OSError, subprocess.SubprocessError):
                 return False
             if (any(result.returncode != 0 for result in
-                    (top, branch, status, head, remote_head))
+                    (top, branch, status, head))
                     or pathlib.Path(top.stdout.strip()).resolve() != checkout
                     or branch.stdout.strip() != "ticket/{}".format(number)
-                    or status.stdout.strip()
-                    or head.stdout.strip() != remote_head.stdout.strip()):
+                    or status.stdout.strip()):
                 return False
+            matches_ticket_tip = (
+                remote_head.returncode == 0
+                and head.stdout.strip() == remote_head.stdout.strip()
+            )
+            if not matches_ticket_tip:
+                try:
+                    main_ancestor = _run(
+                        ["git", "merge-base", "--is-ancestor", "HEAD",
+                         "origin/main"],
+                        cwd=checkout, check=False,
+                        timeout=LOCAL_GIT_TIMEOUT_SECONDS,
+                    )
+                except (ImplementError, OSError,
+                        subprocess.SubprocessError):
+                    return False
+                if main_ancestor.returncode != 0:
+                    return False
         current = pathlib.Path.cwd().resolve()
         try:
             current.relative_to(checkout)

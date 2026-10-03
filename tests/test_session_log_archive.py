@@ -168,6 +168,27 @@ def test_unmounted_volume_reports_skip_and_does_not_fail_the_lane(tmp_path):
     assert not archive.exists()
 
 
+def test_archive_error_is_reported_without_failing_the_lane(tmp_path, monkeypatch):
+    messages = []
+    local_three_am = datetime.datetime.now().astimezone().replace(
+        hour=3, minute=15, second=0, microsecond=0
+    )
+
+    def fail_archive(**_kwargs):
+        raise OSError("archive volume unavailable")
+
+    monkeypatch.setattr(session_log_archive, "archive_pass", fail_archive)
+    result = session_log_archive.run_daily_pass(
+        now=local_three_am,
+        archive_base=tmp_path / "Agent-Logs",
+        emit=messages.append,
+    )
+
+    assert result == 0
+    assert len(messages) == 1
+    assert messages[0].startswith("session-log archive: skipped")
+
+
 def test_daily_pass_is_quiet_outside_the_scheduled_hour(tmp_path):
     messages = []
     local_two_am = datetime.datetime.now().astimezone().replace(

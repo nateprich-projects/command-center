@@ -3596,14 +3596,22 @@ def _stopping_rule_kind(item: object) -> Optional[str]:
 
     Review records are prose lists, not a typed schema. Recognize the three
     categories required by ticket #2001, including the historical "Test gap
-    only" label. Unknown or unsure entries force a full review instead of
-    silently disappearing from the reviewer’s scope.
+    only" label. Muse requirement rows carry their source in the text:
+    ticket requirements can scope a re-review, while "Does not break:" rows
+    and other unknown entries force a full review.
     """
     if not isinstance(item, str) or not item.strip():
         return None
     text = re.sub(r"\s+", " ", item.casefold()).strip()
     if text.startswith("unsure:"):
         return None
+
+    for prefix in ("requirement unmet:", "requirement unsure:"):
+        if text.startswith(prefix):
+            requirement = text[len(prefix):].strip()
+            if requirement.startswith("does not break:"):
+                return None
+            return "missing_requirement_or_accept_test"
 
     failure = bool(re.search(
         r"\b(?:fail|failure|failing|failed|red)\b", text))

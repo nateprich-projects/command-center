@@ -1,0 +1,13 @@
+{
+  "packets": {
+    "must_approve": {
+      "file": "must_approve.json",
+      "sha256": "2e6c601ea1625d07fdc50075a26b1095c435a602bcd226dd0820d3feb5187eda"
+    },
+    "must_reject": {
+      "file": "must_reject.json",
+      "sha256": "d292e9981a1c7dba768c1c659e0ead270d3917d63e708826f6650e8589c521a4"
+    }
+  },
+  "version": "v1"
+}

@@ -389,8 +389,12 @@ Grilling is knowledge work and stays on Claude. It cannot be scheduled, which ma
 a structural throttle on the whole funnel — no artificial cap is needed.
 
 **Claude reviews and merges.** When the diff meets the plan and tests pass, it approves
-and merges. Two conditions: a re-review after a fix is a fresh read against the plan,
-never a diff of the diff; and unattended merges appear in the brief as a record.
+and merges. Two conditions: a re-review after a rejection checks the earlier blocking
+findings and the interdiff since that rejected head, excluding changes brought in by a
+merge of main; when the interdiff's added-plus-deleted lines reach half the current PR
+diff's, the review returns to a fresh full read. Code the fix did not touch is not judged
+again; its first review and the merged-main suite and CI remain the backstop. Unattended
+merges appear in the brief as a record.
 
 This moves the accept gate rather than deleting it — Nate accepts the **project**, not
 each PR. Roughly one or two decisions a week instead of fourteen. Whether a diff matches
@@ -398,6 +402,10 @@ a written spec is checkable; whether the tool is worth keeping is not.
 
 _Rejected: advisory-only review (every correct PR still lands on Nate — full budget,
 full queue). Rejected: gatekeeper review that can fail but not approve — same problem._
+
+_Rejected: a fresh full read after every fix. It failed to converge across five reviews
+on #1789 (the last three on correct code) and twelve in Personal Ops on 2026-09-28
+(six on one consent clause's emoji edge cases); each loop churned correct code._
 
 **Rejected merges are their own class.** If Nate checks a merged PR and it is broken,
 the information is not "there is a bug" — it is "the auto-merge bar failed". Three in a

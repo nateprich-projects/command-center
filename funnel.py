@@ -59,6 +59,7 @@ from block_record import (  # noqa: F401 -- re-exported under the old names
     DECLINED_PREFIX,
     NEEDS_DECISION_PREFIX,
     NEEDS_DECISION_RE,
+    SHAPED_HOLD_COMMENT_PREFIX,
     _parse_block_comment_details,
     _parse_block_comment_header,
     _parse_block_event_spec,
@@ -67,11 +68,16 @@ from block_record import (  # noqa: F401 -- re-exported under the old names
     inert_comment_text,
     parse_block_comment,
     parse_decline_comment,
+    parse_shaped_hold_comment,
+    shaped_plan_version,
     unparseable_block_comment_lines,
+    validate_proof_comment_url,
 )
 # funnel's block, hold and needs-decision writers render through the owner
 # too, so their reasons are inert and their headers read back (#2169).
-from block_record import render_blocked, render_needs_decision
+from block_record import (
+    render_blocked, render_needs_decision, render_shaped_hold,
+)
 import nightly_watch
 import price_watch
 
@@ -846,6 +852,7 @@ class Item:
     labels: List[str] = field(default_factory=list)
     block_references: List[str] = field(default_factory=list)
     block_reason: Optional[str] = None
+    shaped_hold: Optional[Dict[str, object]] = None
     blocked_until: Optional[date] = None
     needs_decision: Optional[str] = None
     decline_reason: Optional[str] = None
@@ -14177,6 +14184,8 @@ def held_at_accept_json(items: Iterable[Item]) -> List[Dict[str, object]]:
 def _event_block_mismatch(item: Item) -> Optional[str]:
     """How a blocked ticket's event spec and Needs routing disagree, if at all.
 
+    A parsed issue-reference or date condition also makes external-event a
+    consistent route.
     Only tickets are checked, and only when their block comments were read:
     an unread comment cannot show whether a spec is there.
     """
@@ -14187,6 +14196,8 @@ def _event_block_mismatch(item: Item) -> Optional[str]:
             return None
         return "well-formed event spec without Needs: external-event"
     if item.needs == "external-event":
+        if item.block_references or _item_blocked_until(item) is not None:
+            return None
         return "Needs: external-event without a well-formed event spec"
     return None
 # Approval may adopt an unset Class only from an explicit, whole-line
@@ -17174,9 +17185,11 @@ def cmd_send_back(items: List[Item], now: datetime, ref: str, reason: str,
 
 
 def _hold_refusal(item: Item) -> Optional[str]:
-    """Why ``item`` cannot be held at Accept, or ``None`` when it can (#1724).
+    """Why item cannot be held at Shaped or Accept, or None when it can (#1724).
 
-    A hold means something only where ``gate_question`` would otherwise ask
+    A Shaped hold is for an open root project and carries named conditions
+    and proof. An Accept hold means something only where ``gate_question``
+    would otherwise ask
     "Accept it?": an open Building project with every ticket closed that does
     not close itself. The unattended close (``_auto_closeable_project``)
     never reads ``blocked``, so a hold on a project that closes itself would
@@ -17188,6 +17201,8 @@ def _hold_refusal(item: Item) -> Optional[str]:
     if item.state != "OPEN":
         return "{} is {}; only an open project waits at Accept".format(
             item.ref, item.state)
+    if item.status == "Shaped":
+        return None
     if item.status != "Building":
         return (
             "{} is at {}, not Building; only a finished Building project "
@@ -17217,15 +17232,13 @@ def cmd_hold(items: List[Item], now: datetime, ref: str, reason: str,
              until: Optional[date] = None, on: Sequence[str] = (),
              confirmed: bool = False, run: Optional[str] = None,
              agent: Optional[str] = None,
-             instruction: Optional[str] = None) -> int:
-    """Record Nate's hold on a finished project at Accept (#1724).
+             instruction: Optional[str] = None,
+             proof: Sequence[str] = ()) -> int:
+    """Record a Shaped-plan hold or finished-project Accept hold (#1724).
 
-    A hold written as prose ("Accept held by Nate ...") is read by nothing, so
-    the project kept asking "Accept it?". The ``blocked`` label with a
-    parseable ``**Blocked until/on ...:**`` comment already takes an item out
-    of his queue, shows its condition, and is lifted by
-    ``clear_satisfied_blocks`` once that condition is met; this verb writes
-    exactly that form, in Nate's relayed voice.
+    Shaped holds write one proof-linked record with the current plan version,
+    named issue conditions, and the owner reason. Finished Building projects
+    retain their existing date- or issue-conditioned Accept hold record.
 
     **Dry run unless ``confirmed``**, like the gate answers: holding is
     Nate's call at his own gate.
@@ -17236,13 +17249,23 @@ def cmd_hold(items: List[Item], now: datetime, ref: str, reason: str,
         raise GitHubError(refusal)
     if (until is None) == (not on):
         raise GitHubError("a hold needs exactly one of --until or --on")
+    shaped_hold = item.status == "Shaped"
+    if shaped_hold and until is not None:
+        raise GitHubError("a Shaped hold needs issue conditions via --on")
     if until is not None and until <= _block_condition_date(now):
         raise GitHubError("hold date must be after today's UTC date")
-    body = _hold_comment_body(reason, until=until, on=on)
+    if shaped_hold:
+        if not proof:
+            raise GitHubError(
+                "a Shaped hold needs at least one --proof comment URL")
+        body = _shaped_hold_record_body(item, reason, on, proof)
+    else:
+        body = _hold_comment_body(reason, until=until, on=on)
 
     if not confirmed:
-        print("would hold {} at Accept ({}) with the blocked label and:".format(
-            item.ref, item.title))
+        place = "as a Shaped plan" if shaped_hold else "at Accept"
+        print("would hold {} {} ({}) with the blocked label and:".format(
+            item.ref, place, item.title))
         print(body)
         print("\nNothing was changed. Re-run with --yes to record the hold.")
         return 1
@@ -17260,6 +17283,10 @@ def cmd_hold(items: List[Item], now: datetime, ref: str, reason: str,
     )
     if comment.returncode != 0:
         raise GitHubError(comment.stderr.strip())
+    if shaped_hold:
+        write_project_select(
+            item.item_id, "Needs", "external-event", item.ref)
+        item.needs = "external-event"
     edit = _run_gh(
         ["gh", "issue", "edit", str(item.number), "--repo", item.repo,
          "--add-label", "blocked"],
@@ -17273,7 +17300,8 @@ def cmd_hold(items: List[Item], now: datetime, ref: str, reason: str,
     if not item.is_blocked:
         item.labels.append("blocked")
 
-    print("{} held at Accept\n{}".format(item.ref, body))
+    place = "at Shaped" if shaped_hold else "at Accept"
+    print("{} held {}\n{}".format(item.ref, place, body))
     return 0
 
 
@@ -17470,11 +17498,33 @@ def _set_pinned(items: List[Item], now: datetime, ref: str, pinned: bool,
 def cmd_comment(items: List[Item], now: datetime, ref: str, body: str,
                 voice: str, run: Optional[str] = None,
                 agent: Optional[str] = None,
-                apply_blocked: bool = False) -> int:
+                apply_blocked: bool = False,
+                blocked_on: Optional[Sequence[str]] = None,
+                because: Optional[str] = None,
+                proof: Sequence[str] = ()) -> int:
     """Post an issue comment with an explicit, stamped voice."""
-    if not body.strip():
+    if not body.strip() and not blocked_on:
         raise GitHubError("a non-empty comment body is required")
     item = find(items, ref)
+    if blocked_on:
+        if not item.item_id:
+            raise GitHubError("{} is not in the Project".format(item.ref))
+        if item.status == "Shaped" and item.parent is None:
+            if voice != "nate-relayed":
+                raise GitHubError(
+                    "a Shaped hold needs the Nate-relayed comment voice")
+            if not proof:
+                raise GitHubError(
+                    "a Shaped hold needs at least one --proof comment URL")
+            body = _shaped_hold_record_body(
+                item, because or "", blocked_on, proof)
+        else:
+            if proof:
+                raise GitHubError(
+                    "--proof is only supported for a Shaped plan block")
+            body = _blocked_comment_body(blocked_on, because or "")
+    elif apply_blocked and not item.item_id:
+        raise GitHubError("{} is not in the Project".format(item.ref))
     comment = _run_gh(
         ["gh", "issue", "comment", str(item.number), "--repo", item.repo,
          "--body", append_provenance(body, voice, at=now, run=run, agent=agent)],
@@ -17482,11 +17532,10 @@ def cmd_comment(items: List[Item], now: datetime, ref: str, body: str,
     )
     if comment.returncode != 0:
         raise GitHubError(comment.stderr.strip())
-    if apply_blocked:
-        if not item.item_id:
-            raise GitHubError("{} is not in the Project".format(item.ref))
-        write_project_select(item.item_id, "Needs", "human", item.ref)
-        item.needs = "human"
+    if apply_blocked or blocked_on:
+        needs = "human" if apply_blocked else "external-event"
+        write_project_select(item.item_id, "Needs", needs, item.ref)
+        item.needs = needs
         edit = _run_gh(
             [
                 "gh", "issue", "edit", str(item.number), "--repo", item.repo,
@@ -17495,9 +17544,13 @@ def cmd_comment(items: List[Item], now: datetime, ref: str, body: str,
             capture_output=True, text=True,
         )
         if edit.returncode != 0:
+            purpose = (
+                "needs-decision comment" if apply_blocked
+                else "blocked-on comment"
+            )
             raise GitHubError(
-                "recorded needs-decision comment on {}, but could not add its "
-                "blocked label: {}".format(item.ref, edit.stderr.strip())
+                "recorded {} on {}, but could not add its blocked label: {}"
+                .format(purpose, item.ref, edit.stderr.strip())
             )
         if not item.is_blocked:
             item.labels.append("blocked")
@@ -18204,14 +18257,15 @@ def classify_blockers(blockers: Iterable[dict], repo: str) -> Dict[str, List[str
 def _current_block_comment_details(
     comments: Sequence[Mapping[str, object]],
 ) -> Tuple[List[str], Optional[date], Optional[str],
-           Optional[Dict[str, str]], Optional[str]]:
+           Optional[Dict[str, str]], Optional[str],
+           Optional[Dict[str, object]]]:
     """Read the current block record: the newest one of any kind (#2166).
 
     Three kinds of comment record a block: a parseable block header, a
-    Needs-a-decision question and a Declined. The newest of them alone is
-    current, and its fields are returned as ``(references, blocked_until,
-    reason, event, question)``; the other kinds' fields are empty, as they
-    are when the thread holds no record at all.
+    Needs-a-decision question, a Declined, or a Shaped hold. The newest
+    record is current; its fields are returned in a six-field tuple:
+    references, blocked date, reason, event, question, and Shaped-hold record.
+    Other kinds' fields are empty when the thread has no current record.
 
     A later Declined starts a new blocked episode without machine-readable
     conditions (#2019), and a later question is waiting on Nate's answer, so
@@ -18226,22 +18280,32 @@ def _current_block_comment_details(
     records = []
     for index, comment in enumerate(comments):
         body = str(comment.get("body") or "")
+        shaped_hold = parse_shaped_hold_comment(body)
+        if shaped_hold is not None:
+            # Hold conditions stay out of generic block references until the
+            # hold gate has checked the attached proof.
+            fields = (
+                [], None, str(shaped_hold["Hold-Reason"]), None, None,
+                shaped_hold,
+            )
+            records.append((parse_time(comment.get("createdAt")), index, fields))
+            continue
         details = _parse_block_comment_details([body])
         if details is not None:
-            fields = details + (None,)
+            fields = details + (None, None)
         elif NEEDS_DECISION_RE.match(body):
             # A question header whose text reads as empty is still the
             # current record: it asks rather than lets an older header clear.
             fields = ([], None, None, None,
-                      parse_needs_decision_comment([body]))
+                      parse_needs_decision_comment([body]), None)
         elif body.lstrip().startswith(DECLINED_PREFIX):
-            fields = ([], None, None, None, None)
+            fields = ([], None, None, None, None, None)
         else:
             continue
         records.append((parse_time(comment.get("createdAt")), index, fields))
 
     if not records:
-        return [], None, None, None, None
+        return [], None, None, None, None, None
     if all(at is not None for at, _, _ in records):
         return max(records, key=lambda record: record[:2])[2]
     return records[-1][2]
@@ -18256,7 +18320,7 @@ def _load_block_comment(item: Item) -> None:
 
     The current block record alone sets ``block_references``,
     ``blocked_until``, ``block_reason``, ``block_event`` and
-    ``needs_decision`` (``_current_block_comment_details``, #2166): an older
+    ``needs_decision`` and ``shaped_hold`` (#2166): an older
     header's conditions never read beside a newer question, so the clear
     cannot lift a block that is waiting on Nate's answer.
 
@@ -18290,6 +18354,7 @@ def _load_block_comment(item: Item) -> None:
         item.block_reason,
         item.block_event,
         item.needs_decision,
+        item.shaped_hold,
     ) = _current_block_comment_details(comments)
     item.decline_reason = parse_decline_comment(bodies)
     item.decline_route = parse_decline_route_comment(payload["comments"])
@@ -22472,6 +22537,35 @@ def _decision_question(value: str) -> str:
     return question
 
 
+def _proof_comment_url(value: str) -> str:
+    """Parse one GitHub comment URL used as hold proof."""
+    try:
+        return validate_proof_comment_url(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc))
+
+
+def _shaped_hold_record_body(
+    item: Item, reason: str, conditions: Sequence[str],
+    proof: Sequence[str],
+) -> str:
+    """Render a Shaped hold from the loaded issue body and supplied evidence."""
+    if not item.item_id:
+        raise GitHubError("{} is not in the Project".format(item.ref))
+    if not isinstance(item.body, str) or not item.body.strip():
+        raise GitHubError("{} has no Shaped plan body to version".format(
+            item.ref))
+    condition_refs = [
+        "{}#{}".format(item.repo, str(value).lstrip("#"))
+        for value in conditions
+    ]
+    try:
+        return render_shaped_hold(
+            reason, condition_refs, shaped_plan_version(item.body), proof)
+    except (TypeError, ValueError) as exc:
+        raise GitHubError(str(exc))
+
+
 def _blocked_reference(value: str) -> str:
     """Normalise one issue number for the strict block-comment header."""
     reference = value.strip()
@@ -22856,7 +22950,7 @@ def main(argv: Optional[Sequence[str]] = None, *,
     comment_body.add_argument("--body-file", help="file containing the comment text")
     comment_body.add_argument(
         "--blocked-on", action="append", type=_blocked_reference, metavar="N",
-        help="post a canonical block header; repeat for multiple issue numbers",
+        help="post a routed block record; repeat for multiple issue numbers",
     )
     comment_body.add_argument(
         "--needs-decision", type=_decision_question, metavar="QUESTION",
@@ -22864,7 +22958,11 @@ def main(argv: Optional[Sequence[str]] = None, *,
     )
     comment.add_argument(
         "--because", type=_comment_reason,
-        help="reason appended to a canonical block header (requires --blocked-on)",
+        help="reason for the block record (requires --blocked-on)",
+    )
+    comment.add_argument(
+        "--proof", action="append", type=_proof_comment_url, default=None,
+        help="GitHub comment URL proving a Shaped hold; repeat as needed",
     )
     comment.add_argument(
         "--run", default=None,
@@ -22876,8 +22974,8 @@ def main(argv: Optional[Sequence[str]] = None, *,
     )
     hold = sub.add_parser(
         "hold",
-        help="Nate's hold on a finished project at Accept, recorded as a "
-             "conditioned block — dry run without --yes",
+        help="owner-authorized hold on a Shaped plan or finished Building "
+             "project — dry run without --yes",
     )
     hold.add_argument("ref", help="issue number, owner/repo#number, or URL")
     hold_condition = hold.add_mutually_exclusive_group(required=True)
@@ -22900,6 +22998,10 @@ def main(argv: Optional[Sequence[str]] = None, *,
     hold.add_argument(
         "--instruction", type=_verbatim_instruction, default=None,
         help="verbatim instruction received from Nate; recorded in provenance",
+    )
+    hold.add_argument(
+        "--proof", action="append", type=_proof_comment_url, default=None,
+        help="GitHub comment URL proving a Shaped hold; repeat as needed",
     )
     hold.add_argument(
         "--run", default=None,
@@ -22972,6 +23074,8 @@ def main(argv: Optional[Sequence[str]] = None, *,
             parser.error("--because is required with --blocked-on")
         if args.because is not None and not args.blocked_on:
             parser.error("--because requires --blocked-on")
+        if args.proof and not args.blocked_on:
+            parser.error("--proof requires --blocked-on")
     if (args.command == "claim"
             and bool(args.run) != bool(args.agent)):
         parser.error("--run and --agent must be supplied together")
@@ -23338,7 +23442,8 @@ def main(argv: Optional[Sequence[str]] = None, *,
             return cmd_hold(items, now, args.ref, args.reason,
                             until=args.until, on=args.on or (),
                             confirmed=args.confirmed, run=args.run,
-                            agent=args.agent, instruction=args.instruction)
+                            agent=args.agent, instruction=args.instruction,
+                            proof=args.proof or ())
         if args.command == "comment":
             if args.needs_decision is not None:
                 body = _needs_decision_comment_body(args.needs_decision)
@@ -23355,7 +23460,10 @@ def main(argv: Optional[Sequence[str]] = None, *,
                     )
             return cmd_comment(
                 items, now, args.ref, body or "", args.voice,
-                args.run, args.agent, apply_blocked=args.needs_decision is not None,
+                args.run, args.agent,
+                apply_blocked=args.needs_decision is not None,
+                blocked_on=args.blocked_on, because=args.because,
+                proof=args.proof or (),
             )
         if args.command == "reject":
             return cmd_reject(items, now, args.pr, args.note)

@@ -111,6 +111,17 @@ def ticket_item():
     )
 
 
+def shaped_project():
+    return funnel.Item(
+        repo="nateprich-projects/command-center", number=2003,
+        title="A Shaped project",
+        url="https://github.com/nateprich-projects/command-center/issues/2003",
+        state="OPEN", body="# Decision\nKeep current service plan.\n",
+        status="Shaped", klass="New", origin="Nate", needs="none",
+        item_id="project-item-2003",
+    )
+
+
 def finished_project():
     """An open Building project, every ticket closed, that waits at Accept."""
     return funnel.Item(
@@ -179,6 +190,72 @@ def test_comment_blocked_on_reads_back_its_references(monkeypatch):
     assert funnel._visible_comment(item.block_reason) == INERT_REASON
     assert item.unparseable_block_comments == []
     assert item.needs_decision is None
+    assert funnel._event_block_mismatch(item) is None
+
+
+def test_comment_blocked_on_shaped_writes_a_routed_hold_record(monkeypatch):
+    item = shaped_project()
+    calls = _record_gh(monkeypatch, [item])
+    project_writes = []
+    monkeypatch.setattr(
+        funnel, "write_project_select",
+        lambda item_id, field, value, ref: project_writes.append(
+            (item_id, field, value, ref)),
+    )
+    proof = (
+        "https://github.com/nateprich-projects/command-center/issues/2003"
+        "#issuecomment-5945296610"
+    )
+
+    assert funnel.main([
+        "comment", "2003",
+        "--blocked-on", "1590", "--blocked-on", "1997",
+        "--because", "Hold until the open prerequisites clear",
+        "--proof", proof, "--voice", "nate-relayed",
+        "--run", "run-hold", "--agent", "codex",
+    ]) == 0
+
+    posted = _posted(calls)
+    expected = {
+        "Hold-Reason": "Hold until the open prerequisites clear",
+        "Hold-Conditions": [
+            "nateprich-projects/command-center#1590",
+            "nateprich-projects/command-center#1997",
+        ],
+        "Plan-Version": (
+            "371883196b99396eca7d9b9cb6613ec0395df5ca683d36fe7415b71343e40dbb"
+        ),
+        "Proof": [proof],
+    }
+    assert block_record.parse_shaped_hold_comment(
+        funnel._visible_comment(posted)) == expected
+    assert project_writes == [
+        ("project-item-2003", "Needs", "external-event", item.ref),
+    ]
+    assert item.needs == "external-event"
+    assert item.is_blocked
+    _load(monkeypatch, item, posted)
+    assert item.shaped_hold == expected
+
+
+def test_shaped_hold_comment_requires_the_owner_voice_before_writing(
+        monkeypatch, capsys):
+    item = shaped_project()
+    calls = _record_gh(monkeypatch, [item])
+    proof = (
+        "https://github.com/nateprich-projects/command-center/issues/2003"
+        "#issuecomment-5945296610"
+    )
+
+    assert funnel.main([
+        "comment", "2003", "--blocked-on", "1590",
+        "--because", "Hold until the open prerequisite clears",
+        "--proof", proof, "--voice", "agent",
+        "--run", "run-hold", "--agent", "codex",
+    ]) == 2
+
+    assert calls == []
+    assert "Nate-relayed" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize(

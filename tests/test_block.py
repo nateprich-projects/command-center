@@ -456,14 +456,21 @@ def test_comment_fetch_failure_is_reported_by_doctor(monkeypatch):
 
 
 def test_comment_posts_a_canonical_single_block_header(monkeypatch):
-    monkeypatch.setattr(funnel, "load_items", lambda: [comment_item()])
+    item = comment_item()
+    monkeypatch.setattr(funnel, "load_items", lambda: [item])
     calls = []
+    project_writes = []
 
     def run(args, capture_output, text=True):
         calls.append(tuple(args))
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(funnel.subprocess, "run", run)
+    monkeypatch.setattr(
+        funnel, "write_project_select",
+        lambda item_id, field, value, ref: project_writes.append(
+            (item_id, field, value, ref)),
+    )
 
     assert funnel.main([
         "comment", "42", "--blocked-on", "77", "--because", "waiting on X",
@@ -473,17 +480,31 @@ def test_comment_posts_a_canonical_single_block_header(monkeypatch):
     posted = calls[0][-1]
     assert posted.startswith("**Blocked on #77:** waiting on X\n\n")
     assert funnel.parse_block_comment([posted])[0] == ["#77"]
+    assert calls[1] == (
+        "gh", "issue", "edit", "42", "--repo", "nateprich/beta",
+        "--add-label", "blocked",
+    )
+    assert project_writes == [
+        ("project-item-42", "Needs", "external-event", item.ref),
+    ]
 
 
 def test_comment_joins_multiple_block_references(monkeypatch):
-    monkeypatch.setattr(funnel, "load_items", lambda: [comment_item()])
+    item = comment_item()
+    monkeypatch.setattr(funnel, "load_items", lambda: [item])
     calls = []
+    project_writes = []
 
     def run(args, capture_output, text=True):
         calls.append(tuple(args))
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(funnel.subprocess, "run", run)
+    monkeypatch.setattr(
+        funnel, "write_project_select",
+        lambda item_id, field, value, ref: project_writes.append(
+            (item_id, field, value, ref)),
+    )
 
     assert funnel.main([
         "comment", "42", "--blocked-on", "77", "--blocked-on", "78",
@@ -494,6 +515,13 @@ def test_comment_joins_multiple_block_references(monkeypatch):
     posted = calls[0][-1]
     assert posted.startswith("**Blocked on #77 and #78:** waiting on both\n\n")
     assert funnel.parse_block_comment([posted])[0] == ["#77", "#78"]
+    assert calls[1] == (
+        "gh", "issue", "edit", "42", "--repo", "nateprich/beta",
+        "--add-label", "blocked",
+    )
+    assert project_writes == [
+        ("project-item-42", "Needs", "external-event", item.ref),
+    ]
 
 
 def test_comment_posts_needs_decision_and_applies_blocked_label(monkeypatch):

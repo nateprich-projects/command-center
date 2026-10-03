@@ -11,6 +11,7 @@ import json
 import pathlib
 import re
 import stat
+import subprocess
 import sys
 
 import pytest
@@ -99,6 +100,15 @@ STOP_COUNTER = {"window_days": 7, "count": 0, "refs": [],
 
 def empty_pr_comments():
     return {"status": "empty", "message": "No PR comments.", "comments": []}
+
+
+def rejected_review_comment(head, blocking, created_at):
+    record = {"verdict": "rejected", "head_sha": head,
+              "blocking": blocking, "ci": "green"}
+    body = (funnel.REVIEW_MARKER + "\n\n" + chr(96) * 3 + "json\n"
+            + json.dumps(record) + "\n" + chr(96) * 3 + "\n")
+    return {"kind": "issue", "author": "nateprich",
+            "created_at": created_at, "body": body}
 
 
 CLOSING_VERBS = (
@@ -1141,6 +1151,15 @@ def test_packet_carries_every_field():
          "status": "COMPLETED"}]
     assert found["verdict"]["verdict"] == "approved"
     assert found["verdict_head_sha"] == SHA
+    assert found["scoped_rereview"] == {
+        "enabled": True,
+        "active": False,
+        "prior_rejected_head": None,
+        "prior_blocking_items": [],
+        "interdiff": None,
+        "full_review_fallback": False,
+        "fallback_reasons": [],
+    }
     assert found["overlap"] == []
     assert found["ticket_prior_prs"] == []
     assert found["protected"] == {
@@ -1148,6 +1167,207 @@ def test_packet_carries_every_field():
     assert found["stop_auto_merging"] == STOP_COUNTER
     assert found["collected_at"] == "2026-09-13T00:00:00+00:00"
     json.dumps(found)  # the packet is JSON by contract
+
+
+def test_scoped_rereview_anchors_latest_rejection_and_pins_main(monkeypatch):
+    old_head = "1" * 40
+    prior_head = "2" * 40
+    current_head = "3" * 40
+    comments = {"status": "available", "comments": [
+        rejected_review_comment(
+            old_head, ["Code defect: old finding"], "2026-09-01T00:00:00Z"),
+        rejected_review_comment(
+            prior_head,
+            ["Code defect: changed behavior",
+             "Missing Do item: add the acceptance check",
+             "Merged-main suite failure: test suite is red"],
+            "2026-09-02T00:00:00Z"),
+    ]}
+    main_sha = "9" * 40
+    main_only = "main-merge-only-change"
+    scopes = {
+        prior_head: "diff --git a/f.py b/f.py\n-old-pr\n",
+        current_head: "diff --git a/f.py b/f.py\n-new-pr\n",
+    }
+    calls = []
+
+    monkeypatch.setattr(review, "fetch_branch_head", lambda repo, branch: main_sha)
+
+    def fetch_scope(repo, base_sha, head):
+        calls.append((repo, base_sha, head))
+        return (["f.py"], scopes[head], "merge-base-" + head[0])
+
+    monkeypatch.setattr(review, "fetch_scope", fetch_scope)
+    monkeypatch.setattr(review, "_diff_line_count",
+                        lambda diff, interdiff=False: 0 if interdiff else 100)
+
+    result, scope = review.build_scoped_rereview(
+        REPO, 7, "main", current_head, comments)
+
+    assert result["active"] is True
+    assert result["prior_rejected_head"] == prior_head
+    assert result["prior_blocking_items"] == [
+        {"kind": "code_defect", "finding": "Code defect: changed behavior"},
+        {"kind": "missing_requirement_or_accept_test",
+         "finding": "Missing Do item: add the acceptance check"},
+        {"kind": "merged_main_suite_failure",
+         "finding": "Merged-main suite failure: test suite is red"},
+    ]
+    assert result["full_review_fallback"] is False
+    assert main_only not in result["interdiff"]
+    assert scope == (["f.py"], scopes[current_head], "merge-base-3")
+    assert calls == [
+        (REPO, main_sha, current_head),
+        (REPO, main_sha, prior_head),
+    ]
+
+
+def test_scoped_rereview_interdiff_excludes_changes_from_merged_main(
+        tmp_path, monkeypatch):
+    def git(*args):
+        proc = subprocess.run(
+            ["git", *args], cwd=tmp_path, check=True,
+            capture_output=True, text=True)
+        return proc.stdout.strip()
+
+    git("init")
+    git("checkout", "-b", "main")
+    git("config", "user.name", "Test")
+    git("config", "user.email", "test@example.invalid")
+    app = tmp_path / "app.py"
+    app.write_text("base\n")
+
+    def commit(message):
+        git("add", "-A")
+        git("commit", "-m", message)
+        return git("rev-parse", "HEAD")
+
+    commit("base")
+    git("checkout", "-b", "ticket")
+    app.write_text("base\nprior change\n")
+    prior_head = commit("rejected change")
+    git("checkout", "main")
+    (tmp_path / "main-only.txt").write_text("main merge change\n")
+    main_sha = commit("main-only change")
+    git("checkout", "ticket")
+    git("merge", "--no-ff", "--no-edit", "main")
+    app.write_text("base\nprior change\ncurrent change\n")
+    current_head = commit("current change")
+
+    comments = {"status": "available", "comments": [
+        rejected_review_comment(
+            prior_head, ["Code defect: fix this behavior"],
+            "2026-09-02T00:00:00Z"),
+    ]}
+    monkeypatch.setattr(
+        review, "fetch_branch_head", lambda repo, branch: main_sha)
+
+    def fetch_scope(repo, base_sha, head):
+        merge_base = git("merge-base", base_sha, head)
+        changed_files = git("diff", "--name-only", merge_base, head).splitlines()
+        diff = git("diff", f"{merge_base}..{head}")
+        return changed_files, diff, merge_base
+
+    monkeypatch.setattr(review, "fetch_scope", fetch_scope)
+    monkeypatch.setattr(review, "_diff_line_count",
+                        lambda diff, interdiff=False: 0)
+
+    result, _ = review.build_scoped_rereview(
+        REPO, 7, "main", current_head, comments)
+
+    assert "main-only.txt" not in result["interdiff"]
+
+
+def test_scoped_rereview_does_not_claim_external_rule_source(monkeypatch):
+    prior_head = "2" * 40
+    current_head = "3" * 40
+    comments = {"status": "available", "comments": [
+        rejected_review_comment(
+            prior_head, ["Code defect: fix this behavior"],
+            "2026-09-02T00:00:00Z"),
+    ]}
+    monkeypatch.setattr(review, "fetch_branch_head", lambda repo, branch: "9" * 40)
+    monkeypatch.setattr(
+        review, "fetch_scope",
+        lambda repo, base_sha, head: (["f.py"], "", "merge-base"))
+
+    result, _ = review.build_scoped_rereview(
+        REPO, 7, "main", current_head, comments)
+
+    assert result["active"] is True
+    assert "stopping_rule_source" not in result
+
+
+def test_plan_replaces_fresh_read_rule_with_scoped_rereview():
+    plan = (ROOT / "plan.md").read_text()
+    start = plan.index("**Claude reviews and merges.**")
+    end = plan.index("**Rejected merges are their own class.**", start)
+    review_rule = " ".join(plan[start:end].split())
+
+    assert "a re-review after a rejection checks the earlier blocking" in review_rule
+    assert "a fresh read against the plan" not in review_rule
+    assert "_Rejected: a fresh full read after every fix." in review_rule
+    assert "five reviews on #1789" in review_rule
+    assert "twelve in Personal Ops on 2026-09-28" in review_rule
+
+
+@pytest.mark.parametrize(
+    ("interdiff_churn", "full_review"), [(4, True), (2, False)])
+def test_scoped_rereview_uses_half_churn_boundary(
+        monkeypatch, interdiff_churn, full_review):
+    prior_head = "2" * 40
+    current_head = "3" * 40
+    comments = {"status": "available", "comments": [
+        rejected_review_comment(
+            prior_head, ["Code defect: fix this behavior"],
+            "2026-09-02T00:00:00Z"),
+    ]}
+    changed = ("diff --git a/f.py b/f.py\n--- a/f.py\n+++ b/f.py\n"
+               "@@ -1,4 +1,4 @@\n"
+               "-old1\n-old2\n-old3\n-old4\n"
+               "+new1\n+new2\n+new3\n+new4\n")
+    monkeypatch.setattr(review, "fetch_branch_head", lambda repo, branch: "9" * 40)
+    monkeypatch.setattr(
+        review, "fetch_scope",
+        lambda repo, base_sha, head: (["f.py"], changed, "merge-base"))
+
+    def interdiff(prior, current):
+        pairs = interdiff_churn // 2
+        return ("@@ -1,0 +1,0 @@\n" + "-removed\n" * pairs
+                + "+added\n" * pairs)
+
+    monkeypatch.setattr(review, "_diff_of_diffs", interdiff)
+
+    result, _ = review.build_scoped_rereview(
+        REPO, 7, "main", current_head, comments)
+
+    assert review._diff_line_count(changed) == 8
+    assert result["full_review_fallback"] is full_review
+    assert ("large_rewrite" in result["fallback_reasons"]) is full_review
+
+
+def test_unclassified_prior_blocker_forces_full_review(monkeypatch):
+    prior_head = "2" * 40
+    current_head = "3" * 40
+    comments = {"status": "available", "comments": [
+        rejected_review_comment(
+            prior_head,
+            ["Code defect: fix this behavior", "CI not green"],
+            "2026-09-02T00:00:00Z"),
+    ]}
+    monkeypatch.setattr(review, "fetch_branch_head", lambda repo, branch: "9" * 40)
+    monkeypatch.setattr(
+        review, "fetch_scope",
+        lambda repo, base_sha, head: (["f.py"], "", "merge-base"))
+
+    result, _ = review.build_scoped_rereview(
+        REPO, 7, "main", current_head, comments)
+
+    assert result["prior_blocking_items"] == [
+        {"kind": "code_defect", "finding": "Code defect: fix this behavior"},
+    ]
+    assert result["full_review_fallback"] is True
+    assert result["fallback_reasons"] == ["prior_blockers_unclassified"]
 
 
 def test_packet_lists_deleted_test_functions():

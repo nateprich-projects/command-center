@@ -17281,11 +17281,16 @@ def cmd_answer_gates(items: List[Item], now: datetime, ref: str,
                      answer: str, decider: str,
                      run: Optional[str] = None,
                      agent: Optional[str] = None) -> int:
-    """Record one answered Gates question in the plan body.
+    """Record one answered Gates question and re-check delegated Shaped work.
 
     The sanctioned post-Ready write. It is one ``gh issue edit``: the marker
     and the Gates line move together or neither does, so no reader can catch
     the body in a state where the two disagree.
+
+    Once the answer clears Needs, a Nate-origin Shaped plan is checked with
+    the existing self-approval predicate. The ordinary sweep remains
+    agent-origin only; this command handles the one plan whose answer just
+    made its delegation actionable.
 
     Deliberately not gated on Status. The question this answers is asked from
     a block, and a blocked project can be sitting at Shaped, Ready or Building
@@ -17316,8 +17321,8 @@ def cmd_answer_gates(items: List[Item], now: datetime, ref: str,
     )
     if out.returncode != 0:
         raise GitHubError(out.stderr.strip())
-    # The caller may evaluate this item again in the same session; keep it
-    # aligned with what GitHub now holds rather than with what it held.
+    # Keep the same-session item aligned with what GitHub now holds before
+    # the single-plan self-approval check.
     item.body = body
     remaining_needs = "human" if plan_needs_nate(body) else "none"
     write_project_select(item.item_id, "Needs", remaining_needs, item.ref)
@@ -17332,8 +17337,66 @@ def cmd_answer_gates(items: List[Item], now: datetime, ref: str,
             "wrote {} but the answered-Gates reader rejects the "
             "record".format(item.ref)
         )
-    print("{} Gates answered by {}\n{}\n{}".format(
-        item.ref, recorded["decider"], recorded["answer"], item.url))
+
+    self_approved = False
+    if item.status == "Shaped" and item.origin == "Nate":
+        by_ref = {item.ref: item}
+        if shaped_self_approvable(item, by_ref):
+            body = _loaded_item_body(item)
+            klass = effective_class(item, by_ref)
+            reason = (
+                "needs_nate all null; class {} self-approvable; "
+                "origin override to agents"
+            ).format(klass)
+            scan_only = item.risk == "escalated"
+            if scan_only:
+                reason += "; " + scan_only_escalation_note(
+                    plan_is_escalated(body))
+
+            try:
+                status_error = _write_status(item, "Ready", now)
+            except (OSError, subprocess.SubprocessError, GitHubError) as exc:
+                status_error = str(exc)
+            if status_error is not None:
+                raise GitHubError(
+                    "Gates answer recorded, but {} could not advance to "
+                    "Ready: {}".format(item.ref, status_error)
+                )
+
+            basis = "{}; {}".format(
+                reason, "no declared risk" if scan_only
+                else "no escalated risk"
+            )
+            authority_signals = needs_nate_signals(body)
+            if authority_signals:
+                basis += "; authority signals: {}".format(
+                    ", ".join(authority_signals)
+                )
+            try:
+                comment = _run_gh(
+                    ["gh", "issue", "comment", str(item.number),
+                     "--repo", item.repo,
+                     "--body", self_approval_comment(
+                         basis, at=now, run=run, agent=agent
+                     )],
+                    capture_output=True, text=True,
+                )
+            except (OSError, subprocess.SubprocessError, GitHubError) as exc:
+                raise GitHubError(
+                    "Ready was written but the Self-approved marker "
+                    "failed: {}".format(exc)
+                ) from exc
+            if comment.returncode != 0:
+                raise GitHubError(
+                    "Ready was written but the Self-approved marker "
+                    "failed: {}".format(comment.stderr.strip())
+                )
+            self_approved = True
+
+    status_note = "\nShaped self-approved → Ready" if self_approved else ""
+    print("{} Gates answered by {}\n{}{}\n{}".format(
+        item.ref, recorded["decider"], recorded["answer"], status_note,
+        item.url))
     return 0
 
 

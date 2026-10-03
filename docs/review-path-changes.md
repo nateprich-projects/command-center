@@ -2,8 +2,17 @@
 
 When a change updates `routines/muse-review.md` or the review engine, the author
 replays both known-verdict packets: the The-League PR #237 must-reject packet and
-the must-approve packet. The machine-local, owner-only corpus lives in
-`command-center-review-corpus/`, relative to the runtime root.
+the must-approve packet. The live machine-local, owner-only corpus lives in
+`command-center-review-corpus/`, relative to the runtime root. Its replay use is
+unchanged.
+
+The two byte-for-byte v1 snapshots in `data/review_packets/v1/` are the
+ticketed, versioned inputs shared by regression and paired evaluation. The live
+owner-only corpus and replay outputs remain out of Git and issue comments; these
+two snapshots are the explicit exception. Keep published versions immutable.
+Packet additions or changes require a ticketed change, a new version, and a
+changelog entry. The shared loader and checksum verifier are in
+`engine/review_packets.py`; this dataset change adds no replay or scoring logic.
 
 Run `review-replay` once per packet with three runs and its known verdict:
 

@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import datetime
 import gzip
+import os
 from pathlib import Path
+import subprocess
 import sys
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -47,7 +49,9 @@ def test_default_archive_base_uses_the_machine_local_ssd(tmp_path, monkeypatch):
         muse, "2026/09/session.jsonl.gz", gzip.compress(b"archive me", mtime=0)
     )
     destinations = []
+    mount_checks = []
     monkeypatch.delenv(session_logs.ARCHIVE_ROOT_ENV, raising=False)
+    monkeypatch.setattr(session_log_archive, "_ensure_base", lambda _base: True)
     monkeypatch.setattr(
         session_log_archive,
         "_archive_file",
@@ -58,12 +62,17 @@ def test_default_archive_base_uses_the_machine_local_ssd(tmp_path, monkeypatch):
     session_log_archive.archive_pass(
         muse_root=muse,
         codex_root=codex,
-        mount_check=lambda _path: True,
+        mount_check=lambda path: mount_checks.append(path) or True,
     )
 
     assert source.exists()
+    # The archive base sits below the volume, so the mount is the volume.
+    assert mount_checks == [Path("/Volumes/External SSD")]
     assert destinations == [
-        Path("/Volumes/External SSD/Agent-Logs/muse/2026/09/session.jsonl.gz")
+        Path(
+            "/Volumes/External SSD/Archives/session-logs/muse/"
+            "2026/09/session.jsonl.gz"
+        )
     ]
 
 
@@ -102,6 +111,160 @@ def test_archive_pass_copies_then_deletes_only_a_verified_gzip(tmp_path):
         "status": "ok", "copied": 2, "deleted": 2,
         "retained": 0, "errors": 0,
     }
+
+
+def test_base_creation_failure_is_reported_non_ok_without_deleting_source(
+        tmp_path):
+    muse, codex, volume, _archive = roots(tmp_path)
+    source = archive_fixture(
+        muse, "2026/09/session.jsonl.gz", gzip.compress(b"keep me", mtime=0)
+    )
+    blocked_base = tmp_path / "base-is-a-file"
+    blocked_base.write_text("not a directory")
+
+    summary = run_pass(muse, codex, volume, blocked_base)
+
+    assert source.exists()
+    assert summary == {
+        "status": "error", "copied": 0, "deleted": 0,
+        "retained": 0, "errors": 1,
+    }
+
+
+def test_unwritable_base_is_reported_non_ok_with_no_sources(tmp_path):
+    muse, codex, volume, _archive = roots(tmp_path)
+    blocked_base = tmp_path / "base-is-a-file"
+    blocked_base.write_text("not a directory")
+
+    summary = run_pass(muse, codex, volume, blocked_base)
+
+    assert summary["status"] == "error"
+    assert summary["errors"] == 1
+
+
+def test_daily_pass_archives_once_per_local_day(tmp_path):
+    muse, codex, volume, archive = roots(tmp_path)
+    first = archive_fixture(
+        muse, "2026/09/first.jsonl.gz", gzip.compress(b"first", mtime=0)
+    )
+    messages = []
+    morning = datetime.datetime.now().astimezone().replace(
+        hour=6, minute=0, second=0, microsecond=0
+    )
+
+    def daily(now):
+        return session_log_archive.run_daily_pass(
+            now=now,
+            muse_root=muse,
+            codex_root=codex,
+            archive_base=archive,
+            volume_root=volume,
+            mount_check=lambda _path: True,
+            emit=messages.append,
+        )
+
+    assert daily(morning) == 0
+    later = archive_fixture(
+        muse, "2026/09/later.jsonl.gz", gzip.compress(b"later", mtime=0)
+    )
+    assert daily(morning.replace(hour=21)) == 0
+
+    assert messages == [
+        "session-log archive: status=ok copied=1 deleted=1 retained=0 errors=0"
+    ]
+    assert not first.exists()
+    assert later.exists()
+
+    assert daily(morning + datetime.timedelta(days=1)) == 0
+    assert not later.exists()
+    assert len(messages) == 2
+
+
+def test_daily_pass_retries_the_same_day_after_an_unwritable_base(tmp_path):
+    muse, codex, volume, _archive = roots(tmp_path)
+    blocked_base = tmp_path / "base-is-a-file"
+    blocked_base.write_text("not a directory")
+    messages = []
+    morning = datetime.datetime.now().astimezone().replace(
+        hour=6, minute=0, second=0, microsecond=0
+    )
+
+    for hour in (6, 9):
+        session_log_archive.run_daily_pass(
+            now=morning.replace(hour=hour),
+            muse_root=muse,
+            codex_root=codex,
+            archive_base=blocked_base,
+            volume_root=volume,
+            mount_check=lambda _path: True,
+            emit=messages.append,
+        )
+
+    assert messages == [
+        "session-log archive: status=error copied=0 deleted=0 retained=0 errors=1"
+    ] * 2
+
+
+def test_module_runs_as_a_script(tmp_path):
+    # Hold the subprocess after 03:00 so the script must reach
+    # __main__ -> main() -> run_daily_pass() and emit its mount result.
+    (tmp_path / "sitecustomize.py").write_text(
+        "import datetime as _datetime\n"
+        "class _FixedDateTime(_datetime.datetime):\n"
+        "    @classmethod\n"
+        "    def now(cls, tz=None):\n"
+        "        return cls(2026, 10, 3, 15, 0, tzinfo=_datetime.timezone.utc)\n"
+        "_datetime.datetime = _FixedDateTime\n",
+        encoding="utf-8",
+    )
+    env = dict(os.environ)
+    env[session_logs.ARCHIVE_ROOT_ENV] = str(tmp_path / "not-mounted" / "logs")
+    pythonpath = [str(tmp_path)]
+    if env.get("PYTHONPATH"):
+        pythonpath.append(env["PYTHONPATH"])
+    env["PYTHONPATH"] = os.pathsep.join(pythonpath)
+
+    completed = subprocess.run(
+        [sys.executable, str(ROOT / "session_log_archive.py")],
+        cwd=str(tmp_path), env=env, capture_output=True, text=True,
+        timeout=60,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout == (
+        "session-log archive: skipped; external volume is not mounted\n"
+    )
+
+
+def test_per_file_archive_error_is_reported_non_ok_with_counts(tmp_path):
+    muse, codex, volume, archive = roots(tmp_path)
+    source = archive_fixture(
+        muse, "2026/09/session.jsonl.gz", gzip.compress(b"source", mtime=0)
+    )
+    destination = archive / "muse" / "2026/09/session.jsonl.gz"
+    destination.parent.mkdir(parents=True)
+    destination.write_bytes(gzip.compress(b"other!", mtime=0))
+
+    summary = run_pass(muse, codex, volume, archive)
+
+    assert source.exists()
+    assert summary == {
+        "status": "error", "copied": 0, "deleted": 0,
+        "retained": 1, "errors": 1,
+    }
+
+
+def test_module_entrypoint_runs_daily_pass_once(monkeypatch):
+    calls = []
+
+    def run_daily_pass():
+        calls.append("called")
+        return 7
+
+    monkeypatch.setattr(session_log_archive, "run_daily_pass", run_daily_pass)
+
+    assert session_log_archive.main() == 7
+    assert calls == ["called"]
 
 
 def test_codex_archival_is_limited_to_non_user_thread_sources(tmp_path):

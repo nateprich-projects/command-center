@@ -4847,6 +4847,23 @@ def test_standard_tier_stays_on_muse_with_a_future_legacy_cutoff(tmp_path):
     assert _heartbeat(repo).startswith("finish --agent muse ")
 
 
+def test_standard_tier_uses_the_contributor_model_for_a_tier_1_repo(tmp_path):
+    subject = "nateprich-projects/command-center"
+    begin = _begin(work={"pr": PR, "repo": subject,
+                         "ref": subject + "#6", "tier": "standard"})
+    proc, repo = _stubbed_runner(
+        tmp_path, begin, _packet(repo=subject), args=("standard", "max"),
+        answers=_review_answers(_judge_answer()))
+
+    assert proc.returncode == 0, proc.stderr
+    assert "begin --agent muse --tier standard --breakdown --role review" \
+        in (repo / "funnel.calls").read_text()
+    assert all(
+        argv[argv.index("--model") + 1] == "muse-spark-1.3-contributor"
+        for argv in _model_argvs(repo)
+    )
+
+
 def test_review_engine_has_no_clock_or_zai_exec_route():
     runner = SCRIPT.read_text()
     for retired_route in ("ZAI_STANDARD_UNTIL",

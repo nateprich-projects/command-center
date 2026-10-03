@@ -1222,6 +1222,50 @@ def test_scoped_rereview_anchors_latest_rejection_and_pins_main(monkeypatch):
     ]
 
 
+def test_scoped_rereview_classifies_recorded_muse_requirement_unmet(monkeypatch):
+    prior_head = "2" * 40
+    current_head = "3" * 40
+    comments = {"status": "available", "comments": [
+        rejected_review_comment(
+            prior_head,
+            ["requirement unmet: add retry coverage -- absent from the diff"],
+            "2026-10-03T08:00:00Z"),
+    ]}
+    monkeypatch.setattr(
+        review, "fetch_branch_head", lambda repo, branch: "9" * 40)
+    monkeypatch.setattr(
+        review, "fetch_scope",
+        lambda repo, base_sha, head: (
+            ["f.py"], "same scoped diff", "merge-base"))
+    monkeypatch.setattr(
+        review, "_diff_line_count",
+        lambda diff, interdiff=False: 0 if interdiff else 100)
+
+    result, _ = review.build_scoped_rereview(
+        REPO, 7, "main", current_head, comments)
+
+    assert result["active"] is True
+    assert result["prior_blocking_items"] == [
+        {"kind": "missing_requirement_or_accept_test",
+         "finding": "requirement unmet: add retry coverage -- absent from the diff"},
+    ]
+    assert result["full_review_fallback"] is False
+
+
+@pytest.mark.parametrize(
+    "prefix", ["requirement unmet:", "requirement unsure:"])
+def test_stopping_rule_kind_classifies_muse_ticket_requirements(prefix):
+    assert review._stopping_rule_kind(
+        prefix + " add retry coverage -- absent from the diff"
+    ) == "missing_requirement_or_accept_test"
+
+
+def test_stopping_rule_kind_leaves_does_not_break_rows_unclassified():
+    assert review._stopping_rule_kind(
+        "requirement unmet: Does not break: preserve old retries -- absent"
+    ) is None
+
+
 def test_scoped_rereview_interdiff_excludes_changes_from_merged_main(
         tmp_path, monkeypatch):
     def git(*args):

@@ -4458,7 +4458,8 @@ def test_sweep_releases_an_escalated_plan_whose_record_declares_none(
     """#1721: #1195's body, whose Needs Nate question has been answered, so
     Needs is none, carries the runner's record that the decision declared
     no risk. It is swept to Ready and Risk stays escalated for the review
-    tier."""
+    tier. Its body's only scan hit was a Siblings checked line, which the
+    scan no longer reads (#2180), so the note names no reason."""
     fixture = next(entry for entry in SCAN_ONLY_HOLDS
                    if "#1195 " in entry["source"])
     stranded = _held_plan(305, fixture["body"], needs="none",
@@ -4478,7 +4479,7 @@ def test_sweep_releases_an_escalated_plan_whose_record_declares_none(
     assert len(comments) == 1
     assert funnel.parse_self_approval(comments[0]) == (
         "needs_nate all null; class Broken self-approvable; origin agent; "
-        "scan-only escalation (data-migration) raises the review tier; "
+        "scan-only escalation raises the review tier; "
         "no declared risk")
 
 

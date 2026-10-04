@@ -8,6 +8,7 @@ None so the default packet passes every row.
 
 from __future__ import annotations
 
+import gzip
 import json
 import pathlib
 import sys
@@ -635,6 +636,101 @@ def diff_section(path, size):
     header_bytes = len(header.encode("utf-8"))
     assert size >= header_bytes + 1
     return header + "+" * (size - header_bytes - 1) + "\n"
+
+
+PR2261_REPRODUCTION = ROOT / "tests" / "fixtures" / "pr_2261_reproduction.json"
+PR2261_NON_FROZEN_DIFF = (
+    ROOT / "tests" / "fixtures" / "pr_2261_non_frozen_sections.diff.gz")
+
+
+def pr_2261_reproduction_diff():
+    """Rebuild PR #2261's measured sections without checking in its 2 MB diff."""
+    source = json.loads(PR2261_REPRODUCTION.read_text(encoding="utf-8"))
+    diff = gzip.decompress(PR2261_NON_FROZEN_DIFF.read_bytes()).decode("utf-8")
+    for row in source["frozen_packets"]:
+        diff += diff_section(row["path"], row["section_bytes"])
+    assert len(diff.encode("utf-8")) == source["diff_bytes"]
+    return source, diff
+
+
+def test_diff_row_accepts_pr_2261_frozen_v2_reproduction():
+    source, diff = pr_2261_reproduction_diff()
+
+    assert source["head_sha"].startswith("7f1989b8")
+    assert len(diff.encode("utf-8")) > review.DIFF_LIMIT_BYTES
+    assert review._diff_bytes_for_cap(diff) == source["non_frozen_bytes"]
+    assert review.precheck_diff({"diff": diff}) == []
+
+
+def test_judges_get_bounded_v2_stubs_without_widening_the_exact_paths():
+    source, diff = pr_2261_reproduction_diff()
+    manifest = {
+        "version": "v2",
+        "packets": {
+            pathlib.Path(row["path"]).stem: {"sha256": row["sha256"]}
+            for row in source["frozen_packets"]
+        },
+    }
+    outside = {
+        "data/review_packets/v2/bad_10.json": diff_section(
+            "data/review_packets/v2/bad_10.json", 300),
+        "data/review_packets/v3/bad_01.json": diff_section(
+            "data/review_packets/v3/bad_01.json", 300),
+        "data/review_packets/v1/must_approve.json": diff_section(
+            "data/review_packets/v1/must_approve.json", 300),
+        "data/review_packets/v1/must_reject.json": diff_section(
+            "data/review_packets/v1/must_reject.json", 300),
+        DIFF_CAP_EXEMPT_PATH: diff_section(DIFF_CAP_EXEMPT_PATH, 300),
+    }
+    malformed = (
+        "diff --git a/data/review_packets/v2/bad_10.json\n"
+        "+malformed header section stays visible\n")
+    diff += "".join(outside.values()) + malformed
+    found = packet(diff=diff, review_packet_manifest=manifest)
+
+    counted_outside = sum(
+        len(section.encode("utf-8")) for path, section in outside.items()
+        if path != DIFF_CAP_EXEMPT_PATH) + len(malformed.encode("utf-8"))
+    assert review._diff_bytes_for_cap(diff) == (
+        source["non_frozen_bytes"] + counted_outside)
+    assert found["precheck"] == {"pass": True, "reasons": []}
+    judged = found["diff"]
+    assert len(judged.encode("utf-8")) < review.DIFF_LIMIT_BYTES
+
+    for row in source["frozen_packets"]:
+        lines = [line for line in judged.splitlines()
+                 if row["path"] in line]
+        assert judged.count(row["path"]) == 1
+        assert len(lines) == 1
+        assert lines[0].startswith("FROZEN PACKET: " + row["path"])
+        assert "added_bytes={}".format(row["section_bytes"]) in lines[0]
+        assert "sha256={}".format(row["sha256"]) in lines[0]
+
+    for path, section in outside.items():
+        assert section in judged
+    assert malformed in judged
+    original = gzip.decompress(
+        PR2261_NON_FROZEN_DIFF.read_bytes()).decode("utf-8")
+    for path in (
+            "data/review_packets/CHANGELOG.md",
+            "data/review_packets/v2/manifest.json",
+            "engine/review_packets.py",
+            "tests/test_engine_review_packets.py"):
+        section = next(
+            "diff --git " + part
+            for part in original.split("diff --git ")[1:]
+            if part.startswith("a/{0} b/{0}\n".format(path)))
+        assert section in judged
+
+    missing = {"version": "v2", "packets": dict(manifest["packets"])}
+    missing["packets"].pop("good_09")
+    not_listed = packet(diff=diff, review_packet_manifest=missing)["diff"]
+    good_09 = next(row for row in source["frozen_packets"]
+                   if row["path"].endswith("good_09.json"))
+    stub = next(line for line in not_listed.splitlines()
+                if good_09["path"] in line)
+    assert "added_bytes={}".format(good_09["section_bytes"]) in stub
+    assert "sha256=not in manifest" in stub
 
 
 @pytest.mark.parametrize(

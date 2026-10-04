@@ -274,6 +274,29 @@ DIFF_TOO_LARGE_REASON = (
 DIFF_CAP_EXEMPT_PATHS = frozenset({
     "dashboard/fixtures/execution_metrics.json",
 })
+#: Frozen v2 calibration packets remain identified individually: a path
+#: outside this exact set is ordinary reviewable diff, even in this directory.
+FROZEN_PACKET_PATHS = frozenset({
+    "data/review_packets/v2/bad_01.json",
+    "data/review_packets/v2/bad_02.json",
+    "data/review_packets/v2/bad_03.json",
+    "data/review_packets/v2/bad_04.json",
+    "data/review_packets/v2/bad_05.json",
+    "data/review_packets/v2/bad_06.json",
+    "data/review_packets/v2/bad_07.json",
+    "data/review_packets/v2/bad_08.json",
+    "data/review_packets/v2/bad_09.json",
+    "data/review_packets/v2/good_01.json",
+    "data/review_packets/v2/good_02.json",
+    "data/review_packets/v2/good_03.json",
+    "data/review_packets/v2/good_04.json",
+    "data/review_packets/v2/good_05.json",
+    "data/review_packets/v2/good_06.json",
+    "data/review_packets/v2/good_07.json",
+    "data/review_packets/v2/good_08.json",
+    "data/review_packets/v2/good_09.json",
+})
+FROZEN_PACKET_MANIFEST_PATH = "data/review_packets/v2/manifest.json"
 
 #: How many of the files a diff could not show its rejection names; the rest
 #: are counted. The reason is recorded in the verdict comment twice (its JSON
@@ -1451,7 +1474,7 @@ def precheck_diff(packet: dict) -> List[str]:
 
 
 def _diff_bytes_for_cap(diff: str) -> int:
-    """Count diff bytes except sections for exact named generated paths.
+    """Count bytes outside the exact cap-exempt and frozen packet paths.
 
     Bytes outside a recognized file section stay counted. If a section header
     cannot be parsed, that section stays counted too, so malformed input cannot
@@ -1463,11 +1486,90 @@ def _diff_bytes_for_cap(diff: str) -> int:
         if line.startswith("diff --git "):
             old_path, new_path = _diff_header_paths(line.rstrip("\r\n"))
             exempt_section = any(
-                path in DIFF_CAP_EXEMPT_PATHS
+                path in DIFF_CAP_EXEMPT_PATHS or path in FROZEN_PACKET_PATHS
                 for path in (old_path, new_path) if path is not None)
         if not exempt_section:
             counted += len(line.encode("utf-8"))
     return counted
+
+
+def _fetch_review_packet_manifest(repo: str, diff: str,
+                                  head_sha: str) -> Optional[dict]:
+    """Read the v2 manifest at the reviewed head when a frozen path is used."""
+    has_frozen_packet = False
+    for line in (diff or "").splitlines():
+        if not line.startswith("diff --git "):
+            continue
+        old_path, new_path = _diff_header_paths(line)
+        if any(path in FROZEN_PACKET_PATHS
+               for path in (old_path, new_path) if path is not None):
+            has_frozen_packet = True
+            break
+    if not has_frozen_packet:
+        return None
+
+    data = _read_file_at(repo, FROZEN_PACKET_MANIFEST_PATH, head_sha)
+    if data is None:
+        raise funnel.GitHubError(
+            "could not read {} at PR head {} for frozen packet stubs".format(
+                FROZEN_PACKET_MANIFEST_PATH, head_sha or "unknown"))
+    try:
+        manifest = json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise funnel.GitHubError(
+            "could not parse {} at PR head {} for frozen packet stubs: {}".format(
+                FROZEN_PACKET_MANIFEST_PATH, head_sha or "unknown", exc))
+    if not isinstance(manifest, dict) or not isinstance(
+            manifest.get("packets"), dict):
+        raise funnel.GitHubError(
+            "{} at PR head {} has no packet manifest".format(
+                FROZEN_PACKET_MANIFEST_PATH, head_sha or "unknown"))
+    return manifest
+
+
+def _stub_frozen_packet_sections(diff: str,
+                                 manifest: Optional[dict]) -> str:
+    """Replace only the named frozen v2 packet sections with one-line stubs."""
+    if not isinstance(manifest, dict):
+        return diff
+    packet_rows = manifest.get("packets")
+    if not isinstance(packet_rows, dict):
+        return diff
+
+    def stub(section: List[str]) -> str:
+        if not section or not section[0].startswith("diff --git "):
+            return "".join(section)
+        old_path, new_path = _diff_header_paths(
+            section[0].rstrip("\r\n"))
+        paths = {path for path in (old_path, new_path)
+                 if path in FROZEN_PACKET_PATHS}
+        if len(paths) != 1:
+            return "".join(section)
+        path = next(iter(paths))
+        name = os.path.splitext(os.path.basename(path))[0]
+        row = packet_rows.get(name)
+        digest = row.get("sha256") if isinstance(row, dict) else None
+        if not isinstance(digest, str) or not re.fullmatch(
+                r"[0-9a-f]{64}", digest):
+            digest = "not in manifest"
+        added_bytes = len("".join(section).encode("utf-8"))
+        return ("FROZEN PACKET: {} added_bytes={} sha256={}\n".format(
+            path, added_bytes, digest))
+
+    output: List[str] = []
+    section: List[str] = []
+    for line in diff.splitlines(keepends=True):
+        if line.startswith("diff --git "):
+            if section:
+                output.append(stub(section))
+            section = [line]
+        elif section:
+            section.append(line)
+        else:
+            output.append(line)
+    if section:
+        output.append(stub(section))
+    return "".join(output)
 
 
 def precheck(packet: dict) -> Dict[str, object]:
@@ -3116,7 +3218,8 @@ def build_packet(*, repo: str, pr_number: int, pr_view: dict, diff: str,
                  changed_files: Optional[Sequence[str]] = None,
                  merge_base: Optional[str] = None,
                  scope_source: str = "pr",
-                 scoped_rereview: Optional[Dict] = None) -> Dict:
+                 scoped_rereview: Optional[Dict] = None,
+                 review_packet_manifest: Optional[dict] = None) -> Dict:
     """Assemble the packet from already-fetched pieces. Pure: no IO.
 
     Every field the review question needs, in one JSON-serialisable dict.
@@ -3166,6 +3269,9 @@ def build_packet(*, repo: str, pr_number: int, pr_view: dict, diff: str,
     PR fallback), ``pr_base_sha`` is the PR's recorded base, and
     ``scope_source`` names which scope the packet carries (``"compare"`` or
     ``"pr"``), so a reviewer can see when the two bases differ.
+    ``review_packet_manifest`` carries the v2 packet checksums at the PR head;
+    the precheck uses the complete diff, then only the judge-facing diff stubs
+    those exact frozen packet sections.
     """
     pr_view = pr_view or {}
     if changed_files is None:
@@ -3260,6 +3366,8 @@ def build_packet(*, repo: str, pr_number: int, pr_view: dict, diff: str,
         assembled["ci_rerun"] = decide_ci_rerun(assembled)
     else:
         assembled["ci_rerun"] = None
+    assembled["diff"] = _stub_frozen_packet_sections(
+        diff, review_packet_manifest)
     return assembled
 
 
@@ -4470,6 +4578,8 @@ def collect(repo: Optional[str], pr_number: int, *,
     if pinned_scope is not None:
         scope_files, scope_diff, merge_base = pinned_scope
         scope_source = "compare"
+    review_packet_manifest = _fetch_review_packet_manifest(
+        resolved, scope_diff, head_sha)
     packet = build_packet(
         repo=resolved,
         pr_number=pr_number,
@@ -4490,6 +4600,7 @@ def collect(repo: Optional[str], pr_number: int, *,
         stop_counter=fetch_stop_counter(lambda: loaded_items, now),
         collected_at=(now or datetime.now(timezone.utc)).isoformat(),
         scoped_rereview=scoped_rereview,
+        review_packet_manifest=review_packet_manifest,
     )
     # Keep build_packet pure; unrunnability depends on fresh GitHub state.
     packet = annotate_unrunnable_premises(packet)

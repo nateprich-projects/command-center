@@ -24,11 +24,13 @@ import stat
 import subprocess
 import sys
 import uuid
+from types import SimpleNamespace
 
 import pytest
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+import funnel  # noqa: E402
 from engine import review_prompts  # noqa: E402
 
 SCRIPT = ROOT / "scripts" / "muse-review-engine"
@@ -1226,6 +1228,7 @@ def _non_open_packet():
     return _packet(
         state="CLOSED",
         merged_at="2026-09-16T03:46:42Z",
+        standing={"state": "closed", "reason": "PR is CLOSED"},
         precheck={"pass": False,
                   "reasons": [
                       "pr_not_open state=CLOSED merged_at=2026-09-16T03:46:42Z",
@@ -1253,8 +1256,22 @@ def _covered_verdict_packet():
         verdict={"verdict": "approved", "ci": "green", "head_sha": HEAD,
                  "blocking": []},
         verdict_head_sha=HEAD,
+        standing={
+            "state": "covered",
+            "reason": "a verdict already covers head {}".format(HEAD[:12]),
+        },
         precheck={"pass": False, "reasons": [
             "verdict: a verdict already covers head {}".format(HEAD[:12]),
+        ]},
+    )
+
+
+def _standing_packet(state, reason):
+    return _packet(
+        standing={"state": state, "reason": reason},
+        precheck={"pass": False, "reasons": [
+            "ci: CI not green (state unknown)",
+            "stop: stop_auto_merging set",
         ]},
     )
 
@@ -1327,10 +1344,60 @@ def test_a_non_open_precheck_stops_without_a_verdict_or_blocking_note(tmp_path):
     assert _apply_calls(repo) == []
     assert not (repo / "applied.marker").exists()
     heartbeat = _heartbeat(repo)
-    assert "pr_not_open state=CLOSED merged_at=2026-09-16T03:46:42Z" in heartbeat
+    legacy_reason = (
+        "pr_not_open state=CLOSED merged_at=2026-09-16T03:46:42Z")
+    assert legacy_reason in heartbeat
+    assert "PR is CLOSED" not in heartbeat
     assert "no verdict recorded" in heartbeat
     assert "--review-result" not in heartbeat
     assert not (repo / "gh.log").exists()
+
+
+def test_a_closed_standing_stands_down_without_a_legacy_precheck_reason(
+        tmp_path):
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), _standing_packet("closed", "PR is CLOSED"))
+
+    assert proc.returncode == 0, proc.stderr
+    assert _muse_calls(repo) == 0
+    assert _apply_calls(repo) == []
+    assert not (repo / "applied.marker").exists()
+    heartbeat = _heartbeat_without_muse_call_record(repo)
+    assert "PR is CLOSED" in heartbeat
+    assert "no verdict recorded" in heartbeat
+    assert "--review-result" not in heartbeat
+
+
+def test_a_covered_standing_keeps_its_existing_reason_and_stands_down(tmp_path):
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), _covered_verdict_packet())
+
+    assert proc.returncode == 0, proc.stderr
+    assert _muse_calls(repo) == 0
+    assert _apply_calls(repo) == []
+    assert not (repo / "applied.marker").exists()
+    heartbeat = _heartbeat_without_muse_call_record(repo)
+    assert "review skipped — a verdict already covers head {}".format(
+        HEAD[:12]) in heartbeat
+    assert "no verdict recorded" in heartbeat
+    assert "--review-result" not in heartbeat
+    assert not (repo / "gh.log").exists()
+
+
+def test_a_covered_standing_stands_down_without_a_legacy_precheck_reason(
+        tmp_path):
+    packet = _covered_verdict_packet()
+    packet["precheck"] = {"pass": True, "reasons": []}
+    proc, repo = _stubbed_runner(tmp_path, _begin(), packet)
+
+    assert proc.returncode == 0, proc.stderr
+    assert _muse_calls(repo) == 0
+    assert _apply_calls(repo) == []
+    assert not (repo / "applied.marker").exists()
+    heartbeat = _heartbeat_without_muse_call_record(repo)
+    assert "a verdict already covers head {}".format(HEAD[:12]) in heartbeat
+    assert "no verdict recorded" in heartbeat
+    assert "--review-result" not in heartbeat
 
 
 def test_a_could_not_run_ci_stands_down_without_a_verdict_or_rejection(tmp_path):
@@ -1344,6 +1411,92 @@ def test_a_could_not_run_ci_stands_down_without_a_verdict_or_rejection(tmp_path)
     assert "CI could not run: Recent account payments have failed" in heartbeat
     assert "no verdict recorded" in heartbeat
     assert "--review-result" not in heartbeat
+
+
+@pytest.mark.parametrize(("state", "reason"), [
+    ("wait", "mergeability UNKNOWN"),
+    ("conflict", "branch 'ticket/9' is conflicting with the base — "
+                 "an engineer rebase is required"),
+], ids=["wait", "conflict"])
+def test_wait_or_conflict_standing_overrides_other_precheck_rows(
+        tmp_path, state, reason):
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), _standing_packet(state, reason))
+
+    assert proc.returncode == 0, proc.stderr
+    assert _muse_calls(repo) == 0
+    assert _apply_calls(repo) == []
+    assert not (repo / "applied.marker").exists()
+    assert not (repo / "gh.log").exists()
+    heartbeat = _heartbeat_without_muse_call_record(repo)
+    assert reason in heartbeat
+    assert "no verdict recorded" in heartbeat
+    assert "--review-result" not in heartbeat
+
+
+def test_conflict_standing_leaves_the_canonical_rejection_for_next_listing(
+        tmp_path, monkeypatch):
+    reason = "branch 'ticket/6'" + funnel.CONFLICTING_BRANCH_SUFFIX
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), _standing_packet("conflict", reason))
+
+    assert proc.returncode == 0, proc.stderr
+    assert _muse_calls(repo) == 0
+    assert _apply_calls(repo) == []
+    assert not (repo / "applied.marker").exists()
+    assert not (repo / "gh.log").exists()
+    heartbeat = _heartbeat_without_muse_call_record(repo)
+    assert reason in heartbeat
+    assert "no verdict recorded" in heartbeat
+    assert "--review-result" not in heartbeat
+
+    # The later listing owns the deterministic conflict rejection (#1351).
+    ticket = SimpleNamespace(
+        ref=REPO + "#6", repo=REPO, number=6, title="Do the thing",
+        url="https://github.com/{}/issues/6".format(REPO),
+        state="OPEN", risk="standard",
+    )
+    row = {
+        "number": PR,
+        "state": "OPEN",
+        "headRefName": "ticket/6",
+        "headRefOid": HEAD,
+        "mergeable": "CONFLICTING",
+        "mergeStateStatus": "DIRTY",
+        "statusCheckRollup": [{"name": "tests", "status": "IN_PROGRESS"}],
+        "isCrossRepository": False,
+        "headRepository": {"nameWithOwner": REPO},
+        "author": {"login": "nateprich"},
+        "verdict": None,
+    }
+    facts = funnel.TicketPRFacts(rows_by_ref={ticket.ref: [row]})
+    writes = []
+
+    def capture_write(repo_name, pr, sha, verdict, ci, blocking, note,
+                      **kwargs):
+        writes.append({
+            "repo": repo_name,
+            "pr": pr,
+            "head_sha": sha,
+            "verdict": verdict,
+            "ci": ci,
+            "blocking": list(blocking),
+            "agent": kwargs.get("agent"),
+        })
+        return 0
+
+    monkeypatch.setattr(funnel, "_write_verdict", capture_write)
+
+    assert funnel.review_queue([ticket], pr_facts=facts) == []
+    assert writes == [{
+        "repo": REPO,
+        "pr": PR,
+        "head_sha": HEAD,
+        "verdict": "rejected",
+        "ci": "unknown",
+        "blocking": [reason],
+        "agent": funnel.MERGE_GATE_AGENT,
+    }]
 
 
 # -- passing precheck with a CI re-run outstanding (#1019) ----------------------
@@ -5129,8 +5282,13 @@ def test_a_replay_runs_no_heartbeat_funnel_gh_or_review_apply(tmp_path):
 @pytest.mark.parametrize("packet", [
     _failing_packet(), _non_open_packet(), _could_not_run_packet(),
     _covered_verdict_packet(), _rerun_packet(), _wait_packet(),
+    _standing_packet("wait", "mergeability UNKNOWN"),
+    _standing_packet(
+        "conflict", "branch 'ticket/9' is conflicting with the base — "
+        "an engineer rebase is required"),
 ], ids=["failing precheck", "not open", "CI could not run",
-        "covered verdict", "CI re-run", "CI wait"])
+        "covered verdict", "CI re-run", "CI wait", "standing wait",
+        "standing conflict"])
 def test_a_replay_judges_the_packet_past_the_precheck_and_ci_branches(
         tmp_path, packet):
     """Each of these ends a live run before the lister; a replay asks the

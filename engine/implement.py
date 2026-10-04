@@ -1789,11 +1789,12 @@ def close_no_diff_ticket(repo: str, number: int, *,
 
 def create_or_update_pr(repo: str, context: dict, ticket: dict,
                         body: str) -> dict:
-    """Create the ticket PR, or update the one already open for the branch.
+    """Create or update the ticket PR, unless its pushed head already merged.
 
     Only the funnel's own open PR is updated (#1794): ``--head`` also matches
     a fork's PR on a branch of the same name, and editing that would act on
-    a stranger's PR.
+    a stranger's PR. A late finish after the merge gate lands the same head
+    must leave the merged PR in place rather than create a duplicate.
     """
     rows = funnel._gh_json(
         "gh", "pr", "list", "--repo", repo, "--state", "open",
@@ -1815,6 +1816,25 @@ def create_or_update_pr(repo: str, context: dict, ticket: dict,
         if proc.returncode != 0:
             raise funnel.GitHubError((proc.stderr or "could not update PR").strip())
         return pr
+    pushed_head = context.get("head_sha")
+    if not isinstance(pushed_head, str) or not pushed_head:
+        raise ImplementError("could not read the pushed head SHA")
+    merged_rows = funnel._gh_json(
+        "gh", "pr", "list", "--repo", repo, "--state", "merged",
+        "--head", context["branch"],
+        "--json", "number,url,headRefOid," + funnel.PR_TRUST_JSON_FIELDS,
+        "--limit", "10",
+    )
+    if merged_rows is None or not isinstance(merged_rows, list):
+        raise funnel.GitHubError("could not list the branch's merged PRs")
+    for row in merged_rows:
+        if (funnel.is_funnel_pr(repo, row)
+                and row.get("headRefOid") == pushed_head):
+            return {
+                "number": row.get("number"),
+                "url": row.get("url"),
+                "merged": True,
+            }
     proc = funnel._run_gh(
         ["gh", "pr", "create", "--repo", repo, "--base", "main",
          "--head", context["branch"], "--title", title,
@@ -3293,7 +3313,8 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
         evidence=render_evidence_block(
             sha=pushed, merged=merged, reproduction=reproduced,
             repo=resolved, prior_fixes=prior_fixes))
-    pr = pr_effect(resolved, context, ticket, body)
+    pr_context = dict(context, head_sha=pushed)
+    pr = pr_effect(resolved, pr_context, ticket, body)
     note = "PR #{}".format(pr["number"])
     if test_source is not None:
         note += " (tests: {})".format(
@@ -3307,7 +3328,9 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
     _finish_exit(
         ref, run=run, agent=agent, outcome="done", note=note,
         release=release_effect, heartbeat_finish=heartbeat_finish,
-        remove_checkout=context, done="PR #{} is open".format(pr["number"]),
+        remove_checkout=context,
+        done=("PR #{} is already merged" if pr.get("merged") else
+              "PR #{} is open").format(pr["number"]),
     )
     return pr
 

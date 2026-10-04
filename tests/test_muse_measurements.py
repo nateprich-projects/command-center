@@ -149,6 +149,28 @@ def test_runtime_buffer_is_a_private_single_slot_recovery_copy(tmp_path):
     assert path.parent.stat().st_mode & 0o777 == 0o700
 
 
+def test_runtime_buffer_records_a_failure_before_any_pairing(tmp_path):
+    assert muse_measurements.record_runtime_failure(
+        "command-center#2123",
+        "owner_report_history_unavailable",
+        REPORT_TEXT,
+        runtime_root=tmp_path,
+    )
+
+    buffer = muse_measurements.load_runtime_buffer(tmp_path)
+    path = tmp_path / "muse-estimate" / "latest.json"
+
+    assert buffer["measurement"] is None
+    assert buffer["estimate"] is None
+    assert buffer["last_failure"] == {
+        "source": "command-center#2123",
+        "reason": "owner_report_history_unavailable",
+        "observed_at": REPORT_TEXT,
+    }
+    assert path.stat().st_mode & 0o777 == 0o600
+    assert path.parent.stat().st_mode & 0o777 == 0o700
+
+
 def test_valid_36_percent_report_preserves_provenance_and_pairs_at_report_time(
     monkeypatch,
 ):

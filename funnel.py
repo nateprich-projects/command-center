@@ -13889,7 +13889,10 @@ def _dashboard_muse_usage(now_epoch: float) -> Optional[Dict[str, object]]:
     if not muse_measurements.feed_enabled():
         return row
 
-    comments = _dashboard_muse_owner_comments()
+    try:
+        comments = _dashboard_muse_owner_comments()
+    except Exception:
+        comments = None
     measurement = None
     owner_report_unusable = False
     if comments is not None:
@@ -13917,11 +13920,16 @@ def _dashboard_muse_usage(now_epoch: float) -> Optional[Dict[str, object]]:
             "muse_measurements", "measurement_not_usable_for_window",
             observed_at,
         )
-        return row
+        return _dashboard_muse_buffer_estimate(buffer) or row
 
+    record_written = True
     if (comments is not None
-            and not muse_measurements.pairing_record_exists(comments, measurement)
-            and not _dashboard_muse_write_pairing_record(measurement)):
+            and not muse_measurements.pairing_record_exists(comments, measurement)):
+        try:
+            record_written = _dashboard_muse_write_pairing_record(measurement)
+        except Exception:
+            record_written = False
+    if not record_written:
         muse_measurements.record_runtime_failure(
             "command-center#2123", "pairing_record_write_failed",
             observed_at,

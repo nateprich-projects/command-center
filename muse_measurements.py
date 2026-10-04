@@ -397,9 +397,16 @@ def load_runtime_buffer(runtime_root: Optional[Path | str] = None) -> Optional[d
             value = json.load(stream)
     except (OSError, ValueError):
         return None
-    if (not isinstance(value, dict) or value.get("schema_version") != SCHEMA_VERSION
-            or not isinstance(value.get("measurement"), dict)
-            or not isinstance(value.get("estimate"), dict)):
+    if not isinstance(value, dict) or value.get("schema_version") != SCHEMA_VERSION:
+        return None
+    measurement = value.get("measurement")
+    estimate = value.get("estimate")
+    failure = value.get("last_failure")
+    if ((measurement is None) != (estimate is None)
+            or (measurement is not None and not isinstance(measurement, dict))
+            or (estimate is not None and not isinstance(estimate, dict))
+            or (measurement is None and estimate is None
+                and not isinstance(failure, dict))):
         return None
     return value
 
@@ -453,7 +460,11 @@ def record_runtime_failure(
     """Record a bounded failure reason internally without creating a log."""
     buffer = load_runtime_buffer(runtime_root)
     if buffer is None:
-        return False
+        buffer = {
+            "schema_version": SCHEMA_VERSION,
+            "measurement": None,
+            "estimate": None,
+        }
     buffer["last_failure"] = {
         "source": source,
         "reason": reason,

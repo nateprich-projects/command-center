@@ -1906,6 +1906,29 @@ if (( ! REPLAY )) && [[ "$PACKET_STANDING_STATE" == "wait" || \
   exit 0
 fi
 
+# Closed is still a stand-down. Keep the legacy precheck reason in the
+# heartbeat when it is present; if it is missing, use the shared standing
+# reason instead of judging or rejecting a closed PR.
+if (( ! REPLAY )) && [[ "$PACKET_STANDING_STATE" == "closed" ]]; then
+  if [[ "$PACKET_PR_NOT_OPEN" == "True" ]]; then
+    if ! packet_field pr_not_open_reason >"$DECISION_FILE"; then
+      echo "muse-review-engine: could not read the non-OPEN precheck reason" >&2
+      failure "could not read the non-OPEN precheck reason for PR #$BEGIN_PR in $BEGIN_REPO" || true
+      exit 1
+    fi
+    PR_NOT_OPEN_REASON="$(cat "$DECISION_FILE")"
+  else
+    PR_NOT_OPEN_REASON="$PACKET_STANDING_REASON"
+  fi
+  if [[ -z "$PR_NOT_OPEN_REASON" ]]; then
+    echo "muse-review-engine: standing closed has no reason" >&2
+    failure "standing closed for PR #$BEGIN_PR in $BEGIN_REPO has no reason; recorded nothing" || true
+    exit 1
+  fi
+  finish_done "review skipped PR #$BEGIN_PR in $BEGIN_REPO at $HEAD_SHORT: $PR_NOT_OPEN_REASON; no verdict recorded"
+  exit 0
+fi
+
 # A startup or account stop is not a code-review verdict.  The run stays
 # healthy and quiet until Actions recovers; recording rejection here would
 # count the same untestable head against the auto-merge bar and hand the
@@ -1916,6 +1939,19 @@ fi
 # nothing and judges the packet as it was collected (#1730).
 if (( ! REPLAY )) && [[ "$PACKET_CI" == "could-not-run" ]]; then
   finish_done "review skipped PR #$BEGIN_PR in $BEGIN_REPO at $HEAD_SHORT: CI could not run: $PACKET_CI_REASON; no verdict recorded"
+  exit 0
+fi
+
+# A covered head must not reach a model call when its legacy precheck row is
+# absent. The shared standing reason is the packet's reason in that case.
+if (( ! REPLAY )) && [[ "$PACKET_STANDING_STATE" == "covered" && \
+                         "$PACKET_PASS" == "True" ]]; then
+  if [[ -z "$PACKET_STANDING_REASON" ]]; then
+    echo "muse-review-engine: standing covered has no reason" >&2
+    failure "standing covered for PR #$BEGIN_PR in $BEGIN_REPO has no reason; recorded nothing" || true
+    exit 1
+  fi
+  finish_done "review skipped — $PACKET_STANDING_REASON; no verdict recorded"
   exit 0
 fi
 
@@ -1933,7 +1969,19 @@ if (( ! REPLAY )) && [[ "$PACKET_PASS" != "True" ]]; then
   # Row 4 already established that a verdict covers this head. Standing
   # down only when it is the sole failing row preserves that verdict without
   # changing the rejection path for a packet carrying another blocker.
-  if [[ "$PACKET_COVERED_VERDICT_ONLY" == "True" ]]; then
+  if [[ "$PACKET_STANDING_STATE" == "covered" ]]; then
+    if [[ "$PACKET_COVERED_VERDICT_ONLY" == "True" ]]; then
+      if [[ -z "$PACKET_STANDING_REASON" ]]; then
+        echo "muse-review-engine: standing covered has no reason" >&2
+        failure "standing covered for PR #$BEGIN_PR in $BEGIN_REPO has no reason; recorded nothing" || true
+        exit 1
+      fi
+      finish_done "review skipped — $PACKET_STANDING_REASON; no verdict recorded"
+      exit 0
+    fi
+    # A separate failing row keeps the existing rejection path.
+  elif [[ "$PACKET_COVERED_VERDICT_ONLY" == "True" ]]; then
+    # Legacy packets have no shared standing field.
     finish_done "review skipped — a verdict already covers head $HEAD_SHORT; no verdict recorded"
     exit 0
   fi

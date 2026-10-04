@@ -211,9 +211,10 @@
       }
     },
     {
-      "id": "1527-owner-comment-reopens-unsure",
+      "id": "1527-owner-comment-then-approval-clears-unsure",
       "fix": "#1527",
-      "case": "Later owner comment reopens a requirement-unsure rejection.",
+      "amended_by": "#2300",
+      "case": "Owner evidence reopens an unsure rejection; later same-head approval clears it.",
       "ticket_number": 8005,
       "risk": "standard",
       "pr_row": {
@@ -261,24 +262,29 @@
           },
           "body": "Owner supplied new evidence.",
           "createdAt": "2026-09-30T10:01:00Z"
+        },
+        {
+          "author": {
+            "login": "nateprich"
+          },
+          "body": "<!-- command-center-review -->\n\n**Review: approved** (CI green)\n\n```json\n{\n  \"blocking\": [],\n  \"ci\": \"green\",\n  \"head_sha\": \"4e6c9a3b1d2f50718293a4b5c6d7e8f901234567\",\n  \"verdict\": \"approved\"\n}\n```",
+          "createdAt": "2026-09-30T10:02:00Z"
         }
       ],
       "expected_verdict": {
-        "verdict": "rejected",
+        "verdict": "approved",
         "ci": "green",
         "head_sha": "4e6c9a3b1d2f50718293a4b5c6d7e8f901234567",
-        "blocking": [
-          "requirement unsure: verify the run"
-        ]
+        "blocking": []
       },
       "expected_standing": {
-        "state": "reviewable",
-        "reason": null
+        "state": "covered",
+        "reason": "a verdict already covers head 4e6c9a3b1d2f"
       },
       "expected_listing": {
-        "listed": true,
+        "listed": false,
         "tier_filter": "standard",
-        "candidate_tier": "standard",
+        "candidate_tier": null,
         "skipped_reason": null
       }
     },

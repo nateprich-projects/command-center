@@ -22,6 +22,7 @@ NOW = datetime(2026, 9, 13, 12, 0, tzinfo=timezone.utc)
 def _no_live_claude_sample(monkeypatch):
     import usage
 
+    monkeypatch.setenv("COMMAND_CENTER_MUSE_ESTIMATE_FEED_DISABLED", "1")
     monkeypatch.setattr(
         usage, "read_claude_plan_weekly_sample", lambda _now: None
     )
@@ -502,6 +503,139 @@ def test_dashboard_muse_usage_maps_the_seven_day_window(monkeypatch):
         "used_percent": 7.15,
         "calls": 42,
     }
+
+
+def test_dashboard_muse_estimate_uses_owner_report_and_records_pair_once(
+    monkeypatch, tmp_path,
+):
+    import muse_measurements
+    import usage
+
+    monkeypatch.delenv("COMMAND_CENTER_MUSE_ESTIMATE_FEED_DISABLED", raising=False)
+    report_at = 1_791_066_187.0
+    current_at = report_at + 3600
+    reset_at = 1_791_158_400.0
+    source_url = (
+        "https://github.com/nateprich-projects/command-center/issues/2123"
+        "#issuecomment-5974149725"
+    )
+    comments = [{
+        "author": {"login": "nateprich"},
+        "url": source_url,
+        "body": (
+            "Nate reported at 2026-10-03 22:23:07 UTC (15:23:07 PDT).\n\n"
+            "Reported panel value: 36% used. Source: Nate's live reading at Meta. "
+            "The timestamp above is the report time, not a verified sample time."
+        ),
+    }]
+    report_meter = {
+        "source": "muse", "captured_at": report_at,
+        "spent_dollars": 68.50, "cap_dollars": 200.0,
+        "windows": {"seven_day": {
+            "used_percent": 34.25, "spent_dollars": 68.50,
+            "cap_dollars": 200.0, "resets_at": reset_at,
+        }},
+    }
+    current_meter = {
+        "source": "muse", "captured_at": current_at,
+        "spent_dollars": 72.0, "cap_dollars": 200.0,
+        "windows": {"seven_day": {
+            "used_percent": 36.0, "spent_dollars": 72.0,
+            "cap_dollars": 200.0, "calls": 43, "resets_at": reset_at,
+        }},
+    }
+    monkeypatch.setattr(
+        usage, "read_muse",
+        lambda as_of: report_meter if as_of == report_at else current_meter,
+    )
+    pace_inputs = []
+    monkeypatch.setattr(
+        usage, "pace",
+        lambda reading, _now, provider=None: (
+            pace_inputs.append(reading["spent_dollars"]) or {"windows": []}
+        ),
+    )
+    monkeypatch.setattr(funnel, "_dashboard_muse_owner_comments", lambda: comments)
+    writes = []
+
+    def write_pairing(measurement):
+        writes.append(dict(measurement))
+        comments.append({
+            "body": muse_measurements.pairing_record_comment(measurement),
+        })
+        return True
+
+    monkeypatch.setattr(funnel, "_dashboard_muse_write_pairing_record", write_pairing)
+    monkeypatch.setattr(
+        muse_measurements, "runtime_buffer_root",
+        lambda _runtime_root=None: tmp_path / "muse-estimate",
+    )
+
+    first = funnel._dashboard_muse_usage(current_at)
+    second = funnel._dashboard_muse_usage(current_at)
+
+    assert first["spent_dollars"] == 75.5
+    assert first["used_percent"] == 37.75
+    assert first["measurement"]["reported_at"] == "2026-10-03T22:23:07Z"
+    assert first["measurement"]["source_record_url"] == source_url
+    assert pace_inputs == [72.0, 72.0]
+    assert len(writes) == 1
+    assert second["spent_dollars"] == first["spent_dollars"]
+
+    comments[:] = [
+        {
+            "author": {"login": "nateprich"},
+            "url": source_url.replace("5974149725", "5975000000"),
+            "body": (
+                "Nate reported at 2026-10-04 00:00:00 UTC (17:00:00 PDT).\n\n"
+                "Reported panel value: 38% used. Source: Nate's live reading at Meta."
+            ),
+        },
+        comments[-1],
+    ]
+    monkeypatch.setattr(
+        usage, "read_muse",
+        lambda as_of: current_meter if as_of == current_at else None,
+    )
+
+    cached = funnel._dashboard_muse_usage(current_at)
+    buffer = muse_measurements.load_runtime_buffer()
+
+    assert cached["spent_dollars"] == 75.5
+    assert buffer["last_failure"]["reason"] == "owner_report_unusable"
+    assert buffer["last_failure"]["observed_at"]
+
+
+def test_snapshot_keeps_report_observation_separate_from_publication_time(
+    tmp_path, monkeypatch,
+):
+    spool = tmp_path / "spool"
+    monkeypatch.setenv(funnel.DASHBOARD_SPOOL_ENV, str(spool))
+    usage = {
+        "muse": {
+            "source": "Muse estimate anchored to owner-reported account-panel reading",
+            "captured_at": 1_791_069_787.0,
+            "spent_dollars": 75.5,
+            "cap_dollars": 200.0,
+            "used_percent": 37.75,
+            "measurement": {
+                "reported_at": "2026-10-03T22:23:07Z",
+                "approximate_observation_time": "2026-10-03T22:23:07Z",
+                "provenance": "owner-reported",
+            },
+        }
+    }
+
+    target = funnel.write_dashboard_snapshot(
+        {"n": 1}, {"columns": []}, "2026-10-04T10:00:00Z", usage=usage
+    )
+    snapshot = json.loads(target.read_text())
+
+    assert snapshot["generated_at"] == "2026-10-04T10:00:00Z"
+    assert snapshot["usage"]["muse"]["measurement"]["reported_at"] == (
+        "2026-10-03T22:23:07Z"
+    )
+    assert "sampled_at" not in snapshot["usage"]["muse"]
 
 
 def test_dashboard_muse_panel_usage_records_latest_validated_reading():

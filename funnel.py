@@ -13774,28 +13774,68 @@ def dashboard_board(
     return {"columns": columns}
 
 
-def _dashboard_muse_usage(now_epoch: float) -> Optional[Dict[str, object]]:
-    """Return the compact Muse local-spend estimate for the dashboard.
+def _dashboard_muse_owner_comments() -> Optional[List[Dict[str, object]]]:
+    """Read the source issue history for owner-supplied panel readings."""
+    data = _gh_json(
+        "gh", "issue", "view", "2123", "--repo",
+        "nateprich-projects/command-center", "--json", "comments",
+    )
+    comments = data.get("comments") if isinstance(data, dict) else None
+    return comments if isinstance(comments, list) else None
 
-    Rolling seven-day dollars against the cap only; the 2026-09-18 decision
-    declined a 24-hour companion line. Best effort like the rest of the
-    snapshot: an unreadable reader yields None and the page shows unavailable,
-    never a failed brief.
+
+def _dashboard_muse_write_pairing_record(measurement: Mapping) -> bool:
+    """Write a single source-linked pairing record, never a refresh log."""
+    import muse_measurements
+
+    result = _run_gh(
+        ["gh", "issue", "comment", "2123", "--repo",
+         "nateprich-projects/command-center", "--body",
+         muse_measurements.pairing_record_comment(measurement)],
+        capture_output=True, text=True,
+    )
+    return result.returncode == 0
+
+
+def _dashboard_muse_buffer_estimate(buffer: Optional[Mapping]):
+    estimate = buffer.get("estimate") if isinstance(buffer, Mapping) else None
+    return dict(estimate) if isinstance(estimate, Mapping) else None
+
+
+def _dashboard_muse_usage(now_epoch: float) -> Optional[Dict[str, object]]:
+    """Return the dashboard-only seven-day Muse estimate.
+
+    The local own-card meter still computes pacing and the fallback estimate.
+    A validated owner report may adjust only the display estimate in the same
+    seven-day window. GitHub comments remain the source; the one-slot runtime
+    buffer only carries the last accepted pairing across read failures.
     """
     try:
+        import muse_measurements
         import usage
     except Exception:
         return None
+
+    buffer = muse_measurements.load_runtime_buffer()
+    observed_at = datetime.fromtimestamp(now_epoch, timezone.utc).isoformat()
     try:
         reading = usage.read_muse(now_epoch)
     except Exception:
-        return None
+        reading = None
     if not isinstance(reading, dict):
-        return None
+        muse_measurements.record_runtime_failure(
+            "usage.read_muse", "own_card_meter_unavailable",
+            observed_at,
+        )
+        return _dashboard_muse_buffer_estimate(buffer)
     windows = reading.get("windows")
     window = windows.get("seven_day") if isinstance(windows, dict) else None
     if not isinstance(window, dict):
-        return None
+        muse_measurements.record_runtime_failure(
+            "usage.read_muse", "own_card_meter_window_unavailable",
+            observed_at,
+        )
+        return _dashboard_muse_buffer_estimate(buffer)
     spent = reading.get("spent_dollars")
     cap = reading.get("cap_dollars")
     percent = window.get("used_percent")
@@ -13808,22 +13848,19 @@ def _dashboard_muse_usage(now_epoch: float) -> Optional[Dict[str, object]]:
             or value != value
             or value in (float("inf"), float("-inf"))
         ):
-            return None
+            return _dashboard_muse_buffer_estimate(buffer)
     if (
         not isinstance(captured_at, (int, float))
         or isinstance(captured_at, bool)
         or not math.isfinite(captured_at)
         or captured_at < 0
     ):
-        return None
+        return _dashboard_muse_buffer_estimate(buffer)
     if cap <= 0 or spent < 0:
-        return None
-    if (
-        not isinstance(calls, int)
-        or isinstance(calls, bool)
-        or calls < 0
-    ):
-        return None
+        return _dashboard_muse_buffer_estimate(buffer)
+    if not isinstance(calls, int) or isinstance(calls, bool) or calls < 0:
+        return _dashboard_muse_buffer_estimate(buffer)
+
     row: Dict[str, object] = {
         "source": "Local Muse session journal estimate",
         "captured_at": float(captured_at),
@@ -13832,9 +13869,8 @@ def _dashboard_muse_usage(now_epoch: float) -> Optional[Dict[str, object]]:
         "used_percent": float(percent),
         "calls": calls,
     }
-    # #1199: the pace signal, when the reader carries one, so the run-out time
-    # is on the page days ahead instead of discovered at the wall. Best effort
-    # like the rest of the row: a missing or odd value is simply left out.
+    # The dashboard carries pacing as display metadata; the adjusted owner
+    # reading never enters this calculation.
     try:
         verdict = usage.pace(
             reading, now_epoch, provider=usage.provider_of("muse"))
@@ -13849,6 +13885,67 @@ def _dashboard_muse_usage(now_epoch: float) -> Optional[Dict[str, object]]:
             if isinstance(value, (int, float)) and not isinstance(value, bool):
                 row[key] = float(value)
         break
+
+    if not muse_measurements.feed_enabled():
+        return row
+
+    comments = _dashboard_muse_owner_comments()
+    measurement = None
+    owner_report_unusable = False
+    if comments is not None:
+        owner_reports = muse_measurements.owner_reports_from_comments(comments)
+        measurement = muse_measurements.latest_usable_owner_measurement(
+            comments, meter_reader=usage.read_muse,
+        )
+        owner_report_unusable = bool(owner_reports) and measurement is None
+    if measurement is None and isinstance(buffer, Mapping):
+        cached_measurement = buffer.get("measurement")
+        if isinstance(cached_measurement, Mapping):
+            measurement = dict(cached_measurement)
+
+    if measurement is None:
+        if comments is None:
+            muse_measurements.record_runtime_failure(
+                "command-center#2123", "owner_report_history_unavailable",
+                observed_at,
+            )
+        return row
+
+    adjusted = muse_measurements.adjusted_estimate(measurement, reading)
+    if adjusted is None:
+        muse_measurements.record_runtime_failure(
+            "muse_measurements", "measurement_not_usable_for_window",
+            observed_at,
+        )
+        return row
+
+    if (comments is not None
+            and not muse_measurements.pairing_record_exists(comments, measurement)
+            and not _dashboard_muse_write_pairing_record(measurement)):
+        muse_measurements.record_runtime_failure(
+            "command-center#2123", "pairing_record_write_failed",
+            observed_at,
+        )
+        return _dashboard_muse_buffer_estimate(buffer) or row
+
+    row.update({
+        key: adjusted[key]
+        for key in (
+            "source", "captured_at", "spent_dollars", "cap_dollars",
+            "used_percent", "calls", "measurement",
+        )
+    })
+    muse_measurements.save_runtime_buffer(measurement, row)
+    if comments is None:
+        muse_measurements.record_runtime_failure(
+            "command-center#2123", "owner_report_history_unavailable",
+            observed_at,
+        )
+    elif owner_report_unusable:
+        muse_measurements.record_runtime_failure(
+            "command-center#2123", "owner_report_unusable",
+            observed_at,
+        )
     return row
 
 

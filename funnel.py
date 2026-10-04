@@ -19757,10 +19757,85 @@ def ticket_pr_facts(
     return facts
 
 
+#: Where a PR head stands for review, and why (#2192). ``state`` is one of
+#: ``closed``, ``foreign``, ``conflict``, ``wait``, ``covered`` and
+#: ``reviewable``; ``reason`` is None only for ``reviewable``.
+ReviewStanding = namedtuple("ReviewStanding", "state reason")
+
+
+def review_standing(
+    repo: str, row: Mapping[str, object],
+    verdict: object, comments: Optional[Sequence[Mapping[str, object]]],
+) -> ReviewStanding:
+    """The one reviewable-head predicate (#2192, plan #1747).
+
+    Read from fields the batched PR read and ``gh pr view`` both carry:
+    ``state``, ``headRefName``, ``headRefOid``, ``mergeable``,
+    ``mergeStateStatus``, ``statusCheckRollup`` and the trust fields.
+    ``comments`` are GitHub-shaped comment rows (``author.login``,
+    ``createdAt``). Pure, so ``engine/review.py``'s packet path can stand
+    down through it too without the funnel importing the engine.
+
+    The first state that holds decides:
+
+    - ``closed``: the PR is not open. A row without a state reads as open,
+      as the listing always has.
+    - ``foreign``: not a ``ticket/<n>`` branch, or not the funnel's own PR
+      (#1794).
+    - ``conflict``: GitHub reports the branch CONFLICTING or DIRTY; the
+      reason is the canonical blocker the merge gate writes.
+    - ``wait``: the head SHA is unreadable, GitHub has not established the
+      branch MERGEABLE, or a check has not reported yet (#900). Precedent
+      (#1019): reviewable requires MERGEABLE, and only a conflicting branch
+      rejects as stale, so an uncomputed mergeability waits for the next
+      read instead of being judged.
+    - ``covered``: a verdict covers the current head (``verdict_covers_head``).
+    - ``reviewable``: everything else. Red CI and an empty rollup are
+      reviewable, so the review pre-check rejects them with a reason.
+
+    ``verdict`` is the PR's latest verdict, or a zero-argument callable that
+    returns it; the callable is invoked only when the head is otherwise
+    reviewable, so a listing pays no verdict read for any other row.
+    """
+    state = str(row.get("state") or "OPEN").upper()
+    if state != "OPEN":
+        return ReviewStanding("closed", "PR is {}".format(state))
+    branch = str(row.get("headRefName") or "")
+    if ticket_ref_from_branch(repo, branch) is None:
+        return ReviewStanding(
+            "foreign", "branch {!r} is not a ticket/<n> branch".format(branch))
+    foreign = foreign_pr_reason(repo, row)
+    if foreign is not None:
+        return ReviewStanding(
+            "foreign", "not the funnel's own PR: {}".format(foreign))
+    conflict = _conflicting_branch_blocker(row)
+    if conflict is not None:
+        return ReviewStanding("conflict", conflict)
+    head_sha = row.get("headRefOid")
+    if not head_sha:
+        return ReviewStanding("wait", "head SHA unreadable")
+    mergeable = str(row.get("mergeable") or "").upper()
+    if mergeable != "MERGEABLE":
+        return ReviewStanding(
+            "wait", "mergeability {}".format(mergeable or "unreadable"))
+    if checks_still_running(row.get("statusCheckRollup")):
+        return ReviewStanding("wait", "checks still running")
+    if callable(verdict):
+        verdict = verdict()
+    if verdict_covers_head(
+        verdict if isinstance(verdict, dict) else None, head_sha, comments
+    ):
+        return ReviewStanding(
+            "covered",
+            "a verdict already covers head {}".format(str(head_sha)[:12]))
+    return ReviewStanding("reviewable", None)
+
+
 def review_queue(
     items: Sequence[Item], tier: Optional[str] = None,
     pr_facts: Optional[Mapping[str, Optional[Dict[str, object]]]] = None,
     output_stream: Optional[IO[str]] = None,
+    skipped: Optional[List[Dict[str, object]]] = None,
 ) -> List[Dict]:
     """Open ticket PRs that need a review, best-first.
 
@@ -19773,11 +19848,16 @@ def review_queue(
     matched to the work the same way an engine is: the expensive judgement is
     spent where the ticket says the stakes are, and nowhere else.
 
-    A PR whose checks are still running is not offered. A ticket branch that
-    GitHub reports as conflicting is rejected mechanically at its current
-    head and never offered for model review; repeated queue reads leave that
-    canonical rejection in place until the engineer pushes a new head. Red CI
-    and a normal empty rollup remain visible to the review pre-check.
+    Each row's standing comes from ``review_standing``, the predicate the
+    review packet shares (#2192). A ticket branch that GitHub reports as
+    conflicting is rejected mechanically at its current head and never
+    offered for model review; repeated queue reads leave that canonical
+    rejection in place until the engineer pushes a new head. A head that
+    waits -- checks still running, mergeability not yet MERGEABLE, or an
+    unreadable SHA -- is not offered, and when ``skipped`` is given it
+    receives ``{ref, pr, reason}`` for each waiting head in this tier, as
+    ``shapeable_idea`` reports its skips. Forks are never reported (#1794).
+    Red CI and a normal empty rollup remain visible to the review pre-check.
     """
     if pr_facts is None:
         pr_facts = ticket_pr_facts(items)
@@ -19785,19 +19865,17 @@ def review_queue(
     for ticket in items:
         if str(getattr(ticket, "state", "OPEN") or "OPEN").upper() != "OPEN":
             continue
+        recorded_risk = getattr(ticket, "risk", None)
+        needed = (
+            recorded_risk if recorded_risk in RISK_OPTIONS else "escalated"
+        )
         for row in _pr_rows_for_ref(pr_facts, ticket.ref):
             repo = ticket.repo
-            if str(row.get("state") or "OPEN").upper() != "OPEN":
-                continue
-            head = row.get("headRefName") or ""
-            if not head.startswith("ticket/"):
-                continue
-            if not is_funnel_pr(repo, row):
-                # A fork or another author's PR is never offered, and never
-                # rejected below either: no verdict is written on it (#1794).
-                continue
-            conflict = _conflicting_branch_blocker(row)
-            if conflict is not None:
+            standing = review_standing(
+                repo, row, lambda: _row_verdict(row, repo),
+                row.get("comments"),
+            )
+            if standing.state == "conflict":
                 # Conflict is a complete, deterministic rejection. Record it
                 # against this snapshot's head before it can reach a model
                 # reviewer. The gate helper makes repeat ticks idempotent and
@@ -19817,22 +19895,23 @@ def review_queue(
                         output_stream=output_stream,
                     )
                 continue
-            if checks_still_running(row.get("statusCheckRollup")):
-                # The checks have not reported yet, so the only answer a
-                # reviewer could record is "CI not green (state unknown)" —
-                # and that rejection then covers this head, locking the PR
-                # out of re-review once CI turns green (#900). Wait instead:
+            if standing.state == "wait":
+                # Nothing a reviewer could record here would be a judgement
+                # of the diff: running checks read "CI not green (state
+                # unknown)", and that rejection covers the head, locking it
+                # out of re-review once CI turns green (#900). Wait instead;
                 # the next tick reconsiders, because nothing was recorded.
+                if skipped is not None and not (tier and needed != tier):
+                    skipped.append({
+                        "ref": ticket.ref,
+                        "pr": row.get("number"),
+                        "reason": standing.reason,
+                    })
                 continue
-            verdict = _row_verdict(row, repo)
-            if verdict_covers_head(
-                verdict, row.get("headRefOid"), row.get("comments")
-            ):
-                continue  # this exact diff has already been judged
-            recorded_risk = getattr(ticket, "risk", None)
-            needed = (
-                recorded_risk if recorded_risk in RISK_OPTIONS else "escalated"
-            )
+            if standing.state != "reviewable":
+                # Closed, foreign (never rejected either: no verdict is
+                # written on a fork, #1794) or already judged at this head.
+                continue
             if tier and needed != tier:
                 continue
             candidate = {"pr": row.get("number"), "repo": repo,
@@ -21518,10 +21597,15 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
         return 0
 
     review_phase_boundary("review_queue")
+    review_waiting: List[Dict[str, object]] = []
     queue = _call_with_optional_keywords(
         review_queue, items, tier, pr_facts=pr_facts,
-        output_stream=sys.stderr,
+        output_stream=sys.stderr, skipped=review_waiting,
     )
+    if review_waiting:
+        # A head the listing waits on is reported, never dropped silently
+        # (#2192), as the shape picker reports its skips.
+        out["review_waiting"] = review_waiting
     # The fixed job order remains the tiebreak within a class group, but a
     # finite preempting class can cross stages. Build one candidate for each
     # queue: the next run gets the next item if this run preempts it.
@@ -21893,9 +21977,16 @@ def cmd_next_review(
             # while the session's normal non-brief invalidation still clears
             # observations from an earlier command before this one starts.
             cache._pr_facts = pr_facts
-    queue = _call_with_optional_keyword(
-        review_queue, "pr_facts", pr_facts, items, tier
+    waiting: List[Dict[str, object]] = []
+    queue = _call_with_optional_keywords(
+        review_queue, items, tier, pr_facts=pr_facts, skipped=waiting,
     )
+    for entry in waiting:
+        # Heads the listing waits on (#2192): named, so a quiet queue is
+        # never mistaken for an empty one.
+        print("review waits: {} PR #{} ({})".format(
+            entry.get("ref"), entry.get("pr"), entry.get("reason")),
+            file=sys.stderr)
     if not queue:
         print("nothing — no {}review waiting".format(
             (tier + " ") if tier else ""), file=sys.stderr)

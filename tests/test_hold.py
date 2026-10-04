@@ -18,6 +18,7 @@ import pytest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
+import block_record  # noqa: E402
 import funnel  # noqa: E402
 
 #: Comment markers count only from the owner account (#1788).
@@ -107,9 +108,9 @@ def _assert_hold_written(calls, item):
     assert [call[:3] for call in calls] == [
         ("gh", "issue", "comment"), ("gh", "issue", "edit"),
     ]
-    assert calls[0][3:6] == ("42", "--repo", "nateprich/beta")
+    assert calls[0][3:6] == (str(item.number), "--repo", item.repo)
     assert calls[1] == (
-        "gh", "issue", "edit", "42", "--repo", "nateprich/beta",
+        "gh", "issue", "edit", str(item.number), "--repo", item.repo,
         "--add-label", "blocked",
     )
     assert item.is_blocked
@@ -220,6 +221,90 @@ def test_hold_records_a_verbatim_instruction(monkeypatch):
     provenance = funnel.parse_provenance(calls[0][-1])
     assert provenance["voice"] == "nate-relayed"
     assert provenance["instruction"] == instruction
+
+
+# -- Shaped hold write reproduction ------------------------------------------
+
+SHAPED_PLAN_BODY = "# Decision\nKeep current service plan.\n"
+SHAPED_PLAN_VERSION = (
+    "371883196b99396eca7d9b9cb6613ec0395df5ca683d36fe7415b71343e40dbb"
+)
+SHAPED_CONDITIONS = ("1590", "1997", "1998", "1999", "2000")
+SHAPED_PROOF = (
+    "https://github.com/nateprich-projects/command-center/issues/2003"
+    "#issuecomment-5945296610"
+)
+
+
+def shaped_project(**overrides):
+    fields = dict(
+        repo="nateprich-projects/command-center", number=2003,
+        title="A Shaped project",
+        url="https://github.com/nateprich-projects/command-center/issues/2003",
+        state="OPEN",
+        body=SHAPED_PLAN_BODY, status="Shaped", klass="New", origin="Nate",
+        needs="none", item_id="project-item-2003",
+    )
+    fields.update(overrides)
+    return funnel.Item(**fields)
+
+
+def test_reproduction_owner_authorized_shaped_hold_writes_block_and_header(
+        monkeypatch):
+    item = shaped_project()
+    calls = _record_github(monkeypatch, [item])
+    project_writes = []
+    monkeypatch.setattr(
+        funnel, "write_project_select",
+        lambda item_id, field, value, ref: project_writes.append(
+            (item_id, field, value, ref)),
+    )
+    args = ["hold", "2003", "--on"] + list(SHAPED_CONDITIONS)
+    args.extend([
+        "--reason", "Hold until the open prerequisites clear",
+        "--proof", SHAPED_PROOF,
+        "--yes", "--run", "run-hold", "--agent", "claude",
+        "--instruction", "Nate asked to hold this Shaped plan",
+    ])
+
+    assert funnel.main(args) == 0
+
+    posted = _assert_hold_written(calls, item)
+    visible = funnel._visible_comment(posted)
+    # The #2003 fixture keeps #1590 and #1997-#2000; stale closed #2120 is
+    # not a live condition.
+    expected_hold = {
+        "Hold-Reason": "Hold until the open prerequisites clear",
+        "Hold-Conditions": [
+            "nateprich-projects/command-center#1590",
+            "nateprich-projects/command-center#1997",
+            "nateprich-projects/command-center#1998",
+            "nateprich-projects/command-center#1999",
+            "nateprich-projects/command-center#2000",
+        ],
+        "Plan-Version": SHAPED_PLAN_VERSION,
+        "Proof": [SHAPED_PROOF],
+    }
+    assert "nateprich-projects/command-center#2120" not in (
+        expected_hold["Hold-Conditions"])
+    assert block_record.parse_shaped_hold_comment(visible) == expected_hold
+    assert project_writes == [
+        ("project-item-2003", "Needs", "external-event", item.ref),
+    ]
+    assert item.needs == "external-event"
+    assert item.status == "Shaped"
+    assert item.klass == "New"
+    assert "approval" not in visible.lower()
+    _read_back(monkeypatch, item, posted)
+    assert item.shaped_hold == expected_hold
+    assert item.block_references == []
+    assert item.block_reason == expected_hold["Hold-Reason"]
+
+
+def test_shaped_hold_refusal_allows_open_owner_project():
+    item = shaped_project()
+
+    assert funnel._hold_refusal(item) is None
 
 
 def test_dry_run_prints_the_hold_and_changes_nothing(monkeypatch, capsys):

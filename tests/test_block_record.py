@@ -60,6 +60,8 @@ MOVED = (
     "BLOCK_EVENT_COMMENT_PREFIX", "BLOCK_EVENT_COMMENT_RE",
     "BLOCK_EVENT_KIND_HEADER_RE", "BLOCK_FENCED_PAYLOAD_RE",
     "NEEDS_DECISION_PREFIX", "NEEDS_DECISION_RE", "DECLINED_PREFIX",
+    "SHAPED_HOLD_COMMENT_PREFIX", "parse_shaped_hold_comment",
+    "shaped_plan_version", "validate_proof_comment_url",
     "inert_comment_text", "_unique_json_object", "_parse_block_event_spec",
     "_unconditioned_event_reason", "_parse_block_comment_header",
     "_parse_block_comment_details", "parse_block_comment",
@@ -123,6 +125,53 @@ def test_render_blocked_until_event_parses_back():
     assert block_record._parse_block_comment_details([body]) == (
         [], None, INERT_WORDS, EVENT)
     assert block_record.unparseable_block_comment_lines([body]) == []
+
+
+def test_shaped_hold_codec_round_trips_its_durable_fields():
+    reason = "Nate asked to wait for the open prerequisites"
+    conditions = ["nateprich-projects/command-center#1590",
+                  "nateprich-projects/command-center#1997"]
+    proof = [
+        "https://github.com/nateprich-projects/command-center/issues/2003"
+        "#issuecomment-5945296610",
+    ]
+    expected = {
+        "Hold-Reason": reason,
+        "Hold-Conditions": conditions,
+        "Plan-Version": (
+            "371883196b99396eca7d9b9cb6613ec0395df5ca683d36fe7415b71343e40dbb"
+        ),
+        "Proof": proof,
+    }
+
+    body = block_record.render_shaped_hold(
+        reason, conditions, expected["Plan-Version"], proof)
+
+    assert block_record.parse_shaped_hold_comment(body) == expected
+    assert funnel.parse_shaped_hold_comment is (
+        block_record.parse_shaped_hold_comment)
+    assert funnel.render_shaped_hold is block_record.render_shaped_hold
+
+
+def test_shaped_plan_version_normalizes_line_endings_only():
+    body = "# Decision\nKeep current service plan.\n"
+    version = (
+        "371883196b99396eca7d9b9cb6613ec0395df5ca683d36fe7415b71343e40dbb"
+    )
+
+    assert block_record.shaped_plan_version(body) == version
+    assert block_record.shaped_plan_version(
+        body.replace("\n", "\r\n")) == version
+    assert block_record.shaped_plan_version(
+        body.replace("Keep", "Keep ")) != version
+
+
+def test_shaped_hold_parser_rejects_an_incomplete_json_record():
+    fence = chr(96) * 3
+    body = "**Blocked:**\n{}json\n{{\"Hold-Reason\": \"Wait\"}}\n{}".format(
+        fence, fence)
+
+    assert block_record.parse_shaped_hold_comment(body) is None
 
 
 def test_an_event_value_cannot_close_the_fence_or_open_a_marker():

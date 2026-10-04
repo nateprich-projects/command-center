@@ -1353,6 +1353,21 @@ def test_a_non_open_precheck_stops_without_a_verdict_or_blocking_note(tmp_path):
     assert not (repo / "gh.log").exists()
 
 
+def test_a_closed_standing_stands_down_without_a_legacy_precheck_reason(
+        tmp_path):
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), _standing_packet("closed", "PR is CLOSED"))
+
+    assert proc.returncode == 0, proc.stderr
+    assert _muse_calls(repo) == 0
+    assert _apply_calls(repo) == []
+    assert not (repo / "applied.marker").exists()
+    heartbeat = _heartbeat_without_muse_call_record(repo)
+    assert "PR is CLOSED" in heartbeat
+    assert "no verdict recorded" in heartbeat
+    assert "--review-result" not in heartbeat
+
+
 def test_a_covered_standing_keeps_its_existing_reason_and_stands_down(tmp_path):
     proc, repo = _stubbed_runner(
         tmp_path, _begin(), _covered_verdict_packet())
@@ -1367,6 +1382,22 @@ def test_a_covered_standing_keeps_its_existing_reason_and_stands_down(tmp_path):
     assert "no verdict recorded" in heartbeat
     assert "--review-result" not in heartbeat
     assert not (repo / "gh.log").exists()
+
+
+def test_a_covered_standing_stands_down_without_a_legacy_precheck_reason(
+        tmp_path):
+    packet = _covered_verdict_packet()
+    packet["precheck"] = {"pass": True, "reasons": []}
+    proc, repo = _stubbed_runner(tmp_path, _begin(), packet)
+
+    assert proc.returncode == 0, proc.stderr
+    assert _muse_calls(repo) == 0
+    assert _apply_calls(repo) == []
+    assert not (repo / "applied.marker").exists()
+    heartbeat = _heartbeat_without_muse_call_record(repo)
+    assert "a verdict already covers head {}".format(HEAD[:12]) in heartbeat
+    assert "no verdict recorded" in heartbeat
+    assert "--review-result" not in heartbeat
 
 
 def test_a_could_not_run_ci_stands_down_without_a_verdict_or_rejection(tmp_path):

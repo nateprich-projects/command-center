@@ -4508,9 +4508,14 @@ def test_the_fallback_flag_returns_a_scoped_rereview_to_the_full_review(
     _scoped_rereview(prior_blocking_items=[
         {"kind": "code_defect", "finding": "  "}]),
     _scoped_rereview(interdiff=None),
+    # The switches alone, with the fallback flag left clear: a disabled or
+    # inactive scope never narrows the review (independent review of PR #2222).
+    _scoped_rereview(enabled=False),
+    _scoped_rereview(active=False),
     "not a scope",
 ], ids=["no-rejection", "disabled", "flag-unset", "no-head", "no-items",
-        "unknown-kind", "blank-finding", "no-interdiff", "not-an-object"])
+        "unknown-kind", "blank-finding", "no-interdiff", "disabled-flag-clear",
+        "inactive-flag-clear", "not-an-object"])
 def test_anything_short_of_a_live_scope_is_the_full_review(tmp_path, scoped):
     """#2002: only a live scope (a rejected head, stopping-rule items, an
     interdiff and the fallback flag clear) narrows the review."""

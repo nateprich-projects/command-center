@@ -18,6 +18,36 @@ CORPUS = json.loads(
 )
 
 
+FIXTURES = ROOT / "tests" / "fixtures"
+REQUIRED_MARKDOWN_SOURCES = {
+    "escalation_scan_1167_recorded.md",
+    "escalation_plan_1503_recorded.md",
+    "escalation_scan_ff225_capture.md",
+}
+
+
+def test_corpus_covers_every_escalation_fixture_body():
+    expected = {}
+    for path in sorted(FIXTURES.glob("escalation*.json")):
+        if path.name == "escalation_corpus.json":
+            continue
+        records = json.loads(path.read_text(encoding="utf-8"))
+        for index, record in enumerate(records):
+            expected[f"{path.name}[{index}]"] = record["body"]
+
+    markdown_sources = {path.name for path in FIXTURES.glob("escalation*.md")}
+    assert REQUIRED_MARKDOWN_SOURCES <= markdown_sources
+    for name in markdown_sources:
+        expected[name] = (FIXTURES / name).read_text(encoding="utf-8")
+
+    actual = {}
+    for case in CORPUS:
+        source = case["source"]
+        assert source not in actual
+        actual[source] = case["body"]
+    assert actual == expected
+
+
 @pytest.mark.parametrize("case", CORPUS, ids=lambda case: case["source"])
 def test_recorded_escalation_outputs_match_base_corpus(case):
     body = case["body"]

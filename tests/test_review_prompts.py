@@ -14,7 +14,7 @@ import pytest
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from engine import review_prompts  # noqa: E402
+from engine import review_decisions, review_packets, review_prompts  # noqa: E402
 
 RECOVERED_SOURCE_RULES = {
     "r1": (
@@ -65,6 +65,52 @@ def test_rounds_are_four_first_round_variants_and_one_round_two_winner():
     assert manifest["round_2_selection"]["max_selected"] == 1
     assert manifest["active_variant"] == "baseline"
     assert manifest["trial_enabled"] is False
+
+
+def test_trial_profile_is_bound_to_the_2072_method_and_frozen_v1_packets():
+    manifest = json.loads(
+        (ROOT / "engine" / "review_variants" / "manifest.json")
+        .read_text())
+
+    assert manifest["trial_definition"] == review_prompts.TRIAL_DEFINITION
+    assert manifest["trial_definition"] == {
+        "scope": "reviewer-only",
+        "duration_days": 14,
+        "max_rounds": 2,
+        "max_variants_including_baselines": 5,
+    }
+    evaluation = manifest["round_2_selection"]["evaluation"]
+    assert evaluation == review_prompts.TRIAL_EVALUATION_POLICY
+    assert evaluation["packet_version"] == review_packets.DEFAULT_VERSION
+    assert evaluation["packets"] == ["must_reject", "must_approve"]
+    assert evaluation["sequential"] == {
+        "initial_runs_per_side": review_decisions.START_RUNS,
+        "additional_runs_per_side": review_decisions.BATCH_RUNS,
+        "max_runs_per_side": review_decisions.MAX_RUNS,
+        "stop_for_decline_fisher_p_below": review_decisions.DECLINE_P,
+        "stop_for_futility_fisher_p_above": review_decisions.FUTILITY_P,
+    }
+    assert evaluation["margins"] == {
+        "must_reject_drop": review_decisions.MUST_REJECT_DROP,
+        "must_approve_false_block_rise": (
+            review_decisions.MUST_APPROVE_FALSE_BLOCK_RISE),
+        "joint_detection_lift": review_decisions.JOINT_DETECTION_LIFT,
+        "joint_false_block_change": review_decisions.JOINT_FALSE_BLOCK_CHANGE,
+    }
+    assert set(review_packets.verify_checksums(evaluation["packet_version"])) == (
+        set(evaluation["packets"]))
+
+
+def test_trial_profile_rejects_a_sample_rule_that_drifts_from_2072():
+    manifest = json.loads(
+        (ROOT / "engine" / "review_variants" / "manifest.json")
+        .read_text())
+    manifest["round_2_selection"]["evaluation"]["sequential"][
+        "max_runs_per_side"] = 80
+
+    with pytest.raises(review_prompts.ReviewPromptError,
+                       match="Round 2 selection rule is malformed"):
+        review_prompts._validate_manifest(manifest)
 
 
 def test_baseline_prompt_is_byte_identical_to_the_pretrial_prompt():

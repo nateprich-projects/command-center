@@ -3968,9 +3968,10 @@ def _parent_rejected_label_region(
     ``Rejected:`` line on its own and its list, ended by
     ``funnel._plan_label_list_end``. A label whose list has no clear end is
     skipped, as the scan cannot read it either. A label with its text on
-    the same line covers that line alone, since the next line can already
-    be another statement. A body with a line break Markdown does not share
-    has no label region, as in ``funnel.plan_scan_text``.
+    the same line counts only where it starts a paragraph, and covers that
+    line alone, since the next line can already be another statement. A
+    body with a line break Markdown does not share has no label region, as
+    in ``funnel.plan_scan_text``.
     """
     if funnel._PLAN_NON_MARKDOWN_BREAK_RE.search(body):
         return None
@@ -3988,8 +3989,10 @@ def _parent_rejected_label_region(
             continue
         # The label's colon is the line's first, inside or before the
         # closing bold marker: the text after the label must not be blank.
+        # The line must start a paragraph, so a hard-wrapped line of a list
+        # item that happens to start `Rejected:` is not one (#1125's body).
         colon = line.find(":")
-        if colon >= 0 and any(
+        if colon >= 0 and (index == 0 or not lines[index - 1].strip()) and any(
                 label.match(line[:cut]) and line[cut:].strip()
                 for cut in (colon + 3, colon + 1)):
             return index, index + 1

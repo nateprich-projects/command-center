@@ -2526,6 +2526,65 @@ def test_a_rejected_label_with_inline_text_carries_its_line(line):
     assert shaped["parent_rejected_excerpt_truncated"] is False
 
 
+def test_a_wrapped_line_starting_rejected_is_not_an_inline_label():
+    """#1125's shape: a hard-wrapped `Decided by the agent` item whose
+    continuation line starts `Rejected:` sits ahead of the `## Rejected`
+    heading. Only a line that starts a paragraph is an inline label, so the
+    heading's section is carried, as on main."""
+    rejected = (
+        "## Rejected\n"
+        "\n"
+        "- A cumulative total, because it hides the weekly change.\n"
+        "- A second costing method, because it breaks the comparison.\n"
+        "\n"
+    )
+    body = (
+        "# A cost review\n"
+        "\n"
+        "## Decided by the agent\n"
+        "\n"
+        "- **Read the log directly.** The fallback was silent and the\n"
+        "  decision-maker did not read it. Rejected: planning the fallback\n"
+        "  in advance, which makes the weaker source the expected outcome.\n"
+        "- **Output tokens only.** The input half still has no measured\n"
+        "  counterpart.\n"
+        "  Rejected: modelling input from a second source, which changes\n"
+        "  the method mid-comparison.\n"
+        "\n"
+        + rejected
+        + "## Needs Nate\n"
+        "\n"
+        "Nothing.\n"
+    )
+
+    shaped = review.shape_ticket(ticket(parent={"body": body,
+                                                "comments": []}))
+
+    assert shaped["parent_rejected_excerpt"] == rejected
+    assert shaped["parent_rejected_excerpt_truncated"] is False
+
+
+def test_a_fenced_rejected_label_does_not_shadow_the_heading():
+    body = ("```markdown\nRejected:\n- example\n\n```\n\n"
+            "## Rejected\n- the heading's option\n")
+
+    shaped = review.shape_ticket(ticket(parent={"body": body,
+                                                "comments": []}))
+
+    assert shaped["parent_rejected_excerpt"] == (
+        "## Rejected\n- the heading's option\n")
+
+
+def test_the_first_of_two_rejected_labels_wins():
+    body = ("Rejected:\n- the first list\n\nNotes.\n\n"
+            "**Rejected:**\n- a later list\n")
+
+    shaped = review.shape_ticket(ticket(parent={"body": body,
+                                                "comments": []}))
+
+    assert shaped["parent_rejected_excerpt"] == "Rejected:\n- the first list\n"
+
+
 def test_a_label_before_a_rejected_heading_wins():
     body = ("Rejected:\n- the label's option\n\n"
             "## Rejected\n- the heading's option\n")

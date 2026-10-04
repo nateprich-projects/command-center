@@ -134,6 +134,7 @@ def packet(**kw):
 def test_pr_open_row_rejects_a_merged_pr_with_its_merge_time():
     view = pr_view(state="CLOSED", mergedAt=MERGED_AT, closedAt=MERGED_AT)
     found = packet(pr_view=view, verdict=None)
+    assert found["standing"] == {"state": "closed", "reason": "PR is CLOSED"}
     assert found["merged_at"] == MERGED_AT
     assert found["precheck"]["reasons"] == [
         "pr_not_open state=CLOSED merged_at={}".format(MERGED_AT)]
@@ -142,6 +143,7 @@ def test_pr_open_row_rejects_a_merged_pr_with_its_merge_time():
 def test_pr_open_row_rejects_a_closed_unmerged_pr_with_its_close_time():
     view = pr_view(state="CLOSED", closedAt=CLOSED_AT)
     found = packet(pr_view=view, verdict=None)
+    assert found["standing"] == {"state": "closed", "reason": "PR is CLOSED"}
     assert found["precheck"]["reasons"] == [
         "pr_not_open state=CLOSED closed_at={}".format(CLOSED_AT)]
 
@@ -192,8 +194,8 @@ def test_ci_row_waits_while_a_check_is_still_running():
 
     found = packet(pr_view=view)
 
-    assert found["standing"]["state"] == "wait"
     assert found["precheck"] == {"pass": True, "reasons": []}
+    assert found["standing"]["state"] == "wait"
 
 
 def test_ci_row_passes_a_green_rollup():
@@ -204,6 +206,10 @@ def test_ci_row_passes_a_green_rollup():
 
 def test_verdict_row_fails_when_a_verdict_covers_this_head():
     found = packet(verdict=verdict())
+    assert found["standing"] == {
+        "state": "covered",
+        "reason": "a verdict already covers head {}".format(SHA[:12]),
+    }
     assert found["precheck"]["reasons"] == [
         "verdict: a verdict already covers head {}".format(SHA[:12])]
 
@@ -396,8 +402,8 @@ def test_merged_row_waits_when_mergeability_is_unknown():
     rows = [merged(5, NEWER, "funnel.py")]
     found = packet(pr_view=view, merged_prs=rows, ci_runs=[ci_run(COVERING)])
 
-    assert found["standing"]["state"] == "wait"
     assert found["precheck"] == {"pass": True, "reasons": []}
+    assert found["standing"]["state"] == "wait"
 
 
 def test_merged_row_still_blocks_an_explicit_dirty_conflict():

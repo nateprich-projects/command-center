@@ -3958,11 +3958,54 @@ def _atx_heading(line: str) -> Optional[Tuple[int, str]]:
     return len(match.group("level")), title
 
 
+def _parent_rejected_label_region(
+        body: str, line_count: int) -> Optional[Tuple[int, int]]:
+    """The first label-form ``Rejected:`` region's lines, or None (#2195).
+
+    The region is the one #2180's plan scan ignores, read through its own
+    definition in funnel.py and on the same lines, quoted regions blank, so
+    a label in fenced code or a block quote is not one: a plain or bold
+    ``Rejected:`` line on its own and its list, ended by
+    ``funnel._plan_label_list_end``. A label whose list has no clear end is
+    skipped, as the scan cannot read it either. A label with its text on
+    the same line counts only where it starts a paragraph, and covers that
+    line alone, since the next line can already be another statement. A
+    body with a line break Markdown does not share has no label region, as
+    in ``funnel.plan_scan_text``.
+    """
+    if funnel._PLAN_NON_MARKDOWN_BREAK_RE.search(body):
+        return None
+    lines = funnel._plan_scan_unquoted(
+        funnel._strip_plan_code_blocks(body)).splitlines()
+    if len(lines) > line_count:
+        return None
+    lines.extend([""] * (line_count - len(lines)))
+    label = funnel._plan_label_re("Rejected")
+    for index, line in enumerate(lines):
+        if label.match(line):
+            end = funnel._plan_label_list_end(lines, index)
+            if end is not None:
+                return index, end
+            continue
+        # The label's colon is the line's first, inside or before the
+        # closing bold marker: the text after the label must not be blank.
+        # The line must start a paragraph, so a hard-wrapped line of a list
+        # item that happens to start `Rejected:` is not one (#1125's body).
+        colon = line.find(":")
+        if colon >= 0 and (index == 0 or not lines[index - 1].strip()) and any(
+                label.match(line[:cut]) and line[cut:].strip()
+                for cut in (colon + 3, colon + 1)):
+            return index, index + 1
+    return None
+
+
 def _bounded_parent_rejected_excerpt(
         body: object,
         limit: int = PARENT_REJECTED_EXCERPT_LIMIT) -> Tuple[str, bool]:
-    """Return the first bounded parent ``Rejected`` section and its cut flag.
+    """Return the first bounded parent ``Rejected`` region and its cut flag.
 
+    A region is an ATX ``Rejected`` heading's section or a label-form
+    ``Rejected:`` list or line (#2195); the first in body order wins.
     Markdown headings inside fenced code are ignored. A same-or-higher ATX
     heading ends the section; deeper headings remain part of it. The visible
     truncation marker counts inside ``limit``, which is at most
@@ -4008,6 +4051,10 @@ def _bounded_parent_rejected_excerpt(
             end = index
             break
 
+    label_region = _parent_rejected_label_region(body, len(lines))
+    if label_region is not None and (start is None
+                                     or label_region[0] < start):
+        start, end = label_region
     if start is None:
         return "", False
 

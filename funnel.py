@@ -60,6 +60,8 @@ from block_record import (  # noqa: F401 -- re-exported under the old names
     NEEDS_DECISION_PREFIX,
     NEEDS_DECISION_RE,
     SHAPED_HOLD_COMMENT_PREFIX,
+    SHAPED_HOLD_CLEAR_PREFIX,
+    SHAPED_HOLD_RELEASE_PREFIX,
     _parse_block_comment_details,
     _parse_block_comment_header,
     _parse_block_event_spec,
@@ -68,7 +70,9 @@ from block_record import (  # noqa: F401 -- re-exported under the old names
     inert_comment_text,
     parse_block_comment,
     parse_decline_comment,
+    parse_shaped_hold_clear_comment,
     parse_shaped_hold_comment,
+    shaped_hold_id,
     shaped_plan_version,
     unparseable_block_comment_lines,
     validate_proof_comment_url,
@@ -77,6 +81,8 @@ from block_record import (  # noqa: F401 -- re-exported under the old names
 # too, so their reasons are inert and their headers read back (#2169).
 from block_record import (
     render_blocked, render_needs_decision, render_shaped_hold,
+    render_conditioned_shaped_hold_clear,
+    render_explicit_shaped_hold_release,
 )
 import nightly_watch
 import price_watch
@@ -854,6 +860,7 @@ class Item:
     block_references: List[str] = field(default_factory=list)
     block_reason: Optional[str] = None
     shaped_hold: Optional[Dict[str, object]] = None
+    shaped_hold_clear: Optional[Dict[str, object]] = None
     blocked_until: Optional[date] = None
     needs_decision: Optional[str] = None
     decline_reason: Optional[str] = None
@@ -15096,6 +15103,124 @@ def _record_covers_current_block(item: Item, conditions: Sequence[str]) -> bool:
     )
 
 
+def _live_shaped_hold_body(item: Item) -> Optional[str]:
+    """Read the held project's current issue state and plan body from GitHub."""
+    if live_issue_state(item) != "OPEN":
+        return None
+    try:
+        body = _ticket_body(item.repo, item.number)
+    except (GitHubError, OSError, subprocess.SubprocessError, ValueError):
+        return None
+    return body if isinstance(body, str) and body.strip() else None
+
+
+def _shaped_hold_proof_is_live_owner_comment(url: object) -> bool:
+    """Whether one proof URL still resolves to a comment by the owner account."""
+    try:
+        canonical = validate_proof_comment_url(url)
+        target, fragment = canonical.split("#", 1)
+        owner, repository, _route, _issue_number = target[
+            len("https://github.com/"):].split("/")
+        raw_id = fragment.removeprefix("issuecomment-")
+        comment_id = int(raw_id)
+        comment = _gh_api_json(
+            "repos/{}/{}/issues/comments/{}".format(
+                owner, repository, comment_id)
+        )
+    except (GitHubError, OSError, subprocess.SubprocessError, ValueError):
+        return False
+    return (
+        isinstance(comment, Mapping)
+        and comment.get("id") == comment_id
+        and isinstance(comment.get("html_url"), str)
+        and comment["html_url"].rstrip("/").lower()
+        == canonical.rstrip("/").lower()
+        and trusted_comment(comment)
+    )
+
+
+def _shaped_hold_clear_inputs(
+    item: Item, record: Mapping[str, object],
+) -> Optional[Tuple[str, str]]:
+    """Return a live plan version only after every issue and proof rechecks."""
+    body = _live_shaped_hold_body(item)
+    if body is None:
+        return None
+    plan_version = shaped_plan_version(body)
+    conditions = record.get("Hold-Conditions")
+    if not isinstance(conditions, list) or not conditions:
+        return None
+
+    all_closed = True
+    for ref in conditions:
+        if not isinstance(ref, str) or "#" not in ref:
+            all_closed = False
+            continue
+        repo, raw_number = ref.rsplit("#", 1)
+        try:
+            number = int(raw_number)
+        except ValueError:
+            all_closed = False
+            continue
+        condition = Item(
+            repo=repo, number=number, title="", url="", state="OPEN")
+        if live_issue_state(condition) != "CLOSED":
+            all_closed = False
+
+    proofs = record.get("Proof")
+    if not isinstance(proofs, list) or not proofs:
+        return None
+    all_proofs_present = True
+    for proof in proofs:
+        if not _shaped_hold_proof_is_live_owner_comment(proof):
+            all_proofs_present = False
+
+    if not all_closed or not all_proofs_present:
+        return None
+    return body, plan_version
+
+
+def _shaped_hold_clear_matches(
+    item: Item, record: Mapping[str, object],
+) -> bool:
+    clear = item.shaped_hold_clear
+    if not isinstance(clear, Mapping):
+        return False
+    try:
+        expected_id = shaped_hold_id(record)
+    except ValueError:
+        return False
+    return clear.get("Hold-ID") == expected_id
+
+
+def _finish_shaped_hold_clear(item: Item, body: str, now: datetime) -> None:
+    """Restore decision routing and remove the blocked label after its record."""
+    remaining_needs = "human" if plan_needs_nate(body) else "none"
+    if item.needs != remaining_needs:
+        if not item.item_id:
+            raise GitHubError("{} is not in the Project".format(item.ref))
+        write_project_select(
+            item.item_id, "Needs", remaining_needs, item.ref)
+        item.needs = remaining_needs
+
+    if item.is_blocked:
+        edit = _run_gh(
+            [
+                "gh", "issue", "edit", str(item.number),
+                "--repo", item.repo, "--remove-label", "blocked",
+            ],
+            capture_output=True, text=True,
+        )
+        if edit.returncode != 0:
+            raise GitHubError(
+                "recorded hold clear on {}, but could not remove its blocked "
+                "label: {}".format(item.ref, edit.stderr.strip())
+            )
+        item.labels = [label for label in item.labels if label != "blocked"]
+    item.body = body
+    item.blocked_cleared_at = now
+
+
 def clear_satisfied_blocks(
     items: Sequence[Item], now: datetime,
     run: Optional[str] = None, agent: Optional[str] = None,
@@ -15146,6 +15271,65 @@ def clear_satisfied_blocks(
                 )
 
     for item in candidates:
+        shaped_hold = _current_shaped_hold_record(item)
+        if shaped_hold is not None:
+            if _shaped_hold_clear_matches(item, shaped_hold):
+                # The durable clear comment was written by an earlier run;
+                # finish any routing or label write left by a partial failure.
+                body = _live_shaped_hold_body(item)
+                if body is None:
+                    continue
+                _finish_shaped_hold_clear(item, body, now)
+                clear = item.shaped_hold_clear or {}
+                cleared.append({
+                    "ref": item.ref,
+                    "kind": "shaped-hold",
+                    "clear": clear.get("kind"),
+                    "conditions": list(shaped_hold["Hold-Conditions"]),
+                    "proof": list(shaped_hold["Proof"]),
+                    "plan_version": clear.get("Plan-Version"),
+                    "cleared_at": now.isoformat(),
+                })
+                continue
+
+            inputs = _shaped_hold_clear_inputs(item, shaped_hold)
+            if inputs is None:
+                continue
+            body, plan_version = inputs
+            clear_body = render_conditioned_shaped_hold_clear(
+                shaped_hold, plan_version)
+            comment = _run_gh(
+                [
+                    "gh", "issue", "comment", str(item.number),
+                    "--repo", item.repo,
+                    "--body", append_provenance(
+                        clear_body, "agent", at=now, run=run, agent=agent),
+                ],
+                capture_output=True, text=True,
+            )
+            if comment.returncode != 0:
+                raise GitHubError(
+                    "could not record conditioned hold clear on {}: {}".format(
+                        item.ref, comment.stderr.strip())
+                )
+            item.shaped_hold_clear = parse_shaped_hold_clear_comment(clear_body)
+            if item.shaped_hold_clear is None:
+                raise GitHubError(
+                    "conditioned hold clear for {} did not parse back".format(
+                        item.ref)
+                )
+            _finish_shaped_hold_clear(item, body, now)
+            cleared.append({
+                "ref": item.ref,
+                "kind": "shaped-hold",
+                "clear": "conditioned",
+                "conditions": list(shaped_hold["Hold-Conditions"]),
+                "proof": list(shaped_hold["Proof"]),
+                "plan_version": plan_version,
+                "cleared_at": now.isoformat(),
+            })
+            continue
+
         event_records = (
             heartbeat_records.get(item.block_event.get("agent"), [])
             if isinstance(item.block_event, dict) else []
@@ -17628,6 +17812,118 @@ def cmd_hold(items: List[Item], now: datetime, ref: str, reason: str,
     return 0
 
 
+def _reload_shaped_hold_for_release(item: Item) -> str:
+    """Re-read a Shaped hold, its plan and labels before an owner release."""
+    live_state = live_issue_state(item)
+    if live_state != "OPEN":
+        raise GitHubError(
+            "{} is not open on GitHub; its Shaped hold cannot be released"
+            .format(item.ref)
+        )
+    payload = _gh_json(
+        "gh", "issue", "view", str(item.number), "--repo", item.repo,
+        "--json", "state,body,comments,labels",
+    )
+    if (
+        not isinstance(payload, Mapping)
+        or not isinstance(payload.get("body"), str)
+        or not isinstance(payload.get("comments"), list)
+        or not isinstance(payload.get("labels"), list)
+        or str(payload.get("state") or "").upper() != "OPEN"
+    ):
+        raise GitHubError(
+            "could not re-read the live Shaped hold on {}".format(item.ref)
+        )
+    labels = []
+    for label in payload["labels"]:
+        name = label.get("name") if isinstance(label, Mapping) else label
+        if isinstance(name, str):
+            labels.append(name)
+    comments = trusted_comments(payload["comments"])
+    (
+        item.block_references,
+        item.blocked_until,
+        item.block_reason,
+        item.block_event,
+        item.needs_decision,
+        item.shaped_hold,
+    ) = _current_block_comment_details(comments)
+    item.shaped_hold_clear = _current_shaped_hold_clear(comments)
+    item.block_comments_error = None
+    item.state = "OPEN"
+    item.body = payload["body"]
+    item.labels = labels
+
+    if item.parent is not None or item.status != "Shaped":
+        raise GitHubError(
+            "{} is not an open Shaped project".format(item.ref)
+        )
+    if not item.item_id:
+        raise GitHubError("{} is not in the Project".format(item.ref))
+    if not isinstance(item.shaped_hold, dict):
+        raise GitHubError("{} has no current Shaped hold to release".format(
+            item.ref))
+    if not item.body.strip():
+        raise GitHubError("{} has no current Shaped plan to re-present".format(
+            item.ref))
+    return item.body
+
+
+def cmd_release_shaped_hold(
+    items: List[Item], now: datetime, ref: str, confirmed: bool,
+    instruction: Optional[str] = None, run: Optional[str] = None,
+    agent: Optional[str] = None,
+) -> int:
+    """Release a Shaped hold only on Nate's explicit owner instruction."""
+    item = find(items, ref)
+    if not confirmed:
+        print("would explicitly release the Shaped hold on {}".format(item.ref))
+        print("\nNothing was changed. Re-run with --yes and --instruction.")
+        return 1
+    if not isinstance(instruction, str) or not instruction.strip():
+        raise GitHubError(
+            "an explicit hold release requires Nate's verbatim --instruction"
+        )
+
+    body = _reload_shaped_hold_for_release(item)
+    record = item.shaped_hold
+    if not isinstance(record, dict):
+        raise GitHubError("{} has no current Shaped hold to release".format(
+            item.ref))
+    if _shaped_hold_clear_matches(item, record):
+        _finish_shaped_hold_clear(item, body, now)
+        print("{} was already cleared; the Shaped approval gate is pending again"
+              .format(item.ref))
+        return 0
+    if not item.is_blocked:
+        raise GitHubError("{} has no active blocked Shaped hold".format(
+            item.ref))
+
+    current_plan_version = shaped_plan_version(body)
+    clear_body = render_explicit_shaped_hold_release(
+        record, current_plan_version)
+    comment = _run_gh(
+        [
+            "gh", "issue", "comment", str(item.number), "--repo", item.repo,
+            "--body", append_provenance(
+                clear_body, "nate-relayed", at=now, run=run, agent=agent,
+                instruction=instruction,
+            ),
+        ],
+        capture_output=True, text=True,
+    )
+    if comment.returncode != 0:
+        raise GitHubError(comment.stderr.strip())
+    item.shaped_hold_clear = parse_shaped_hold_clear_comment(clear_body)
+    if item.shaped_hold_clear is None:
+        raise GitHubError("explicit hold release for {} did not parse back".format(
+            item.ref))
+    _finish_shaped_hold_clear(item, body, now)
+    print("{} explicitly released; the Shaped approval gate is pending again"
+          .format(item.ref))
+    return 0
+
+
 def cmd_answer_gates(items: List[Item], now: datetime, ref: str,
                      answer: str, decider: str,
                      run: Optional[str] = None,
@@ -18634,6 +18930,57 @@ def _current_block_comment_details(
     return records[-1][2]
 
 
+def _current_shaped_hold_clear(
+    comments: Sequence[Mapping[str, object]],
+) -> Optional[Dict[str, object]]:
+    """The newest owner-authored clear that follows the matching hold."""
+    records = []
+    for index, comment in enumerate(comments):
+        if not isinstance(comment, Mapping) or not trusted_comment(comment):
+            continue
+        body = str(comment.get("body") or "")
+        hold = parse_shaped_hold_comment(body)
+        if hold is not None:
+            records.append((parse_time(comment.get("createdAt")), index,
+                            "hold", hold))
+            continue
+        cleared = parse_shaped_hold_clear_comment(body)
+        if cleared is not None:
+            records.append((parse_time(comment.get("createdAt")), index,
+                            "clear", cleared))
+            continue
+        if (
+            _parse_block_comment_details([body]) is not None
+            or NEEDS_DECISION_RE.match(body)
+            or body.lstrip().startswith(DECLINED_PREFIX)
+        ):
+            records.append((parse_time(comment.get("createdAt")), index,
+                            "reset", None))
+
+    if all(at is not None for at, _, _, _ in records):
+        records.sort(key=lambda record: (record[0], record[1]))
+
+    active_hold_id = None
+    active_clear = None
+    for _at, _index, kind, value in records:
+        if kind == "hold":
+            try:
+                active_hold_id = shaped_hold_id(value)
+            except ValueError:
+                active_hold_id = None
+            active_clear = None
+        elif kind == "clear":
+            if (
+                active_hold_id is not None
+                and value.get("Hold-ID") == active_hold_id
+            ):
+                active_clear = value
+        else:
+            active_hold_id = None
+            active_clear = None
+    return active_clear
+
+
 def _load_block_comment(item: Item) -> None:
     """Populate one open blocked item's parsed comment state.
 
@@ -18653,6 +19000,7 @@ def _load_block_comment(item: Item) -> None:
     in ``clear_satisfied_blocks``, which runs only once a newer header's
     conditions are satisfied.
     """
+    item.shaped_hold_clear = None
     payload = _gh_json(
         "gh", "issue", "view", str(item.number), "--repo", item.repo,
         "--json", "comments",
@@ -18679,6 +19027,7 @@ def _load_block_comment(item: Item) -> None:
         item.needs_decision,
         item.shaped_hold,
     ) = _current_block_comment_details(comments)
+    item.shaped_hold_clear = _current_shaped_hold_clear(comments)
     item.decline_reason = parse_decline_comment(bodies)
     item.decline_route = parse_decline_route_comment(payload["comments"])
     for body in reversed(bodies):
@@ -23296,8 +23645,8 @@ def main(argv: Optional[Sequence[str]] = None, *,
     )
     hold = sub.add_parser(
         "hold",
-        help="owner-authorized hold on a Shaped plan or finished Building "
-             "project — dry run without --yes",
+        help="owner-authorized hold or explicit release of a Shaped plan — "
+             "dry run without --yes",
     )
     hold.add_argument("ref", help="issue number, owner/repo#number, or URL")
     hold_condition = hold.add_mutually_exclusive_group(required=True)
@@ -23309,9 +23658,13 @@ def main(argv: Optional[Sequence[str]] = None, *,
         "--on", nargs="+", type=_hold_reference, default=None, metavar="N",
         help="hold until these issues in the project's repository close",
     )
+    hold_condition.add_argument(
+        "--release", action="store_true",
+        help="explicitly release a Shaped hold (requires --yes and --instruction)",
+    )
     hold.add_argument(
-        "--reason", required=True, type=_comment_reason,
-        help="why Nate is holding it (required)",
+        "--reason", required=False, type=_comment_reason,
+        help="why Nate is holding it (required unless --release)",
     )
     hold.add_argument(
         "--yes", action="store_true", dest="confirmed",
@@ -23390,6 +23743,12 @@ def main(argv: Optional[Sequence[str]] = None, *,
                           "routine, the same way an engine declares its own.")
     reject.add_argument("--note", default=None, help="what is broken")
     args = parser.parse_args(argv)
+
+    if args.command == "hold":
+        if not args.release and not args.reason:
+            parser.error("hold needs --reason unless --release is used")
+        if args.release and args.confirmed and not args.instruction:
+            parser.error("--instruction is required for a confirmed --release")
 
     if args.command == "comment":
         if args.blocked_on and args.because is None:
@@ -23761,6 +24120,11 @@ def main(argv: Optional[Sequence[str]] = None, *,
             return cmd_answer_gates(items, now, args.ref, args.answer,
                                     args.decider, args.run, args.agent)
         if args.command == "hold":
+            if args.release:
+                return cmd_release_shaped_hold(
+                    items, now, args.ref, args.confirmed,
+                    instruction=args.instruction, run=args.run, agent=args.agent,
+                )
             return cmd_hold(items, now, args.ref, args.reason,
                             until=args.until, on=args.on or (),
                             confirmed=args.confirmed, run=args.run,

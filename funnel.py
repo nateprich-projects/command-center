@@ -1714,6 +1714,28 @@ def asserted_text(text: str) -> str:
     )
 
 
+def _walk_escalation_matches(
+        text: str,
+        proposal: Optional[Callable[[str, re.Match, str], bool]] = None,
+        ) -> List[Dict[str, Optional[str]]]:
+    """Return the first accepted, trimmed matching line per category."""
+    found: List[Dict[str, Optional[str]]] = []
+    for name, pattern in sorted(ESCALATION_PATTERNS.items()):
+        for match in re.finditer(pattern, text, re.IGNORECASE):
+            if proposal is not None and not proposal(text, match, name):
+                continue
+            line_start = text.rfind("\n", 0, match.start()) + 1
+            line_end = text.find("\n", match.start())
+            if line_end < 0:
+                line_end = len(text)
+            found.append({
+                "reason": name,
+                "line": text[line_start:line_end].strip(),
+            })
+            break
+    return found
+
+
 def escalation_matches(title: str, body: str,
                        failed_before: bool = False
                        ) -> List[Dict[str, Optional[str]]]:
@@ -1749,19 +1771,7 @@ def escalation_matches(title: str, body: str,
             found.append({"reason": "prior attempt failed", "line": None})
         return found
 
-    found: List[Dict[str, Optional[str]]] = []
-    for name, pattern in sorted(ESCALATION_PATTERNS.items()):
-        match = re.search(pattern, text, re.IGNORECASE)
-        if not match:
-            continue
-        line_start = text.rfind("\n", 0, match.start()) + 1
-        line_end = text.find("\n", match.start())
-        if line_end < 0:
-            line_end = len(text)
-        found.append({
-            "reason": name,
-            "line": text[line_start:line_end].strip(),
-        })
+    found = _walk_escalation_matches(text)
     if failed_before:
         found.append({"reason": "prior attempt failed", "line": None})
     return found
@@ -2383,21 +2393,7 @@ def plan_escalation_matches(plan_body: str
     if RISK_LINE.search(text):
         return escalation_matches("", text)
 
-    found: List[Dict[str, Optional[str]]] = []
-    for name, pattern in sorted(ESCALATION_PATTERNS.items()):
-        for match in re.finditer(pattern, text, re.IGNORECASE):
-            if not _plan_match_is_proposed(text, match, name):
-                continue
-            line_start = text.rfind("\n", 0, match.start()) + 1
-            line_end = text.find("\n", match.start())
-            if line_end < 0:
-                line_end = len(text)
-            found.append({
-                "reason": name,
-                "line": text[line_start:line_end].strip(),
-            })
-            break
-    return found
+    return _walk_escalation_matches(text, _plan_match_is_proposed)
 
 
 def open_needs_nate_categories(plan_body: str) -> Optional[FrozenSet[str]]:

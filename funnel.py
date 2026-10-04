@@ -1606,30 +1606,45 @@ _CREDENTIALS_MATCHER_NAMED_TERMS = (
     r"api[- ]key|access token|client secret|credential store|password|private key"
 )
 _CREDENTIALS_MATCHER_ACTION_NOUN = r"credentials?"
+# These stems are the ticket-side boundary: retain their spelling and only
+# widen them when the category gains a listed verb form (#2181).
+_ESCALATION_MATCHER_VERB_STEMS = {
+    "authorisation": r"broaden|chang|elevat|expand|grant|reduc|revok|tighten",
+    "credentials": (
+        r"access|chang|creat|enter|expos|grant|handl|load|read|replac|revok|"
+        r"rotat|stor|suppl|touch|updat|use|uses|used|using|writ|wrote"
+    ),
+    "destructive": r"allow|enable|enabling|perform|permit|ran|run",
+}
+_DESTRUCTIVE_MATCHER_PHRASE_OBJECT = (
+    r"(?:destructive|irreversible)"
+    r"\s+(?:actions?|changes?|commands?|operations?)"
+)
 
 ESCALATION_PATTERNS = {
     "credentials": (
         r"(?<!no )\b(" + _CREDENTIALS_MATCHER_NAMED_TERMS + r")\b|"
-        r"(?<!not )(?<!never )\b(?:access|chang|creat|enter|expos|"
-        r"handl|load|read|replac|revok|rotat|stor|suppl|touch|"
-        r"use|uses|used|using|writ)\w*"
+        r"(?<!not )(?<!never )\b(?:"
+        + _ESCALATION_MATCHER_VERB_STEMS["credentials"] + r")\w*"
         r"(?:\s+(?!(?:no|not|nothing)\b)[\w'’-]+){0,4}"
         r"\s+" + _CREDENTIALS_MATCHER_ACTION_NOUN + r"\b"
     ),
     "authorisation": r"(?<!no )(?<!not )(?<!never )\b("
                      r"authoris(?:e|es|ed|ing)|authoriz(?:e|es|ed|ing)|"
                      r"permission model|access control|oauth|scope grant)\b|"
-                     r"(?<!not )(?<!never )\b(?:broaden|chang|elevat|expand|"
-                     r"grant|reduc|revok|tighten)\w*"
+                     r"(?<!not )(?<!never )\b(?:"
+                     + _ESCALATION_MATCHER_VERB_STEMS["authorisation"]
+                     + r")\w*"
                      r"(?:\s+(?!(?:no|not|nothing)\b)[\w'’-]+){0,4}"
                      r"\s+permissions?\b",
     "data-migration": r"(?<!no )\b(data migration|schema migration|backfill|"
                       r"irreversible migration|migrat(?:e|es|ed|ing))\b",
     "destructive": r"(?<!no )\b(force[- ]push|hard delete|permanently delete|"
                    r"drop the (table|branch)|rewrite history|"
-                   r"(?:allow|enable|perform|permit|run)\w*"
-                   r"(?:\s+[\w'’-]+){0,4}\s+(?:destructive|irreversible)"
-                   r"\s+(?:actions?|changes?|commands?|operations?))\b",
+                   r"(?:" + _ESCALATION_MATCHER_VERB_STEMS["destructive"]
+                   + r")\w*"
+                   r"(?:\s+[\w'’-]+){0,4}\s+"
+                   + _DESTRUCTIVE_MATCHER_PHRASE_OBJECT + r")\b",
     "concurrency": r"(?<!no )\b(race condition|deadlock|thread[- ]safe|mutex|"
                    r"atomic (write|commit)|"
                    r"(?:concurrent|overlapping)\s+(?:mutations?|processes|runs?|"
@@ -1872,12 +1887,12 @@ PLAN_SCAN_IGNORED_REGIONS: Tuple[Tuple[str, str], ...] = (
 )
 
 _PLAN_QUOTE_PAIRS = {"\"": "\"", "“": "”", "‘": "’", "«": "»"}
-# These literal forms are already used by the credentials proposal matcher.
-# The direct-action table below shares this list, like the existing direct
-# action entries use their category's established verbs.
+# Credentials forms are explicit because open stems accept misspellings. The
+# direct-action table and proposal matcher share this list (#2181).
 _CREDENTIALS_PLAN_ACTION_FORMS = (
     r"access|accesses|accessed|accessing|change|changes|changed|changing|"
-    r"create|creates|created|creating|expose|exposes|exposed|exposing|"
+    r"create|creates|created|creating|enter|enters|entered|entering|"
+    r"expose|exposes|exposed|exposing|"
     r"grant|grants|granted|granting|handle|handles|handled|handling|"
     r"load|loads|loaded|loading|read|reads|reading|replace|replaces|"
     r"replaced|replacing|revoke|revokes|revoked|revoking|rotate|rotates|"
@@ -1885,6 +1900,29 @@ _CREDENTIALS_PLAN_ACTION_FORMS = (
     r"supplied|supplying|touch|touches|touched|touching|update|updates|"
     r"updated|updating|use|uses|used|using|write|writes|wrote|written|writing"
 )
+# Each category's in-phrase verbs, with every inflection spelled out. The
+# direct-action entries below come from these lists; concurrency has no
+# in-phrase verb (#2181).
+_PLAN_IN_PHRASE_VERB_FORMS = {
+    "authorisation": (
+        r"broaden|broadens|broadened|broadening|change|changes|changed|"
+        r"changing|elevate|elevates|elevated|elevating|expand|expands|"
+        r"expanded|expanding|grant|grants|granted|granting|reduce|reduces|"
+        r"reduced|reducing|revoke|revokes|revoked|revoking|tighten|tightens|"
+        r"tightened|tightening"
+    ),
+    "concurrency": "",
+    "credentials": _CREDENTIALS_PLAN_ACTION_FORMS,
+    "data-migration": (
+        r"backfill|backfills|backfilled|backfilling|migrate|migrates|"
+        r"migrated|migrating|migration"
+    ),
+    "destructive": (
+        r"allow|allows|allowed|allowing|enable|enables|enabled|enabling|"
+        r"perform|performs|performed|performing|permit|permits|permitted|"
+        r"permitting|run|runs|ran|running"
+    ),
+}
 _PLAN_PROPOSAL_ACTIONS = {
     # Every inflection is spelled out: an optional suffix on a stem that
     # ends in "e" matches "changeing", never "changing" (#1681 review).
@@ -1950,33 +1988,37 @@ _PLAN_DIRECT_PROPOSAL_PREFIX_RE = re.compile(
 )
 _PLAN_DIRECT_ACTIONS = {
     # The authorisation pattern's own terms can carry the verb: "authorise
-    # the client", or "grant ... permissions" (#1678).
+    # the client, or a verb plus permissions (#1678). Spell every in-phrase
+    # inflection out rather than letting an open stem accept "changeing".
     "authorisation": re.compile(
         r"\b(?:authori[sz](?:e|es|ed|ing)|"
-        r"(?:broaden|chang|elevat|expand|grant|reduc|revok|tighten)\w*"
+        r"(?:" + _PLAN_IN_PHRASE_VERB_FORMS["authorisation"] + r")"
         r"(?:\s+[\w'’-]+){0,4}\s+permissions?)\b",
         re.IGNORECASE,
     ),
-    # "migrat\w*" also took "migrateing" (#1722). "migration" stays: it
-    # carries the proposal in a clause-led "Schema migration ..." item.
+    # "migration" stays: it carries the proposal in a clause-led
+    # "Schema migration ..." item (#1722).
     "data-migration": re.compile(
-        r"\b(?:backfill|backfills|backfilled|backfilling|migrate|migrates|"
-        r"migrated|migrating|migration)\b",
+        r"\b(?:" + _PLAN_IN_PHRASE_VERB_FORMS["data-migration"] + r")\b",
         re.IGNORECASE,
     ),
     # Like data-migration and authorisation, this category gets a direct
     # action entry for its own verb-inside-phrase proposal shape. Reuse the
     # credentials proposal forms and matcher terms verbatim (#1770).
     "credentials": re.compile(
-        r"\b(?:" + _CREDENTIALS_PLAN_ACTION_FORMS + r")"
+        r"\b(?:" + _PLAN_IN_PHRASE_VERB_FORMS["credentials"] + r")"
         r"(?:\s+[\w'’-]+){0,4}\s+"
         r"(?:" + _CREDENTIALS_MATCHER_NAMED_TERMS + r"|"
         + _CREDENTIALS_MATCHER_ACTION_NOUN + r")\b",
         re.IGNORECASE,
     ),
+    # The destructive phrase can carry its own proposing verb (#2181).
     "destructive": re.compile(
         r"\b(?:force[- ]push|hard[- ]delete|permanently\s+delete|"
-        r"drop\s+(?:the\s+)?(?:table|branch)|rewrite\s+history)\b",
+        r"drop\s+(?:the\s+)?(?:table|branch)|rewrite\s+history|"
+        r"(?:" + _PLAN_IN_PHRASE_VERB_FORMS["destructive"] + r")"
+        r"(?:\s+[\w'’-]+){0,4}\s+"
+        + _DESTRUCTIVE_MATCHER_PHRASE_OBJECT + r")\b",
         re.IGNORECASE,
     ),
 }

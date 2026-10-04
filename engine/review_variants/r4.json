@@ -1,0 +1,9 @@
+{
+  "id": "r4",
+  "question_rules": [
+    "So is \u0060passes-on-base\u0060 on any other ticket."
+  ],
+  "judge_rules": [
+    "On any other ticket \u0060reproduction: passes-on-base\u0060 is weighed, not blocking."
+  ]
+}

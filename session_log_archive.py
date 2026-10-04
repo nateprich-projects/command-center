@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Move verified compressed session logs to the machine-local SSD archive.
 
-This pass runs in the app-hosted Codex routine after a successful ``begin``
-gate. It must not be called by the launchd run-keeper, which cannot write to
-the external volume.
+The funnel watch runs ``python3 session_log_archive.py`` on its existing
+app-hosted cadence; ``run_daily_pass`` archives once per local day, on the
+first call at or after 03:00. It must not be called by the launchd
+run-keeper, which cannot write to the external volume.
 """
 
 from __future__ import annotations
@@ -24,10 +25,28 @@ import session_logs
 
 
 ARCHIVE_HOUR = 3
+DAILY_STAMP_NAME = ".last-daily-pass"
 READABLE_SAMPLE_BYTES = 64 * 1024
 CODEX_ARCHIVE_THREAD_SOURCES = frozenset({"automation", "subagent", "review"})
 Pathish = Union[str, Path]
 MountCheck = Callable[[Path], bool]
+
+
+def _volume_root(base: Path) -> Path:
+    """The external mount holding ``base``: ``/Volumes/<name>`` when under it."""
+    parts = base.parts
+    if len(parts) >= 3 and parts[0] == "/" and parts[1] == "Volumes":
+        return Path(*parts[:3])
+    return base.parent
+
+
+def _ensure_base(base: Path) -> bool:
+    """Create the archive base and confirm this user can write into it."""
+    try:
+        base.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return False
+    return base.is_dir() and os.access(str(base), os.W_OK | os.X_OK)
 
 
 def _mounted(volume_root: Path) -> bool:
@@ -204,13 +223,8 @@ def archive_pass(
     mount_check: Optional[MountCheck] = None,
 ) -> Dict[str, Union[int, str]]:
     """Archive internal gzip logs, retaining every source that fails checks."""
-    base_value = (
-        archive_base
-        or os.environ.get(session_logs.ARCHIVE_ROOT_ENV)
-        or session_logs.DEFAULT_ARCHIVE_BASE
-    )
-    base = Path(os.path.expanduser(str(base_value)))
-    mount_value = volume_root if volume_root is not None else base.parent
+    base = _archive_base(archive_base)
+    mount_value = volume_root if volume_root is not None else _volume_root(base)
     mounted_path = Path(os.path.expanduser(str(mount_value)))
     check_mount = mount_check or _mounted
     summary: Dict[str, Union[int, str]] = {
@@ -220,6 +234,11 @@ def archive_pass(
 
     if not check_mount(mounted_path):
         summary["status"] = "unmounted"
+        return summary
+    if not _ensure_base(base):
+        # No source is touched when the archive base cannot hold copies.
+        summary["status"] = "error"
+        summary["errors"] = 1
         return summary
 
     roots = {
@@ -248,6 +267,8 @@ def archive_pass(
             else:
                 summary["retained"] = int(summary["retained"]) + 1
                 summary["errors"] = int(summary["errors"]) + 1
+    if summary["errors"]:
+        summary["status"] = "error"
     return summary
 
 
@@ -255,9 +276,32 @@ def _summary_line(summary: Dict[str, Union[int, str]]) -> str:
     if summary["status"] == "unmounted":
         return "session-log archive: skipped; external volume is not mounted"
     return (
-        "session-log archive: copied={copied} deleted={deleted} "
+        "session-log archive: status={status} copied={copied} deleted={deleted} "
         "retained={retained} errors={errors}"
     ).format(**summary)
+
+
+def _archive_base(archive_base: Optional[Pathish]) -> Path:
+    base_value = (
+        archive_base
+        or os.environ.get(session_logs.ARCHIVE_ROOT_ENV)
+        or session_logs.DEFAULT_ARCHIVE_BASE
+    )
+    return Path(os.path.expanduser(str(base_value)))
+
+
+def _ran_today(stamp: Path, today: str) -> bool:
+    try:
+        return stamp.read_text(encoding="utf-8").strip() == today
+    except OSError:
+        return False
+
+
+def _record_run(stamp: Path, today: str) -> None:
+    try:
+        stamp.write_text(today + "\n", encoding="utf-8")
+    except OSError:
+        pass
 
 
 def run_daily_pass(
@@ -270,9 +314,18 @@ def run_daily_pass(
     mount_check: Optional[MountCheck] = None,
     emit: Callable[[str], None] = print,
 ) -> int:
-    """Run in the existing app cadence during its 03:00 local hour only."""
+    """Archive once per local day, on the first call at or after 03:00.
+
+    A pass that reaches the archive base records the day on the volume; an
+    unmounted volume or an unwritable base records nothing, so a later call
+    the same day tries again.
+    """
     local_now = datetime.datetime.now().astimezone() if now is None else now.astimezone()
-    if local_now.hour != ARCHIVE_HOUR:
+    if local_now.hour < ARCHIVE_HOUR:
+        return 0
+    today = local_now.date().isoformat()
+    stamp = _archive_base(archive_base) / DAILY_STAMP_NAME
+    if _ran_today(stamp, today):
         return 0
     try:
         summary = archive_pass(
@@ -283,6 +336,8 @@ def run_daily_pass(
             mount_check=mount_check,
         )
         emit(_summary_line(summary))
+        if summary["status"] != "unmounted" and stamp.parent.is_dir():
+            _record_run(stamp, today)
     except Exception:
         # Archiving is maintenance; a missing or unhealthy destination must
         # not stop the app-hosted funnel lane.

@@ -3316,6 +3316,56 @@ def test_improve_idea_does_not_preempt_an_improve_review(monkeypatch, capsys):
     assert result["work"] == _review_job(ticket)
 
 
+def test_begin_reports_the_review_heads_the_listing_waits_on(
+    monkeypatch, capsys
+):
+    """A waiting head is named in begin's JSON, never dropped (#2192).
+
+    The review queue fills a ``skipped`` list, as the shape picker does, and
+    begin reports it as ``review_waiting`` beside the job it hands out.
+    """
+    project, ticket = _ticket(131, 130)
+    _, waiting_ticket = _ticket(133, 130)
+    review = _review_job(ticket, pr=132)
+    waiting = {"ref": waiting_ticket.ref, "pr": 134,
+               "reason": "mergeability UNKNOWN"}
+
+    def review_queue(rows, tier, *, pr_facts=None, output_stream=None,
+                     skipped=None):
+        if skipped is not None:
+            skipped.append(dict(waiting))
+        return [review]
+
+    _allow_begin(monkeypatch)
+    monkeypatch.setattr(funnel, "reconcile_approved_merges", lambda *args: [])
+    monkeypatch.setattr(funnel, "review_queue", review_queue)
+    monkeypatch.setattr(funnel, "shapeable_idea", lambda *args: None)
+    monkeypatch.setattr(funnel, "_ticket_body", lambda repo, number: "")
+
+    assert funnel.cmd_begin(
+        [project, ticket, waiting_ticket], NOW, "zcode", "standard", False,
+        caller_role="review",
+    ) == 0
+    result = json.loads(capsys.readouterr().out)
+
+    assert result["do"] == "review"
+    assert result["work"] == review
+    assert result["review_waiting"] == [waiting]
+
+
+def test_begin_has_no_review_waiting_key_when_nothing_waits(
+    monkeypatch, capsys
+):
+    project, ticket = _ticket(141, 140)
+
+    result = _reviewer_begin(
+        monkeypatch, capsys, [project, ticket], review=_review_job(ticket),
+    )
+
+    assert result["do"] == "review"
+    assert "review_waiting" not in result
+
+
 def test_muse_escalated_begin_uses_the_explicit_reviewer_role(
     monkeypatch, capsys
 ):
@@ -4458,7 +4508,8 @@ def test_sweep_releases_an_escalated_plan_whose_record_declares_none(
     """#1721: #1195's body, whose Needs Nate question has been answered, so
     Needs is none, carries the runner's record that the decision declared
     no risk. It is swept to Ready and Risk stays escalated for the review
-    tier."""
+    tier. Its body's only scan hit was a Siblings checked line, which the
+    scan no longer reads (#2180), so the note names no reason."""
     fixture = next(entry for entry in SCAN_ONLY_HOLDS
                    if "#1195 " in entry["source"])
     stranded = _held_plan(305, fixture["body"], needs="none",
@@ -4478,7 +4529,7 @@ def test_sweep_releases_an_escalated_plan_whose_record_declares_none(
     assert len(comments) == 1
     assert funnel.parse_self_approval(comments[0]) == (
         "needs_nate all null; class Broken self-approvable; origin agent; "
-        "scan-only escalation (data-migration) raises the review tier; "
+        "scan-only escalation raises the review tier; "
         "no declared risk")
 
 

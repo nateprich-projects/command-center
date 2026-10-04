@@ -30,8 +30,14 @@ finish. Each API cost field states whether it was measured (zero included),
 missing (no event) or lost (an event with no readable value), so an
 unreadable value never reads as zero or as nothing measured. An errored finish
 written before `error_class` was recorded is classified on read. `open_starts`
-and `api_cost_for_run` are thin adapters over it. The view is derived on every
-read: the spool format and the records on GitHub are unchanged.
+and `api_cost_for_run` are thin adapters over it, and `agent_health.assess`
+takes its open starts, bindings, completed durations, per-run outcomes (the
+finish, or one of the run's non-terminal events, where a `config-drift`
+refusal lives), and auth-outage state from it (#2176). A successful login
+probe has no run id, so the view associates it with the run whose finish
+opened the outage. `muse_auth_outage` is a thin adapter over that view, shared
+by the lanes' gate. The view is derived on every read: the spool format and
+the records on GitHub are unchanged.
 
 **Start and finish read GitHub strictly** (`read(strict=True)`, #2175). A
 GitHub read that fails is lost, never "no records"; only a missing file is an
@@ -242,19 +248,11 @@ def _muse_call_record(value: str) -> Dict[str, object]:
 PROVIDERS = {"claude": "anthropic", "codex": "openai", "zcode": "zai",
              "muse": "meta"}
 
-#: When z.ai stops answering the standard judgement tier: 2026-09-27 06:00
-#: PDT (#1694). It was first the start of the plan's expiry day in Beijing
-#: time, 2026-10-06 09:00 PDT (1791302400; Nate, 2026-09-23; #1411), and was
-#: brought forward when z.ai's weekly window was spent until 2026-10-03,
-#: which stopped the standard lane while Muse's week went mostly unused.
-#: `scripts/muse-review-engine` routes on the same instant and a test pins
-#: the two together.
-ZAI_STANDARD_UNTIL = 1790514000
-
-# Keep each retirement instant beside the policy that makes the lane retired.
-# Readers may use it to retain historical work without treating silence after
-# the cutoff as an active lane.
-RETIRED_AGENT_CUTOFFS = {"zcode": ZAI_STANDARD_UNTIL}
+# Keep the standard-tier zcode retirement instant in the historical agent
+# record. The bridge ended at 2026-09-27 06:00 PDT (1790514000); this timestamp
+# no longer controls routing. The 2026-10-03 00:22 to 2026-10-06 09:00 PDT
+# z.ai window remains retired per Nate's 2026-09-29 plan approval (#1590).
+RETIRED_AGENT_CUTOFFS = {"zcode": 1790514000}
 
 
 def retired_agents(now: Optional[float] = None) -> frozenset:
@@ -265,10 +263,10 @@ def retired_agents(now: Optional[float] = None) -> frozenset:
     died. zcode was retired on 2026-09-09 by Nate's decision: measured over
     24h it did work in 18 of 93 runs and was refused on the z.ai pace line in
     63, while Muse carried every job it had on the separate Meta pool (#431).
-    It ran again, as the engine's z.ai standard tier, from 2026-09-23 until
-    ``ZAI_STANDARD_UNTIL`` (2026-09-27 06:00 PDT, #1694), and retires again
-    at that instant by itself, so its silence after the cutoff is not read
-    as a lane that died.
+    It ran again as the engine's standard tier from 2026-09-23 until
+    2026-09-27 06:00 PDT (1790514000, #1694, #1987). That retirement instant
+    remains here for health history and no longer controls routing, so its
+    silence after the cutoff is not read as a lane that died.
     codex was retired from 2026-09-18 to 2026-09-22, while Muse implemented
     both tiers (#1106). It returned when its automations went live again
     (Nate, #1315, #1325): Codex implements both tiers, so its silence is a
@@ -965,7 +963,15 @@ def run_views(records: List[Dict]) -> Dict[str, Dict]:
     - ``binding`` as `bindings` reads the run's own bind records, and
       ``job`` as `job_for_run` reads it for the run's agent;
     - ``api_cost_events`` and ``api_cost``, each field a ``state`` and a
-      ``value`` (the ``API_COST_*`` values above).
+      ``value`` (the ``API_COST_*`` values above);
+    - ``events``: the run's non-terminal ``event`` records in the order read
+      — an outcome filed against the run without closing it, such as a
+      gate's ``config-drift`` refusal (#1316) or a misfiled finish
+      re-attached to its run (#2176);
+    - ``muse_auth_outage``: the auth-outage finish opened by this run, plus
+      the successful login probe that cleared it if one followed. A probe has
+      no run id, so the view associates it with the run whose finish opened
+      the outage (#2176).
 
     Runs with a start come first, oldest start first, which is the order
     `open_starts` reports; runs with no start follow in the order read. A
@@ -976,17 +982,41 @@ def run_views(records: List[Dict]) -> Dict[str, Dict]:
     distinct = distinct_records(records)
     rows: Dict[str, Dict[str, List[Dict]]] = {}
     unresolved = []
+    auth_outages: Dict[str, Dict[str, object]] = {}
+    open_auth_outage: Optional[Dict[str, object]] = None
     position = {id(record): index for index, record in enumerate(distinct)}
     for record in distinct:
         phase = record.get("phase")
         if phase == "finish" and record.get("unresolved"):
             unresolved.append(record)
         run = record.get("run")
+        if record.get("agent") == "muse":
+            if (
+                phase == "finish"
+                and record.get("outcome") == "errored"
+                and record.get("note") == MUSE_AUTH_OUTAGE_NOTE
+            ):
+                if open_auth_outage is None:
+                    open_auth_outage = {
+                        "run": run if isinstance(run, str) and run else None,
+                        "opened": record,
+                        "cleared_by": None,
+                    }
+                    outage_run = open_auth_outage["run"]
+                    if outage_run is not None:
+                        auth_outages[outage_run] = open_auth_outage
+            elif (
+                phase == "auth_probe"
+                and record.get("result") == "success"
+                and open_auth_outage is not None
+            ):
+                open_auth_outage["cleared_by"] = record
+                open_auth_outage = None
         if not isinstance(run, str) or not run:
             continue
         found = rows.setdefault(run, {
             "all": [], "start": [], "finish": [], "bind": [], "api_cost": [],
-            "job": [],
+            "job": [], "event": [],
         })
         found["all"].append(record)
         if phase in found:
@@ -1046,6 +1076,8 @@ def run_views(records: List[Dict]) -> Dict[str, Dict]:
             "job": next(iter(jobs)) if len(jobs) == 1 else None,
             "api_cost_events": list(found["api_cost"]),
             "api_cost": _run_api_cost(found["api_cost"]),
+            "events": list(found["event"]),
+            "muse_auth_outage": auth_outages.get(run),
         }
 
     started = sorted(
@@ -2246,15 +2278,33 @@ def read_brief(agent: str, timeout: Optional[float] = None) -> List[Dict]:
 MUSE_AUTH_OUTAGE_NOTE = "Muse provider outage: missing meta credentials"
 
 
+def muse_auth_outage(records: List[Dict]) -> Optional[Dict]:
+    """The finish that opened a still-open Muse auth outage, or ``None``.
+
+    A successful login probe has no run id. `run_views` associates it with the
+    run whose finish opened the outage, so this adapter and `agent_health`
+    consume the same per-run reading (#2176). Duplicate GitHub/spool records
+    are collapsed before the view is built (#1225).
+    """
+    for view in run_views(records).values():
+        outage = view.get("muse_auth_outage")
+        if isinstance(outage, dict) and outage.get("cleared_by") is None:
+            opened = outage.get("opened")
+            return opened if isinstance(opened, dict) else None
+    return None
+
+
 def muse_auth_outage_open(records: List[Dict]) -> bool:
     """Whether durable Muse records leave the authentication outage open.
 
-    The append-only order on GitHub is authoritative: the exact auth-outage
-    finish opens the park, and only a successful smoke probe closes it. Other
-    run failures and unsuccessful probes do not change the state.
+    The append-only order on GitHub is authoritative for this lane gate: the
+    exact auth-outage finish opens the park, and only a successful smoke probe
+    closes it. Keep accepting these durable legacy rows even when they have no
+    run id; `agent_health.assess` reads the run-attributed state from
+    `run_views` separately (#2176).
     """
     open_outage = False
-    for record in records:
+    for record in distinct_records(records):
         if not isinstance(record, dict) or record.get("agent") != "muse":
             continue
         if (

@@ -7,12 +7,16 @@ It reports six distinct conditions, because they have different causes and
 different fixes:
 
 - **Silent.** No record at all within the window. The watchdog can report that
-  absence and when the last record arrived, but cannot observe its cause.
+  absence and when the last record arrived, but cannot observe its cause —
+  except a Muse auth outage (#1946), which the records themselves name: while
+  no successful login probe has cleared it, Muse's silence reports as that
+  park, with the time of the finish that opened it (#2176).
 - **Dying.** Runs that started and never finished. That is the signature of a
   session killed mid-work by a rate limit, and it is the one condition a single
   outcome line could never have detected.
-- **Erroring.** Repeated `errored` outcomes. Something is broken in the run
-  itself.
+- **Degraded lane.** The newest three judged runs in one lane each errored or
+  passed `unfinished_seconds` without an end. The condition names the lane and
+  each run's failure detail.
 - **Stale runtime.** Three consecutive scheduled runs used a checkout that
   GitHub reports behind `main` after the normal keeper lag.
 - **Config drift.** A Codex run refused in the last day because its model,

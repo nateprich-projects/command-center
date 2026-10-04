@@ -1,0 +1,10 @@
+# Ticket #2271 premise evidence
+
+Implementation is contingent on the existing source and meter being present. The current `origin/main` checkout confirms the required premises:
+
+- The dashboard has an existing Muse estimate adapter in `dashboard/public/app.js:927-940`; it consumes the snapshot estimate. The adjacent account-panel adapter at `:909-925` currently requires `sampled_at` and renders freshness at `:998-1014`. This ticket adds the measurement contract only; the later display/feed work owns that stale/freshness presentation.
+- `usage.read_muse(now)` in `usage.py:923-935,1061-1081` is the canonical own-card meter. It can be evaluated at the owner's report time and returns the own-card percentage and reset identity for that seven-day window. The new module delegates to it instead of duplicating cost or window math.
+- The Codex routine documents `~/.claude/command-center-heartbeat` as the runtime root (`routines/codex-work.md:6-10`); `funnel.py:115` anchors that root at `~/.claude`. Any future decode buffer belongs under its `muse-estimate/` child. This implementation creates no persistent buffer or measurement file.
+- The accepted calibration input is the owner-reported 36% panel reading at report time `2026-10-03T22:23:07Z`, recorded at [issue comment #5974149725](https://github.com/nateprich-projects/command-center/issues/2123#issuecomment-5974149725). Nate's follow-up says reports are within one or two minutes of viewing; [issue comment #5975698153](https://github.com/nateprich-projects/command-center/issues/2123#issuecomment-5975698153) settles report time as the approximate observation time with 60-120 seconds of uncertainty. Neither comment supplies an exact provider sample timestamp.
+
+These findings satisfy the implementation preconditions. The module preserves the GitHub comment as the source record, labels the provenance owner-reported, pairs by calling the own-card meter at report time, and returns no measurement on absent or malformed input. It does not acquire panel data, create durable state, or change pricing, pace, lanes, spending, or the dashboard.

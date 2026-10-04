@@ -1,8 +1,4 @@
-"""A retired agent's silence is not a dying run (#431, #1106).
-
-zcode retired on 2026-09-09, runs again as the engine's z.ai standard tier
-from 2026-09-23, and retires again by itself at `heartbeat.ZAI_STANDARD_UNTIL`.
-"""
+"""A retired agent's silence is not a dying run (#431, #1106, #1987)."""
 
 from __future__ import annotations
 
@@ -40,17 +36,16 @@ ZAI_CUTOFF = datetime(2026, 9, 27, 6, 0,
                       tzinfo=timezone(timedelta(hours=-7))).timestamp()
 
 
-def test_the_zai_cutoff_is_2026_09_27_0600_pacific():
-    assert heartbeat.ZAI_STANDARD_UNTIL == ZAI_CUTOFF == 1790514000
+def test_zcode_retirement_cutoff_is_2026_09_27_0600_pacific():
+    assert not hasattr(heartbeat, "ZAI_STANDARD_UNTIL")
+    assert ZAI_CUTOFF == 1790514000
     assert heartbeat.RETIRED_AGENT_CUTOFFS == {"zcode": ZAI_CUTOFF}
     pacific = datetime.fromtimestamp(ZAI_CUTOFF, timezone(timedelta(hours=-7)))
     assert (pacific.month, pacific.day, pacific.hour) == (9, 27, 6)
 
 
-def test_zcode_is_live_until_the_zai_cutoff_and_retired_from_it():
-    """zcode was the engine's z.ai standard tier from 2026-09-23; its
-    silence alarmed while it ran, and stops alarming by itself at the
-    cutoff (2026-09-27 06:00 PDT since #1694), with no edit to make."""
+def test_zcode_retirement_is_effective_at_its_recorded_cutoff():
+    """Keep historical health reads accurate around the bridge's end."""
     assert heartbeat.retired_agents(ZAI_CUTOFF - 1) == frozenset()
     assert heartbeat.retired_agents(ZAI_CUTOFF) == {"zcode"}
     assert heartbeat.retired_agents(ZAI_CUTOFF + 86400) == {"zcode"}

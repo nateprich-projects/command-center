@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
+import os
 import pathlib
 import re
 import shlex
@@ -493,7 +494,8 @@ def test_the_ticket_pr_is_created_rather_than_a_foreign_one_edited(
     monkeypatch.setattr(funnel, "_run_gh", fake_run)
 
     pr = implement.create_or_update_pr(
-        REPO, {"branch": "ticket/42", "root": tmp_path},
+        REPO, {"branch": "ticket/42", "head_sha": "new-head",
+               "root": tmp_path},
         {"title": "Do it", "number": 42}, "body")
 
     assert pr == {"number": 95, "url": "https://github.com/owner/repo/pull/95"}
@@ -501,6 +503,51 @@ def test_the_ticket_pr_is_created_rather_than_a_foreign_one_edited(
     fields = asked[0][asked[0].index("--json") + 1].split(",")
     assert {"isCrossRepository", "headRepository", "headRepositoryOwner",
             "author"} <= set(fields)
+
+
+def test_a_merged_pr_on_the_pushed_head_is_returned_without_creating_another(
+        monkeypatch, tmp_path):
+    """Source check: implement.py:1798-1803 lists with --repo, --state open,
+    and --head before the gh pr create fallback at lines 1818-1822.
+    """
+    asked = []
+    runs = []
+    merged = {
+        "number": 94,
+        "url": "https://github.com/owner/repo/pull/94",
+        "headRefOid": "same-head",
+        "isCrossRepository": False,
+        "author": {"login": "nateprich"},
+    }
+
+    def fake_json(*args):
+        asked.append(args)
+        state = args[args.index("--state") + 1]
+        if state == "open":
+            return []
+        if state == "merged":
+            return [{**FOREIGN_PRS[0], "headRefOid": "same-head"}, merged]
+        raise AssertionError(args)
+
+    def fake_run(argv, **kwargs):
+        runs.append(list(argv))
+        return type("R", (), {
+            "returncode": 0, "stderr": "",
+            "stdout": "https://github.com/owner/repo/pull/95\n",
+        })()
+
+    monkeypatch.setattr(funnel, "_gh_json", fake_json)
+    monkeypatch.setattr(funnel, "_run_gh", fake_run)
+
+    pr = implement.create_or_update_pr(
+        REPO, {"branch": "ticket/42", "head_sha": "same-head",
+               "root": tmp_path},
+        {"title": "Do it", "number": 42}, "body")
+
+    assert pr == {"number": 94, "url": merged["url"], "merged": True}
+    assert [args[args.index("--state") + 1] for args in asked] == [
+        "open", "merged"]
+    assert [argv[:3] for argv in runs] == []
 
 
 def test_the_owners_open_ticket_pr_is_still_updated(monkeypatch, tmp_path):
@@ -1087,9 +1134,27 @@ def test_pre_pr_stray_check_catches_other_run_scratch(tmp_path, name):
         implement._commit_if_needed(clone, 42, "Added the implementation.")
 
 
-def test_pre_pr_stray_check_passes_a_clean_checkout(tmp_path):
+def test_pre_pr_stray_check_rejects_pytest_tmp_with_file_and_absolute_symlink(
+        tmp_path):
+    _, clone = make_clone(tmp_path)
+    scratch = clone / ".pytest-tmp"
+    scratch.mkdir()
+    (scratch / "scratch.bin").write_text("temporary output\n")
+    target = tmp_path / "outside-target"
+    target.write_text("local target\n")
+    link = scratch / "absolute-target-link"
+    link.symlink_to(target.resolve())
+
+    assert link.is_symlink()
+    assert pathlib.Path(os.readlink(link)).is_absolute()
+    with pytest.raises(implement.StrayFileError, match=r"\.pytest-tmp"):
+        implement._check_no_run_scratch(clone)
+
+
+def test_pre_pr_stray_check_passes_without_pytest_tmp(tmp_path):
     _, clone = make_clone(tmp_path)
 
+    assert not (clone / ".pytest-tmp").exists()
     implement._check_no_run_scratch(clone)
 
 
@@ -1625,6 +1690,60 @@ def test_heartbeat_root_cleanup_removes_ticket_1950_shaped_pushed_checkout(
     )
     assert implement._remove_codex_run_checkout(checkout, 1950, "codex")
     assert not checkout.exists()
+
+
+def make_clean_main_ancestor_with_newer_ticket_tip(tmp_path, monkeypatch):
+    _remote, checkout = make_heartbeat_codex_run_clone(tmp_path, monkeypatch)
+    run_git("switch", "--quiet", "main", cwd=checkout)
+    (checkout / "ticket-only.txt").write_text("remote ticket tip\n")
+    run_git("add", "ticket-only.txt", cwd=checkout)
+    run_git("commit", "--quiet", "-m", "advance remote ticket tip",
+            cwd=checkout)
+    run_git("push", "--quiet", "origin", "HEAD:refs/heads/ticket/42",
+            cwd=checkout)
+    run_git("fetch", "--quiet", "origin", cwd=checkout)
+    run_git("switch", "--quiet", "ticket/42", cwd=checkout)
+    return checkout
+
+
+# Baseline origin/main f4a13cae7 at engine/implement.py:2979-2984 had the
+# strict `head.stdout.strip() != remote_head.stdout.strip()` guard. A clean
+# ticket-2202 checkout had HEAD == origin/main (68c50ae), differed from
+# origin/ticket/2202 (d24c1a8), and had empty status, so that guard kept it.
+def test_heartbeat_root_cleanup_removes_clean_main_ancestor_with_newer_ticket_tip(
+        tmp_path, monkeypatch):
+    checkout = make_clean_main_ancestor_with_newer_ticket_tip(
+        tmp_path, monkeypatch)
+
+    head = run_git("rev-parse", "HEAD", cwd=checkout).stdout.strip()
+    main = run_git("rev-parse", "refs/remotes/origin/main",
+                   cwd=checkout).stdout.strip()
+    ticket = run_git("rev-parse", "refs/remotes/origin/ticket/42",
+                     cwd=checkout).stdout.strip()
+    assert head == main
+    assert head != ticket
+    assert run_git("status", "--porcelain", cwd=checkout).stdout == ""
+
+    assert implement._remove_codex_run_checkout(checkout, 42, "codex")
+    assert not checkout.exists()
+
+
+def test_heartbeat_root_cleanup_keeps_dirty_main_ancestor_with_newer_ticket_tip(
+        tmp_path, monkeypatch):
+    checkout = make_clean_main_ancestor_with_newer_ticket_tip(
+        tmp_path, monkeypatch)
+    head = run_git("rev-parse", "HEAD", cwd=checkout).stdout.strip()
+    main = run_git("rev-parse", "refs/remotes/origin/main",
+                   cwd=checkout).stdout.strip()
+    ticket = run_git("rev-parse", "refs/remotes/origin/ticket/42",
+                     cwd=checkout).stdout.strip()
+    assert head == main
+    assert head != ticket
+    (checkout / "local-only.txt").write_text("uncommitted local work\n")
+    assert run_git("status", "--porcelain", cwd=checkout).stdout
+
+    assert not implement._remove_codex_run_checkout(checkout, 42, "codex")
+    assert checkout.is_dir()
 
 
 @pytest.mark.parametrize("work_state", ("unpushed", "dirty"))
@@ -4234,6 +4353,79 @@ def test_finish_main_routes_blocked_and_declined_answers(
         ["--answer-file", str(path), "--run", "run-42"]) == 1
 
 
+def test_failed_decline_removes_a_clean_content_safe_checkout(
+        tmp_path, monkeypatch, capsys):
+    # Reproduction: run d969170d07f3's declined finish-ticket for #2076
+    # exited 1 on the GitHub API rate limit before _finish_exit. The retained
+    # ticket-2076 checkout was clean with HEAD equal to origin/ticket/2076,
+    # so its bytes were already durable; the CLI error path never offered it
+    # to _remove_codex_run_checkout.
+    remote, clone = make_heartbeat_codex_run_clone(
+        tmp_path, monkeypatch, number=2076)
+    run_git("branch", "--quiet", "--move", "ticket/2076", cwd=clone)
+    run_git("push", "--quiet", "--set-upstream", "origin", "ticket/2076",
+            cwd=clone)
+    head = run_git("rev-parse", "HEAD", cwd=clone).stdout.strip()
+    remote_head = run_git(
+        "rev-parse", "refs/remotes/origin/ticket/2076", cwd=clone,
+    ).stdout.strip()
+    assert head == remote_head
+    assert run_git("status", "--porcelain", cwd=clone).stdout == ""
+    assert run_git("--git-dir", str(remote), "rev-parse",
+                   "refs/heads/ticket/2076").stdout.strip() == head
+
+    answer_path = tmp_path / "answer.json"
+    answer_path.write_text(json.dumps({"declined": "The run hit the API limit."}))
+    _stub_claim_state(monkeypatch, "owned")
+
+    def rate_limited_decline(*args, **kwargs):
+        raise funnel.GitHubError(
+            "gh: API rate limit already exceeded for user ID 263208503.")
+
+    monkeypatch.setattr(implement, "finish_declined", rate_limited_decline)
+    monkeypatch.chdir(clone)
+
+    assert implement.finish_main([
+        "--answer-file", str(answer_path), "--run", "d969170d07f3",
+        "--repo", REPO,
+    ]) == 1
+
+    assert "API rate limit" in capsys.readouterr().err
+    assert not clone.exists()
+
+
+def test_failed_decline_keeps_a_dirty_codex_run_checkout(
+        tmp_path, monkeypatch, capsys):
+    remote, clone = make_heartbeat_codex_run_clone(
+        tmp_path, monkeypatch, number=2076)
+    run_git("branch", "--quiet", "--move", "ticket/2076", cwd=clone)
+    run_git("push", "--quiet", "--set-upstream", "origin", "ticket/2076",
+            cwd=clone)
+    local_work = clone / "local-only.txt"
+    local_work.write_text("keep this unpushed work\n")
+
+    answer_path = tmp_path / "answer.json"
+    answer_path.write_text(json.dumps({"declined": "The run hit the API limit."}))
+    _stub_claim_state(monkeypatch, "owned")
+
+    def rate_limited_decline(*args, **kwargs):
+        raise funnel.GitHubError("gh: API rate limit already exceeded")
+
+    monkeypatch.setattr(implement, "finish_declined", rate_limited_decline)
+    monkeypatch.chdir(clone)
+
+    assert implement.finish_main([
+        "--answer-file", str(answer_path), "--run", "run-2076",
+        "--repo", REPO,
+    ]) == 1
+
+    assert "API rate limit" in capsys.readouterr().err
+    assert clone.is_dir()
+    assert local_work.read_text() == "keep this unpushed work\n"
+    assert run_git("--git-dir", str(remote), "rev-parse",
+                   "refs/heads/ticket/2076").returncode == 0
+
+
 def test_finish_main_accepts_inline_json(monkeypatch, capsys):
     _stub_claim_state(monkeypatch, "empty")
     routed = {}
@@ -5000,15 +5192,15 @@ def test_finish_git_invocation_sites_match_the_recorded_inventory():
         ("diff", "--name-status"): 1,
         ("rev-list", "--count"): 2,
         ("fetch", "origin"): 2,
-        ("merge-base", "--is-ancestor"): 1,
+        ("merge-base", "--is-ancestor"): 2,
         ("merge", "-s"): 1,
         ("push", "--set-upstream"): 1,
     })
     assert actual == expected
 
     inventory = (ROOT / "docs" / "finish-subprocess-bounds.md").read_text()
-    assert "27 bounded Git callsites" in inventory
-    assert "26 static callsites" in inventory
+    assert "28 bounded Git callsites" in inventory
+    assert "27 static callsites" in inventory
     for command in (
         "git diff --name-only -z",
         "git diff --cached --name-only -z",
@@ -6164,9 +6356,10 @@ def test_run_tests_missing_executable_uses_fixed_start_failure(tmp_path):
 
 # --- One shared tail ends every finish-ticket exit (#2167) ---
 #
-# Every exit releases its claim once, finishes its heartbeat once and offers
-# its checkout for removal exactly where it did before #2167, all inside
-# ``_finish_exit``. The rows replay #1494 (a no-diff close releases and
+# Completed exits release their claim once, finish their heartbeat once and
+# offer checkout removal through ``_finish_exit``. A failed declined-answer
+# handoff also offers clean, already-durable checkouts for removal from the
+# CLI error path. The rows replay #1494 (a no-diff close releases and
 # finishes), #1638 (a superseded run releases nothing), #1795 (a member
 # note carries no test id), #1825 (a pushed checkout under the heartbeat's
 # runs root is removed) and #2014 (a decline removes a pushed clean
@@ -6207,11 +6400,14 @@ def test_only_the_shared_tail_releases_finishes_or_removes_the_checkout():
     ]
 
     # The superseded finish records its heartbeat alone: it releases
-    # nothing and keeps its checkout (#1638, #1856).
+    # nothing and keeps its checkout (#1638, #1856). A failed decline offers
+    # its checkout directly, subject to the shared clean/content-safe guard.
     assert [call for call in calls
             if call[0] != "_finish_exit"
             and call != ("_record_superseded_finish", "finish_heartbeat")
+            and call != ("_finish_ticket", "_remove_codex_run_checkout")
             ] == []
+    assert calls.count(("_finish_ticket", "_remove_codex_run_checkout")) == 1
     assert sorted(TAIL_EFFECTS[callee] for name, callee in calls
                   if name == "_finish_exit") == [
         "cleanup", "heartbeat", "release"]

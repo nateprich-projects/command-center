@@ -14,8 +14,8 @@ import muse_model  # noqa: E402
 
 
 #: The repositories Nate cleared for the contributor model on 2026-09-26
-#: (#1570): repo tiers 1 and 3. Spelled out, like the model ids below, so a
-#: silent addition to or removal from the production allowlist fails here.
+#: (#1570), retained as the canonical posture by #1987: repo tiers 1 and 3.
+#: Spelled out so a silent allowlist change fails here.
 CLEARED = ("command-center", "github-runners", "workbench",
            "Fantasy-GM", "The-League", "AFL")
 #: Tier 2, kept on the private model: real-world impact, real-world data.
@@ -40,21 +40,27 @@ def cleared(monkeypatch):
     monkeypatch.setattr(muse_model, "CONTRIBUTOR_REPOS", frozenset(CLEARED))
 
 
-def test_the_cleared_repositories_are_exactly_tiers_1_and_3():
-    """Nate, 2026-09-26 (#1570): "So tier 1 and tier 3, but not tier 2."
-    Clearing a repository is an exposure decision; a silent addition is
-    the failure this test exists for."""
+def test_1987_retains_the_exact_tier_1_and_3_contributor_map():
+    """Keep #1987's tier-to-model posture tied to the independent repo tiers."""
+    import funnel
+
+    tier_1 = {name for name, tier in funnel.REPO_TIERS.items() if tier == 1}
+    assert tier_1 == {"command-center", "github-runners", "workbench"}
     assert muse_model.CONTRIBUTOR_REPOS == frozenset(CLEARED)
+    assert tier_1 <= muse_model.CONTRIBUTOR_REPOS
+    assert all(funnel.repo_tier(repo) == 3
+               for repo in muse_model.CONTRIBUTOR_REPOS - tier_1)
 
 
-def test_no_tier_2_repository_is_ever_cleared():
-    """Tier 2 is the work with real-world impact; its data stays off the
-    training tier whatever else joins the allowlist."""
+def test_1987_keeps_tier_2_off_contributor_and_unnamed_on_standard():
+    """Tier 2 stays excluded, and unlisted names fail closed to standard."""
     import funnel
 
     tier_2 = {name for name, tier in funnel.REPO_TIERS.items() if tier == 2}
     assert tier_2 == set(EXCLUDED)
     assert not tier_2 & muse_model.CONTRIBUTOR_REPOS
+    assert all(muse_model.model_for(repo) == STANDARD_ID for repo in tier_2)
+    assert muse_model.model_for("unnamed-repository") == STANDARD_ID
 
 
 @pytest.mark.parametrize("repo", CLEARED)

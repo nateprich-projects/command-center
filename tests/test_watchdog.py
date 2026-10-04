@@ -251,9 +251,8 @@ def test_sparse_silence_floor_reaches_the_watchdog_issue_body(monkeypatch):
     calls = []
 
     monkeypatch.setattr(watchdog.time, "time", lambda: now)
-    # zcode is the retired control since Codex came back (#1325), pinned
-    # rather than read from the clock: it is live as the z.ai standard tier
-    # until `heartbeat.ZAI_STANDARD_UNTIL`.
+    # Pin zcode as retired here so this test isolates the watchdog's handling
+    # of a known retired agent from the cutoff reader.
     monkeypatch.setattr(
         watchdog.heartbeat, "RETIRED_AGENTS", frozenset({"zcode"}))
     monkeypatch.setattr(watchdog.heartbeat, "PROVIDERS", {
@@ -427,11 +426,16 @@ def test_runtime_alarm_ignores_claude_and_rows_without_runtime(monkeypatch):
     assert watchdog.assess("codex", rows, NOW) == []
 
 
-def test_old_failures_age_out_of_the_weekly_count():
+def test_a_later_success_breaks_an_old_error_streak():
     rows = []
     for i in range(3):
         rows += [start(str(i), 24 * 30), finish(str(i), 24 * 30, "errored")]
-    assert not any("errored" in p for p in watchdog.assess("codex", rows, NOW))
+    conditions = watchdog.assess("codex", rows, NOW)
+    assert any("degraded" in problem for problem in conditions)
+
+    rows += [start("recovered", 1), finish("recovered", 1, "done")]
+    conditions = watchdog.assess("codex", rows, NOW)
+    assert not any("degraded" in problem for problem in conditions)
 
 
 def test_never_having_run_does_not_file_an_issue():

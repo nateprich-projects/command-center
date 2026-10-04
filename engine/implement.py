@@ -1451,7 +1451,9 @@ _RUN_SCRATCH_PREFIXES = (
     "prompt.", "prompt-", "run.", "run-", "scratch.", "scratch-",
 )
 _RUN_SCRATCH_SUFFIXES = (".scratch", ".tmp")
-_RUN_SCRATCH_DIRECTORIES = frozenset({".scratch", "scratch", ".tmp", "tmp"})
+_RUN_SCRATCH_DIRECTORIES = frozenset({
+    ".scratch", "scratch", ".tmp", ".pytest-tmp", "tmp",
+})
 
 
 def _git_name_paths(root: pathlib.Path, command: Sequence[str]) -> List[str]:
@@ -1787,11 +1789,12 @@ def close_no_diff_ticket(repo: str, number: int, *,
 
 def create_or_update_pr(repo: str, context: dict, ticket: dict,
                         body: str) -> dict:
-    """Create the ticket PR, or update the one already open for the branch.
+    """Create or update the ticket PR, unless its pushed head already merged.
 
     Only the funnel's own open PR is updated (#1794): ``--head`` also matches
     a fork's PR on a branch of the same name, and editing that would act on
-    a stranger's PR.
+    a stranger's PR. A late finish after the merge gate lands the same head
+    must leave the merged PR in place rather than create a duplicate.
     """
     rows = funnel._gh_json(
         "gh", "pr", "list", "--repo", repo, "--state", "open",
@@ -1813,6 +1816,25 @@ def create_or_update_pr(repo: str, context: dict, ticket: dict,
         if proc.returncode != 0:
             raise funnel.GitHubError((proc.stderr or "could not update PR").strip())
         return pr
+    pushed_head = context.get("head_sha")
+    if not isinstance(pushed_head, str) or not pushed_head:
+        raise ImplementError("could not read the pushed head SHA")
+    merged_rows = funnel._gh_json(
+        "gh", "pr", "list", "--repo", repo, "--state", "merged",
+        "--head", context["branch"],
+        "--json", "number,url,headRefOid," + funnel.PR_TRUST_JSON_FIELDS,
+        "--limit", "10",
+    )
+    if merged_rows is None or not isinstance(merged_rows, list):
+        raise funnel.GitHubError("could not list the branch's merged PRs")
+    for row in merged_rows:
+        if (funnel.is_funnel_pr(repo, row)
+                and row.get("headRefOid") == pushed_head):
+            return {
+                "number": row.get("number"),
+                "url": row.get("url"),
+                "merged": True,
+            }
     proc = funnel._run_gh(
         ["gh", "pr", "create", "--repo", repo, "--base", "main",
          "--head", context["branch"], "--title", title,
@@ -2891,9 +2913,10 @@ def _remove_codex_run_checkout(root: pathlib.Path, number: int,
     owner-only. Restrict removal to that exact direct child; finish-ticket also
     runs from session workspaces and other agents' checkouts, which must remain
     untouched. For Git checkouts, remove only when the tree is clean and HEAD
-    exactly matches ``origin/ticket/<number>``. A non-Git directory retains the
-    prior cleanup behavior; the production finish path obtains its root from a
-    validated Git checkout.
+    is an ancestor of ``origin/main`` or exactly matches
+    ``origin/ticket/<number>``. A non-Git directory retains the prior cleanup
+    behavior; the production finish path obtains its root from a validated Git
+    checkout.
 
     Live runs clone into the heartbeat directory's ``codex-runs/``
     (``heartbeat.SPOOL_DIR``), because that is the Codex sandbox's only
@@ -2905,13 +2928,16 @@ def _remove_codex_run_checkout(root: pathlib.Path, number: int,
     ``review-evidence-*``, so no guard below can match them; they are
     removed by review_evidence itself.
 
-    Only ``_finish_exit`` calls it, after the exit's heartbeat finish has
-    recorded its outcome (#2167).
-    The branch may have been pushed by this run or an earlier one; an exact
-    remote-tip match and a clean tree prove that this checkout holds no unique
-    Git work. A stray-file refusal, a ``_keep_work`` failure before its push,
-    or a superseded run can still hold the only copy, so those paths do not
-    call this cleanup and the pushed/clean guard keeps any other unsafe tree.
+    Completed exits call it through ``_finish_exit`` after the heartbeat has
+    recorded its outcome (#2167). A failed declined-answer path also offers
+    the checkout directly from ``_finish_ticket``; the same clean/content-safe
+    checks retain any work that is not already durable.
+    The branch may have been pushed by this run or an earlier one; a clean
+    tree whose HEAD is already on main or at the remote ticket tip holds no
+    unique Git work. A stray-file refusal, a ``_keep_work`` failure before its
+    push, or a superseded run can still hold the only copy, so those paths do
+    not call this cleanup and the clean/content-safe guard keeps any other
+    unsafe tree.
     """
     if agent != "codex":
         return False
@@ -2977,12 +3003,28 @@ def _remove_codex_run_checkout(root: pathlib.Path, number: int,
             except (ImplementError, OSError, subprocess.SubprocessError):
                 return False
             if (any(result.returncode != 0 for result in
-                    (top, branch, status, head, remote_head))
+                    (top, branch, status, head))
                     or pathlib.Path(top.stdout.strip()).resolve() != checkout
                     or branch.stdout.strip() != "ticket/{}".format(number)
-                    or status.stdout.strip()
-                    or head.stdout.strip() != remote_head.stdout.strip()):
+                    or status.stdout.strip()):
                 return False
+            matches_ticket_tip = (
+                remote_head.returncode == 0
+                and head.stdout.strip() == remote_head.stdout.strip()
+            )
+            if not matches_ticket_tip:
+                try:
+                    main_ancestor = _run(
+                        ["git", "merge-base", "--is-ancestor", "HEAD",
+                         "origin/main"],
+                        cwd=checkout, check=False,
+                        timeout=LOCAL_GIT_TIMEOUT_SECONDS,
+                    )
+                except (ImplementError, OSError,
+                        subprocess.SubprocessError):
+                    return False
+                if main_ancestor.returncode != 0:
+                    return False
         current = pathlib.Path.cwd().resolve()
         try:
             current.relative_to(checkout)
@@ -3271,7 +3313,8 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
         evidence=render_evidence_block(
             sha=pushed, merged=merged, reproduction=reproduced,
             repo=resolved, prior_fixes=prior_fixes))
-    pr = pr_effect(resolved, context, ticket, body)
+    pr_context = dict(context, head_sha=pushed)
+    pr = pr_effect(resolved, pr_context, ticket, body)
     note = "PR #{}".format(pr["number"])
     if test_source is not None:
         note += " (tests: {})".format(
@@ -3285,7 +3328,9 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
     _finish_exit(
         ref, run=run, agent=agent, outcome="done", note=note,
         release=release_effect, heartbeat_finish=heartbeat_finish,
-        remove_checkout=context, done="PR #{} is open".format(pr["number"]),
+        remove_checkout=context,
+        done=("PR #{} is already merged" if pr.get("merged") else
+              "PR #{} is open").format(pr["number"]),
     )
     return pr
 
@@ -3825,6 +3870,15 @@ def _finish_ticket(args: argparse.Namespace) -> int:
         return _record_superseded_finish(args, exc.ref, exc.reason)
     except (funnel.GitHubError, ImplementError, OSError,
             subprocess.SubprocessError) as exc:
+        # A declined finish can fail before it reaches _finish_exit (for
+        # example, when GitHub refuses the first decline write). Its ticket
+        # checkout is still safe to remove when the shared clean/content-safe
+        # guard proves all work is already durable; dirty or unknown checkouts
+        # remain for recovery.
+        if "declined" in answer and context is not None:
+            _remove_codex_run_checkout(
+                context["root"], context["number"], args.agent,
+            )
         print("finish-ticket: {}".format(exc), file=sys.stderr)
         return 1
     print(json.dumps(result, sort_keys=True))

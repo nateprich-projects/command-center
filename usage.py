@@ -298,6 +298,10 @@ MUSE_WEEKLY_RESERVE = round(
     100.0 * MUSE_SESSION_RESERVE_DOLLARS / MUSE_WEEKLY_CAP_DOLLARS, 2
 )
 
+# The bounded reviewer trial has its own total ceiling inside the existing
+# Muse allowance. This does not authorize trial activation or evaluation calls.
+MUSE_TRIAL_TOTAL_CAP_DOLLARS = 20.0
+
 #: Nate's dated release of the Muse pace brake (#1341), for the one window that
 #: resets on Sunday 2026-09-27 at 17:00 PDT. It names that window by its reset
 #: time, so it lapses there by construction: the next window reads against the
@@ -403,6 +407,97 @@ def muse_pace_override(resets_at: float, now: float) -> Optional[Dict]:
     if reopened is not None and now >= float(reopened):
         found["reopened_at"] = float(reopened)
     return found
+
+
+def _finite_nonnegative_dollars(value) -> Optional[float]:
+    """Parse a recorded dollar amount without treating malformed data as zero."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        amount = float(value)
+    except (OverflowError, TypeError, ValueError):
+        return None
+    if not math.isfinite(amount) or amount < 0.0:
+        return None
+    return amount
+
+
+def muse_trial_allowance_dollars(now: Optional[float] = None) -> Optional[float]:
+    """Return the current Muse weekly cap that contains the trial's total.
+
+    The verified configuration has a $109 panel-paired cap through its
+    2026-10-05 reset and a $200 baseline cap. Read the active cap each time so
+    later allowance changes cannot silently create room for a new allowance.
+    """
+    now = time.time() if now is None else now
+    now = _finite_nonnegative_dollars(now)
+    if now is None:
+        return None
+    try:
+        resets_at = muse_window_start(now) + SEVEN_DAY
+        override = muse_pace_override(resets_at, now)
+        allowance = (
+            override["cap_dollars"] if override
+            else MUSE_WEEKLY_CAP_DOLLARS
+        )
+    except (KeyError, OverflowError, TypeError, ValueError):
+        return None
+    return _finite_nonnegative_dollars(allowance)
+
+
+def muse_trial_counter_read(spent_dollars, now: Optional[float] = None) -> Dict:
+    """Read a caller-supplied trial total and decide whether another run fits.
+
+    The caller supplies the previously recorded total from GitHub, the durable
+    state of this repository. No local counter file is written. Stop if the
+    total is unreadable, the $20 ceiling no longer fits the active Muse
+    allowance, or one reserved Muse session could take the total over $20.
+    """
+    spent = _finite_nonnegative_dollars(spent_dollars)
+    cap = _finite_nonnegative_dollars(MUSE_TRIAL_TOTAL_CAP_DOLLARS)
+    reserve = _finite_nonnegative_dollars(MUSE_SESSION_RESERVE_DOLLARS)
+    allowance = muse_trial_allowance_dollars(now)
+    known = all(value is not None for value in (spent, cap, reserve, allowance))
+    contained = (
+        cap is not None and allowance is not None and cap <= allowance
+    )
+    stop = (
+        not known or not contained
+        or spent + reserve > cap
+    )
+    return {
+        "known": known,
+        "spent_dollars": spent,
+        "cap_dollars": cap,
+        "allowance_dollars": allowance,
+        "reserve_dollars": reserve,
+        "contained": contained,
+        "stop": stop,
+    }
+
+
+def muse_trial_counter_increment(
+        spent_dollars, increment_dollars,
+        now: Optional[float] = None) -> Dict:
+    """Add observed trial usage to the caller's recorded total, failing closed."""
+    now = time.time() if now is None else now
+    reading = muse_trial_counter_read(spent_dollars, now)
+    increment = _finite_nonnegative_dollars(increment_dollars)
+    if not reading["known"] or increment is None:
+        reading["known"] = False
+        reading["stop"] = True
+        reading["increment_dollars"] = None
+        return reading
+
+    total = round(reading["spent_dollars"] + increment, 6)
+    if not math.isfinite(total):
+        reading["known"] = False
+        reading["stop"] = True
+        reading["increment_dollars"] = None
+        return reading
+    updated = muse_trial_counter_read(total, now)
+    updated["increment_dollars"] = increment
+    return updated
 
 
 #: The provider's weekly window opens on the same lattice every week: Monday
@@ -1208,9 +1303,6 @@ def shaping_allowed(reading: Dict) -> bool:
     """
     if isinstance(reading, dict) and reading.get("unmetered"):
         return True
-    if isinstance(reading, dict) and reading.get("source") == "zai" \
-            and _zai_lane_live(time.time()):
-        return _zai_has_headroom(reading)
     try:
         windows = reading.get("windows") or {}
         five = windows.get("five_hour") or {}
@@ -1223,32 +1315,6 @@ def shaping_allowed(reading: Dict) -> bool:
     except (AttributeError, TypeError, ValueError):
         return False
     return IDLE_WINDOW_START <= used <= IDLE_WINDOW_CEILING
-
-
-def _zai_lane_live(now: float) -> bool:
-    """Whether the engine's z.ai standard tier is still routing (#1411)."""
-    import heartbeat
-
-    return now < heartbeat.ZAI_STANDARD_UNTIL
-
-
-def _zai_has_headroom(reading: Dict) -> bool:
-    """Shaping headroom on the z.ai lane: the pool's own stop, nothing lower.
-
-    The idle rule's 15% five-hour boundary keeps shaping off a window someone
-    may be working in, and keeps the committed review and breakdown jobs'
-    reserve. Neither applies here while the z.ai lane runs: the plan is
-    cancelled, nobody else spends it, and credits left at its expiry are worth
-    nothing, so the pool is unpaced by design (Nate, 2026-09-23). Holding
-    shaping to 15% would leave 85% of every five-hour window to lapse. What
-    still refuses is the pool's own stop — a spent five-hour or weekly window —
-    and a reading `pace` cannot judge. _(agent rule, unconfirmed — advisory.)_
-    """
-    try:
-        verdict = pace(reading, time.time(), "zai")
-    except (AttributeError, KeyError, TypeError, ValueError):
-        return False
-    return bool(verdict.get("known")) and not verdict.get("over_pace")
 
 
 def _rolling_week_has_headroom(reading: Dict, windows: Dict) -> bool:
@@ -1447,70 +1513,9 @@ DOWNSTREAM_RESERVE = 20.0
 # this is the half that was missed.
 
 PROVIDER_POLICY = {
-    # **Unpaced from 2026-09-23: spend it before it lapses.** Nate cancelled
-    # the Coding Plan; it stays active until it expires on 2026-10-07, and
-    # the engine's standard judgement tier runs on it until the start of that
-    # day in Beijing time (AGENTS.md; `heartbeat.ZAI_STANDARD_UNTIL`). The
-    # idle-window shaping gate is lifted for it too (`_zai_has_headroom`). Credits left at the expiry are worth
-    # nothing, so a line that holds the week back for later is holding it
-    # back for no later at all — the same reasoning that took `openai` to a
-    # floor of 100 on 2026-09-07. Floor and target are therefore both 100.
-    #
-    # What still stops `begin` is an actually spent window, in both of the
-    # windows z.ai reports: `used + reserve > 100`. Each reserve is one run,
-    # not a share held back — a real zcode routine run measured ~43 credits
-    # (below), about 2.2% of the five-hour window's 2,000 credits and 0.4%
-    # of the week's 10,000, so 2.5 and 0.5 refuse a run that could not
-    # finish rather than one that merely spends late. z.ai also refuses a
-    # spent window itself; `scripts/zai-exec` reports that as a quota skip,
-    # and the next `begin` stops here on the reading. _(agent rule,
-    # unconfirmed — advisory; Nate chose to use the credits, 2026-09-23.)_
-    #
-    # The history below explains the paced values this replaced, and is
-    # what to restore if the pool is ever bought again rather than run out.
-    #
-    # Bought for the automations and used for nothing else, so there is no
-    # interactive share to protect. Set to 90 on 2026-09-06 and lowered to 15 the
-    # same day, once a real routine run was measured at ~43 credits rather than
-    # the ~3 a trivial session had suggested.
-    #
-    # At 90 the floor equalled `WEEKLY_TARGET`, so the proportional line was inert
-    # and the whole week was spendable on Monday. At 15 the floor stops mattering
-    # after about a day and the rising line governs, which makes the schedule
-    # **self-limiting**: poll as often as you like and the gate simply refuses
-    # once the week is ahead of itself. Cadence stops being a number anyone has to
-    # choose. Below about 10 the floor stops doing its job and Monday morning
-    # becomes a dead zone again.
-    #
-    # The reserve moves with it. 5% of a weekly window is calibrated for Anthropic,
-    # where one run is ~1.5% of the budget. Measured here, a whole session cost
-    # **3 credits of 10,000** — 0.03% — so the shared reserve would hold back 500
-    # credits against a run that costs three, and the cap would really bite at 85%.
-    # **Temporarily 22, raised from 15 on 2026-09-07 by Nate's instruction.**
-    # zcode had been over pace for 35 consecutive runs since 00:38 — last real
-    # work 00:30, breaking #59 into #76-#81 — sitting at 19.1% used against 15.0
-    # allowed, 12.7% into a fresh weekly window. Proportional pacing would not
-    # have cleared it until 2026-09-08 00:33.
-    #
-    # This is a workaround for #93, not a revision of the reasoning below. The
-    # defect is that `allowed = max(floor, target * elapsed)` makes the floor a
-    # *plateau*: allowed stays exactly at the floor until the rising line
-    # overtakes it, so any pool that spends past its floor stalls until the
-    # calendar catches up. All three pools were blocked at once for that reason.
-    #
-    # The obvious fix — anchoring the line at the floor — was tried and reverted
-    # the same day: `floor + (target - floor) * elapsed` is **uniformly looser**,
-    # by `floor * (1 - elapsed)`, peaking around +17.5 points a third of the way
-    # through the week. Two tests correctly caught it. Removing the plateau
-    # without loosening is not possible, so the trade is real and belongs in #93.
-    #
-    # 22 clears the current 19.6% (used + reserve) with a little room. **Restore
-    # to 15 once #93 settles the model** — the measured reasoning for 15 is
-    # unchanged and is recorded below.
-    "zai": {"weekly_floor": 100.0, "weekly_target": 100.0,
-            "weekly_reserve": 0.5,
-            "five_hour_ceiling": 100.0, "five_hour_reserve": 2.5},
-
+    # zcode remains readable for historical quota records, but the retired
+    # standard tier has no provider-specific pace override. Any direct use
+    # follows the shared provider defaults.
     # Muse's pool is metered from local session attribution at the standard
     # rate card, counted from the provider's weekly reset (#1190). 100% is the
     # $200 cap, the flat ceiling that stops a run, and the $4.50 session

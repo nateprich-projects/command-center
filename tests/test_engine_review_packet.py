@@ -309,9 +309,11 @@ def test_fetch_ci_runs_lists_pull_request_runs_on_the_branch(monkeypatch):
         assert field in fields
 
 
-def test_fetch_ci_runs_reads_no_runs_without_actions(monkeypatch):
+def test_fetch_ci_runs_raises_on_a_failed_read(monkeypatch):
+    """A failed run list stops the packet, not reads as no runs (#2194)."""
     monkeypatch.setattr(funnel, "_gh_json", lambda *args: None)
-    assert review.fetch_ci_runs(REPO, RUN_BRANCH) == []
+    with pytest.raises(funnel.GitHubError):
+        review.fetch_ci_runs(REPO, RUN_BRANCH)
 
 
 def test_fetch_ci_runs_skips_an_empty_branch_without_calling(monkeypatch):
@@ -941,6 +943,35 @@ def test_the_packet_carries_either_form_of_a_prior_fix_line(line):
         + line + "\n- (+2 more prior fixes)")
 
 
+def test_reviewer_rules_receive_existing_1850_1851_packet_facts():
+    """Both established reviewer inputs already reach one packet."""
+    prior_fix = "- rewrites #42's prior fix (engine/implement.py:finish_done)"
+    body = MODEL_TEXT + "\n" + evidence_block(
+        HEAD40, "reproduction: red", prior_fix)
+    marker = "pytest.mark." + "skip"
+    diff = (
+        "diff --git a/tests/test_reviewer_input.py "
+        "b/tests/test_reviewer_input.py\n"
+        "new file mode 100644\n"
+        "index 0000000..1111111\n"
+        "--- /dev/null\n"
+        "+++ b/tests/test_reviewer_input.py\n"
+        "@@ -0,0 +1 @@\n"
+        "+@" + marker + '(reason="fixture unavailable")\n'
+    )
+
+    found = packet(
+        pr_view=pr_view(headRefOid=HEAD40, body=body), diff=diff)
+
+    assert found["evidence"].endswith(prior_fix)
+    assert found["test_weakening"]["added_skip_or_xfail"] == {
+        "count": 1,
+        "items": ["tests/test_reviewer_input.py: @" + marker
+                  + '(reason="fixture unavailable")'],
+        "truncated": False,
+    }
+
+
 @pytest.mark.parametrize("sha", [
     OTHER40,              # an earlier push's block
     HEAD40[:12],          # a prefix is not the head
@@ -1220,6 +1251,50 @@ def test_scoped_rereview_anchors_latest_rejection_and_pins_main(monkeypatch):
         (REPO, main_sha, current_head),
         (REPO, main_sha, prior_head),
     ]
+
+
+def test_scoped_rereview_classifies_recorded_muse_requirement_unmet(monkeypatch):
+    prior_head = "2" * 40
+    current_head = "3" * 40
+    comments = {"status": "available", "comments": [
+        rejected_review_comment(
+            prior_head,
+            ["requirement unmet: add retry coverage -- absent from the diff"],
+            "2026-10-03T08:00:00Z"),
+    ]}
+    monkeypatch.setattr(
+        review, "fetch_branch_head", lambda repo, branch: "9" * 40)
+    monkeypatch.setattr(
+        review, "fetch_scope",
+        lambda repo, base_sha, head: (
+            ["f.py"], "same scoped diff", "merge-base"))
+    monkeypatch.setattr(
+        review, "_diff_line_count",
+        lambda diff, interdiff=False: 0 if interdiff else 100)
+
+    result, _ = review.build_scoped_rereview(
+        REPO, 7, "main", current_head, comments)
+
+    assert result["active"] is True
+    assert result["prior_blocking_items"] == [
+        {"kind": "missing_requirement_or_accept_test",
+         "finding": "requirement unmet: add retry coverage -- absent from the diff"},
+    ]
+    assert result["full_review_fallback"] is False
+
+
+@pytest.mark.parametrize(
+    "prefix", ["requirement unmet:", "requirement unsure:"])
+def test_stopping_rule_kind_classifies_muse_ticket_requirements(prefix):
+    assert review._stopping_rule_kind(
+        prefix + " add retry coverage -- absent from the diff"
+    ) == "missing_requirement_or_accept_test"
+
+
+def test_stopping_rule_kind_leaves_does_not_break_rows_unclassified():
+    assert review._stopping_rule_kind(
+        "requirement unmet: Does not break: preserve old retries -- absent"
+    ) is None
 
 
 def test_scoped_rereview_interdiff_excludes_changes_from_merged_main(
@@ -2632,6 +2707,9 @@ def test_cli_shows_the_ticket_comments_with_voices(monkeypatch, capsys):
         review, "fetch_plan_md", lambda repo: ("# design record", False))
     monkeypatch.setattr(review, "fetch_open_prs", lambda repo: [])
     monkeypatch.setattr(review, "fetch_merged_prs", lambda repo: [])
+    # The run list is read, not defaulted: offline gh would stop the packet
+    # (#2194).
+    monkeypatch.setattr(review, "fetch_ci_runs", lambda repo, branch: [])
     monkeypatch.setattr(
         review, "fetch_verdict", lambda repo, pr: verdict())
     monkeypatch.setattr(

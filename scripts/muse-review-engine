@@ -1,11 +1,11 @@
 #!/bin/bash
 # A judgement engine: one review, breakdown, or shape job against its packet,
-# then stop. Muse answers; z.ai's GLM-5.3 answered the standard tier until
-# 2026-09-27 06:00 PDT, brought forward from 2026-10-06 09:00 PDT (#1694, below).
+# then stop. Muse answers both standard and escalated tiers; the standard-tier
+# bridge retired at 2026-09-27 06:00 PDT (#1987).
 #
 # Usage: muse-review-engine [tier] [reasoning-effort]
 #   tier   -- escalated (default) or standard; substituted into begin
-#   effort -- max (default) or high; Muse only, zai-exec takes none
+#   effort -- max (default) or high
 #
 # review-replay runs the same review on a given packet and records nothing,
 # through the MUSE_REVIEW_ENGINE_REPLAY_* variables (#1730; below).
@@ -16,12 +16,10 @@
 # precheck whose merged overlap has no green run yet re-runs the PR's CI once
 # and waits for the result instead of calling the model (#1019).
 # Otherwise, review calls one lister and judges of at most three
-# requirements each against the same cached packet — in parallel on Muse, one
-# at a time on z.ai (#1411); the runner derives the
+# requirements each against the same cached packet in parallel; the runner derives the
 # verdict before handing the answer to review-apply. Breakdown answers one
-# JSON question. Shape on Muse asks one framer, then sibling checks, deciders
-# and an auditor in parallel, and merges their answers in code (#1599); shape
-# on z.ai answers one JSON question. Calls retry once on a parse error; a
+# JSON question. Shape asks one framer, then sibling checks, deciders and an
+# auditor in parallel, and merges their answers in code (#1599). Calls retry once on a parse error; a
 # shape part or a judge chunk whose call goes stream-idle is also asked once
 # more, and each writes one timing line to stderr (#1719). The review lister
 # gets the same stream-idle retry (#1730) and the same timing line (#1855),
@@ -31,35 +29,8 @@
 # Breakdown rides the standard tier only; shape follows wherever begin offers
 # it.
 #
-# Two backends, one protocol. Everything above is the same whichever model
-# answers; only the model call, the agent name on the records, and the
-# provider-quota handling differ.
-#
-#  - Muse (`muse exec`, agent `muse`) runs with --disable-shell
-#    --disable-write --disable-web-tools: it has no tool at all, so it cannot
-#    run funnel.py or gh itself. No --sandbox-network flag: there are no tools
-#    left that need the network, and the CLI's own provider calls work under
-#    the default. No --approval-mode either: the default stays on-request, so
-#    a future tool outside the three disables could never be silently
-#    auto-allowed on this path.
-#  - z.ai (`scripts/zai-exec`, agent `zcode`) posts one user message with no
-#    `tools` array to GLM-5.3's Anthropic-compatible endpoint. There is no
-#    tool to disable because none is ever offered, and it refuses any reply
-#    that a model other than glm-5.3 answered (LEARNINGS.md, 2026-09-06).
-#
-# The standard tier routed to z.ai while now < 2026-09-27 06:00 PDT
-# (1790514000; #1694). The first cutoff, 2026-10-07 00:00 Beijing time
-# (1791302400, 2026-10-06 09:00 PDT), was Nate's decision of 2026-09-23:
-# Muse's week was nearly spent until its Sunday 17:00 PDT reset, and his
-# cancelled z.ai Coding Plan stays active until it expires on 2026-10-07, so
-# its credits are use-it-or-lose-it. The first cutoff was the start of the
-# expiry day in z.ai's own time zone (UTC+8), the earliest reading of "expires
-# 2026-10-07" (#1411). After the cutoff in force the standard tier is Muse's
-# with nothing to undo. The escalated tier never routes. heartbeat.py's
-# ZAI_STANDARD_UNTIL holds the cutoff in force, and a test pins the two
-# together.
-# AGENTS.md carries the terms caveat: headless use of a Coding Plan key is his
-# risk call on unread terms, as Muse's is.
+# Every tier uses Muse. `muse_model.py` is the canonical source for the model
+# allowed on each repository; this runner does not select another backend.
 #
 # A separate runner from muse-implement on purpose: a flag error must never
 # turn a reviewer into a writer.
@@ -99,8 +70,7 @@ esac
 # the diff out of its copy (#1886). Listing what a ticket asks for is the easy
 # half of a review (#1233), so on a max lane the lister asks at high, the one
 # effort below max this runner takes; the judges, and every other call, keep
-# the lane's. Below max the lister keeps it too. Muse only: zai-exec takes no
-# effort.
+# the lane's. Below max the lister keeps it too.
 if [[ "$EFFORT" == "max" ]]; then
   LISTER_EFFORT="high"
 else
@@ -118,14 +88,18 @@ CALL_EFFORT="$EFFORT"
 # derivation the lanes run rather than from a second copy of them: replay kept
 # one max call over the whole packet when #1233 split review, and that call
 # went stream-idle on the must-approve seed (#1698). Environment variables,
-# not flags, because the parse above refuses every flag. All three or none:
+# not flags, because the parse above refuses every flag. The packet and answer
+# are required; the routine can be omitted to use the active versioned prompt:
 #
 #   MUSE_REVIEW_ENGINE_REPLAY_PACKET   the review packet to judge
-#   MUSE_REVIEW_ENGINE_REPLAY_ROUTINE  the review routine to ask it with
+#   MUSE_REVIEW_ENGINE_REPLAY_ROUTINE  optional explicit routine; by default
+#                                      the active versioned prompt is used
 #   MUSE_REVIEW_ENGINE_REPLAY_ANSWER   where the derived answer goes; must
 #                                      not exist yet
 #
-# A replay records nothing. It starts no funnel session and runs no begin,
+# A replay needs the packet and answer variables. The routine is optional and
+# defaults to the same active versioned prompt as a live review. A replay
+# records nothing. It starts no funnel session and runs no begin,
 # heartbeat, packet fetch, gh or review-apply, and it skips the precheck and
 # CI branches: a corpus packet is frozen evidence about a PR that has long
 # since moved on, and the question is what the judges make of it. It writes
@@ -139,12 +113,16 @@ REPLAY_ANSWER="${MUSE_REVIEW_ENGINE_REPLAY_ANSWER:-}"
 REPLAY=0
 if [[ -n "$REPLAY_PACKET$REPLAY_ROUTINE$REPLAY_ANSWER" ]]; then
   REPLAY=1
-  if [[ -z "$REPLAY_PACKET" || -z "$REPLAY_ROUTINE" || -z "$REPLAY_ANSWER" ]]; then
-    echo "muse-review-engine: a replay needs MUSE_REVIEW_ENGINE_REPLAY_PACKET, MUSE_REVIEW_ENGINE_REPLAY_ROUTINE and MUSE_REVIEW_ENGINE_REPLAY_ANSWER together" >&2
+  if [[ -z "$REPLAY_PACKET" || -z "$REPLAY_ANSWER" ]]; then
+    echo "muse-review-engine: a replay needs MUSE_REVIEW_ENGINE_REPLAY_PACKET and MUSE_REVIEW_ENGINE_REPLAY_ANSWER" >&2
     exit 1
   fi
   if [[ ! -f "$REPLAY_PACKET" || ! -r "$REPLAY_PACKET" ]]; then
     echo "muse-review-engine: cannot read the replay packet $REPLAY_PACKET" >&2
+    exit 1
+  fi
+  if [[ -n "$REPLAY_ROUTINE" && ( ! -f "$REPLAY_ROUTINE" || ! -r "$REPLAY_ROUTINE" ) ]]; then
+    echo "muse-review-engine: cannot read the replay routine $REPLAY_ROUTINE" >&2
     exit 1
   fi
   # Refused rather than overwritten: a file already there could be read as
@@ -165,53 +143,18 @@ quota_stop() {
   exit 0
 }
 
-# --- which backend answers this run (Nate, 2026-09-23) ------------------------
-#
-# Decided from the clock, not from a file or a flag in the plist: the plist
-# keeps running `standard max`, and the routing lapses at the cutoff with
-# nothing to remove. The cutoff is overridable only so the tests can drive
-# both sides of it; a value that is not a plain epoch keeps the run on Muse,
-# the behaviour this block did not exist to change.
-#
-# The agent name is `zcode`, the old z.ai lane's name (retired 2026-09-09,
-# #431; its in-app routine stays retired): it spends
-# the `zai` pool in usage.py and heartbeat.py already, so `begin` reads z.ai's
-# own five-hour and weekly windows and stops the lane when either is spent.
-# No fallback to Muse on a spent z.ai window: the standard lane records a skip
-# and waits, and Muse's week is left to the escalated tier it was kept for.
-# That assumed Muse's week was nearly spent; on 2026-09-27 z.ai's weekly
-# window was spent until 2026-10-03 while Muse had used 19% of its week, so
-# the cutoff was brought forward instead (#1694).
-ZAI_STANDARD_UNTIL="${MUSE_REVIEW_ENGINE_ZAI_UNTIL:-1790514000}"
-BACKEND="muse"
+# Both tiers use Muse; retirement is no longer a clock-controlled route.
 AGENT="muse"
-if [[ "$TIER" == "standard" && "$ZAI_STANDARD_UNTIL" =~ ^[0-9]+$ ]] \
-  && (( $(date +%s) < ZAI_STANDARD_UNTIL )); then
-  BACKEND="zai"
-  AGENT="zcode"
-fi
 
 # The maintained read-only clone, not Nate's working tree: the routine text
 # and the funnel it invokes must come from the same checkout.
 REPO="${MUSE_REVIEW_ENGINE_REPO:-/Users/nateprich/.claude/command-center-run}"
-# The muse, zai-exec and gh binaries and the wall-clock bound are overridable
-# for the tests; the defaults are what the schedule runs. zai-exec is a
-# sibling of this runner, like the quota-hold helper below.
+# The Muse and gh binaries and the wall-clock bound are overridable for tests;
+# the defaults are what the schedule runs.
 MUSE_BIN="${MUSE_BIN:-$HOME/.local/bin/muse}"
-ZAI_EXEC_BIN="${ZAI_EXEC_BIN:-${BASH_SOURCE[0]%/*}/zai-exec}"
 MUSE_CALL_BIN="${MUSE_CALL_BIN:-$REPO/muse_call.py}"
 GH_BIN="${GH_BIN:-gh}"
 BOUND_SECONDS="${MUSE_REVIEW_ENGINE_BOUND_SECONDS:-1200}"
-# zai-exec's own network deadline sits inside the bound, so a slow reply ends
-# as zai-exec's diagnostic rather than as the bound's kill. The kill stays as
-# the backstop.
-if (( BOUND_SECONDS > 60 )); then
-  ZAI_TIMEOUT_SECONDS=$((BOUND_SECONDS - 30))
-else
-  ZAI_TIMEOUT_SECONDS=$(( BOUND_SECONDS > 1 ? BOUND_SECONDS - 1 : 1 ))
-fi
-#: zai-exec's status for a spent z.ai window; see its docstring.
-ZAI_QUOTA_EXIT=75
 ROUTINE_REVIEW="$REPO/routines/muse-review.md"
 # A replay asks with the routine it was given, under the same template check
 # (#1730).
@@ -229,11 +172,6 @@ mkdir -p "$WORKSPACE" || exit 1
 
 # Checked before begin, like the routines: a run must never take work it
 # cannot ask about.
-if [[ "$BACKEND" == "zai" && ! -x "$ZAI_EXEC_BIN" ]]; then
-  echo "muse-review-engine: cannot execute $ZAI_EXEC_BIN — refusing to run the z.ai standard tier without it" >&2
-  exit 1
-fi
-
 # One prompt per job, all checked before begin: a run must never take work
 # it cannot ask about. Everything after the first `---` is the agent-facing
 # prompt; the header above it is written for a human reading the file. Same
@@ -261,10 +199,35 @@ check_routine() {
   printf '%s' "$template"
 }
 
-# Bare assignments, not `local x=$(...)`: the assignment keeps the
-# substitution's status, so `if !` sees a bad routine.
-if ! PROMPT_REVIEW="$(check_routine "$ROUTINE_REVIEW")"; then
+# The reviewer question and its per-requirement header both use the same
+# versioned variant data. A replay uses it too unless it was given an
+# explicit routine (#1730).
+if [[ ! -r "$REPO/routines/muse-review.md" ]]; then
+  echo "muse-review-engine: cannot read $REPO/routines/muse-review.md — refusing to run without a prompt" >&2
   exit 1
+fi
+if ! REVIEW_PROMPT_JSON="$(python3 "$REPO/engine/review_prompts.py" active 2>&1)"; then
+  echo "muse-review-engine: cannot load the active reviewer prompt: $REVIEW_PROMPT_JSON" >&2
+  exit 1
+fi
+if ! PROMPT_REVIEW="$(printf '%s' "$REVIEW_PROMPT_JSON" | python3 -c 'import json,sys; sys.stdout.write(json.load(sys.stdin)["routine"])')"; then
+  echo "muse-review-engine: the active reviewer prompt is invalid" >&2
+  exit 1
+fi
+if ! PROMPT_REVIEW_JUDGE_RULES="$(printf '%s' "$REVIEW_PROMPT_JSON" | python3 -c 'import json,sys; print("\n".join(json.load(sys.stdin)["judge_rules"]))')"; then
+  echo "muse-review-engine: the active reviewer judge rules are invalid" >&2
+  exit 1
+fi
+# An explicit path to the canonical routine still means the active variant;
+# other routine paths retain the path-based override and template check.
+if (( REPLAY )) && [[ -n "$REPLAY_ROUTINE" ]]; then
+  EXPLICIT_ROUTINE="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$REPLAY_ROUTINE")"
+  ACTIVE_ROUTINE="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$REPO/routines/muse-review.md")"
+  if [[ "$EXPLICIT_ROUTINE" != "$ACTIVE_ROUTINE" ]]; then
+    if ! PROMPT_REVIEW="$(check_routine "$REPLAY_ROUTINE")"; then
+      exit 1
+    fi
+  fi
 fi
 if ! PROMPT_BREAKDOWN="$(check_routine "$ROUTINE_BREAKDOWN")"; then
   exit 1
@@ -272,7 +235,7 @@ fi
 if ! PROMPT_SHAPE="$(check_routine "$ROUTINE_SHAPE")"; then
   exit 1
 fi
-if [[ "$BACKEND" == "muse" && ! -r "$MUSE_CALL_BIN" ]]; then
+if [[ ! -r "$MUSE_CALL_BIN" ]]; then
   echo "muse-review-engine: cannot read $MUSE_CALL_BIN — continuing without Muse session capture" >&2
 fi
 
@@ -373,12 +336,7 @@ fi
 
 # Bind the heartbeat start to Muse's session when available. This is
 # telemetry only: a missing id leaves usage unresolved, but must not stop the
-# run it is meant to observe. Muse's alone: a z.ai run never sets it, so no
-# zcode record can claim a Muse session.
-#
-# The z.ai run gets the same binding under zcode's own variable, which
-# heartbeat reads as that agent's session and zai-exec uses to name its call
-# log, so the run's calls land in one file heartbeat can read back.
+# run it is meant to observe.
 #
 # Only the run's first Muse call carries the id (#1413). `exec --session-id`
 # with an id already used resumes that session's conversation, and one in
@@ -396,22 +354,13 @@ fi
 # id inherited from the caller must not reach its calls either (#1730).
 MUSE_SESSION_BOUND=0
 if (( REPLAY )); then
-  unset MUSE_SESSION_ID ZCODE_SESSION_ID
-elif [[ "$BACKEND" == "muse" ]]; then
+  unset MUSE_SESSION_ID
+else
   if MUSE_SESSION_ID="$(python3 -c 'import uuid; print(uuid.uuid4())' 2>/dev/null)" \
     && [[ -n "$MUSE_SESSION_ID" ]]; then
     export MUSE_SESSION_ID
   else
     unset MUSE_SESSION_ID
-    echo "muse-review-engine: no session id; continuing without session usage telemetry" >&2
-  fi
-else
-  unset MUSE_SESSION_ID
-  if ZCODE_SESSION_ID="$(python3 -c 'import uuid; print(uuid.uuid4())' 2>/dev/null)" \
-    && [[ -n "$ZCODE_SESSION_ID" ]]; then
-    export ZCODE_SESSION_ID
-  else
-    unset ZCODE_SESSION_ID
     echo "muse-review-engine: no session id; continuing without session usage telemetry" >&2
   fi
 fi
@@ -446,14 +395,12 @@ failure() {
   fi
   finish_args=(finish --agent "$AGENT" --run "$BEGIN_RUN" \
     --outcome errored --note "$note")
-  if [[ "$BACKEND" == "muse" ]]; then
-    if ! muse_call_record="$(python3 "$MUSE_CALL_BIN" summarize "$RUN_DIR")"; then
-      echo "muse-review-engine: could not summarize Muse call ids; finishing without them" >&2
-      muse_call_record=""
-    fi
-    if [[ -n "$muse_call_record" ]]; then
-      finish_args+=(--muse-call-record "$muse_call_record")
-    fi
+  if ! muse_call_record="$(python3 "$MUSE_CALL_BIN" summarize "$RUN_DIR")"; then
+    echo "muse-review-engine: could not summarize Muse call ids; finishing without them" >&2
+    muse_call_record=""
+  fi
+  if [[ -n "$muse_call_record" ]]; then
+    finish_args+=(--muse-call-record "$muse_call_record")
   fi
   if ! python3 "$REPO/heartbeat.py" "${finish_args[@]}"; then
     echo "muse-review-engine: could not finish errored run" >&2
@@ -542,15 +489,13 @@ PY
   if [[ "$review_result" == "approved" || "$review_result" == "rejected" ]]; then
     finish_args+=(--review-result "$review_result")
   fi
-  if [[ "$BACKEND" == "muse" ]]; then
-    local muse_call_record
-    if ! muse_call_record="$(python3 "$MUSE_CALL_BIN" summarize "$RUN_DIR")"; then
-      echo "muse-review-engine: could not summarize Muse call ids; finishing without them" >&2
-      muse_call_record=""
-    fi
-    if [[ -n "$muse_call_record" ]]; then
-      finish_args+=(--muse-call-record "$muse_call_record")
-    fi
+  local muse_call_record
+  if ! muse_call_record="$(python3 "$MUSE_CALL_BIN" summarize "$RUN_DIR")"; then
+    echo "muse-review-engine: could not summarize Muse call ids; finishing without them" >&2
+    muse_call_record=""
+  fi
+  if [[ -n "$muse_call_record" ]]; then
+    finish_args+=(--muse-call-record "$muse_call_record")
   fi
   if [[ -n "$merged_pr" ]]; then
     finish_args+=(--merged "$merged_pr")
@@ -668,10 +613,7 @@ PY
 # One model call: the prompt file in, the raw answer on stdout. Paths are
 # arguments so the review judges can run in parallel without sharing answers
 # or diagnostics. Plain kill, not a process-group kill: --disable-shell means
-# the model can have no children to orphan, and zai-exec is one Python process
-# making one HTTP request. Exit 124 when the bound kills it. The backend
-# decides only which command runs; the bound, the files and the status are
-# the same for both.
+# the model can have no children to orphan. Exit 124 when the bound kills it.
 call_model_files() {
   local prompt_path="$1"
   local answer_path="$2"
@@ -690,13 +632,6 @@ call_model_files() {
     return 1
   fi
   rm -f "$killed_marker"
-  if [[ "$BACKEND" == "zai" ]]; then
-    # No model flag and no effort: zai-exec asks for glm-5.3 itself and
-    # refuses a reply from anything else. No tool flags: it offers none.
-    "$ZAI_EXEC_BIN" \
-      --prompt-file "$prompt_path" \
-      --timeout "$ZAI_TIMEOUT_SECONDS" >"$answer_path" 2>"$diag_path" &
-  else
     # The id on the first call only; see the binding above (#1413).
     local -a muse_exec
     if (( MUSE_SESSION_BOUND == 0 )); then
@@ -745,7 +680,6 @@ call_model_files() {
       --no-foreign-personal-context \
       --workspace "$WORKSPACE" \
       --prompt-file "$prompt_path" >"$raw_answer_path" 2>"$diag_path" &
-  fi
   local muse_pid=$!
   (
     trap - EXIT
@@ -764,29 +698,27 @@ call_model_files() {
   local bound_pid=$!
   wait "$muse_pid"
   local status=$?
-  if [[ "$BACKEND" == "muse" ]]; then
-    # Read the complete stream after this invocation stops. Background tool
-    # results can arrive late, and parallel calls can complete out of order;
-    # each invocation has its own capture slot.
-    if [[ -n "$muse_capture_path" ]] \
-      && ! python3 "$MUSE_CALL_BIN" capture "$raw_answer_path" "$answer_path" \
-        "$muse_capture_path"; then
-      echo "muse-review-engine: Muse session capture failed; keeping the model answer and marking the id uncaptured" >&2
-      if ! muse_answer_from_jsonl "$raw_answer_path" "$answer_path"; then
-        echo "muse-review-engine: could not recover the Muse model answer from its JSON stream" >&2
-        return 1
-      fi
-      if (( muse_call_first )) && [[ -n "${MUSE_SESSION_ID:-}" ]]; then
-        printf '"%s"\n' "$MUSE_SESSION_ID" >"$muse_capture_path" 2>/dev/null || true
-      else
-        printf 'null\n' >"$muse_capture_path" 2>/dev/null || true
-      fi
-    elif [[ -z "$muse_capture_path" ]]; then
-      echo "muse-review-engine: no Muse call capture slot; continuing without its id" >&2
-      if ! muse_answer_from_jsonl "$raw_answer_path" "$answer_path"; then
-        echo "muse-review-engine: could not recover the Muse model answer from its JSON stream" >&2
-        return 1
-      fi
+  # Read the complete stream after this invocation stops. Background tool
+  # results can arrive late, and parallel calls can complete out of order;
+  # each invocation has its own capture slot.
+  if [[ -n "$muse_capture_path" ]] \
+    && ! python3 "$MUSE_CALL_BIN" capture "$raw_answer_path" "$answer_path" \
+      "$muse_capture_path"; then
+    echo "muse-review-engine: Muse session capture failed; keeping the model answer and marking the id uncaptured" >&2
+    if ! muse_answer_from_jsonl "$raw_answer_path" "$answer_path"; then
+      echo "muse-review-engine: could not recover the Muse model answer from its JSON stream" >&2
+      return 1
+    fi
+    if (( muse_call_first )) && [[ -n "${MUSE_SESSION_ID:-}" ]]; then
+      printf '"%s"\n' "$MUSE_SESSION_ID" >"$muse_capture_path" 2>/dev/null || true
+    else
+      printf 'null\n' >"$muse_capture_path" 2>/dev/null || true
+    fi
+  elif [[ -z "$muse_capture_path" ]]; then
+    echo "muse-review-engine: no Muse call capture slot; continuing without its id" >&2
+    if ! muse_answer_from_jsonl "$raw_answer_path" "$answer_path"; then
+      echo "muse-review-engine: could not recover the Muse model answer from its JSON stream" >&2
+      return 1
     fi
   fi
   if [[ -e "$killed_marker" ]]; then
@@ -802,28 +734,6 @@ call_model_files() {
 
 call_model() {
   call_model_files "$PROMPT_FILE" "$ANSWER_FILE" "$DIAG_FILE"
-}
-
-# End the whole run as a z.ai quota skip: no verdict, no apply, no errored
-# record, whichever call met the spent window — the lister, a judge, or an
-# issue job's one question (#1411). Nothing is parked: z.ai publishes its
-# windows, so the next `begin --agent zcode` reads the spent one and stops
-# before any Project read, and the reset lifts it by itself. Never Muse's hold
-# file either — a spent z.ai window must not park the escalated tier, which
-# still has Muse's week to spend.
-zai_quota_skip() {
-  local diag_path="$1"
-  local status="$2"
-  local zai_reason
-  zai_reason="$(grep -m 1 'zai-exec: quota-exhausted:' "$diag_path" 2>/dev/null \
-    | sed 's/^zai-exec: quota-exhausted: //')"
-  echo "muse-review-engine: z.ai's quota is exhausted; the standard lane stops until its window resets (${zai_reason:-no reason given})" >&2
-  if [[ -n "${BEGIN_RUN:-}" ]]; then
-    python3 "$REPO/heartbeat.py" finish --agent "$AGENT" --run "$BEGIN_RUN" \
-      --outcome skipped-provider-quota \
-      --note "z.ai quota exhausted: ${zai_reason:-zai-exec exit $status}" >&2 || true
-  fi
-  quota_stop
 }
 
 # End the whole run as a Muse quota skip once muse_quota_record has written
@@ -856,7 +766,6 @@ muse_quota_skip() {
 # their ordinary fail-closed handling.
 muse_auth_failure() {
   local diag_path="$1"
-  [[ "$BACKEND" == "muse" ]] || return 1
   [[ -r "$diag_path" ]] || return 1
   grep -Fqi -- "missing meta credentials" "$diag_path"
 }
@@ -873,15 +782,9 @@ muse_auth_outage() {
 model_failed() {
   local status="$1"
   local diag_path="${2:-$DIAG_FILE}"
-  # A spent provider window is not the subject's failure, on either backend.
-  # z.ai says so with zai-exec's own status.
-  if [[ "$BACKEND" == "zai" ]]; then
-    if (( status == ZAI_QUOTA_EXIT )); then
-      zai_quota_skip "$diag_path" "$status"
-    fi
-  # Muse: record the hold so every lane waits for the reset instead of
+  # Record the provider hold so every lane waits for the reset instead of
   # retrying on its own schedule.
-  elif MUSE_QUOTA_RESET="$(muse_quota_record "$diag_path" "${BEGIN_RUN:-}")"; then
+  if MUSE_QUOTA_RESET="$(muse_quota_record "$diag_path" "${BEGIN_RUN:-}")"; then
     muse_quota_skip
   fi
   if muse_auth_failure "$diag_path"; then
@@ -893,11 +796,6 @@ model_failed() {
     exit 124
   fi
   model_err="$(cat "$diag_path")"
-  if [[ "$BACKEND" == "zai" ]]; then
-    echo "muse-review-engine: zai-exec failed (exit $status): $model_err" >&2
-    failure "zai-exec failed (exit $status) $FAIL_SUBJECT: $model_err" || true
-    exit 1
-  fi
   echo "muse-review-engine: muse exec failed (exit $status): $model_err" >&2
   failure "muse exec failed (exit $status) $FAIL_SUBJECT: $model_err" || true
   exit 1
@@ -1114,8 +1012,7 @@ retry_issue_prompt() {
 # becomes a question for Nate: unlike an `unsure` requirement, a missing
 # decision has no safe reading. The answer is built in code, so shape-apply
 # runs once and its exit 3 is final; asking the model again would not change
-# a merge. z.ai's shape keeps the one call below, and breakdown keeps it on
-# both backends.
+# a merge. Breakdown keeps the one call below.
 
 # The Python side of the split, one small entry point per step, calling
 # engine/shape_split.py the way the review split calls engine/review.py. A
@@ -1579,7 +1476,7 @@ run_issue_job() {
   fi
 
   # Shape on Muse asks its small questions instead of the one call below.
-  if [[ "$JOB" == "shape" && "$BACKEND" == "muse" ]]; then
+  if [[ "$JOB" == "shape" ]]; then
     run_shape_split
   fi
 
@@ -1627,10 +1524,8 @@ run_issue_job() {
 
 # Park before claiming anything while Muse's provider quota is spent. The
 # hold is written by whichever lane last met the refusal and expires by
-# itself at the reset the provider named. It speaks for Muse only: a z.ai run
-# spends a different pool, and `begin` gates it on z.ai's own windows.
-if [[ "$BACKEND" == "muse" ]] \
-  && MUSE_QUOTA_RESET="$(muse_quota_hold_until)"; then
+# itself at the reset the provider named.
+if MUSE_QUOTA_RESET="$(muse_quota_hold_until)"; then
   echo "muse-review-engine: parked until $MUSE_QUOTA_RESET — Muse's provider quota is exhausted" >&2
   quota_stop
 fi
@@ -1638,7 +1533,7 @@ fi
 # Authentication parks are derived only from the durable heartbeat branch.
 # A successful minimal Muse call writes the recovery event there before any
 # lane claims work; a failed probe leaves the existing outage open.
-if [[ "$BACKEND" == "muse" ]] && (( ! REPLAY )); then
+if (( ! REPLAY )); then
   if ! MUSE_AUTH_STATE="$(python3 "$REPO/heartbeat.py" muse-auth-state)"; then
     echo "muse-review-engine: could not establish Muse auth outage state; refusing to run" >&2
     exit 1
@@ -1874,26 +1769,23 @@ fi
 
 # Resolved once, from the repository this job works: the PR's repo for a
 # review, the subject issue's repo for a breakdown or a shape. Both are in
-# hand by here, so no job reaches `muse exec` without an answer. Muse only:
-# the allowlist decides which repositories may reach Meta's contributor tier,
-# and a z.ai run has one model, which zai-exec names and checks itself.
-if [[ "$BACKEND" == "muse" ]]; then
-  if [[ "$JOB" == "review" ]]; then
-    MUSE_MODEL="$(resolve_muse_model "$BEGIN_REPO")"
-  else
-    MUSE_MODEL="$(resolve_muse_model "$SUBJECT_REPO")"
-  fi
-  # See muse-implement for why this is here and not only in the helper: a
-  # command substitution that dies yields the empty string without stopping
-  # the runner, and `--model ""` is an id Muse accepts without complaint.
-  [[ -n "$MUSE_MODEL" ]] || MUSE_MODEL="$MUSE_FALLBACK_MODEL"
-  # Keep the pin on the call arrays themselves: the repository-wide guard
-  # treats each `exec` array as a call site and cannot connect a later flag.
-  MUSE_EXEC=("$MUSE_BIN" exec --model "$MUSE_MODEL" --json)
-  MUSE_EXEC_UNBOUND=("$MUSE_BIN" exec --model "$MUSE_MODEL" --json)
-  if [[ -n "${MUSE_SESSION_ID:-}" ]]; then
-    MUSE_EXEC+=(--session-id "$MUSE_SESSION_ID")
-  fi
+# hand by here, so no job reaches `muse exec` without an answer. The allowlist
+# decides which repositories may reach Meta's contributor tier.
+if [[ "$JOB" == "review" ]]; then
+  MUSE_MODEL="$(resolve_muse_model "$BEGIN_REPO")"
+else
+  MUSE_MODEL="$(resolve_muse_model "$SUBJECT_REPO")"
+fi
+# See muse-implement for why this is here and not only in the helper: a
+# command substitution that dies yields the empty string without stopping
+# the runner, and `--model ""` is an id Muse accepts without complaint.
+[[ -n "$MUSE_MODEL" ]] || MUSE_MODEL="$MUSE_FALLBACK_MODEL"
+# Keep the pin on the call arrays themselves: the repository-wide guard
+# treats each `exec` array as a call site and cannot connect a later flag.
+MUSE_EXEC=("$MUSE_BIN" exec --model "$MUSE_MODEL" --json)
+MUSE_EXEC_UNBOUND=("$MUSE_BIN" exec --model "$MUSE_MODEL" --json)
+if [[ -n "${MUSE_SESSION_ID:-}" ]]; then
+  MUSE_EXEC+=(--session-id "$MUSE_SESSION_ID")
 fi
 
 if [[ "$JOB" != "review" ]]; then
@@ -2635,6 +2527,11 @@ line that does the work; an unmet result names the input, the path through
 the diff and the wrong outcome. The `Risks:` in `pr_body` are where to look hardest. When `evidence`
 is `unavailable`, or the packet has none, say so and judge as you otherwise
 would.
+HEADER
+  if [[ -n "$PROMPT_REVIEW_JUDGE_RULES" ]]; then
+    printf '\n%s\n' "$PROMPT_REVIEW_JUDGE_RULES"
+  fi
+  cat <<'HEADER'
 
 HEADER
   # A scoped re-review (#2002) adds its two questions after every rule above,
@@ -2736,8 +2633,7 @@ PY
 
 # One judge chunk, then its timing line (#1719). Returns 0 with result.json
 # written — the chunk's judgements, or `unsure` for each requirement when it
-# failed closed — or with a `quota` marker and no result on a spent z.ai
-# window; 1 only when not even the failed-closed result could be recorded.
+# failed closed; 1 only when not even the failed-closed result could be recorded.
 run_judge_chunk() {
   local index="$1"
   local call_dir="$2"
@@ -2782,15 +2678,6 @@ judge_chunk_calls() {
     call_model_files "$prompt_path" "$answer_path" "$diag_path"
     muse_status=$?
     if (( muse_status != 0 )); then
-      # A spent z.ai window is not an answer about these requirements, so it
-      # must not become `unsure` and, through it, a rejection of a PR nobody
-      # judged. Leave the marker and no result; the loop below finishes the
-      # whole run as a quota skip and applies no verdict (#1411).
-      if [[ "$BACKEND" == "zai" ]] && (( muse_status == ZAI_QUOTA_EXIT )); then
-        cp "$diag_path" "$call_dir/quota" 2>/dev/null || : > "$call_dir/quota"
-        echo "muse-review-engine: judge chunk $index met a spent z.ai window" >&2
-        return 0
-      fi
       if muse_auth_failure "$diag_path"; then
         : >"$call_dir/auth-outage"
         echo "muse-review-engine: judge chunk $index found missing meta credentials" >&2
@@ -2855,12 +2742,7 @@ judge_chunk_calls() {
 # Their inputs are independent and each file is isolated, so parallel max
 # calls do not race over the cached packet, answer, or diagnostic.
 #
-# On z.ai, one at a time instead (#1411). The Lite plan refuses concurrent
-# requests (code 1302), and a GLM-5.3 answer takes minutes, so parallel judges
-# past the limit would wait out their retries and read `unsure` — a rejection
-# of a good PR on every review with more than one chunk. Sequential judges
-# also stop at the first spent window instead of spending the rest of the
-# chunks' credits on a run that cannot record a verdict. Muse is unchanged.
+# Muse judges run in parallel, each with an isolated call directory.
 JUDGE_PIDS=()
 JUDGE_RUN_STATUS=0
 for (( index = 0; index < JUDGE_COUNT; index++ )); do
@@ -2886,22 +2768,11 @@ PY
     failure "could not prepare judge chunk $index for PR #$BEGIN_PR in $BEGIN_REPO" || true
     exit 1
   fi
-  if [[ "$BACKEND" == "zai" ]]; then
-    run_judge_chunk "$index" "$CALL_DIR"
-    judge_status=$?
-    if (( judge_status != 0 )); then
-      JUDGE_RUN_STATUS=1
-    fi
-    if [[ -e "$CALL_DIR/quota" ]]; then
-      zai_quota_skip "$CALL_DIR/quota" "$ZAI_QUOTA_EXIT"
-    fi
-  else
-    run_judge_chunk "$index" "$CALL_DIR" &
-    JUDGE_PIDS+=("$!")
-  fi
+  run_judge_chunk "$index" "$CALL_DIR" &
+  JUDGE_PIDS+=("$!")
 done
 # The `+` guard: bash 3.2, which launchd's /bin/bash is, reads an empty
-# array under `set -u` as unbound, and the z.ai path leaves this one empty.
+# array under `set -u` as unbound.
 for judge_pid in ${JUDGE_PIDS[@]+"${JUDGE_PIDS[@]}"}; do
   wait "$judge_pid"
   judge_status=$?
@@ -2909,13 +2780,11 @@ for judge_pid in ${JUDGE_PIDS[@]+"${JUDGE_PIDS[@]}"}; do
     JUDGE_RUN_STATUS=1
   fi
 done
-if [[ "$BACKEND" == "muse" ]]; then
-  for (( index = 0; index < JUDGE_COUNT; index++ )); do
-    if [[ -e "$RUN_DIR/judge.$index/auth-outage" ]]; then
-      muse_auth_outage
-    fi
-  done
-fi
+for (( index = 0; index < JUDGE_COUNT; index++ )); do
+  if [[ -e "$RUN_DIR/judge.$index/auth-outage" ]]; then
+    muse_auth_outage
+  fi
+done
 if (( JUDGE_RUN_STATUS != 0 )); then
   failure "could not record one or more judge results for PR #$BEGIN_PR in $BEGIN_REPO" || true
   exit 1
@@ -2923,25 +2792,20 @@ fi
 
 # Preserve the shared provider-quota hold when a failed judge captured its
 # refusal. The failed chunk still becomes unsure and the code-derived verdict
-# remains rejected, as the ticket requires. Muse only: a judge that met a
-# spent z.ai window has already ended the run as a quota skip above, and the
-# next `begin` reads the window from z.ai, so there is no hold to write — and
-# a Muse-shaped refusal in a z.ai judge's diagnostic must never park Muse.
+# remains rejected, as the ticket requires.
 #
 # A replay stops here instead, with the hold written and no answer: a judge
 # the provider refused judged nothing, and its `unsure` would score as a
 # rejection of a packet nobody read (#1730).
-if [[ "$BACKEND" == "muse" ]]; then
-  for (( index = 0; index < JUDGE_COUNT; index++ )); do
-    if MUSE_QUOTA_RESET="$(muse_quota_record "$RUN_DIR/judge.$index/diag.txt" "${BEGIN_RUN:-}")"; then
-      echo "muse-review-engine: Muse's provider quota is exhausted; parking future lanes until $MUSE_QUOTA_RESET" >&2
-      if (( REPLAY )); then
-        quota_stop
-      fi
-      break
+for (( index = 0; index < JUDGE_COUNT; index++ )); do
+  if MUSE_QUOTA_RESET="$(muse_quota_record "$RUN_DIR/judge.$index/diag.txt" "${BEGIN_RUN:-}")"; then
+    echo "muse-review-engine: Muse's provider quota is exhausted; parking future lanes until $MUSE_QUOTA_RESET" >&2
+    if (( REPLAY )); then
+      quota_stop
     fi
-  done
-fi
+    break
+  fi
+done
 
 # Flatten chunks in canonical order and derive the only answer passed to
 # review-apply. A missing/corrupt result file is expanded to unsure entries;

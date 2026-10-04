@@ -25,8 +25,8 @@ ranks anything itself.
 | `funnel pin <ref> [--yes]` | Pin a project within its current gate; dry-run by default |
 | `funnel unpin <ref> [--yes]` | Clear a project's pin; dry-run by default |
 | `funnel comment <ref> --body "<text>" --voice <voice>` | Post a comment with explicit provenance |
-| `funnel comment <ref> --blocked-on N [--blocked-on M] --because "<reason>" --voice <voice>` | Post a canonical block comment |
-| `funnel hold <ref> (--until YYYY-MM-DD \| --on N [N ...]) --reason "<why>" [--yes]` | Record Nate's hold on a finished project at Accept as a conditioned block; dry-run by default |
+| `funnel comment <ref> --blocked-on N [--blocked-on M] --because "<reason>" [--proof URL] --voice <voice>` | Post a routed block comment; Shaped holds include a plan hash and proof |
+| `funnel hold <ref> ((--until YYYY-MM-DD \| --on N [N ...]) --reason "<why>" [--proof URL] \| --release --instruction "<Nate's words>") [--yes]` | Record a Shaped hold or conditioned Accept hold, or explicitly release a Shaped hold |
 | `python3 outcomes.py derive [--dry-run]` | Derive closed-ticket outcomes from GitHub; durable records append to `heartbeat:outcomes.jsonl` |
 | `python3 outcomes.py read` | Read the durable derived outcome records |
 | `python3 outcomes.py signals` | Compute the named outcome signals from the durable records |

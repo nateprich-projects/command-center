@@ -69,6 +69,39 @@ def shaped_plan(number=40, *, origin="agent", klass="Broken",
     )
 
 
+HELD_SHAPED_BODY = "# Decision\nKeep current service plan.\n"
+HELD_SHAPED_VERSION = (
+    "371883196b99396eca7d9b9cb6613ec0395df5ca683d36fe7415b71343e40dbb"
+)
+
+
+def held_shaped_plan(number=42, *, body=HELD_SHAPED_BODY,
+                     condition_state="OPEN"):
+    condition = funnel.Item(
+        repo=REPO, number=41, title="Open prerequisite",
+        url="https://example.invalid/41", state=condition_state,
+    )
+    plan = funnel.Item(
+        repo=REPO, number=number, title="Held plan {}".format(number),
+        url="https://example.invalid/{}".format(number), state="OPEN",
+        status="Shaped", klass="New", origin="Nate", risk="standard",
+        needs="external-event", body=body, labels=["blocked"],
+        block_reason="Hold until the open prerequisite clears",
+        shaped_hold={
+            "Hold-Reason": "Hold until the open prerequisite clears",
+            "Hold-Conditions": ["nateprich/beta#41"],
+            "Plan-Version": HELD_SHAPED_VERSION,
+            "Proof": [
+                "https://github.com/nateprich-projects/command-center/"
+                "issues/2003#issuecomment-5945296610",
+            ],
+        },
+        status_since=NOW - timedelta(days=2),
+        blocked_since=NOW - timedelta(days=1),
+    )
+    return plan, condition
+
+
 def building_project(number=30):
     return funnel.Item(
         repo=REPO, number=number, title="Project {}".format(number),
@@ -96,6 +129,50 @@ def brief_for(items, capsys):
 def routed(item, *others):
     by_ref = {i.ref: i for i in (item,) + others}
     return funnel.watch_owns_gate(item, funnel.gate_question(item), by_ref)
+
+
+def test_reproduction_unchanged_shaped_hold_is_watch_owned():
+    plan, condition = held_shaped_plan()
+    by_ref = {"nateprich/beta#42": plan, "nateprich/beta#41": condition}
+    held_question = "Held — recheck?"
+
+    assert funnel.gate_question(plan, by_ref) == held_question
+    assert funnel.watch_owns_gate(plan, held_question, by_ref)
+
+
+def test_brief_keeps_an_unchanged_hold_in_watch_gates_and_reopens_after_edit(
+    capsys,
+):
+    plan, condition = held_shaped_plan()
+
+    brief = brief_for([plan, condition], capsys)
+
+    assert brief["total_needing_nate"] == 0
+    assert brief["items"] == []
+    assert [row["ref"] for row in brief["watch_gates"]] == [
+        "nateprich/beta#42",
+    ]
+    assert brief["watch_gates"][0]["question"] == "Held — recheck?"
+
+    plan.body += "\nA material body edit.\n"
+    edited = brief_for([plan, condition], capsys)
+
+    assert edited["total_needing_nate"] == 1
+    assert edited["items"][0]["waiting_on"] == "Is the plan good?"
+    assert edited["watch_gates"] == []
+
+
+def test_a_resolved_shaped_hold_returns_to_the_plan_gate(capsys):
+    plan, condition = held_shaped_plan(condition_state="CLOSED")
+
+    brief = brief_for([plan, condition], capsys)
+
+    assert brief["total_needing_nate"] == 1
+    assert [row["ref"] for row in brief["items"]] == [
+        "nateprich/beta#42",
+    ]
+    assert brief["items"][0]["waiting_on"] == "Is the plan good?"
+    assert brief["watch_gates"] == []
 
 
 def test_a_silently_blocked_ticket_leaves_the_total_for_watch_gates(capsys):

@@ -7,11 +7,12 @@ import pathlib
 
 import pytest
 
-from engine import replay
+from engine import replay, review_packets
 from engine.review_decisions import score_paired_runs
 from engine.review_evaluation import (
     fisher_decline_p_value,
     render_cost_table,
+    render_parent_issue_evidence,
     run_eval_nonblocking,
 )
 
@@ -84,7 +85,7 @@ def test_run_eval_nonblocking_uses_registered_looks_and_never_blocks(
 
     def replay_fn(packet_name, head_checkout, main_checkout, *, runs,
                   version, runtime_root, head_runs=()):
-        calls.append((packet_name, runs, len(head_runs)))
+        calls.append((packet_name, runs, len(head_runs), version))
         if packet_name == "must_reject" and runs == 40:
             head_rejected, main_rejected = 30, 36
             prior_head = prior_main = 0
@@ -120,6 +121,7 @@ def test_run_eval_nonblocking_uses_registered_looks_and_never_blocks(
 
     assert [call[1] for call in calls] == [40, 40, 60, 60]
     assert [call[2] for call in calls] == [0, 0, 40, 40]
+    assert {call[3] for call in calls} == {"v1"}
     assert [look["runs_per_side"] for look in result["looks"]] == [40, 60]
     assert result["looks"][0]["decline_p_value"] > 0.05
     assert result["looks"][1]["decline_p_value"] < 0.05
@@ -127,8 +129,26 @@ def test_run_eval_nonblocking_uses_registered_looks_and_never_blocks(
     assert result["trial_enabled"] is False
     assert result["merge_blocking"] is False
     assert result["outcome"]["merge_blocking"] is False
+    assert result["packet_version"] == review_packets.DEFAULT_VERSION
+    assert result["packet_checksums"] == review_packets.verify_checksums("v1")
+    assert result["regression_evidence"]["must_reject"]["runs_per_side"] == 60
+    assert result["regression_evidence"]["must_approve_false_blocks"][
+        "runs_per_side"] == 60
     assert "reviewer_b" not in result
     assert manifest_path.read_bytes() == manifest_before
+
+    evidence = render_parent_issue_evidence(result)
+    assert "Scope: reviewer-only; window: 14 days" in evidence
+    assert "Packet set: `v1`; must-reject SHA-256" in evidence
+    assert "Head versus current main" in evidence
+    assert "Must-reject rejection rate" in evidence
+    assert "Must-approve false-block rate" in evidence
+    assert "Paired A+B system measurements" in evidence
+    assert "Added detection over reviewer A" in evidence
+    assert "Joint false blocks versus reviewer A" in evidence
+    assert "| Measure | Runs | Cost (USD) | Latency (s) | Rate (95% CI) |" in evidence
+    assert "No packet contents or owner-local replay records are included." in evidence
+    assert "change_id" not in evidence
 
 
 def test_eval_stops_at_existing_pace_brake_without_blocking(tmp_path):
@@ -145,6 +165,10 @@ def test_eval_stops_at_existing_pace_brake_without_blocking(tmp_path):
     assert result["merge_blocking"] is False
     assert result["look_count"] == 0
     assert result["outcome"] is None
+
+    evidence = render_parent_issue_evidence(result)
+    assert "Quality outcome: not measured" in evidence
+    assert "No regression, pass, or inconclusive quality classification is claimed." in evidence
 
 
 def test_fisher_decline_uses_the_one_sided_exact_reference():

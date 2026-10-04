@@ -6,6 +6,15 @@ the must-approve packet. The live machine-local, owner-only corpus lives in
 `command-center-review-corpus/`, relative to the runtime root. Its replay use is
 unchanged.
 
+The two seeds are `command-center-review-corpus/the-league-237-must-reject.json`
+and `command-center-review-corpus/command-center-1959-must-approve.json`. Both
+are full reviews: neither carries a live `scoped_rereview`, so a replay sends
+the full-review prompts and never reaches a scoped re-review's own lister header
+and judge paragraph (#2002). A replay therefore cannot measure a change to the
+scoped wording. Until a scoped seed exists, `tests/test_muse_review_engine.py`
+covers that path, and `SCOPED_REREVIEW_ENABLED` in `engine/review.py` turns
+scoped re-review off.
+
 The two byte-for-byte v1 snapshots in `data/review_packets/v1/` are the
 ticketed, versioned inputs shared by regression and paired evaluation. The live
 owner-only corpus and replay outputs remain out of Git and issue comments; these

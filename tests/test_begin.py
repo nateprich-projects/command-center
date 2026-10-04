@@ -738,6 +738,44 @@ def test_run_preflight_stops_on_missing_budget_before_project_reads(monkeypatch)
     assert out["do"] == "stop"
 
 
+def test_run_preflight_refuses_partial_cloud_metadata_before_project_reads(
+    monkeypatch, codex_settings_match,
+):
+    import heartbeat
+
+    monkeypatch.setattr(funnel, "_codex_settings_check", codex_settings_match)
+    monkeypatch.setattr(
+        funnel,
+        "_start_begin_heartbeat",
+        lambda agent, tier=None: "run-id",
+    )
+    monkeypatch.setattr(
+        heartbeat,
+        "record_event",
+        lambda *args, **kwargs: "recorded",
+    )
+    monkeypatch.setattr(
+        usage,
+        "read_agent",
+        lambda *args: pytest.fail("refused cloud metadata reached usage"),
+    )
+    _deny_preflight_project_reads(monkeypatch)
+
+    out, reading = funnel._begin_preflight(
+        NOW,
+        "codex",
+        False,
+        "standard",
+        codex_profile="cloud",
+        cloud_metadata={"model": "fixture-model"},
+    )
+
+    assert reading is None
+    assert out["gate"] == "config"
+    assert out["do"] == "stop"
+    assert "cloud profile" in out["why"]
+
+
 def test_main_treats_a_structured_empty_window_as_a_clean_reserve_stop(
     monkeypatch, capsys
 ):

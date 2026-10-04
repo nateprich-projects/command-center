@@ -1197,6 +1197,8 @@ def gate_question(
             return GATE_QUESTIONS["block_unread"]
         if condition is not None:
             return None
+        if item.parent is not None and item.needs_decision:
+            return item.needs_decision
         if item.parent is None and item.needs_decision:
             # An answered Gates question is settled, whatever the comment
             # thread still says. The marker is consulted before the question
@@ -1368,6 +1370,14 @@ def watch_owns_gate(
             and _shaped_hold_is_unresolved(item, shaped_hold, by_ref)
         )
     if question in WATCH_UNBLOCK_QUESTIONS:
+        if (
+            item.is_blocked
+            and item.parent is not None
+            and item.needs_decision is not None
+        ):
+            # The ticket's recorded question belongs to Nate even when its
+            # wording happens to match a watch-owned unblock question.
+            return False
         return item.needs != "human" or item.decline_reason is not None
     if question != GATES["Shaped"]:
         return False

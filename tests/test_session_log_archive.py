@@ -214,7 +214,11 @@ def test_module_runs_as_a_script(tmp_path):
         "    @classmethod\n"
         "    def now(cls, tz=None):\n"
         "        return cls(2026, 10, 3, 15, 0, tzinfo=_datetime.timezone.utc)\n"
-        "_datetime.datetime = _FixedDateTime\n",
+        "_datetime.datetime = _FixedDateTime\n"
+        # tmp_path may itself sit on a mounted /Volumes disk (#2283), so the
+        # not-mounted case must not depend on where pytest puts it.
+        "import os.path as _os_path\n"
+        "_os_path.ismount = lambda path: False\n",
         encoding="utf-8",
     )
     env = dict(os.environ)

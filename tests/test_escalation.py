@@ -537,6 +537,23 @@ def test_ticket_1643_affirmative_proposal_fixtures_still_escalate():
             fixture["expected_reasons"], fixture["source"]
 
 
+@pytest.mark.parametrize("source, expected_reason", [
+    ("Ticket #2181: enter verb inside the credentials phrase", "credentials"),
+    ("Ticket #2181: run verb inside the destructive phrase", "destructive"),
+])
+def test_ticket_2181_in_phrase_verbs_match_their_category(source,
+                                                           expected_reason):
+    fixtures = json.loads(
+        (FIXTURES / "escalation_plan_true_proposals.json").read_text()
+    )
+    fixture = next(item for item in fixtures if item["source"] == source)
+
+    assert [match["reason"] for match in
+            funnel.plan_escalation_matches(fixture["body"])] == [
+        expected_reason
+    ], source
+
+
 @pytest.mark.parametrize("quoted", [
     '"401 Incorrect API key"',
     "“401 Incorrect API key”",
@@ -648,60 +665,63 @@ def test_ticket_1722_direct_migration_verbs_are_spelled_out():
         assert direct.fullmatch(word) is None, word
 
 
-def test_ticket_1770_every_verb_carrying_category_has_a_direct_action_entry():
-    """Each category's own verb shape is represented in the direct table."""
-    examples = {
-        "data-migration": "migrate the schema",
-        "authorisation": "grant the service permissions",
-        "credentials": "rotate the deploy credentials",
-    }
-    assert set(examples) <= set(funnel._PLAN_DIRECT_ACTIONS)
-    for category, phrase in examples.items():
-        assert funnel._PLAN_DIRECT_ACTIONS[category].search(phrase), category
+# The action/object shape tested by each category's matcher.
+_IN_PHRASE_OBJECTS = {
+    "authorisation": "the service permissions",
+    "credentials": "the deploy credentials",
+    "data-migration": "the schema migration",
+    "destructive": "destructive operations",
+}
 
 
-def test_ticket_1770_credentials_direct_actions_use_literal_rotate_forms_and_terms():
-    direct = funnel._PLAN_DIRECT_ACTIONS["credentials"]
-    for verb in funnel._CREDENTIALS_PLAN_ACTION_FORMS.split("|"):
-        assert direct.search("{} the deploy credentials".format(verb)), verb
+def test_ticket_2181_every_category_uses_one_in_phrase_verb_list():
+    """Keep matcher stems and plan-side forms in sync for every category."""
+    patterns = funnel.ESCALATION_PATTERNS
+    lists = funnel._PLAN_IN_PHRASE_VERB_FORMS
+    stems_by_category = funnel._ESCALATION_MATCHER_VERB_STEMS
 
-    for noun in ("API key", "access token", "client secret",
-                 "credential store", "password", "private key", "credential",
-                 "credentials"):
-        assert direct.search("rotate the deploy {}".format(noun)), noun
+    assert set(lists) == set(patterns)
+    with_verbs = {category for category, forms in lists.items() if forms}
+    assert with_verbs == set(funnel._PLAN_DIRECT_ACTIONS)
+    assert set(stems_by_category) <= with_verbs
+    assert "concurrency" not in with_verbs
 
-    for invalid in ("changeing", "rotateing", "useing", "writed"):
-        assert direct.search("{} the deploy credentials".format(invalid)) is None
-    assert direct.search("rotate the deploy secret key") is None
+    for category, pattern in sorted(patterns.items()):
+        forms = lists[category].split("|") if lists[category] else []
+        assert len(forms) == len(set(forms)), category
+        stems = stems_by_category.get(category, "")
+        if stems:
+            assert "(?:" + stems + r")\w*" in pattern, category
+        for stem in filter(None, stems.split("|")):
+            assert any(stem + ending in forms for ending in ("", "e", "y")), \
+                (category, stem)
+        if not forms:
+            continue
+        direct = funnel._PLAN_DIRECT_ACTIONS[category]
+        obj = _IN_PHRASE_OBJECTS[category]
+        for form in forms:
+            match = re.search(pattern, "{} {}".format(form, obj),
+                              re.IGNORECASE)
+            assert match, (category, form)
+            assert direct.search(match.group(0)), (category, form)
+            if stems:
+                assert match.start() == 0, (category, form)
+                if form.endswith("e"):
+                    misspelt = "{}ing {}".format(form, obj)
+                    assert direct.search(misspelt) is None, \
+                        (category, misspelt)
 
 
-def test_ticket_1770_credentials_direct_actions_reuse_existing_vocabulary():
-    direct = funnel._PLAN_DIRECT_ACTIONS["credentials"].pattern
-    proposal = funnel._PLAN_PROPOSAL_ACTIONS["credentials"].pattern
+@pytest.mark.parametrize("sentence", [
+    "Changeing the service permissions for the runner.",
+    "Elevateing the service permissions for the runner.",
+    "Reduceing the service permissions for the runner.",
+    "Revokeing the service permissions for the runner.",
+])
+def test_ticket_2181_misspelled_authorisation_forms_do_not_escalate(sentence):
+    body = "## What it is\n\n{}\n".format(sentence)
 
-    def action_terms(pattern):
-        assert pattern.startswith(r"\b(?:")
-        return pattern[len(r"\b(?:"):pattern.index(")", len(r"\b(?:"))]
-
-    assert action_terms(direct) == action_terms(proposal)
-
-    direct_tail = direct.split(
-        r"(?:\s+[\w'’-]+){0,4}\s+", 1
-    )[1]
-    assert direct_tail.startswith("(?:") and direct_tail.endswith(r")\b")
-    direct_credentials = direct_tail[3:-3]
-    matcher_terms = "{}|{}".format(
-        funnel._CREDENTIALS_MATCHER_NAMED_TERMS,
-        funnel._CREDENTIALS_MATCHER_ACTION_NOUN,
-    )
-    assert direct_credentials == matcher_terms
-    matcher = funnel.ESCALATION_PATTERNS["credentials"]
-    assert matcher.startswith(
-        r"(?<!no )\b(" + funnel._CREDENTIALS_MATCHER_NAMED_TERMS + r")\b|"
-    )
-    assert matcher.endswith(
-        r"\s+" + funnel._CREDENTIALS_MATCHER_ACTION_NOUN + r"\b"
-    )
+    assert funnel.plan_escalation_matches(body) == []
 
 
 # -- one region filter decides what the plan scan reads (#2180) -------------

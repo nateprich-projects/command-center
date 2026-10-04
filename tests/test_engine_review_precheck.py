@@ -58,6 +58,7 @@ def pr_view(**kw):
         "mergedAt": None,
         "closedAt": None,
         "mergeable": "MERGEABLE",
+        "mergeStateStatus": "CLEAN",
         "statusCheckRollup": [
             {"name": "tests", "conclusion": "SUCCESS", "status": "COMPLETED"},
         ],
@@ -184,12 +185,15 @@ def test_ci_row_fails_a_red_rollup_and_names_the_check():
     assert reasons == ["ci: CI not green (state red): lint"]
 
 
-def test_ci_row_fails_while_a_check_is_still_running():
+def test_ci_row_waits_while_a_check_is_still_running():
     view = pr_view(statusCheckRollup=[
         {"name": "slow", "conclusion": None, "status": "IN_PROGRESS"},
     ])
-    reasons = packet(pr_view=view)["precheck"]["reasons"]
-    assert reasons == ["ci: CI not green (state unknown)"]
+
+    found = packet(pr_view=view)
+
+    assert found["standing"]["state"] == "wait"
+    assert found["precheck"] == {"pass": True, "reasons": []}
 
 
 def test_ci_row_passes_a_green_rollup():
@@ -387,13 +391,27 @@ def test_merged_row_passes_with_no_overlap_and_requests_no_rerun():
     assert found["ci_rerun"] is None
 
 
-def test_merged_row_rejects_when_mergeability_is_unknown():
+def test_merged_row_waits_when_mergeability_is_unknown():
     view = pr_view(mergeable="UNKNOWN")
     rows = [merged(5, NEWER, "funnel.py")]
     found = packet(pr_view=view, merged_prs=rows, ci_runs=[ci_run(COVERING)])
-    assert len(found["precheck"]["reasons"]) == 1
-    assert found["precheck"]["reasons"][0].startswith("merged-overlap:")
-    assert found["ci_rerun"] is None
+
+    assert found["standing"]["state"] == "wait"
+    assert found["precheck"] == {"pass": True, "reasons": []}
+
+
+def test_merged_row_still_blocks_an_explicit_dirty_conflict():
+    view = pr_view(mergeable="UNKNOWN", mergeStateStatus="DIRTY")
+    rows = [merged(5, NEWER, "funnel.py")]
+    found = packet(pr_view=view, merged_prs=rows, ci_runs=[ci_run(COVERING)])
+
+    assert found["standing"] == {
+        "state": "conflict",
+        "reason": "branch 'ticket/9' is conflicting with the base — "
+                  "an engineer rebase is required",
+    }
+    assert found["precheck"]["reasons"] == [
+        "merged-overlap: PR #5 merged at {} touches funnel.py".format(NEWER)]
 
 
 def test_merged_row_waits_when_a_newer_attempt_is_already_in_flight():

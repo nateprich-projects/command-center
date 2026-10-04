@@ -24,6 +24,17 @@ NOW = datetime(2026, 9, 15, 12, 0, tzinfo=timezone.utc)
 REPO = "owner/repo"
 
 
+@pytest.fixture(autouse=True)
+def open_facts_without_a_verdict_read_none(monkeypatch):
+    """An open fact here without ``verdict`` means a PR with no verdict.
+
+    The board's fixture-only fallback reads it once; offline gh fails that
+    read, and a failed read is unknown rather than none (#2194). Tests that
+    exercise the read itself patch ``latest_verdict`` again.
+    """
+    monkeypatch.setattr(funnel, "latest_verdict", lambda repo, number: None)
+
+
 def project(**kw):
     values = dict(
         repo=REPO, number=1, title="Project", url="u", state="OPEN",

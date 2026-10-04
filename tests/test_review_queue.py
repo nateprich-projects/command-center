@@ -78,8 +78,10 @@ OWNER_PR = {"isCrossRepository": False,
 
 
 def _row(pr, ticket, opened, head="abc", **trust):
+    # Every real row carries GitHub's mergeability, and the listing waits on
+    # a head whose mergeability is not yet MERGEABLE (#2192).
     row = {"number": pr, "headRefName": "ticket/{}".format(ticket),
-           "headRefOid": head, "createdAt": opened}
+           "headRefOid": head, "createdAt": opened, "mergeable": "MERGEABLE"}
     row.update(OWNER_PR)
     row.update(trust)
     return row
@@ -567,3 +569,195 @@ def test_review_queue_reads_live_ticket_pr_facts_not_display_carry_forward(
 
     assert reads == [[ticket.ref]]
     assert [entry["pr"] for entry in queue] == [10]
+
+
+# -- One reviewable-head predicate (#2192) ------------------------------------
+#
+# Plan #1747: the listing and the packet decide reviewability from one
+# predicate over the row fields both reads carry. Precedent (#1019): a head is
+# reviewable only once GitHub reports it MERGEABLE; only a conflicting branch
+# rejects as stale. A head GitHub has not computed yet waits, and is reported.
+
+CONFLICT_REASON = "branch 'ticket/1'" + funnel.CONFLICTING_BRANCH_SUFFIX
+UNSURE = {"verdict": "rejected", "head_sha": "abc",
+          "comment_created_at": "2026-09-10T05:00:00Z",
+          "blocking": ["requirement unsure: verify the run"]}
+
+
+def _later_comment(login):
+    return {"body": "later PR comment", "createdAt": "2026-09-10T05:01:00Z",
+            "author": {"login": login}}
+
+
+def _standing_row(**fields):
+    row = _row(10, 1, "2026-09-10T05:00:00Z", head="abc")
+    row.update(state="OPEN", mergeStateStatus="CLEAN", statusCheckRollup=GREEN)
+    row.update(fields)
+    return row
+
+
+STANDING_TABLE = [
+    pytest.param({"state": "CLOSED"}, None, (), "closed", "PR is CLOSED",
+                 id="closed"),
+    pytest.param({"state": "MERGED"}, None, (), "closed", "PR is MERGED",
+                 id="merged"),
+    pytest.param({"isCrossRepository": True,
+                  "headRepository": {"nameWithOwner": "mallory/beta"},
+                  "author": {"login": "mallory"}},
+                 None, (), "foreign",
+                 "not the funnel's own PR: it was opened from another "
+                 "repository (mallory/beta)", id="fork"),
+    pytest.param({"headRefName": "feature/1"}, None, (), "foreign",
+                 "branch 'feature/1' is not a ticket/<n> branch",
+                 id="non-ticket-branch"),
+    pytest.param({"mergeable": "CONFLICTING", "mergeStateStatus": "DIRTY"},
+                 None, (), "conflict", CONFLICT_REASON, id="conflicting"),
+    pytest.param({"mergeable": "UNKNOWN", "mergeStateStatus": "DIRTY",
+                  "statusCheckRollup": RUNNING},
+                 None, (), "conflict", CONFLICT_REASON, id="dirty-unknown"),
+    pytest.param({"mergeable": "UNKNOWN", "mergeStateStatus": "UNKNOWN"},
+                 None, (), "wait", "mergeability UNKNOWN", id="unknown"),
+    pytest.param({"mergeable": None}, None, (), "wait",
+                 "mergeability unreadable", id="mergeability-unreadable"),
+    pytest.param({"statusCheckRollup": RUNNING}, None, (), "wait",
+                 "checks still running", id="check-in-progress"),
+    pytest.param({"headRefOid": None}, None, (), "wait",
+                 "head SHA unreadable", id="head-unreadable"),
+    pytest.param({"statusCheckRollup": RED}, None, (), "reviewable", None,
+                 id="red"),
+    pytest.param({"statusCheckRollup": []}, None, (), "reviewable", None,
+                 id="empty-rollup"),
+    pytest.param({}, {"verdict": "approved", "head_sha": "abc"}, (),
+                 "covered", "a verdict already covers head abc",
+                 id="verdict-at-head"),
+    pytest.param({}, UNSURE, (_later_comment("nateprich"),), "reviewable",
+                 None, id="unsure-then-owner-comment"),
+    pytest.param({}, UNSURE, (_later_comment("mallory"),), "covered",
+                 "a verdict already covers head abc",
+                 id="unsure-then-outsider-comment"),
+    pytest.param({}, {"verdict": "rejected", "head_sha": "old",
+                      "blocking": ["requirement unmet: fix it"]}, (),
+                 "reviewable", None, id="new-head-after-rejection"),
+]
+
+
+@pytest.mark.parametrize(
+    ("fields", "verdict", "comments", "state", "reason"), STANDING_TABLE)
+def test_review_standing_reads_each_head_state(
+        fields, verdict, comments, state, reason):
+    row = _standing_row(**fields)
+
+    standing = funnel.review_standing(REPO, row, verdict, list(comments))
+
+    assert (standing.state, standing.reason) == (state, reason)
+    assert tuple(standing) == (state, reason)
+
+
+@pytest.mark.parametrize(
+    ("fields", "verdict", "comments", "state", "reason"), STANDING_TABLE)
+def test_review_standing_reads_the_verdict_only_for_an_otherwise_ready_head(
+        fields, verdict, comments, state, reason):
+    """A lazy verdict is read only when the earlier states pass.
+
+    The listing's rows include closed PRs, which carry no verdict, and an
+    eager read would cost one ``gh pr view`` per row.
+    """
+    reads = []
+
+    def read_verdict():
+        reads.append(1)
+        return verdict
+
+    standing = funnel.review_standing(
+        REPO, _standing_row(**fields), read_verdict, list(comments))
+
+    assert standing.state == state
+    assert reads == ([1] if state in ("covered", "reviewable") else [])
+
+
+def test_a_green_head_with_unknown_mergeability_is_not_offered(monkeypatch):
+    """GitHub has not computed mergeability yet, so the head waits (#2192).
+
+    On main the listing offered it, and the packet then judged an
+    unestablished merge state.
+    """
+    row = _rollup_row(10, 1, "2026-09-15T23:10:00Z", GREEN)
+    row.update(state="OPEN", mergeable="UNKNOWN", mergeStateStatus="UNKNOWN")
+    facts = _wire(monkeypatch, [row])
+    writes = _capture_conflict_writes(monkeypatch, facts)
+
+    assert funnel.review_queue([_ticket(1)], pr_facts=facts) == []
+    assert writes == []
+
+
+def test_a_waiting_head_is_reported_with_its_reason(monkeypatch):
+    unknown = _rollup_row(10, 1, "2026-09-15T23:10:00Z", GREEN)
+    unknown.update(state="OPEN", mergeable="UNKNOWN")
+    running = _rollup_row(20, 2, "2026-09-15T23:11:00Z", RUNNING)
+    running["state"] = "OPEN"
+    clean = _rollup_row(30, 3, "2026-09-15T23:12:00Z", GREEN)
+    clean["state"] = "OPEN"
+    facts = _wire(monkeypatch, [unknown, running, clean])
+    skipped = []
+
+    queue = funnel.review_queue(
+        [_ticket(1), _ticket(2), _ticket(3)], pr_facts=facts, skipped=skipped)
+
+    assert [entry["pr"] for entry in queue] == [30]
+    assert skipped == [
+        {"ref": REPO + "#1", "pr": 10, "reason": "mergeability UNKNOWN"},
+        {"ref": REPO + "#2", "pr": 20, "reason": "checks still running"},
+    ]
+
+
+@pytest.mark.parametrize("trust", NOT_THE_FUNNELS)
+def test_only_waiting_heads_are_reported(monkeypatch, trust):
+    """Forks stay unreported (#1794); conflict, closed and covered heads
+    have their own answers and are not waiting."""
+    fork = _rollup_row(10, 1, "2026-09-15T23:10:00Z", RUNNING)
+    fork.update(trust, state="OPEN", mergeable="UNKNOWN")
+    conflict = _rollup_row(20, 2, "2026-09-15T23:11:00Z", GREEN)
+    conflict.update(state="OPEN", mergeable="CONFLICTING")
+    closed = _rollup_row(30, 3, "2026-09-15T23:12:00Z", RUNNING)
+    closed.update(state="CLOSED", mergeable="UNKNOWN")
+    covered = _rollup_row(40, 4, "2026-09-15T23:13:00Z", GREEN, head="seen")
+    covered["state"] = "OPEN"
+    facts = _wire(monkeypatch, [fork, conflict, closed, covered],
+                  verdicts={40: {"verdict": "approved", "head_sha": "seen"}})
+    _capture_conflict_writes(monkeypatch, facts)
+    skipped = []
+
+    queue = funnel.review_queue(
+        [_ticket(n) for n in (1, 2, 3, 4)], pr_facts=facts, skipped=skipped)
+
+    assert queue == []
+    assert skipped == []
+
+
+def test_a_waiting_head_outside_the_tier_is_not_reported(monkeypatch):
+    row = _rollup_row(10, 1, "2026-09-15T23:10:00Z", RUNNING)
+    row["state"] = "OPEN"
+    facts = _wire(monkeypatch, [row])
+    skipped = []
+
+    assert funnel.review_queue([_ticket(1, "escalated")], tier="standard",
+                               pr_facts=facts, skipped=skipped) == []
+    assert skipped == []
+
+
+def test_next_review_prints_the_waiting_heads_to_stderr(monkeypatch, capsys):
+    unknown = _rollup_row(10, 1, "2026-09-15T23:10:00Z", GREEN)
+    unknown.update(state="OPEN", mergeable="UNKNOWN")
+    clean = _rollup_row(20, 2, "2026-09-15T23:11:00Z", GREEN)
+    clean["state"] = "OPEN"
+    facts = _wire(monkeypatch, [unknown, clean])
+
+    assert funnel.cmd_next_review(
+        [_ticket(1), _ticket(2)], None, pr_facts=facts) == 0
+    captured = capsys.readouterr()
+
+    assert json.loads(captured.out)["pr"] == 20
+    assert (
+        "review waits: {}#1 PR #10 (mergeability UNKNOWN)".format(REPO)
+        in captured.err
+    )

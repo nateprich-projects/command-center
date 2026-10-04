@@ -28,6 +28,41 @@ RUNTIME_ROOT = pathlib.Path(
                    str(pathlib.Path.home() / ".claude"))
 )
 
+TRIAL_DEFINITION = {
+    "scope": "reviewer-only",
+    "duration_days": 14,
+    "max_rounds": 2,
+    "max_variants_including_baselines": 5,
+}
+
+TRIAL_EVALUATION_POLICY = {
+    "method": "paired-a+b",
+    "packet_version": "v1",
+    "packets": ["must_reject", "must_approve"],
+    "sequential": {
+        "initial_runs_per_side": 40,
+        "additional_runs_per_side": 20,
+        "max_runs_per_side": 120,
+        "stop_for_decline_fisher_p_below": 0.05,
+        "stop_for_futility_fisher_p_above": 0.30,
+    },
+    "margins": {
+        "must_reject_drop": 0.15,
+        "must_approve_false_block_rise": 0.10,
+        "joint_detection_lift": 0.10,
+        "joint_false_block_change": 0.05,
+    },
+    "intervals": {
+        "rate_difference": "newcombe-wilson-95",
+        "paired_rates": "wilson-95",
+    },
+    "interpretation": {
+        "fisher_p_value": "sample_size_only",
+        "inconclusive_is_pass": False,
+        "merge_blocking": False,
+    },
+}
+
 
 class ReviewPromptError(ValueError):
     """A versioned reviewer prompt is malformed or cannot be selected."""
@@ -64,6 +99,8 @@ def _validate_manifest(value: dict) -> None:
     active = value.get("active_variant")
     if not isinstance(active, str) or active not in files:
         raise ReviewPromptError("active_variant is not a known variant")
+    if value.get("trial_definition") != TRIAL_DEFINITION:
+        raise ReviewPromptError("the reviewer trial definition is malformed")
 
     rounds = value.get("rounds")
     expected_rounds = [
@@ -78,10 +115,7 @@ def _validate_manifest(value: dict) -> None:
             "variant": "best_round_1_single",
             "candidates": ["r1", "r2", "r4"],
             "max_selected": 1,
-            "evaluation": (
-                "Use #2072's paired A+B method and inconclusive rules once "
-                "established."
-            ),
+            "evaluation": TRIAL_EVALUATION_POLICY,
     }:
         raise ReviewPromptError("the Round 2 selection rule is malformed")
     restore = value.get("restore")

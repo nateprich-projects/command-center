@@ -4281,12 +4281,12 @@ def fetch_ci_runs(repo: str, branch: str,
 
     The merged-overlap row's coverage evidence: a green run on this head
     that started after an overlapping merge tested a merge commit built
-    against a main containing it. An unreadable answer — Actions off, a
-    transient API failure — reads as no runs, which fails closed: an
-    overlap then rejects as stale exactly as before #1019, and a PR with
-    no overlap is unaffected. Event and head are filtered again in
-    ``summarize_runs`` so a surprising server answer cannot smuggle a push
-    run, or another head's runs, into coverage.
+    against a main containing it. A failed or malformed answer raises
+    ``GitHubError``, as ``fetch_merged_prs`` does, and stops the packet
+    (#2194): read as no runs, one bad read rejected a covered overlap as
+    stale. An empty list is still no runs. Event and head are filtered
+    again in ``summarize_runs`` so a surprising server answer cannot
+    smuggle a push run, or another head's runs, into coverage.
     """
     if not branch:
         return []
@@ -4296,7 +4296,8 @@ def fetch_ci_runs(repo: str, branch: str,
         "--json", "databaseId,event,headSha,headBranch,conclusion,status,"
                   "createdAt,startedAt,updatedAt")
     if rows is None or not isinstance(rows, list):
-        return []
+        raise funnel.GitHubError(
+            "could not read the CI runs for {} in {}".format(branch, repo))
     shaped = []
     newest = True
     for row in rows:
@@ -4315,7 +4316,11 @@ def fetch_ci_runs(repo: str, branch: str,
 
 
 def fetch_verdict(repo: str, pr_number: int) -> Optional[dict]:
-    """The newest review verdict on the PR, or None. Newest wins."""
+    """The newest review verdict on the PR, or None. Newest wins.
+
+    An unreadable comment read raises ``GitHubError`` and stops the packet
+    rather than reading as no verdict (#2194).
+    """
     return funnel.latest_verdict(repo, pr_number)
 
 
@@ -4358,6 +4363,8 @@ def collect(repo: Optional[str], pr_number: int, *,
     the packet falls back to the PR reads with ``scope_source`` ``"pr"``.
     A compare that lists 300 files may be clipped, so the scope and the
     diff then come from the PR files API, also as ``"pr"`` (#1800).
+    An unreadable verdict or CI-run read raises ``GitHubError`` here rather
+    than reading as none, so the runner records no verdict (#2194).
     """
     resolved = funnel.resolve_repo(repo)
     pr_view = fetch_pr(resolved, pr_number)

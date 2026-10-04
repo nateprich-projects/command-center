@@ -12,6 +12,7 @@ from typing import Dict
 _PACKET_ROOT = pathlib.Path(__file__).resolve().parents[1] / "data" / "review_packets"
 _VERSION_RE = re.compile(r"v[1-9][0-9]*\Z")
 _SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
+DEFAULT_VERSION = "v1"
 
 
 class PacketSetError(ValueError):
@@ -61,13 +62,13 @@ def _read_packet_set(version: str) -> tuple[dict, Dict[str, bytes], Dict[str, st
     return manifest, contents, digests
 
 
-def verify_checksums(version: str = "v1") -> Dict[str, str]:
+def verify_checksums(version: str = DEFAULT_VERSION) -> Dict[str, str]:
     """Verify every packet in a frozen set and return its SHA-256 digests."""
     _manifest, _contents, digests = _read_packet_set(version)
     return digests
 
 
-def load_packet_set(version: str = "v1") -> Dict[str, dict]:
+def load_packet_set(version: str = DEFAULT_VERSION) -> Dict[str, dict]:
     """Load all packets in a set after verifying their recorded checksums."""
     _manifest, contents, _digests = _read_packet_set(version)
     packets = {}
@@ -82,7 +83,7 @@ def load_packet_set(version: str = "v1") -> Dict[str, dict]:
     return packets
 
 
-def load_packet(name: str, version: str = "v1") -> dict:
+def load_packet(name: str, version: str = DEFAULT_VERSION) -> dict:
     """Load one named packet from a frozen set after verifying the full set."""
     if not isinstance(name, str):
         raise PacketSetError("unknown packet name")

@@ -31,9 +31,33 @@ merge gate. The reviewer checks that the PR has verdicts for both packets.
 `engine/review_variants/` holds the versioned baseline, R1, R2 and R4
 prompt rules. The manifest fixes Round 1 to baseline plus each single rule and
 Round 2 to baseline plus at most one Round 1 winner selected under #2072's
-method. The active selector stays on baseline while `trial_enabled` is false;
+paired A+B evaluation profile. The trial definition is reviewer-only, lasts 14
+days, allows at most two rounds and five variants including baselines. The
+active selector stays on baseline while `trial_enabled` is false;
 the review engine and replay command use the same loader for both the reviewer
 question and judge guidance.
+
+The evaluation profile uses the frozen `data/review_packets/v1/` must-reject
+and must-approve packets and their recorded SHA-256 digests. It begins at 40
+runs per side, adds batches of 20, and stops by 120 runs per side. The
+one-sided Fisher decline p-value stops for decline below 0.05 or futility above
+0.30; it selects sample size only. Quality is classified against the registered
+margins using 95% Newcombe intervals for head-versus-main rate differences and
+95% Wilson intervals for paired A+B rates. If those intervals establish
+neither safety nor a regression, the result is inconclusive; inconclusive is
+not a pass, and no result blocks a merge. The registered margins are a 15
+percentage-point must-reject decline, a 10-point must-approve false-block rise,
+a 10-point meaningful added-detection target, and a 5-point joint false-block
+change.
+
+For each later evaluation run, use
+`engine.review_evaluation.render_parent_issue_evidence` to format one comment
+for parent issue #2083. It includes the candidate variant, packet version and
+checksums, head and main commit SHAs, every sequential look, both packet
+comparisons with intervals and margins, paired A+B rates, and the cost/latency
+table. A skipped replay is reported without a quality conclusion. The comment
+contains only aggregate results and packet digests, never packet contents or
+owner-local replay records.
 
 After a trial, restore the pre-trial prompt and check both known verdicts with
 the owner-local corpus:

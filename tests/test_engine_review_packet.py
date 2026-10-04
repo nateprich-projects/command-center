@@ -309,9 +309,11 @@ def test_fetch_ci_runs_lists_pull_request_runs_on_the_branch(monkeypatch):
         assert field in fields
 
 
-def test_fetch_ci_runs_reads_no_runs_without_actions(monkeypatch):
+def test_fetch_ci_runs_raises_on_a_failed_read(monkeypatch):
+    """A failed run list stops the packet, not reads as no runs (#2194)."""
     monkeypatch.setattr(funnel, "_gh_json", lambda *args: None)
-    assert review.fetch_ci_runs(REPO, RUN_BRANCH) == []
+    with pytest.raises(funnel.GitHubError):
+        review.fetch_ci_runs(REPO, RUN_BRANCH)
 
 
 def test_fetch_ci_runs_skips_an_empty_branch_without_calling(monkeypatch):
@@ -2705,6 +2707,9 @@ def test_cli_shows_the_ticket_comments_with_voices(monkeypatch, capsys):
         review, "fetch_plan_md", lambda repo: ("# design record", False))
     monkeypatch.setattr(review, "fetch_open_prs", lambda repo: [])
     monkeypatch.setattr(review, "fetch_merged_prs", lambda repo: [])
+    # The run list is read, not defaulted: offline gh would stop the packet
+    # (#2194).
+    monkeypatch.setattr(review, "fetch_ci_runs", lambda repo, branch: [])
     monkeypatch.setattr(
         review, "fetch_verdict", lambda repo, pr: verdict())
     monkeypatch.setattr(

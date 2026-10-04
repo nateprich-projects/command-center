@@ -5020,9 +5020,18 @@ def latest_verdict(repo: str, pr) -> Optional[Dict]:
     its SHA despite any later approval there. The merge gate separately checks
     that the selected verdict covers the PR's current head. ``--json comments``
     rows carry ``author.login`` for the trusted-author check (#1787).
+
+    A failed or malformed comment read raises ``GitHubError`` rather than
+    reading as no verdict (#2194): a review packet built on it judged a head
+    again without its prior rejection. An empty comment list is still none.
     """
-    rows = (_gh_json("gh", "pr", "view", str(pr), "--repo", repo,
-                     "--json", "comments") or {}).get("comments", [])
+    payload = _gh_json("gh", "pr", "view", str(pr), "--repo", repo,
+                       "--json", "comments")
+    rows = payload.get("comments") if isinstance(payload, dict) else None
+    if not isinstance(rows, list):
+        raise GitHubError(
+            "could not read the review verdict on PR #{} in {}".format(
+                pr, repo))
     return _latest_verdict_for_reviewed_head(rows)
 
 
@@ -19464,10 +19473,19 @@ def _pr_rows_for_ref(
 
 
 def _row_verdict(row: Mapping[str, object], repo: str) -> Optional[Dict]:
-    """Use the batch's comment tail, falling back for old fixture maps."""
+    """Use the batch's verdict or the row's own comment tail (#2194).
+
+    A ``ticket_pr_facts`` row carries ``verdict``; a ``_pr_fact_for_number``
+    fact carries its ``comments`` tail, resolved here with the same head rule
+    instead of a second read that could fail. Only a row with neither, as in
+    old fixture maps, reads again, and a failed read raises ``GitHubError``.
+    """
     if "verdict" in row:
         value = row.get("verdict")
         return value if isinstance(value, dict) else None
+    comments = row.get("comments")
+    if isinstance(comments, list):
+        return _latest_verdict_from_comments(comments)
     number = row.get("number")
     return latest_verdict(repo, number) if number is not None else None
 
@@ -22771,7 +22789,12 @@ def merge_blockers(
             why.append("CI not green: {} skipped — a skipped check verified "
                        "nothing".format(", ".join(str(s) for s in skipped)))
 
-    verdict = _row_verdict(data, repo)
+    # An unreadable verdict is named as unreadable, not as absent (#2194).
+    try:
+        verdict = _row_verdict(data, repo)
+    except GitHubError as exc:
+        why.append("review verdict unreadable: {}".format(exc))
+        return why
     if verdict is None:
         why.append("no review verdict recorded")
     else:

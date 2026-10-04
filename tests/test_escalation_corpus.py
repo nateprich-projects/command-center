@@ -1,4 +1,8 @@
-"""Recorded escalation cases pin the shared ticket and plan scan results."""
+"""Recorded escalation cases pin the shared ticket and plan scan results.
+
+The unchanged expected-output corpus was verified with this test against
+base commit c7317ff01e2088c01a1c6bc9625ff9fbcad2af4c.
+"""
 
 import json
 import pathlib

@@ -216,7 +216,7 @@ def test_the_park_does_not_hide_runs_that_errored():
     """It explains a gap in records, not three runs that failed (#1160)."""
     rows, _opened_at = outage_rows(quiet=3 * HOUR)
     for index in range(3):
-        at = NOW - 4 * HOUR - index * MIN
+        at = NOW - (index + 1) * MIN
         rows.append(finish("boom-{}".format(index), at, "errored",
                            note="boom {}".format(index)))
 
@@ -379,7 +379,7 @@ def test_an_errored_finish_before_error_class_is_classified_on_read(
 
     conditions = assess("muse", rows, NOW, regressions_only=True)
 
-    assert [c for c in conditions if "3 regression errors" in c]
+    assert [c for c in conditions if "3 consecutive regression errors" in c]
 
 
 def test_completed_durations_count_runs_not_rows(monkeypatch):

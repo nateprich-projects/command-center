@@ -1833,7 +1833,10 @@ def test_brief_surfaces_agent_health_without_counting_it_as_a_decision(
     )
     health = [{
         "agent": "codex",
-        "condition": "`codex` errored 3 times this week. Most recent: reserve",
+        "condition": (
+            "`codex` degraded: errored 3 times consecutively. "
+            "Latest: begin-timeout: reserve"
+        ),
     }]
     monkeypatch.setattr(funnel, "agent_health", lambda now: health)
     monkeypatch.setattr(funnel, "unattended_merges", lambda now: [])

@@ -41,6 +41,11 @@ from engine import review_packets  # noqa: E402
 DEFAULT_RUNS = 3
 EXPECTED_VERDICTS = ("approved", "rejected")
 RUNTIME_ROOT = pathlib.Path(funnel.CLAUDE_DIR)
+#: Nearest-rank p90 per Muse session from 3,992 sessions and 4,120 provider
+#: usage records in the trailing 72-hour window, measured 2026-10-04 at the
+#: configured model's own-card rates. Keep this scoped to the bounded review
+#: evaluation; standalone replays continue to reserve a full Muse session.
+REVIEW_EVALUATION_REPLAY_P90_DOLLARS = 0.00619
 #: The checkout this module runs from. The engine runs from it with
 #: MUSE_REVIEW_ENGINE_REPO pointing at it, so a branch replays with the
 #: branch's engine, routine and judges rather than the maintained clone's.
@@ -145,7 +150,9 @@ def all_match(verdicts: Sequence[str], expected: str) -> bool:
     return bool(verdicts) and all(verdict == expected for verdict in verdicts)
 
 
-def check_budget(runs: int, now: Optional[float] = None) -> None:
+def check_budget(runs: int, now: Optional[float] = None, *,
+                 replay_run_p90_dollars: Optional[float] = None,
+                 trial_spent_dollars=None) -> None:
     """Apply the shared Muse quota hold and pace brake before model calls."""
     current = time.time() if now is None else now
     hold_until = agent_health.quota_hold_until()
@@ -161,19 +168,46 @@ def check_budget(runs: int, now: Optional[float] = None) -> None:
     if not isinstance(seven_day, dict):
         raise ReplayError("Muse budget could not be read")
 
-    # `begin` reserves one Muse session per lane run, and each replay is one
-    # engine run: its lister, judges and their retries are that run's calls,
-    # as they are a lane's. So apply the same per-run reserve once per
-    # replay, N times in all, before the first engine run starts (#1730).
+    evaluation_batch = (
+        replay_run_p90_dollars is not None or trial_spent_dollars is not None
+    )
     reading_for_replays = dict(reading)
     windows_for_replays = dict(windows)
     seven_for_replays = dict(seven_day)
     policy = dict(seven_for_replays.get("policy") or {})
-    base_reserve = policy.get(
-        "weekly_reserve",
-        usage.policy("meta", "weekly_reserve", usage.WEEKLY_RESERVE),
-    )
-    policy["weekly_reserve"] = float(base_reserve) * runs
+    if evaluation_batch:
+        replay_cost = usage._finite_nonnegative_dollars(
+            replay_run_p90_dollars)
+        weekly_cap = usage._finite_nonnegative_dollars(
+            seven_day.get("cap_dollars"))
+        used_percent = usage._finite_nonnegative_dollars(
+            seven_day.get("used_percent"))
+        if (replay_cost is None or replay_cost <= 0 or weekly_cap is None
+                or weekly_cap <= 0 or used_percent is None):
+            raise ReplayError("review evaluation budget could not be read")
+        reserve_dollars = usage._finite_nonnegative_dollars(replay_cost * runs)
+        if reserve_dollars is None:
+            raise ReplayError("review evaluation budget could not be read")
+        trial = usage.muse_trial_counter_read(
+            trial_spent_dollars, current, reserve_dollars=reserve_dollars)
+        if (not isinstance(trial, dict) or trial.get("known") is not True
+                or trial.get("stop") is not False):
+            raise ReplayError("Muse trial budget gate is closed")
+        weekly_reserve = usage._finite_nonnegative_dollars(
+            100.0 * reserve_dollars / weekly_cap)
+        if weekly_reserve is None:
+            raise ReplayError("review evaluation budget could not be read")
+        policy["weekly_reserve"] = weekly_reserve
+    else:
+        # `begin` reserves one Muse session per lane run, and each replay is
+        # one engine run: its lister, judges and retries are that run's calls,
+        # as they are a lane's. Keep that full-session reserve for standalone
+        # replay callers (#1730).
+        base_reserve = policy.get(
+            "weekly_reserve",
+            usage.policy("meta", "weekly_reserve", usage.WEEKLY_RESERVE),
+        )
+        policy["weekly_reserve"] = float(base_reserve) * runs
     seven_for_replays["policy"] = policy
     windows_for_replays["seven_day"] = seven_for_replays
     reading_for_replays["windows"] = windows_for_replays
@@ -281,7 +315,9 @@ def _engine_run(packet_path: pathlib.Path,
 def replay(packet: str | pathlib.Path,
            routine: Optional[str | pathlib.Path] = None, *,
            runs: int = DEFAULT_RUNS, expected: str,
-           runtime_root: str | pathlib.Path = RUNTIME_ROOT) -> dict:
+           runtime_root: str | pathlib.Path = RUNTIME_ROOT,
+           replay_run_p90_dollars: Optional[float] = None,
+           trial_spent_dollars=None) -> dict:
     """Replay one packet N times and return verdict-only summary data.
 
     With no explicit routine, the engine loads the active versioned reviewer
@@ -301,7 +337,14 @@ def replay(packet: str | pathlib.Path,
         raise ReplayError("runs must be a positive integer")
     if expected not in EXPECTED_VERDICTS:
         raise ReplayError("expected verdict must be approved or rejected")
-    check_budget(runs)
+    if (replay_run_p90_dollars is None
+            and trial_spent_dollars is None):
+        check_budget(runs)
+    else:
+        check_budget(
+            runs, replay_run_p90_dollars=replay_run_p90_dollars,
+            trial_spent_dollars=trial_spent_dollars,
+        )
     root = pathlib.Path(runtime_root).expanduser().resolve()
     packet_path = resolve_packet_path(packet, root)
     routine_path = (
@@ -444,16 +487,27 @@ def _save_main_pool(pool: dict,
 
 def _run_checkout_replay(checkout: pathlib.Path, packet_path: pathlib.Path,
                          runs: int, expected: str,
-                         runtime_root: pathlib.Path) -> dict:
+                         runtime_root: pathlib.Path, *,
+                         replay_run_p90_dollars: Optional[float] = None,
+                         trial_spent_dollars=None) -> dict:
     """Run this checkout's replay CLI without exposing captured diagnostics."""
     entry = checkout / "engine" / "replay.py"
     if not entry.is_file():
         raise ReplayError("review checkout has no replay entry point")
     try:
+        command = [
+            sys.executable, str(entry), str(packet_path), "--runs",
+            str(runs), "--expected-verdict", expected,
+            "--runtime-root", str(runtime_root),
+        ]
+        if replay_run_p90_dollars is not None:
+            command.extend(("--replay-run-p90-dollars",
+                            str(replay_run_p90_dollars)))
+        if trial_spent_dollars is not None:
+            command.extend(("--trial-spent-dollars",
+                            str(trial_spent_dollars)))
         result = subprocess.run(
-            [sys.executable, str(entry), str(packet_path), "--runs",
-             str(runs), "--expected-verdict", expected,
-             "--runtime-root", str(runtime_root)],
+            command,
             cwd=str(checkout), capture_output=True, text=True, check=False,
         )
     except (OSError, subprocess.SubprocessError) as exc:
@@ -491,7 +545,9 @@ def replay_packet(packet_name: str, head_checkout: str | pathlib.Path,
                   main_checkout: str | pathlib.Path, *,
                   runs: int = DEFAULT_RUNS, version: str = "v1",
                   runtime_root: str | pathlib.Path = RUNTIME_ROOT,
-                  head_runs: Optional[Sequence[dict]] = None) -> dict:
+                  head_runs: Optional[Sequence[dict]] = None,
+                  replay_run_p90_dollars: Optional[float] = None,
+                  trial_spent_dollars=None) -> dict:
     """Replay one frozen packet on PR head and current main.
 
     Main-side runs are reused only for the same 40-character main SHA. A new
@@ -543,8 +599,16 @@ def replay_packet(packet_name: str, head_checkout: str | pathlib.Path,
                     "cached head replay runs do not match this head")
         missing_head_runs = runs - len(cached_head_runs)
         if missing_head_runs:
+            budget_kwargs = {}
+            if (replay_run_p90_dollars is not None
+                    or trial_spent_dollars is not None):
+                budget_kwargs = {
+                    "replay_run_p90_dollars": replay_run_p90_dollars,
+                    "trial_spent_dollars": trial_spent_dollars,
+                }
             head_summary = _run_checkout_replay(
-                head_path, packet_path, missing_head_runs, expected, root)
+                head_path, packet_path, missing_head_runs, expected, root,
+                **budget_kwargs)
             new_head_runs = _summary_runs(
                 head_summary, expected=expected, count=missing_head_runs)
             cached_head_runs.extend(
@@ -559,8 +623,16 @@ def replay_packet(packet_name: str, head_checkout: str | pathlib.Path,
         cached_runs = list(pool["packets"].get(key, []))
         if len(cached_runs) < runs:
             missing = runs - len(cached_runs)
+            budget_kwargs = {}
+            if (replay_run_p90_dollars is not None
+                    or trial_spent_dollars is not None):
+                budget_kwargs = {
+                    "replay_run_p90_dollars": replay_run_p90_dollars,
+                    "trial_spent_dollars": trial_spent_dollars,
+                }
             main_summary = _run_checkout_replay(
-                main_path, packet_path, missing, expected, root)
+                main_path, packet_path, missing, expected, root,
+                **budget_kwargs)
             new_runs = _summary_runs(
                 main_summary, expected=expected, count=missing)
             for run in new_runs:
@@ -604,6 +676,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         help="known verdict required for every replay")
     parser.add_argument("--runtime-root", default=str(RUNTIME_ROOT),
                         help=argparse.SUPPRESS)
+    parser.add_argument("--replay-run-p90-dollars", type=float,
+                        default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--trial-spent-dollars", type=float,
+                        default=None, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     if args.runs < 1:
         parser.error("--runs must be a positive integer")
@@ -611,6 +687,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         summary = replay(
             args.packet, args.routine, runs=args.runs,
             expected=args.expected_verdict, runtime_root=args.runtime_root,
+            replay_run_p90_dollars=args.replay_run_p90_dollars,
+            trial_spent_dollars=args.trial_spent_dollars,
         )
     except ReplayError:
         print("review-replay: replay failed", file=sys.stderr)

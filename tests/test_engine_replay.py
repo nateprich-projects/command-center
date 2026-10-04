@@ -138,6 +138,118 @@ def test_budget_gate_reserves_one_session_per_engine_run(monkeypatch):
     assert "policy" not in reading["windows"]["seven_day"]
 
 
+def test_evaluation_budget_admits_recorded_40_run_batch_at_p90(monkeypatch):
+    reading = {"windows": {"seven_day": {
+        "used_percent": 38.75,
+        "cap_dollars": 109.0,
+        "rolling": True,
+        "policy": {"weekly_reserve": 4.13},
+    }}}
+    observed = {}
+
+    monkeypatch.setattr(replay.agent_health, "quota_hold_until", lambda: None)
+    monkeypatch.setattr(replay.usage, "read_agent",
+                        lambda _agent, _now: reading)
+
+    def pace(found, now, provider):
+        observed["weekly_reserve"] = found["windows"]["seven_day"][
+            "policy"]["weekly_reserve"]
+        return {"known": True, "over_pace": False, "band": "ok"}
+
+    def trial(spent_dollars, now, *, reserve_dollars):
+        observed["trial"] = (spent_dollars, now, reserve_dollars)
+        return {"known": True, "stop": False}
+
+    monkeypatch.setattr(replay.usage, "pace", pace)
+    monkeypatch.setattr(replay.usage, "muse_trial_counter_read", trial)
+
+    replay.check_budget(
+        40, now=100.0, replay_run_p90_dollars=0.00619,
+        trial_spent_dollars=0.0,
+    )
+
+    assert observed["weekly_reserve"] == pytest.approx(0.227156)
+    assert observed["trial"][:2] == (0.0, 100.0)
+    assert observed["trial"][2] == pytest.approx(0.2476)
+
+
+@pytest.mark.parametrize("trial_spent_dollars", [None, 20.0, float("nan")])
+def test_evaluation_budget_refuses_exhausted_or_unreadable_trial_total(
+        monkeypatch, trial_spent_dollars):
+    monkeypatch.setattr(replay.agent_health, "quota_hold_until", lambda: None)
+    monkeypatch.setattr(replay.usage, "read_agent", lambda _agent, _now: {
+        "windows": {"seven_day": {
+            "used_percent": 38.75,
+            "cap_dollars": 109.0,
+            "rolling": True,
+            "policy": {"weekly_reserve": 4.13},
+        }},
+    })
+    monkeypatch.setattr(
+        replay.usage, "pace",
+        lambda *_args, **_kwargs: pytest.fail(
+            "weekly pace was read after the trial cap had already refused"),
+    )
+
+    with pytest.raises(replay.ReplayError):
+        replay.check_budget(
+            40, now=100.0, replay_run_p90_dollars=0.00619,
+            trial_spent_dollars=trial_spent_dollars,
+        )
+
+
+def test_evaluation_budget_refuses_when_trial_cap_read_is_missing(monkeypatch):
+    monkeypatch.setattr(replay.agent_health, "quota_hold_until", lambda: None)
+    monkeypatch.setattr(replay.usage, "MUSE_TRIAL_TOTAL_CAP_DOLLARS", None)
+    monkeypatch.setattr(replay.usage, "read_agent", lambda _agent, _now: {
+        "windows": {"seven_day": {
+            "used_percent": 38.75,
+            "cap_dollars": 109.0,
+            "rolling": True,
+            "policy": {"weekly_reserve": 4.13},
+        }},
+    })
+    monkeypatch.setattr(
+        replay.usage, "pace",
+        lambda *_args, **_kwargs: pytest.fail(
+            "weekly pace was read after the trial-cap configuration was missing"),
+    )
+
+    with pytest.raises(replay.ReplayError):
+        replay.check_budget(
+            40, now=100.0, replay_run_p90_dollars=0.00619,
+            trial_spent_dollars=0.0,
+        )
+
+
+def test_evaluation_budget_keeps_weekly_over_budget_refusal(monkeypatch):
+    observed = {}
+    monkeypatch.setattr(replay.agent_health, "quota_hold_until", lambda: None)
+    monkeypatch.setattr(replay.usage, "read_agent", lambda _agent, _now: {
+        "windows": {"seven_day": {
+            "used_percent": 99.9,
+            "cap_dollars": 109.0,
+            "rolling": True,
+            "policy": {"weekly_reserve": 4.13},
+        }},
+    })
+
+    def pace(reading, _now, provider):
+        observed["reserve"] = reading["windows"]["seven_day"][
+            "policy"]["weekly_reserve"]
+        return {"known": True, "over_pace": True, "band": "over"}
+
+    monkeypatch.setattr(replay.usage, "pace", pace)
+
+    with pytest.raises(replay.ReplayError):
+        replay.check_budget(
+            40, now=100.0, replay_run_p90_dollars=0.00619,
+            trial_spent_dollars=0.0,
+        )
+
+    assert observed["reserve"] == pytest.approx(0.227156)
+
+
 @pytest.mark.parametrize(
     "result",
     [
@@ -713,6 +825,56 @@ def test_cli_entry_point_exists_and_is_executable():
 
     assert entry.exists()
     assert entry.stat().st_mode & stat.S_IXUSR
+
+
+def test_replay_cli_forwards_evaluation_budget_readings(monkeypatch, capsys):
+    observed = {}
+
+    def replay_fn(packet, routine=None, **kwargs):
+        observed.update(packet=packet, routine=routine, **kwargs)
+        return {"expected": "approved", "verdicts": ["approved"],
+                "failed_parts": [[]], "pass": True}
+
+    monkeypatch.setattr(replay, "replay", replay_fn)
+
+    assert replay.main([
+        "packet.json", "--runs", "40", "--expected-verdict", "approved",
+        "--replay-run-p90-dollars", "0.00619",
+        "--trial-spent-dollars", "0.0",
+    ]) == 0
+
+    assert observed["replay_run_p90_dollars"] == 0.00619
+    assert observed["trial_spent_dollars"] == 0.0
+    assert json.loads(capsys.readouterr().out)["pass"] is True
+
+
+def test_checkout_replay_passes_evaluation_budget_readings(
+        tmp_path, monkeypatch):
+    checkout = tmp_path / "checkout"
+    entry = checkout / "engine" / "replay.py"
+    entry.parent.mkdir(parents=True)
+    entry.write_text("# replay entry")
+    packet = tmp_path / "packet.json"
+    packet.write_text("{}")
+    observed = {}
+
+    def run(command, **_kwargs):
+        observed["command"] = command
+        return subprocess.CompletedProcess(
+            command, 0,
+            json.dumps({"expected": "approved", "verdicts": [],
+                        "failed_parts": []}), "")
+
+    monkeypatch.setattr(replay.subprocess, "run", run)
+
+    replay._run_checkout_replay(
+        checkout, packet, 40, "approved", tmp_path,
+        replay_run_p90_dollars=0.00619, trial_spent_dollars=0.0,
+    )
+
+    command = observed["command"]
+    assert command[command.index("--replay-run-p90-dollars") + 1] == "0.00619"
+    assert command[command.index("--trial-spent-dollars") + 1] == "0.0"
 
 
 def _replay_pool_fixture():

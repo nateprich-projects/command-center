@@ -2390,6 +2390,327 @@ def test_packet_wires_parent_rejected_excerpt_and_keeps_other_body_text_out():
     json.dumps(found)
 
 
+# -- label-form Rejected lists (#2195) -----------------------------------------
+# 41 of the last 84 shaped plans give Rejected as a `Rejected:` label and its
+# list, #1747 among them; the excerpt used to read only an ATX heading.
+
+#: #1747's Rejected list, word for word.
+PLAN_1747_REJECTED = (
+    "Rejected:\n"
+    "- Another targeted patch to either function: funnel-watch step 10a "
+    "requires redesign at 3+ distinct Broken projects, and both functions "
+    "exceed it.\n"
+    "- Splitting into one project per function: the failures are coupled "
+    "(which PRs plus what the packet carries) and the watch capture rule "
+    "bundles per shared component.\n"
+    "- A local listing cache, packet store, or lock file: GitHub is the "
+    "state; the only exception is the statusline rate-limit cache.\n"
+    "- Ranking or reordering inside the redesigned code: one shared program "
+    "computes all ordering and callers act on its output.\n"
+)
+
+#: A parent in #1747's body shape: prose, a `Do:` label list, the Rejected
+#: label list, then the runner's sections, `(rejected: ...)` clauses and
+#: fenced marker blocks.
+PLAN_1747_SHAPED_BODY = (
+    "Redesign funnel.py review_queue and engine/review.py collect after 4 "
+    "and 3 distinct Broken fixes in seven days.\n"
+    "\n"
+    "Scope is review candidate selection and packet assembly.\n"
+    "\n"
+    "Do:\n"
+    "- Define one tested candidate-plus-packet definition.\n"
+    "- Add regression coverage that fails if selection or assembly "
+    "regresses.\n"
+    "\n"
+    + PLAN_1747_REJECTED
+    + "\n"
+    "## Siblings checked\n"
+    "\n"
+    "- nateprich-projects/command-center#1125 (independent): no shared "
+    "routines.\n"
+    "\n"
+    "## Premises\n"
+    "\n"
+    "- Six fixes touched review_queue or collect (label: inferred; "
+    "evidence: #1747 idea body)\n"
+    "\n"
+    "Proposed class: Broken\n"
+    "\n"
+    "## Decided by the agent\n"
+    "\n"
+    "- Stay separate behind a frozen contract. (rejected: Merge "
+    "review_queue and collect into one path.; Keeps ordering in one "
+    "program.)\n"
+    "\n"
+    "## Sequencing\n"
+    "\n"
+    "Depends on: nateprich-projects/command-center#1746\n"
+    "\n"
+    "<!-- command-center-shape-risk -->\n"
+    "\n"
+    "```json\n"
+    "{\n"
+    "  \"declared\": [],\n"
+    "  \"scan\": []\n"
+    "}\n"
+    "```\n"
+)
+
+
+def test_shape_ticket_carries_a_1747_shaped_label_form_rejected_list():
+    """#2195's reproduction: on main this excerpt was empty."""
+    shaped = review.shape_ticket(ticket(parent={
+        "body": PLAN_1747_SHAPED_BODY, "comments": []}))
+
+    assert shaped["parent_rejected_excerpt"] == PLAN_1747_REJECTED
+    assert shaped["parent_rejected_excerpt_truncated"] is False
+    assert "body" not in shaped["parent"]
+
+
+def test_the_packet_carries_the_label_form_list_on_every_ticket_entry():
+    parent = {"number": 1, "ref": REPO + "#1",
+              "body": PLAN_1747_SHAPED_BODY, "comments": []}
+
+    found = packet(ticket=ticket(parent=parent))
+
+    for shaped in (found["ticket"], found["tickets"][0]):
+        assert shaped["parent_rejected_excerpt"] == PLAN_1747_REJECTED
+        assert shaped["parent_rejected_excerpt_truncated"] is False
+        assert "Proposed class" not in shaped["parent_rejected_excerpt"]
+    json.dumps(found)
+
+
+@pytest.mark.parametrize("label", [
+    "**Rejected:**", "**Rejected**:", "__Rejected:__", "rejected:",
+], ids=["bold", "bold-colon-outside", "underscore-bold", "lower-case"])
+def test_a_bold_or_lower_case_rejected_label_carries_its_list(label):
+    region = (label + "\n"
+              "- Keep the old reader: it drops the label form.\n"
+              "- Copy the boundary: two definitions drift.\n")
+    body = ("# Plan\n\nWhat it is: one reader.\n\n" + region
+            + "\nAfter the list, this paragraph is not carried.\n")
+
+    shaped = review.shape_ticket(ticket(parent={"body": body,
+                                                "comments": []}))
+
+    assert shaped["parent_rejected_excerpt"] == region
+
+
+def test_a_blank_line_between_the_label_and_its_list_is_carried():
+    region = ("Rejected:\n\n"
+              "1. Keep the old reader.\n"
+              "   It drops the label form.\n"
+              "2. Copy the boundary.\n")
+    body = "What it is: one reader.\n\n" + region + "\n## Siblings checked\n"
+
+    shaped = review.shape_ticket(ticket(parent={"body": body,
+                                                "comments": []}))
+
+    assert shaped["parent_rejected_excerpt"] == region
+
+
+@pytest.mark.parametrize("line", [
+    "Rejected: raising the ceiling, because it keeps the coupling.",
+    "**Rejected:** raising the ceiling, because it keeps the coupling.",
+    "**Rejected**: raising the ceiling, because it keeps the coupling.",
+], ids=["plain", "bold", "bold-colon-outside"])
+def test_a_rejected_label_with_inline_text_carries_its_line(line):
+    body = ("Scope is the named test only.\n\n"
+            + line + "\n"
+            "Decided: this next line is not a rejected option.\n\n"
+            "## Siblings checked\n")
+
+    shaped = review.shape_ticket(ticket(parent={"body": body,
+                                                "comments": []}))
+
+    assert shaped["parent_rejected_excerpt"] == line + "\n"
+    assert shaped["parent_rejected_excerpt_truncated"] is False
+
+
+def test_a_wrapped_line_starting_rejected_is_not_an_inline_label():
+    """#1125's shape: a hard-wrapped `Decided by the agent` item whose
+    continuation line starts `Rejected:` sits ahead of the `## Rejected`
+    heading. Only a line that starts a paragraph is an inline label, so the
+    heading's section is carried, as on main."""
+    rejected = (
+        "## Rejected\n"
+        "\n"
+        "- A cumulative total, because it hides the weekly change.\n"
+        "- A second costing method, because it breaks the comparison.\n"
+        "\n"
+    )
+    body = (
+        "# A cost review\n"
+        "\n"
+        "## Decided by the agent\n"
+        "\n"
+        "- **Read the log directly.** The fallback was silent and the\n"
+        "  decision-maker did not read it. Rejected: planning the fallback\n"
+        "  in advance, which makes the weaker source the expected outcome.\n"
+        "- **Output tokens only.** The input half still has no measured\n"
+        "  counterpart.\n"
+        "  Rejected: modelling input from a second source, which changes\n"
+        "  the method mid-comparison.\n"
+        "\n"
+        + rejected
+        + "## Needs Nate\n"
+        "\n"
+        "Nothing.\n"
+    )
+
+    shaped = review.shape_ticket(ticket(parent={"body": body,
+                                                "comments": []}))
+
+    assert shaped["parent_rejected_excerpt"] == rejected
+    assert shaped["parent_rejected_excerpt_truncated"] is False
+
+
+def test_a_fenced_rejected_label_does_not_shadow_the_heading():
+    body = ("```markdown\nRejected:\n- example\n\n```\n\n"
+            "## Rejected\n- the heading's option\n")
+
+    shaped = review.shape_ticket(ticket(parent={"body": body,
+                                                "comments": []}))
+
+    assert shaped["parent_rejected_excerpt"] == (
+        "## Rejected\n- the heading's option\n")
+
+
+def test_the_first_of_two_rejected_labels_wins():
+    body = ("Rejected:\n- the first list\n\nNotes.\n\n"
+            "**Rejected:**\n- a later list\n")
+
+    shaped = review.shape_ticket(ticket(parent={"body": body,
+                                                "comments": []}))
+
+    assert shaped["parent_rejected_excerpt"] == "Rejected:\n- the first list\n"
+
+
+def test_a_label_before_a_rejected_heading_wins():
+    body = ("Rejected:\n- the label's option\n\n"
+            "## Rejected\n- the heading's option\n")
+
+    shaped = review.shape_ticket(ticket(parent={"body": body,
+                                                "comments": []}))
+
+    assert shaped["parent_rejected_excerpt"] == (
+        "Rejected:\n- the label's option\n")
+
+
+def test_a_rejected_heading_before_a_label_keeps_its_whole_section():
+    """The heading form reads as on main, a label inside it included."""
+    body = ("# Plan\n\n"
+            "## Rejected\n- the heading's option\n\n"
+            "Rejected:\n- a label inside the section\n\n"
+            "## Notes\n"
+            "Rejected:\n- a later label\n")
+
+    shaped = review.shape_ticket(ticket(parent={"body": body,
+                                                "comments": []}))
+
+    assert shaped["parent_rejected_excerpt"] == (
+        "## Rejected\n- the heading's option\n\n"
+        "Rejected:\n- a label inside the section\n\n")
+
+
+def test_a_rejected_label_inside_a_fence_or_quote_is_not_carried():
+    body = ("# Plan\n\n"
+            "```markdown\nRejected:\n- an example, not the plan's\n```\n\n"
+            "> Rejected:\n> - a quoted example\n\n"
+            "**Rejected:**\n- the plan's own option\n")
+
+    shaped = review.shape_ticket(ticket(parent={"body": body,
+                                                "comments": []}))
+
+    assert shaped["parent_rejected_excerpt"] == (
+        "**Rejected:**\n- the plan's own option\n")
+
+
+def test_only_fenced_rejected_labels_and_headings_leave_the_excerpt_empty():
+    body = ("# Plan\n\n"
+            "```markdown\n## Rejected\n- shown\nRejected:\n- shown\n```\n"
+            "## Accepted\nKeep this plan choice.\n")
+
+    shaped = review.shape_ticket(ticket(parent={"body": body,
+                                                "comments": []}))
+
+    assert shaped["parent_rejected_excerpt"] == ""
+    assert shaped["parent_rejected_excerpt_truncated"] is False
+
+
+def test_a_rejected_label_whose_list_has_no_clear_end_is_skipped():
+    """The scan cannot read where this label's list ends (#2180), so the
+    packet does not guess either; the next Rejected region is carried."""
+    body = ("Rejected:\nSee the thread.\n\n"
+            "## Rejected\n- the heading's option\n")
+
+    shaped = review.shape_ticket(ticket(parent={"body": body,
+                                                "comments": []}))
+
+    assert shaped["parent_rejected_excerpt"] == (
+        "## Rejected\n- the heading's option\n")
+
+
+def test_a_label_form_rejected_excerpt_is_bounded_on_a_line_boundary():
+    items = ["- option {} {}\n".format(index, "x" * 100)
+             for index in range(30)]
+    region = "**Rejected:**\n" + "".join(items)
+    body = "What it is: one reader.\n\n" + region + "\n## Siblings checked\n"
+
+    shaped = review.shape_ticket(ticket(parent={"body": body,
+                                                "comments": []}))
+    excerpt = shaped["parent_rejected_excerpt"]
+    marker = review.PARENT_REJECTED_TRUNCATION_MARKER
+    prefix = excerpt[:excerpt.index(marker)]
+
+    assert len(excerpt) <= review.PARENT_REJECTED_EXCERPT_LIMIT
+    assert excerpt.endswith(marker)
+    assert prefix.startswith("**Rejected:**\n- option 0 ")
+    assert prefix.endswith("\n")
+    assert region.startswith(prefix)
+    assert shaped["parent_rejected_excerpt_truncated"] is True
+
+
+def test_a_label_form_excerpt_uses_the_remaining_ticket_body_budget():
+    remaining = 60
+    shaped = review.shape_ticket(ticket(
+        body="x" * (review.TICKET_BODY_LIMIT - remaining),
+        parent={"body": PLAN_1747_SHAPED_BODY, "comments": []},
+    ))
+
+    excerpt = shaped["parent_rejected_excerpt"]
+    assert len(shaped["body"]) + len(excerpt) <= review.TICKET_BODY_LIMIT
+    assert excerpt == "Rejected:\n" + review.PARENT_REJECTED_TRUNCATION_MARKER
+    assert shaped["parent_rejected_excerpt_truncated"] is True
+
+
+def test_the_packet_carries_the_label_list_the_plan_scan_ignores():
+    """One definition (#2195): the excerpt is the label region #2180's plan
+    scan blanks, on a recorded plan whose only scan hit sat in that list."""
+    assert ("label", "Rejected") in funnel.PLAN_SCAN_IGNORED_REGIONS
+    fixtures = json.loads(
+        (ROOT / "tests" / "fixtures"
+         / "escalation_plan_region_holds.json").read_text(encoding="utf-8"))
+    [fixture] = [row for row in fixtures
+                 if "command-center#2029" in row["source"]]
+    body = fixture["body"]
+    start = body.index("\nRejected:\n") + 1
+    end = body.index("\n\n## Siblings checked\n") + 1
+    region = body[start:end]
+    assert fixture["pre_change_line"] in region
+
+    shaped = review.shape_ticket(ticket(parent={"body": body,
+                                                "comments": []}))
+
+    assert shaped["parent_rejected_excerpt"] == region
+    assert shaped["parent_rejected_excerpt_truncated"] is False
+    scanned = funnel.plan_scan_text(body).splitlines(keepends=True)
+    first = body[:start].count("\n")
+    blanked = scanned[first:first + region.count("\n")]
+    assert all(not line.strip() for line in blanked)
+
+
 def test_packet_renders_the_four_1315_premises_as_testable_entries():
     entries = [
         {"claim": "CODEX_THREAD_ID reaches the automation process",
@@ -3145,6 +3466,7 @@ def test_fetch_pr_reads_the_recorded_base_sha(monkeypatch):
     fields = seen["args"][seen["args"].index("--json") + 1].split(",")
     assert "baseRefOid" in fields
     assert "mergedBy" in fields
+    assert "mergeStateStatus" in fields
 
 
 def _stub_collect_prereqs(monkeypatch, view):

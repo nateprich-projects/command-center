@@ -84,8 +84,10 @@ def test_run_eval_nonblocking_uses_registered_looks_and_never_blocks(
     manifest_before = manifest_path.read_bytes()
 
     def replay_fn(packet_name, head_checkout, main_checkout, *, runs,
-                  version, runtime_root, head_runs=()):
-        calls.append((packet_name, runs, len(head_runs), version))
+                  version, runtime_root, head_runs=(),
+                  replay_run_p90_dollars, trial_spent_dollars):
+        calls.append((packet_name, runs, len(head_runs), version,
+                      replay_run_p90_dollars, trial_spent_dollars))
         if packet_name == "must_reject" and runs == 40:
             head_rejected, main_rejected = 30, 36
             prior_head = prior_main = 0
@@ -116,12 +118,17 @@ def test_run_eval_nonblocking_uses_registered_looks_and_never_blocks(
     result = run_eval_nonblocking(
         "baseline", paired_run_records(),
         head_checkout=ROOT, main_checkout=ROOT, runtime_root=tmp_path,
+        trial_spent_dollars=0.0,
         replay_fn=replay_fn,
     )
 
     assert [call[1] for call in calls] == [40, 40, 60, 60]
     assert [call[2] for call in calls] == [0, 0, 40, 40]
     assert {call[3] for call in calls} == {"v1"}
+    assert {call[4] for call in calls} == {
+        replay.REVIEW_EVALUATION_REPLAY_P90_DOLLARS
+    }
+    assert {call[5] for call in calls} == {0.0}
     assert [look["runs_per_side"] for look in result["looks"]] == [40, 60]
     assert result["looks"][0]["decline_p_value"] > 0.05
     assert result["looks"][1]["decline_p_value"] < 0.05

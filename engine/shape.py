@@ -114,7 +114,11 @@ ANSWER_KEYS = frozenset({
     "escalated_risk",
     "depends_on",
     "premises",
+    "failure_modes",
 })
+
+#: Optional answer fields. Omission is normalized before exact-key validation.
+OPTIONAL_ANSWER_KEYS = frozenset({"failure_modes"})
 
 #: The confidence vocabulary shared with LEARNINGS.md (#1422).
 PREMISE_LABELS = ("measured", "documented", "inferred")
@@ -439,14 +443,34 @@ def _validate_escalated_risk(entries: object) -> List[Dict[str, str]]:
     return validated
 
 
-def validate_answer(data: object) -> Dict:
+def _validate_failure_modes(entries: object) -> List[str]:
+    """Validate the bounded Review focus list (#1839, #2022)."""
+    if not isinstance(entries, list):
+        raise ShapeError("failure_modes must be a list")
+    if len(entries) > 3:
+        raise ShapeError("failure_modes must contain at most 3 items")
+    return [
+        _require_line(entry, "failure_modes[{}]".format(index))
+        for index, entry in enumerate(entries)
+    ]
+
+
+def validate_answer(data: object, *, include_failure_modes: bool = True) -> Dict:
     """Validate a shape answer against the plan schema.
 
     Returns a normalized copy: surrounding whitespace stripped, inner
     newlines in one-line fields collapsed. Anything malformed raises
     ``ShapeError`` before any write, so a confused model cannot leave a
-    half-shaped idea behind.
+    half-shaped idea behind. ``failure_modes`` is optional and omission is
+    equivalent to an empty list. The runner can omit it for a safe fallback.
     """
+    if isinstance(data, dict):
+        data = dict(data)
+        if not include_failure_modes:
+            for key in OPTIONAL_ANSWER_KEYS:
+                data.pop(key, None)
+        for key in OPTIONAL_ANSWER_KEYS:
+            data.setdefault(key, [])
     _check_keys(data, sorted(ANSWER_KEYS), "the answer")
     assert isinstance(data, dict)
     proposed = _require_line(data["proposed_class"], "proposed_class")
@@ -472,6 +496,7 @@ def validate_answer(data: object) -> Dict:
             data["escalated_risk"]),
         "depends_on": _validate_depends_on(data["depends_on"]),
         "premises": _validate_premises(data["premises"]),
+        "failure_modes": _validate_failure_modes(data["failure_modes"]),
     }
 
 
@@ -508,8 +533,12 @@ def render_plan(answer: Dict) -> str:
     the model's fields, the narrative or a one-line field, is made inert:
     the model never moves an idea toward agents or toward Nate.
     """
-    lines = [_without_proposed_class_lines(answer["plan_markdown"]).rstrip(),
-             "", "## Premises", ""]
+    lines = [_without_proposed_class_lines(answer["plan_markdown"]).rstrip()]
+    failure_modes = answer.get("failure_modes", [])
+    if failure_modes:
+        lines.extend(["", "## Review focus", ""])
+        lines.extend("- {}".format(mode) for mode in failure_modes)
+    lines.extend(["", "## Premises", ""])
     premises = answer["premises"]
     if premises:
         for entry in premises:
@@ -1775,6 +1804,8 @@ def apply_main(argv: Optional[Sequence[str]] = None) -> int:
                              "malformed answer exits 3 below attempt 2 "
                              "(the runner retries once) and 1 at 2 or "
                              "later. Without --attempt, exit 1.")
+    parser.add_argument("--omit-failure-modes", action="store_true",
+                        help="omit Review focus from the rendered plan")
     parser.add_argument("--validate-only", action="store_true",
                         help="validate and decide without writing anything; "
                              "print the status, reason, and answer as JSON")
@@ -1805,7 +1836,8 @@ def apply_main(argv: Optional[Sequence[str]] = None) -> int:
         # Only the exit code is decided here, before any read: a malformed
         # answer is retryable on the runner protocol. Both paths then run
         # ``shape_decision`` on the same data (#2137).
-        validate_answer(data)
+        data = validate_answer(
+            data, include_failure_modes=not args.omit_failure_modes)
     except ShapeError as exc:
         print("shape-apply: {}".format(exc), file=sys.stderr)
         return validation_exit(args.attempt)

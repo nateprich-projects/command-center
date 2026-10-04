@@ -175,6 +175,7 @@ def blocked_by_payload(refs):
 def test_a_well_formed_answer_validates():
     found = shape.validate_answer(answer())
     assert found["proposed_class"] == "Improve"
+    assert found["failure_modes"] == []
     assert found["needs_nate"] == {
         "exposure": None, "gates": None, "scope": None,
         "preference": None}
@@ -184,6 +185,33 @@ def test_a_well_formed_answer_validates():
     assert found["premises"] == [
         {"claim": "reviews stay human-gated",
          "evidence": "plan.md:42", "label": "documented"}]
+
+
+@pytest.mark.parametrize("modes", [
+    [],
+    ["cache timeout is reported"],
+    ["cache timeout is reported", "retry keeps request identity"],
+    ["cache timeout is reported", "retry keeps request identity",
+     "cleanup removes only the current run"],
+])
+def test_failure_modes_round_trip_zero_through_three(modes):
+    assert shape.validate_answer(answer(failure_modes=modes))["failure_modes"] == modes
+
+
+def test_omitted_failure_modes_equal_an_empty_list():
+    assert "failure_modes" not in answer()
+    assert shape.validate_answer(answer())["failure_modes"] == []
+
+
+def test_failure_modes_reject_a_fourth_item():
+    with pytest.raises(shape.ShapeError, match="at most 3"):
+        shape.validate_answer(answer(failure_modes=["one", "two", "three", "four"]))
+
+
+@pytest.mark.parametrize("mode", ["", "   ", 7])
+def test_failure_modes_must_be_nonempty_strings(mode):
+    with pytest.raises(shape.ShapeError, match="failure_modes\\[0\\]"):
+        shape.validate_answer(answer(failure_modes=[mode]))
 
 
 def test_validation_strips_surrounding_whitespace():
@@ -505,6 +533,21 @@ def test_render_carries_the_plan_and_every_field():
             "- reviews stay human-gated (label: documented; "
             "evidence: plan.md:42)\n\nProposed class: Improve\n\n"
             "## Decided from precedent") in body
+
+
+def test_render_puts_review_focus_bullets_after_the_plan_summary():
+    body = shape.render_plan(shape.validate_answer(answer(
+        failure_modes=["cache timeout is reported",
+                       "retry keeps request identity"])))
+    assert body.startswith(
+        "# Plan\n\nDo the thing.\n\n## Review focus\n\n"
+        "- cache timeout is reported\n"
+        "- retry keeps request identity\n\n## Premises\n")
+
+
+def test_render_omits_empty_review_focus():
+    body = shape.render_plan(shape.validate_answer(answer()))
+    assert "## Review focus" not in body
 
 
 def _proposed_class_lines(body):
@@ -3296,6 +3339,30 @@ def test_apply_cli_validate_only_reports_the_decision_without_writing(
     assert found["status"] == "Ready"
     assert "needs_nate all null" in found["reason"]
     assert found["answer"]["proposed_class"] == "Improve"
+    assert item.status == "Ideas"
+
+
+def test_apply_cli_omit_failure_modes_falls_back_without_review_focus(
+        monkeypatch, capsys):
+    item = idea(42)
+    stub_project_ref_load(monkeypatch, item)
+    monkeypatch.setattr(funnel, "load_items", lambda **kwargs: [item])
+    monkeypatch.setattr(
+        funnel, "gh_graphql",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("validate-only must not write")))
+    monkeypatch.setattr(funnel.subprocess, "run",
+                        lambda *args, **kwargs: (_ for _ in ()).throw(
+                            AssertionError("validate-only must not write")))
+    model_answer = answer(failure_modes=["the cache is not invalidated"])
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(model_answer)))
+
+    assert shape.apply_main([
+        "42", "--repo", REPO, "--answer", "-", "--validate-only",
+        "--omit-failure-modes",
+    ]) == 0
+    found = json.loads(capsys.readouterr().out)
+    assert found["answer"]["failure_modes"] == []
     assert item.status == "Ideas"
 
 

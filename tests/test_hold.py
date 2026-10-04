@@ -371,6 +371,65 @@ def _load_live_shaped_hold(monkeypatch, item, *, condition_states=None,
     return record, comments, live_states
 
 
+def test_shaped_hold_clear_inputs_rechecks_live_state_and_owner_proof(
+        monkeypatch):
+    item = shaped_project(state="CLOSED")
+    record = {
+        "Hold-Reason": "Wait for the named prerequisites",
+        "Hold-Conditions": [
+            "nateprich-projects/command-center#1590",
+            "nateprich-projects/command-center#1997",
+            "nateprich-projects/command-center#1998",
+            "nateprich-projects/command-center#1999",
+            "nateprich-projects/command-center#2000",
+        ],
+        "Plan-Version": SHAPED_PLAN_VERSION,
+        "Proof": [SHAPED_PROOF],
+    }
+    state_reads = []
+    body_reads = []
+    api_reads = []
+
+    def gh_json(*args):
+        command = list(args)
+        if command[:3] == ["gh", "issue", "view"]:
+            number = int(command[3])
+            repo = command[5]
+            requested = command[-1]
+            if requested == "state":
+                state_reads.append((repo, number))
+                return {"state": "OPEN" if number == 2003 else "CLOSED"}
+            if requested == "body":
+                body_reads.append((repo, number))
+                return {"body": SHAPED_PLAN_BODY}
+        if command[:2] == ["gh", "api"]:
+            api_reads.append(command[2])
+            return {
+                "id": 5945296610,
+                "html_url": SHAPED_PROOF,
+                "user": OWNER,
+            }
+        pytest.fail("unexpected live helper request: {!r}".format(command))
+
+    monkeypatch.setattr(funnel, "_gh_json", gh_json)
+
+    assert funnel._shaped_hold_clear_inputs(item, record) == (
+        SHAPED_PLAN_BODY, SHAPED_PLAN_VERSION,
+    )
+    assert state_reads == [
+        ("nateprich-projects/command-center", 2003),
+        ("nateprich-projects/command-center", 1590),
+        ("nateprich-projects/command-center", 1997),
+        ("nateprich-projects/command-center", 1998),
+        ("nateprich-projects/command-center", 1999),
+        ("nateprich-projects/command-center", 2000),
+    ]
+    assert body_reads == [("nateprich-projects/command-center", 2003)]
+    assert api_reads == [
+        "repos/nateprich-projects/command-center/issues/comments/5945296610",
+    ]
+
+
 def test_live_satisfied_shaped_hold_clears_once_and_reasks_plan_gate(
         monkeypatch):
     item = shaped_project(labels=["blocked"], needs="external-event")

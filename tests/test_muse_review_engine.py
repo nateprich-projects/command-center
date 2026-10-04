@@ -1226,6 +1226,7 @@ def _non_open_packet():
     return _packet(
         state="CLOSED",
         merged_at="2026-09-16T03:46:42Z",
+        standing={"state": "closed", "reason": "PR is CLOSED"},
         precheck={"pass": False,
                   "reasons": [
                       "pr_not_open state=CLOSED merged_at=2026-09-16T03:46:42Z",
@@ -1253,6 +1254,10 @@ def _covered_verdict_packet():
         verdict={"verdict": "approved", "ci": "green", "head_sha": HEAD,
                  "blocking": []},
         verdict_head_sha=HEAD,
+        standing={
+            "state": "covered",
+            "reason": "a verdict already covers head {}".format(HEAD[:12]),
+        },
         precheck={"pass": False, "reasons": [
             "verdict: a verdict already covers head {}".format(HEAD[:12]),
         ]},
@@ -1337,7 +1342,26 @@ def test_a_non_open_precheck_stops_without_a_verdict_or_blocking_note(tmp_path):
     assert _apply_calls(repo) == []
     assert not (repo / "applied.marker").exists()
     heartbeat = _heartbeat(repo)
-    assert "pr_not_open state=CLOSED merged_at=2026-09-16T03:46:42Z" in heartbeat
+    legacy_reason = (
+        "pr_not_open state=CLOSED merged_at=2026-09-16T03:46:42Z")
+    assert legacy_reason in heartbeat
+    assert "PR is CLOSED" not in heartbeat
+    assert "no verdict recorded" in heartbeat
+    assert "--review-result" not in heartbeat
+    assert not (repo / "gh.log").exists()
+
+
+def test_a_covered_standing_keeps_its_existing_reason_and_stands_down(tmp_path):
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), _covered_verdict_packet())
+
+    assert proc.returncode == 0, proc.stderr
+    assert _muse_calls(repo) == 0
+    assert _apply_calls(repo) == []
+    assert not (repo / "applied.marker").exists()
+    heartbeat = _heartbeat_without_muse_call_record(repo)
+    assert "review skipped — a verdict already covers head {}".format(
+        HEAD[:12]) in heartbeat
     assert "no verdict recorded" in heartbeat
     assert "--review-result" not in heartbeat
     assert not (repo / "gh.log").exists()

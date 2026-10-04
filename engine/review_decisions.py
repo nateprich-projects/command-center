@@ -10,8 +10,10 @@ approximation at alpha=.05 needs about 109 independent runs per side for 80%
 power to detect an 80% to 65% must-reject drop. The 120-per-side cap gives
 about 83% under that assumption. At 73% to 58%, it gives about 79%, so the
 cap can leave the measured-baseline case inconclusive. This calculation is
-not a claim about the power of repeated unadjusted interim tests: next_batch
-expects the sequentially calibrated p-value for the pre-registered decline.
+not a claim about the power or type-I error of repeated looks. Per #2072's
+settled rule, each look passes its one-sided Fisher exact decline p-value
+unchanged to next_batch as a sample-size signal; only decide_outcome's full
+interval classification describes quality, and it never blocks a merge.
 """
 
 from __future__ import annotations
@@ -368,9 +370,12 @@ def next_batch(runs_per_side: int, decline_p_value: float | None = None) -> int:
     """Return additional runs per side under the registered sequential bounds.
 
     The initial call uses ``runs_per_side=0`` and returns 40. Later calls pass
-    the sequentially calibrated p-value for an unacceptable decline: below
+    the one-sided Fisher exact p-value for a decline in the head's must-reject
+    rejection rate versus the same-main pool, unchanged at each look: below
     .05 stops for decline; above .30 stops for futility. Otherwise add 20,
-    capped at 120 per side. A return of 0 means stop, not pass.
+    capped at 120 per side. A return of 0 means stop, not pass. The p-value
+    only selects sample size; ``decide_outcome`` remains the nonblocking,
+    full-interval quality classification.
     """
     if isinstance(runs_per_side, bool) or not isinstance(runs_per_side, int):
         raise ValueError("runs_per_side must be an integer")

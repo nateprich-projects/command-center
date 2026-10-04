@@ -795,11 +795,43 @@ def test_replay_packet_reuses_same_sha_pool_with_identical_output(
     pool = replay.load_main_pool(
         fixture["main_commit_sha"], runtime_root=runtime_root)
     [records] = pool["packets"].values()
+    pool_path = runtime_root / "eval-replay" / "main-pool.json"
     assert first == second
     assert [call[0] for call in calls] == ["head", "main", "head"]
     assert len(records) == 2
+    assert pool_path == runtime_root / replay.MAIN_POOL_RELATIVE_PATH
+    assert pool_path.is_file()
     assert all(record["main_commit_sha"] == fixture["main_commit_sha"]
                for record in records)
+
+
+def test_eval_replay_pool_path_is_ignored_by_git():
+    result = subprocess.run(
+        ["git", "-C", str(ROOT), "check-ignore", "--quiet",
+         "eval-replay/main-pool.json"],
+        capture_output=True, text=True, check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_replay_packet_reuses_prior_head_samples_for_the_next_batch(
+        tmp_path, monkeypatch):
+    fixture = _replay_pool_fixture()
+    head, main, runtime_root, _revisions, calls = _replay_pool_context(
+        tmp_path, monkeypatch, fixture)
+
+    first = replay.replay_packet(
+        "must_reject", head, main, runs=2, runtime_root=runtime_root)
+    second = replay.replay_packet(
+        "must_reject", head, main, runs=4, runtime_root=runtime_root,
+        head_runs=first["head"]["runs"])
+
+    assert [call[0] for call in calls] == ["head", "main", "head", "main"]
+    assert [call[1] for call in calls] == [2, 2, 2, 2]
+    assert len(second["head"]["runs"]) == 4
+    assert len(second["main"]["runs"]) == 4
+    assert second["head"]["runs"][:2] == first["head"]["runs"]
 
 
 def test_replay_packet_misses_and_replaces_pool_when_main_sha_changes(

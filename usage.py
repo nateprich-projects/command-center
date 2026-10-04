@@ -445,17 +445,23 @@ def muse_trial_allowance_dollars(now: Optional[float] = None) -> Optional[float]
     return _finite_nonnegative_dollars(allowance)
 
 
-def muse_trial_counter_read(spent_dollars, now: Optional[float] = None) -> Dict:
+def muse_trial_counter_read(spent_dollars, now: Optional[float] = None, *,
+                            reserve_dollars=None) -> Dict:
     """Read a caller-supplied trial total and decide whether another run fits.
 
     The caller supplies the previously recorded total from GitHub, the durable
     state of this repository. No local counter file is written. Stop if the
     total is unreadable, the $20 ceiling no longer fits the active Muse
-    allowance, or one reserved Muse session could take the total over $20.
+    allowance, or the reserved next work could take the total over $20. By
+    default that work is one full Muse session; replay batches can supply their
+    measured p90 reservation instead.
     """
     spent = _finite_nonnegative_dollars(spent_dollars)
     cap = _finite_nonnegative_dollars(MUSE_TRIAL_TOTAL_CAP_DOLLARS)
-    reserve = _finite_nonnegative_dollars(MUSE_SESSION_RESERVE_DOLLARS)
+    reserve = _finite_nonnegative_dollars(
+        MUSE_SESSION_RESERVE_DOLLARS if reserve_dollars is None
+        else reserve_dollars
+    )
     allowance = muse_trial_allowance_dollars(now)
     known = all(value is not None for value in (spent, cap, reserve, allowance))
     contained = (

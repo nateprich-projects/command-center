@@ -342,6 +342,7 @@ def run_eval_nonblocking(
         head_checkout: str | pathlib.Path = CHECKOUT,
         main_checkout: str | pathlib.Path | None = None,
         runtime_root: str | pathlib.Path = RUNTIME_ROOT,
+        trial_spent_dollars=None,
         replay_fn: Optional[Callable[..., dict]] = None) -> dict:
     """Replay head vs main and score A+B records without gating a merge.
 
@@ -349,7 +350,9 @@ def run_eval_nonblocking(
     brake. The main-side run pool remains keyed by the exact main commit in
     ``eval-replay/`` under the runtime root. ``paired_runs`` contains already
     collected A/B records; this function neither selects reviewer B nor
-    enables the prompt trial.
+    enables the prompt trial. ``trial_spent_dollars`` is the prior total read
+    from the durable GitHub trial record; if it is absent or unreadable, the
+    replay budget gate refuses before starting an engine run.
     """
     try:
         head_path, manifest = review_prompts._manifest(head_checkout)
@@ -410,6 +413,9 @@ def run_eval_nonblocking(
                     packet_name, head_path, main_path, runs=runs_per_side,
                     version=packet_version, runtime_root=root,
                     head_runs=head_samples[packet_name],
+                    replay_run_p90_dollars=(
+                        replay.REVIEW_EVALUATION_REPLAY_P90_DOLLARS),
+                    trial_spent_dollars=trial_spent_dollars,
                 )
                 head_rejected, main_rejected, observed_head, observed_main = (
                     _replay_run_counts(summary, packet_name, runs_per_side))

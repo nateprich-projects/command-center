@@ -4473,6 +4473,241 @@ def test_the_judges_ask_for_cited_met_results_and_concrete_blocks(tmp_path):
             "outcome.") in framing
 
 
+# -- the scoped re-review (#2002, plan #1838) ---------------------------------
+#
+# #2001's runner puts `scoped_rereview` in every packet: after a rejection,
+# the rejected head, that rejection's blocking items under the stopping rule's
+# three kinds, and the interdiff since that head without main's merges, with a
+# fallback flag for a large rewrite. These pin the wording the lister and the
+# judges are given for it, and that the flag (or anything short of a live
+# scope) leaves the full review's wording untouched.
+
+SCOPED_ITEMS = (
+    {"kind": "code_defect",
+     "finding": "Code defect: thing.py prints nothing on empty input"},
+    {"kind": "missing_requirement_or_accept_test",
+     "finding": "Missing Do item: no test pins the empty-input case"},
+)
+SCOPED_INTERDIFF = ("--- prior-pr-diff\n+++ current-pr-diff\n@@ -1,2 +1,3 @@\n"
+                    " diff --git a/thing.py b/thing.py\n"
+                    "+INTERDIFF-SENTINEL = 'the fix'\n")
+NEW_BLOCKING_DEFECT = (
+    "No new blocking defect: the interdiff adds no code defect, missing "
+    "requirement or Accept test, or merged-main suite failure.")
+
+
+def _scoped_rereview(**overrides):
+    scoped = {"enabled": True, "active": True,
+              "prior_rejected_head": "f" * 40,
+              "prior_blocking_items": [dict(item) for item in SCOPED_ITEMS],
+              "interdiff": SCOPED_INTERDIFF,
+              "full_review_fallback": False, "fallback_reasons": []}
+    scoped.update(overrides)
+    return scoped
+
+
+def _scoped_requirements():
+    return ["Prior blocking item addressed ({kind}): {finding}".format(**item)
+            for item in SCOPED_ITEMS] + [NEW_BLOCKING_DEFECT]
+
+
+def _flat(text):
+    return " ".join(text.split())
+
+
+def _lister_framing(repo):
+    lister = (repo / "muse.prompt.1").read_text()
+    return _flat(lister.split(
+        "The text after this paragraph is the review question", 1)[0])
+
+
+def _judge_framing(repo, call=2):
+    judge = (repo / "muse.prompt.{}".format(call)).read_text()
+    return _flat(judge.split("The assigned requirements are:", 1)[0])
+
+
+#: The scoped judge wording, sentence by sentence (#2002).
+SCOPED_JUDGE_SENTENCES = (
+    "This review is a scoped re-review.",
+    "A `Prior blocking item addressed` requirement asks whether that "
+    "finding is addressed: met when the change now resolves it, citing the "
+    "interdiff line that does; unmet when it is not addressed, saying what "
+    "is still wrong.",
+    "The `No new blocking defect` requirement is unmet when the interdiff "
+    "adds a code defect, removes or weakens something a ticket's Do or "
+    "Accept requires, or brings a merged-main suite failure absent on main: "
+    "name each such defect with its input, its path through the interdiff "
+    "and the wrong outcome.",
+    "Search only the interdiff and the prior blocking items; read `diff` "
+    "for context.",
+    "Code the interdiff does not touch was judged at the rejected head: do "
+    "not judge it again.",
+    "A fault you come across outside the interdiff blocks only when it is "
+    "one of those three kinds and you can name its input, path and wrong "
+    "outcome: then mark `No new blocking defect` unmet and say the fault "
+    "lies outside the interdiff.",
+    "Anything else you notice outside it is a note in `evidence`, never a "
+    "reason for unmet or unsure.",
+)
+
+
+def test_a_scoped_rereview_asks_each_prior_item_and_the_interdiff_only(
+        tmp_path):
+    """#2002: given a live scope, the lister asks for one requirement per
+    carried blocking item and one for new blocking defects, and nothing from
+    the tickets or the plan; each judge answers addressed (met) or not
+    addressed (unmet) per item and names new interdiff defects, searching
+    only the interdiff and the prior items."""
+    requirements = _scoped_requirements()
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), _packet(scoped_rereview=_scoped_rereview()),
+        answers=(_requirements_answer(*requirements),
+                 json.dumps({"requirements": [
+                     {"requirement": requirements[0], "status": "met",
+                      "evidence": "interdiff line 1 prints on empty input"},
+                     {"requirement": requirements[1], "status": "unmet",
+                      "evidence": "no test in the interdiff pins it"},
+                     {"requirement": requirements[2], "status": "unmet",
+                      "evidence": "input None, through the new branch, "
+                                  "raises TypeError"},
+                 ]})))
+
+    assert proc.returncode == 0, proc.stderr
+    assert _muse_calls(repo) == 2
+    lister = _lister_framing(repo)
+    assert lister.startswith("This call is not the review.")
+    for sentence in (
+        "This review is a scoped re-review.",
+        "The judges answer two questions only: was each prior blocking item "
+        "addressed, and does the interdiff add a new blocking defect.",
+        "Code the fix did not touch was judged at the rejected head and is "
+        "not judged again.",
+        "List exactly these requirements, in this order, and nothing else:",
+        "one requirement reading `Prior blocking item addressed (<kind>): "
+        "<finding>`, with the entry's `kind` and `finding` copied verbatim;",
+        "last, this requirement, copied verbatim: `{}`".format(
+            NEW_BLOCKING_DEFECT),
+        "Do not list the tickets' Do or Accept, the plan's or the "
+        "repository's rules, or the plan's Rejected options: they were "
+        "listed and judged at the rejected head.",
+        "Keep that item's requirement and append `Superseded by Nate's "
+        "override — <url> — \"<short exact quote>\"`.",
+    ):
+        assert sentence in lister, sentence
+    # The full review's listing rule is not asked as well.
+    assert "List what this diff must do and what it must avoid." \
+        not in lister
+    # The lister reads the scope from its packet: items and the interdiff.
+    lister_packet = json.loads(_cached_packet_from_judge_prompt(
+        (repo / "muse.prompt.1").read_text()))
+    assert lister_packet["scoped_rereview"] == _scoped_rereview()
+
+    judge = _judge_framing(repo)
+    for sentence in SCOPED_JUDGE_SENTENCES:
+        assert sentence in judge, sentence
+    prompt = (repo / "muse.prompt.2").read_text()
+    assert _assigned_requirements(prompt) == requirements
+    assert "INTERDIFF-SENTINEL" in prompt
+
+    applied = json.loads((repo / "apply.answer").read_text())
+    assert applied["verdict"] == "rejected"
+    assert [(row["requirement"], row["status"])
+            for row in applied["requirements"]] == [
+        (requirements[0], "met"),
+        (requirements[1], "unmet"),
+        (requirements[2], "unmet"),
+    ]
+    assert applied["blocking"] == [
+        "requirement unmet: {} -- no test in the interdiff pins it".format(
+            requirements[1]),
+        "requirement unmet: {} -- input None, through the new branch, "
+        "raises TypeError".format(requirements[2]),
+    ]
+
+
+def test_the_fallback_flag_returns_a_scoped_rereview_to_the_full_review(
+        tmp_path):
+    """#2002: the same scope with `full_review_fallback` set (a large
+    rewrite) is asked exactly as a review with no scope at all, while with
+    the flag clear it gets the scoped wording."""
+    def framings(name, scoped):
+        overrides = {} if scoped is None else {"scoped_rereview": scoped}
+        proc, repo = _stubbed_runner(
+            tmp_path / name, _begin(), _packet(**overrides),
+            answers=_review_answers(_judge_answer()))
+        assert proc.returncode == 0, proc.stderr
+        return _lister_framing(repo), _judge_framing(repo)
+
+    full = framings("full", None)
+    fallback = framings("fallback", _scoped_rereview(
+        full_review_fallback=True, fallback_reasons=["large_rewrite"]))
+    scoped = framings("scoped", _scoped_rereview())
+
+    assert fallback == full
+    for framing in fallback:
+        assert "scoped re-review" not in framing
+    assert "List what this diff must do and what it must avoid." in \
+        fallback[0]
+    assert scoped[0] != full[0]
+    assert "This review is a scoped re-review." in scoped[0]
+    # The judge keeps every full-review rule and adds the scoped one.
+    assert scoped[1] != full[1]
+    assert scoped[1].startswith(full[1].split(
+        " Return exactly one JSON object", 1)[0])
+    for sentence in SCOPED_JUDGE_SENTENCES:
+        assert sentence in scoped[1], sentence
+
+
+@pytest.mark.parametrize("scoped", [
+    # No prior rejection: #2001's empty scope.
+    {"enabled": True, "active": False, "prior_rejected_head": None,
+     "prior_blocking_items": [], "interdiff": None,
+     "full_review_fallback": False, "fallback_reasons": []},
+    # The rollback switch is off.
+    _scoped_rereview(enabled=False, full_review_fallback=True,
+                     fallback_reasons=["scoped_rereview_disabled"]),
+    # Malformed scopes fail to the full review, never to a narrower one.
+    _scoped_rereview(full_review_fallback=None),
+    _scoped_rereview(prior_rejected_head=""),
+    _scoped_rereview(prior_blocking_items=[]),
+    _scoped_rereview(prior_blocking_items=[
+        {"kind": "style", "finding": "Code defect: an unknown kind"}]),
+    _scoped_rereview(prior_blocking_items=[
+        {"kind": "code_defect", "finding": "  "}]),
+    _scoped_rereview(interdiff=None),
+    # The switches alone, with the fallback flag left clear: a disabled or
+    # inactive scope never narrows the review (independent review of PR #2222).
+    _scoped_rereview(enabled=False),
+    _scoped_rereview(active=False),
+    "not a scope",
+], ids=["no-rejection", "disabled", "flag-unset", "no-head", "no-items",
+        "unknown-kind", "blank-finding", "no-interdiff", "disabled-flag-clear",
+        "inactive-flag-clear", "not-an-object"])
+def test_anything_short_of_a_live_scope_is_the_full_review(tmp_path, scoped):
+    """#2002: only a live scope (a rejected head, stopping-rule items, an
+    interdiff and the fallback flag clear) narrows the review."""
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), _packet(scoped_rereview=scoped),
+        answers=_review_answers(_judge_answer()))
+
+    assert proc.returncode == 0, proc.stderr
+    lister, judge = _lister_framing(repo), _judge_framing(repo)
+    assert "List what this diff must do and what it must avoid." in lister
+    for framing in (lister, judge):
+        assert "scoped re-review" not in framing
+
+
+def test_the_engine_names_every_stopping_rule_kind_the_packet_carries():
+    """#2002: the engine's own copy of #2001's three kinds; a kind added to
+    engine/review.py alone would send every scope to the full review."""
+    sys.path.insert(0, str(ROOT))
+    from engine import review
+
+    script = SCRIPT.read_text()
+    for kind in review.SCOPED_REREVIEW_KINDS:
+        assert '"{}"'.format(kind) in script, kind
+
+
 def test_the_requirement_list_is_kept_where_the_judges_will_read_it(tmp_path):
     proc, repo = _with_probe(
         tmp_path, begin=_begin(), packet=_packet(),

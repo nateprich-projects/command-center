@@ -1,0 +1,9 @@
+{
+  "id": "r1",
+  "question_rules": [
+    "If \u0060evidence\u0060 says the diff rewrites fix #N, confirm it still prevents that fix's failure; cite its test."
+  ],
+  "judge_rules": [
+    "If \u0060evidence\u0060 has a \u0060rewrites prior fix: #N\u0060 line, confirm the diff still prevents that fix's failure and cite its test; mark unmet each assigned requirement it bears on when it does not."
+  ]
+}

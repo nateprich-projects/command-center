@@ -1,0 +1,480 @@
+[
+  {
+    "source": "escalation_plan_false_gates.json[0]",
+    "body": "The fix is forward-only and the 14 invalid-JSON lines and the lost escalated fire stand unrewritten as the before-measurement. (source: sibling convention #1393 and #1182 no-backfill decisions)",
+    "escalation_reasons": [
+      "data-migration"
+    ],
+    "plan_is_escalated": []
+  },
+  {
+    "source": "escalation_plan_false_gates.json[1]",
+    "body": "The fix is forward-only with no rewrite of the nine wasted runs or of the watch's two hand-closes, which stand as the before-measurement. (source: sibling convention #1393 and #1182 no-backfill decisions)",
+    "escalation_reasons": [
+      "data-migration"
+    ],
+    "plan_is_escalated": []
+  },
+  {
+    "source": "escalation_plan_false_gates.json[2]",
+    "body": "On a residual refusal — a concurrent writer raced the read — re-read the edges and treat the ref as satisfied only when the edge is confirmed present; absent or unreadable keeps the failure named, never a match on the refusal string.",
+    "escalation_reasons": [
+      "concurrency"
+    ],
+    "plan_is_escalated": []
+  },
+  {
+    "source": "escalation_plan_false_gates.json[3]",
+    "body": "The fix is forward-only; the 2026-09-25 rejection, the refused merge and the watch's re-record stand as the before-measurement. (source: sibling convention #1393 and #1182 no-backfill decisions)",
+    "escalation_reasons": [
+      "data-migration"
+    ],
+    "plan_is_escalated": []
+  },
+  {
+    "source": "escalation_plan_false_gates.json[4]",
+    "body": "The fix is forward-only; the 16 escalated and 8 standard lost fires and their absent records stand as the before-measurement with no backfill. (source: sibling convention: the no-backfill decisions in #1393 and #1182)",
+    "escalation_reasons": [
+      "data-migration"
+    ],
+    "plan_is_escalated": []
+  },
+  {
+    "source": "escalation_plan_false_gates.json[5]",
+    "body": "On #1503 funnel.plan_escalation_matches returns exactly one hit, a data-migration reason on the Backfill-or-rewrite line that sits under ## Rejected and negates a backfill rather than proposing one.",
+    "escalation_reasons": [
+      "data-migration"
+    ],
+    "plan_is_escalated": []
+  },
+  {
+    "source": "escalation_plan_false_gates.json[6]",
+    "body": "The fix makes the newest automation-thread rollout errors visible in doctor without touching any credential. The credential fix itself is Nate's and out of scope.",
+    "escalation_reasons": [
+      "credentials"
+    ],
+    "plan_is_escalated": []
+  },
+  {
+    "source": "escalation_plan_false_gates.json[7]",
+    "body": "#1541 publisher retry floor is publisher-side spend versus doctor health, shared log-as-comparison-source and no-backfill conventions, keep both.",
+    "escalation_reasons": [
+      "data-migration"
+    ],
+    "plan_is_escalated": []
+  },
+  {
+    "source": "escalation_plan_false_gates.json[8]",
+    "body": "The doctor reported \"401 Incorrect API key\" in the newest task error; the credential fix is outside this plan.",
+    "escalation_reasons": [
+      "credentials"
+    ],
+    "plan_is_escalated": []
+  },
+  {
+    "source": "escalation_plan_false_gates.json[9]",
+    "body": "The fix is forward-only; the 2026-09-25 evening timings and the 7-of-12 timeout count stand as the before-measurement with no backfill. (source: sibling convention, the no-backfill decisions in #1393 and #1182, followed by #1417, #1519, #1541 and #1542)",
+    "escalation_reasons": [
+      "data-migration"
+    ],
+    "plan_is_escalated": []
+  },
+  {
+    "source": "escalation_plan_false_gates.json[10]",
+    "body": "The fix is forward-only with no backfill or re-run of past breakdowns. (source: sibling convention, the no-backfill decisions in #1393 and #1182, followed by #1514 through #1545)",
+    "escalation_reasons": [
+      "data-migration"
+    ],
+    "plan_is_escalated": []
+  },
+  {
+    "source": "escalation_plan_false_gates.json[11]",
+    "body": "The fix is forward-only; the three 2026-09-25/26 failed finish runs stand as the before-measurement with no backfill or re-run. (source: sibling convention, the no-backfill decisions in #1393 and #1182, followed by #1514 through #1545)",
+    "escalation_reasons": [
+      "data-migration"
+    ],
+    "plan_is_escalated": []
+  },
+  {
+    "source": "escalation_plan_false_gates.json[12]",
+    "body": "## Decided from precedent\n- The measurement is forward-only; the 2026-09-24 to 09-26 windows and the 44 reserve-skips stand as the before-measurement with no backfill (source: sibling convention, the no-backfill decisions in #1393 and #1182)\n",
+    "escalation_reasons": [
+      "data-migration"
+    ],
+    "plan_is_escalated": []
+  },
+  {
+    "source": "escalation_plan_false_gates.json[13]",
+    "body": "## Decided from precedent\n- The fix is forward-only; the 2026-09-26 snapshot and its eleven-minute serve window stand as the before-measurement with no backfill or re-publish. (source: sibling convention, the no-backfill decisions in #1393 and #1182, followed by #1514 through #1582)\n",
+    "escalation_reasons": [
+      "data-migration"
+    ],
+    "plan_is_escalated": []
+  },
+  {
+    "source": "escalation_plan_false_gates.json[14]",
+    "body": "## Decided from precedent\n- The fix is forward-only: the 2026-09-26 census, the 70.3 percent alert and the manual reap stand as the before-measurement with no backfill. (source: sibling convention, the no-backfill decisions in #1393 and #1182, followed by #1514 through #1576)\n",
+    "escalation_reasons": [
+      "data-migration"
+    ],
+    "plan_is_escalated": []
+  },
+  {
+    "source": "escalation_plan_false_gates.json[15]",
+    "body": "## Siblings checked\n- #1626 (Shaped) — review-lister deadlock fix on #1581's tickets; engine code, not AGENTS.md; keep both.\n",
+    "escalation_reasons": [
+      "concurrency"
+    ],
+    "plan_is_escalated": []
+  },
+  {
+    "source": "escalation_plan_false_gates.json[16]",
+    "body": "## Siblings checked\n- #1643 and #1679 (independent): a sibling rotates the deploy credentials during cutover; this ticket only changes the matcher.\n",
+    "escalation_reasons": [
+      "credentials"
+    ],
+    "plan_is_escalated": []
+  },
+  {
+    "source": "escalation_plan_region_edges.json[0]",
+    "body": "Fix the ledger.\n\n## Premises\n\n- Nate wrote \"ship it (label: inferred; evidence: thread)\n\nProposed class: Improve\n\n## Decided from precedent\n\nNone recorded.\n\n## Decided by the agent\n\n- Keep the \"fast path\" as is.\" (rejected: x; y)\n- Backfill the ledger table from the heartbeat branch. (rejected: Leave it empty; dashboards need it)\n",
+    "escalation_reasons": [
+      "data-migration"
+    ],
+    "plan_is_escalated": [
+      "data-migration"
+    ]
+  },
+  {
+    "source": "escalation_plan_region_edges.json[1]",
+    "body": "Fix the ledger.\n\n## What it is\n\n- Tidy the ledger reader.\n\n## Premises\n\n- Nate called the ledger “the source of truth (label: inferred; evidence: thread)\n\nProposed class: Improve\n\n## Decided from precedent\n\nNone recorded.\n\n## Decided by the agent\n\n- Keep the ledger as” Nate described it. (rejected: x; y)\n- Backfill the ledger table from the heartbeat branch. (rejected: Leave it empty; dashboards need it)\n",
+    "escalation_reasons": [
+      "data-migration"
+    ],
+    "plan_is_escalated": [
+      "data-migration"
+    ]
+  },
+  {
+    "source": "escalation_plan_region_edges.json[2]",
+    "body": "## What it is\n\nRejected:\n- Keep the \"old path.\n\nThe 6\" pipe stays.\nWe will migrate the production database to the new schema.\nThe 8\" pipe and the \"spare\" stay.\n",
+    "escalation_reasons": [
+      "data-migration"
+    ],
+    "plan_is_escalated": [
+      "data-migration"
+    ]
+  },
+  {
+    "source": "escalation_plan_region_edges.json[3]",
+    "body": "## Premises\n\n- The 6\" pipe holds (label: measured; evidence: x)\n\n## What it is\n\nThe 8\" pipe stays.\nWe will migrate the production database to the new schema.\nThe \"spare\" and the 9\" stay.\n",
+    "escalation_reasons": [
+      "data-migration"
+    ],
+    "plan_is_escalated": [
+      "data-migration"
+    ]
+  },
+  {
+    "source": "escalation_plan_region_edges.json[4]",
+    "body": "## What it is\n\n- Ticket 1: tidy the reader.\n  Rejected:\n  - Rewrite it from scratch.\n- We will migrate the production database to the new schema.\n",
+    "escalation_reasons": [
+      "data-migration"
+    ],
+    "plan_is_escalated": [
+      "data-migration"
+    ]
+  },
+  {
+    "source": "escalation_plan_region_edges.json[5]",
+    "body": "## What it is\n\n- Ticket 1: tidy the reader.\n  Rejected:\n  - Rewrite it from scratch.\n\n- We will migrate the production database to the new schema.\n",
+    "escalation_reasons": [
+      "data-migration"
+    ],
+    "plan_is_escalated": [
+      "data-migration"
+    ]
+  },
+  {
+    "source": "escalation_plan_region_edges.json[6]",
+    "body": "## What it is\n\nRejected:\n- Alt A.\n\n* We will migrate the production database to the new schema.\n",
+    "escalation_reasons": [
+      "data-migration"
+    ],
+    "plan_is_escalated": [
+      "data-migration"
+    ]
+  },
+  {
+    "source": "escalation_plan_region_edges.json[7]",
+    "body": "## What it is\n\nRejected:\n1. Alt A.\n\n- We will migrate the production database to the new schema.\n",
+    "escalation_reasons": [
+      "data-migration"
+    ],
+    "plan_is_escalated": [
+      "data-migration"
+    ]
+  },
+  {
+    "source": "escalation_plan_region_edges.json[8]",
+    "body": "## What it is\n\nRejected:\n- Alt A.\n\n We will migrate the production database to the new schema.\n",
+    "escalation_reasons": [
+      "data-migration"
+    ],
+    "plan_is_escalated": [
+      "data-migration"
+    ]
+  },
+  {
+    "source": "escalation_plan_region_edges.json[9]",
+    "body": "## What it is\n\nRejected:\n- Alt A.\n\n  We will migrate the production database to the new schema.\n",
+    "escalation_reasons": [
+      "data-migration"
+    ],
+    "plan_is_escalated": [
+      "data-migration"
+    ]
+  },
+  {
+    "source": "escalation_plan_region_edges.json[10]",
+    "body": "Intro.\n\n## Premises\n\n- claim (label: measured; evidence: x)\n\nWhat it is\n----------\n\n- We will migrate the production database to the new schema.\n",
+    "escalation_reasons": [
+      "data-migration"
+    ],
+    "plan_is_escalated": [
+      "data-migration"
+    ]
+  },
+  {
+    "source": "escalation_plan_region_edges.json[11]",
+    "body": "Intro ## Premises We will migrate the production database to the new schema.\n",
+    "escalation_reasons": [
+      "data-migration"
+    ],
+    "plan_is_escalated": [
+      "data-migration"
+    ]
+  },
+  {
+    "source": "escalation_plan_region_edges.json[12]",
+    "body": "## Premises and approach\n\n- We will migrate the production database to the new schema.\n",
+    "escalation_reasons": [
+      "data-migration"
+    ],
+    "plan_is_escalated": [
+      "data-migration"
+    ]
+  },
+  {
+    "source": "escalation_plan_region_edges.json[13]",
+    "body": "## What it is\n\nRejected: run the backfill against the live ledger.\n- Broaden the deploy role's permissions.\n",
+    "escalation_reasons": [
+      "authorisation",
+      "data-migration"
+    ],
+    "plan_is_escalated": [
+      "authorisation",
+      "data-migration"
+    ]
+  },
+  {
+    "source": "escalation_plan_region_edges.json[14]",
+    "body": "## Premises\n\n- c\n\nRisk: escalated — credentials\n",
+    "escalation_reasons": [
+      "declared: credentials"
+    ],
+    "plan_is_escalated": []
+  },
+  {
+    "source": "escalation_plan_region_holds.json[0]",
+    "body": "Fix the escalation scan's blind spot for credentials proposals whose proposing verb sits inside the matched phrase.\n\nWhat it is:\n- Add a credentials entry to _PLAN_DIRECT_ACTIONS mirroring the existing data-migration and authorisation direct-action entries, spelling every verb inflection literally per the #1681/#1722 convention.\n- Acceptance pair for funnel.plan_escalation_matches: `Rotate the deploy credentials during cutover.` returns a credentials hit, and `We will rotate the API key before the deploy.` keeps returning a credentials hit.\n- Add a true-proposal regression fixture for the verb-inside-phrase shape and a guard test asserting every category that can carry its own verb has a direct-action table entry.\n- Verify with `python3 -m pytest`.\n\nRejected:\n- Broadening generic verb-proximity matching instead of a category-specific direct table, because it would re-admit non-proposals that #1643 named non-proposals and that still over-escalate per #1679.\n- Stemming or lemmatizing verbs instead of spelling every inflection, because it breaks the explicit-inflection convention from #1681 and #1722 and risks matching unreviewed forms.\n- Leaving the miss because #1721 softened a scan-only hit to a tier raise, because the miss still routes a real credentials change to standard-tier review.\n- Folding this into #1722, because #1722 is scoped to credentials and data-migration verb inflections while this adds a missing credentials direct table.\n\n## Siblings checked\n\n- nateprich-projects/command-center#1125 (independent): draft adds credentials _PLAN_DIRECT_ACTIONS entry while #1125 reads heartbeat deltas and #684 log for a cost review with no code change\n- nateprich-projects/command-center#1194 (independent): draft fixes funnel.plan_escalation_matches direct table while #1194 builds a review replay tool plus journal corpus on the engine/review_apply path\n- nateprich-projects/command-center#1195 (independent): draft edits _PLAN_DIRECT_ACTIONS with fixtures and guard test while #1195 records codex_run.py launch path and compares isolation levers with no behaviour change\n- nateprich-projects/command-center#1272 (independent): Execution metrics tab builds metrics.py/dashboard series while draft adds credentials direct-action table to escalation scan\n- nateprich-projects/command-center#1557 (independent): Saturday Claude implement lane changes begin/roles/scheduling while draft fixes funnel.plan_escalation_matches credentials matching\n- nateprich-projects/command-center#1581 (independent): Split escalated shape calls to avoid stream-idle timeouts while draft adds missing credentials entry and guard test\n- nateprich-projects/command-center#1602 (independent): Draft adds credentials direct-action table to escalation scan while sibling deploys connector container and fixes auth; no shared work.\n- nateprich-projects/command-center#162 (independent): Draft fixes escalation-scan credentials matching while sibling builds nightly pricing/release watch; no shared work or ordering.\n- nateprich-projects/command-center#1626 (independent): Draft changes escalation-scan direct-action matching while sibling changes review-lister unsure-reject for future-evidence premises; disjoint mechanisms.\n- nateprich-projects/command-center#1637 (independent): Draft adds a credentials direct-action table to the escalation scan while #1637 bounds runner timeouts and relocates clones; no shared work.\n- nateprich-projects/command-center#1638 (independent): Draft touches plan_escalation_matches direct tables while #1638 guards claim release/push and branch-at-bind; disjoint mechanisms.\n- nateprich-projects/command-center#1654 (independent): Draft fixes escalation-scan credentials detection while #1654 re-measures metrics outcome tiles; no shared files or work.\n- nateprich-projects/command-center#1655 (independent): Draft adds a credentials direct-action table to the escalation scan while #1655 fixes large-ledger reads and heals empty outcome runs.\n- nateprich-projects/command-center#1658 (independent): Draft changes funnel escalation matching while #1658 guards finish_blocked_on_human against refiling not-planned human steps.\n- nateprich-projects/command-center#1669 (independent): Draft changes funnel escalation matching while #1669 adds stream-idle retry and timing to shape parts and judge chunks.\n- nateprich-projects/command-center#1675 (independent): draft adds a credentials _PLAN_DIRECT_ACTIONS entry for verb-inside-phrase proposals while #1675 carries PR body and Departures into the review packet\n- nateprich-projects/command-center#1677 (independent): draft fixes funnel.plan_escalation_matches credentials detection while #1677 records Accept holds via funnel hold and renames the brief listing\n- nateprich-projects/command-center#1679 (independent): draft adds the missing credentials direct-action table for the Rotate-the-credentials shape while #1679 raises tier on scan-only hits and fixes -ing inflections in existing tables\n- nateprich-projects/command-center#1682 (independent): Draft adds a credentials _PLAN_DIRECT_ACTIONS entry and guard test while sibling builds broken_fix_tickets/fix_recurrence.py/B3 measurement with no shared code or ordering.\n- nateprich-projects/command-center#1697 (independent): Draft fixes funnel.plan_escalation_matches credentials detection while sibling dedupes Proposed class lines in engine/shape.py render_plan.\n- nateprich-projects/command-center#1698 (independent): Draft changes escalation-scan direct-action tables while sibling splits review-replay into the live lister-plus-judges path in scripts/muse-review-engine.\n- nateprich-projects/command-center#1701 (independent): Draft adds credentials _PLAN_DIRECT_ACTIONS entry for plan_escalation_matches while sibling fixes finished_by_comments withholding and queue listing.\n- nateprich-projects/command-center#25 (independent): Draft fixes escalation-scan credentials direct table while sibling builds remote MCP connector tool surface and deployment.\n- nateprich-projects/command-center#75 (independent): Draft fixes escalation-scan credentials direct table while sibling reads Claude plan-usage file and marks transcript fallback estimated.\n\n## Premises\n\n- On main efb128d83 funnel.plan_escalation_matches returns [] for Rotate the deploy credentials during cutover while We will rotate the API key before the deploy returns a credentials hit. (label: measured; evidence: nateprich-projects/command-center#1739 body reproduction on main efb128d83)\n- _PLAN_DIRECT_ACTIONS has data-migration and authorisation direct-action entries but no credentials entry. (label: inferred; evidence: nateprich-projects/command-center#1739 body root-cause statement)\n- #1681 and #1722 establish spelling every verb inflection literally in direct-action tables. (label: inferred; evidence: nateprich-projects/command-center#1681 and #1722 cited in #1739)\n- After #1721 a scan-only escalation hit raises the review tier rather than holding the plan. (label: inferred; evidence: nateprich-projects/command-center#1721 cited in #1739 body)\n- Broad verb-proximity matching would re-admit #1643 non-proposals that still over-escalate per #1679. (label: inferred; evidence: nateprich-projects/command-center#1643 and #1679 cited in plan Rejected)\n\nProposed class: Broken\n\n## Decided from precedent\n\nNone recorded.\n\n## Decided by the agent\n\n- Mirror the data-migration and authorisation verb stems and spell every inflection literally. (rejected: Cover only rotate and its four inflections for this ticket.; Mirroring keeps category tables consistent and literal inflections follow the #1681/#1722 convention against stemming.)\n- Reuse exactly the existing credentials matcher term list with no added synonyms. (rejected: Add new credential synonyms beyond the current matcher list.; Reusing the canonical term list fixes only the missing direct table without widening match scope.)\n- Define data-migration, authorisation, and credentials as the verb-carrying categories. (rejected: Define only the categories that already have direct-action tables.; Those three are the observed verb-carrying shapes and the guard must fail while any lacks a table.)\n- Cover rotate inflections with credential nouns plus a sibling-citation non-proposal counter-case. (rejected: Cover only the reported Rotate sentence with no counter-case.; Explicit inflections follow #1681/#1722 and the counter-case pins the #1643/#1679 non-proposal rule.)\n- Fix only the credentials table here and file any other missing tables as follow-up ideas. (rejected: Expand this ticket to add every missing direct-action table the guard surfaces.; Keeps a Broken fix narrow and reviewable while preserving extra work as separately shaped ideas.)\n\n\n<!-- command-center-provenance -->\n\n```json\n{\n  \"agent\": \"muse\",\n  \"at\": \"2026-09-27T17:12:41.750309+00:00\",\n  \"run\": \"9905e1348d4a\",\n  \"voice\": \"agent\"\n}\n```",
+    "escalation_reasons": [
+      "credentials"
+    ],
+    "plan_is_escalated": []
+  },
+  {
+    "source": "escalation_plan_region_holds.json[1]",
+    "body": "One TickTick Open API transport for operational alerts, shared by command-center and member repos\n\nWhat it is:\nOne shared sender for operational failure alerts through the TickTick Open API, called by command-center and member repos through thin adapters, running in both Mac local runs with Keychain-held credentials and GitHub Actions runs with the existing authorized secret. It covers verified refresh-token rotation continuity in both runtimes including durable usability of any rotated refresh token in later Actions runs, a concurrency-safe uncertain-send path leaving exactly one TickTick task under timeout retries, overlapping retries, unknown outcomes, simultaneous Mac and Actions sends, lease expiry, and delayed TickTick visibility beyond the bounded reconcile window, with live tests against real TickTick behavior proving the single-task outcome. Scope stays operational alerts only, and the work changes no credentials, settings, integrations, permissions, or spending; where present access cannot durably persist a rotated token, the transport fails safely.\n\nTicket-sized work:\n1. Define the shared send interface, caller adapter shape, operational-alert-only guardrails, rollout assumptions, and rollback behavior.\n2. Specify and verify the dual-runtime auth and refresh path, including how a rotated refresh token stays durable and usable for later runs in each runtime.\n3. Establish with present-access evidence whether the existing authorized Actions credential and permission can persist the rotated token for later runs, and specify the safe-failure behavior when that access is absent.\n4. Specify the shared cross-runtime coordination contract for sends, covering acquisition, lease expiry, retries after unknown outcomes, and handling of delayed visibility beyond the bounded reconcile window.\n5. Specify transient-state rules for any local retry spool or omit the spool, covering ownership, retention, cleanup, crash recovery, and unknown-outcome handling consistent with GitHub as state of record.\n6. Specify and run live tests against real TickTick behavior proving one task remains under overlapping and delayed retries, simultaneous Mac and Actions sends, unknown outcomes, and lease expiry with retries.\n\nRejected:\n- Pre-create title lookup alone as deduplication, because send-back reasoning falsified it: overlapping timeout retries and late-visible prior creates can still leave duplicates.\n- Treating a proposed future live test as evidence of present Actions secret-write access, because send-back reasoning states it is not evidence of present access.\n- Adding a new credential, expanded permission, new integration, or spending change for rotation write-back, because the send-backs authorize none.\n- Verifying rotation in only one runtime, because the send-backs require verified continuity in both local Keychain runs and Actions runs.\n- Keeping a local retry spool as state of record or without ownership, retention, cleanup, crash recovery, and unknown-outcome rules reconciled with GitHub as state, because it conflicts with the GitHub-is-state rule.\n- Relying on a bounded reconcile window alone while leaving delayed visibility beyond the bound unhandled, because the send-backs require no duplicate remains in that case.\n- Broadening the sender beyond operational alerts, because the scope is fixed to operational alerts only.\n- Per-repo duplicate senders instead of one shared transport with thin adapters, because it duplicates auth, rotation, and deduplication behavior across callers.\n\n## Siblings checked\n\n- nateprich-projects/command-center#1125 (independent): draft builds shared TickTick alert transport while sibling reviews funnel-watch costs for week ending 2026-10-03\n- nateprich-projects/command-center#1557 (independent): draft builds shared TickTick alert transport while sibling works tickets in Saturday-morning timebox before noon reset\n- nateprich-projects/command-center#1590 (independent): draft builds shared TickTick alert transport while sibling moves standard tier back to Muse after contributor readings\n- nateprich-projects/command-center#162 (independent): Draft builds shared TickTick alert transport with rotation/dedup; nightly pricing/release watch shares no sender work and needs no ordering.\n- nateprich-projects/command-center#1637 (independent): Draft builds shared TickTick alert transport; iCloud workspace eviction hang fix shares no auth/send work and needs no ordering.\n- nateprich-projects/command-center#1673 (independent): Draft builds shared TickTick alert transport; pace-gate contributor pricing display shares no alert-send work and needs no ordering.\n- nateprich-projects/command-center#1744 (independent): Draft builds shared TickTick alert transport while sibling redesigns funnel.py begin load path with no shared work or ordering.\n- nateprich-projects/command-center#1745 (independent): Draft builds shared TickTick alert transport while sibling redesigns funnel.py brief sections with no shared work or ordering.\n- nateprich-projects/command-center#1746 (independent): Draft builds shared TickTick alert transport while sibling redesigns engine/shape.py shaping pipeline with no shared work or ordering.\n- nateprich-projects/command-center#1747 (independent): TickTick alert transport shares no work or ordering with review_queue/collect listing redesign.\n- nateprich-projects/command-center#1748 (independent): TickTick alert transport shares no work or ordering with decline/block record redesign.\n- nateprich-projects/command-center#1749 (independent): TickTick alert transport shares no work or ordering with escalation-scan redesign.\n- nateprich-projects/command-center#1750 (independent): Draft builds shared TickTick alert transport while #1750 redesigns heartbeat cost/health readers, separate work with no ordering.\n- nateprich-projects/command-center#1762 (independent): Draft builds TickTick sender with rotation/dedup while #1762 fixes silent Xcode-license lane stoppage, draft needs no lane fix.\n- nateprich-projects/command-center#1767 (independent): Draft handles TickTick auth/coordination while #1767 brokers runner git/gh calls without model-shell credentials, separate domains.\n- nateprich-projects/command-center#1837 (independent): draft builds TickTick alert transport with rotation/dedup while sibling defines review-evidence judging, no shared work or ordering\n- nateprich-projects/command-center#1838 (independent): draft builds TickTick alert transport while sibling scopes re-review to prior findings plus fix diff, no shared work or ordering\n- nateprich-projects/command-center#1839 (independent): draft builds TickTick alert transport while sibling names review focus at shaping and routes hotspot fixes, no shared work or ordering\n- nateprich-projects/command-center#1840 (independent): Draft builds shared TickTick operational-alert transport while sibling counts unrequested PR changes, sharing no work or ordering.\n- nateprich-projects/command-center#1890 (independent): Draft builds shared TickTick sender while sibling fixes Muse-login expiry detection and notice, with no shared implementation and draft needs nothing from it.\n- nateprich-projects/command-center#1896 (independent): Draft builds TickTick transport while sibling marks overridden review requirements superseded, sharing no work or ordering.\n- nateprich-projects/command-center#1967 (independent): Draft builds shared TickTick alert transport while sibling adds Claude usage bar to funnel dashboard, with no shared work or ordering.\n- nateprich-projects/command-center#2003 (independent): Draft builds shared TickTick alert transport while sibling pilots Muse standard-tier implementation, with no shared work or ordering.\n- nateprich-projects/command-center#2013 (independent): Draft builds shared TickTick alert transport while sibling prunes growing agent session logs, with no shared work or ordering.\n- nateprich-projects/command-center#2061 (independent): Draft builds shared TickTick alert transport while sibling fixes intermittent quota-hold test on self-hosted runner.\n- nateprich-projects/command-center#2065 (independent): Draft builds shared TickTick alert transport while sibling fixes evidence lines misread as PR closing keywords.\n- nateprich-projects/command-center#2072 (independent): Draft builds shared TickTick alert transport while sibling sets review-path replay acceptance rule.\n- nateprich-projects/command-center#2078 (independent): Draft builds shared TickTick operational-alert transport while sibling adds second Muse reviewer approval, with no shared work or ordering.\n\n## Premises\n\n- TickTick Open API can create operational-alert tasks from Mac local runs and GitHub Actions runs. (label: inferred; evidence: nateprich-projects/command-center#2029 thread 2026-10-01T16:29:31Z cites TickTick task creation and tests against real TickTick behavior.)\n- Mac local runs hold TickTick credentials in Keychain and Actions runs use an existing authorized secret. (label: inferred; evidence: nateprich-projects/command-center#2029 thread 2026-09-30T23:02:02Z and 2026-10-01T18:43:14Z assert local Keychain runs and existing authorized Actions secret.)\n- TickTick refresh tokens can rotate and any rotated token must remain durable and usable for later runs in each runtime. (label: inferred; evidence: nateprich-projects/command-center#2029 thread 2026-10-01T16:29:31Z requires verified rotation continuity and durable rotated-token storage in both runtimes.)\n- Timeout retries, overlapping retries, unknown outcomes, simultaneous Mac and Actions sends, lease expiry, and delayed TickTick visibility beyond the bounded reconcile window can otherwise leave duplicate tasks. (label: inferred; evidence: nateprich-projects/command-center#2029 thread 2026-10-01T21:03:16Z lists those cases including delayed visibility beyond the 10-minute bound.)\n- GitHub is the state of record for shared send coordination and any transient retry state. (label: inferred; evidence: nateprich-projects/command-center#2029 thread 2026-10-01T18:43:14Z cites the GitHub-is-state rule for spool reconciliation.)\n\nProposed class: Improve\n\n## Risk rationale\n\n- credentials: Plan handles TickTick refresh tokens and durable write-back of rotated tokens to the Actions secret.\n- authorisation: Plan depends on whether the existing Actions credential and permission can update the secret.\n- concurrency: Plan must leave one task under simultaneous Mac and Actions sends, overlapping retries, unknown outcomes, and lease expiry.\n\n## Decided from precedent\n\n- TickTick receives exactly operational failure alerts as genuine tasks, never ideas or backlog items. (source: plan.md Surfaces: TickTick receives exactly one thing: operational failure alerts, which are genuine tasks.)\n\n## Decided by the agent\n\n- The Actions run overwrites the existing authorized Actions secret in place with the rotated refresh token using only its existing identity, so later runs read the new value. (rejected: Persist the rotated token to a new secret, repo file, or local artifact, or mint a new credential to perform the write.; One in-place secret keeps GitHub as the state of record with no second source and stays within the no-new-credential and never-commit-secrets bounds.)\n- Evidence is a recorded run where the existing Actions identity updates the existing secret and a later run reads it back with values redacted, and without it the sender retains the prior token and raises a non-secret failure without write-back. (rejected: Treat planned future tests or vendor docs as present-access proof, and on missing access retry the write or cache the token outside the secret.; Only an observed write-then-read proves present permission can persist rotation, and retaining the old token with a visible failure avoids silent loss or insecure fallback.)\n- Run a live rotation drill in each runtime that forces a refresh, persists via that runtime path, then proves a following run authenticates with the rotated token. (rejected: Verify rotation in one runtime only, or from documentation and mocks without a live refresh and follow-on auth in each runtime.; Separate live drills catch Keychain versus secret persistence gaps, and the follow-on auth proves the rotated token remains usable for later runs.)\n- Use one GitHub-stored alert claim per alert with atomic first-writer acquisition and TTL lease expiry plus reconcile-before-takeover. (rejected: Allow independent Mac and Actions sends reconciled later by TickTick title lookup.; GitHub is the only shared state both runtimes already write, and send-backs falsified title-lookup-alone because overlapping and late-visible creates still duplicate.)\n- Retries must re-acquire the same GitHub claim lease and reconcile TickTick state before any re-create, holding the lease through confirmation. (rejected: Retry by immediately re-creating the TickTick task on timeout or unknown response.; An unknown outcome may hide a succeeded create, so only lease-gated reconcile-before-create prevents a second task under overlapping retries.)\n- The lease holder renews the GitHub claim past the bounded window until TickTick confirms exactly one task, deleting any duplicate before release. (rejected: Release the claim at the bounded reconcile deadline and leave late-appearing duplicates in place.; Send-backs require no duplicate remains beyond the bound and falsified bounded-reconcile-alone, so release must wait on single-task confirmation.)\n- Set the bounded reconcile window to 10 minutes for duplicate detection and delayed-visibility handling. (rejected: Use an unbounded window or an unspecified length with no testable bound.; A fixed 10-minute bound preserves the value already named in the thread while keeping reconcile bounded and live-testable.)\n- Omit any transient local retry spool so all send retry and unknown-outcome state lives only in the shared GitHub coordination record. (rejected: Keep a Mac-local transient spool with defined ownership retention cleanup crash recovery and unknown-outcome rules.; Only GitHub state is visible to both Mac and Actions so a local spool cannot prevent cross-runtime duplicates and adds crash and retention failure modes.)\n- Require five live tests against real TickTick each proving exactly one task remains under overlapping retries delayed visibility simultaneous Mac-and-Actions sends unknown outcomes and lease-expiry retries. (rejected: Accept mocked TickTick tests or a single happy-path live create without overlap delay cross-runtime unknown-outcome and lease cases.; Only live concurrent cross-runtime delayed and lease-expiry cases can falsify duplicate creation under real TickTick visibility and timing behavior.)\n- House the transport once in command-center as canonical source with thin caller adapters in member repos invoking the shared send interface. (rejected: Copy the full sender into each member repo with independent auth and retry logic.; One canonical source prevents drift in rotation and deduplication while thin adapters preserve caller independence.)\n- Record no credential, permission, integration, or spending changes with rollback to prior per-caller sends if verification fails. (rejected: Assume new access can be provisioned during rollout with forward-only fixes and no rollback.; Send-backs forbid new access and scope change, so rollout must be reversible without widening authority.)\n\n<!-- command-center-shape-risk -->\n\n```json\n{\n  \"declared\": [\n    \"credentials\",\n    \"authorisation\",\n    \"concurrency\"\n  ],\n  \"scan\": [\n    \"authorisation\"\n  ]\n}\n```\n\n\n<!-- command-center-provenance -->\n\n```json\n{\n  \"agent\": \"muse\",\n  \"at\": \"2026-10-02T03:56:53.786017+00:00\",\n  \"run\": \"a6243d707c32\",\n  \"voice\": \"agent\"\n}\n```",
+    "escalation_reasons": [
+      "authorisation"
+    ],
+    "plan_is_escalated": []
+  },
+  {
+    "source": "escalation_plan_scan_only_holds.json[0]",
+    "body": "Repair human-step filing so a lane cannot re-file a human step Nate closed as not planned and re-block the ticket he unblocked, and so agent-doable work never rides inside a human step.\n\nWhat it does:\n- Before filing a Needs:human sub-issue that would block its parent ticket, read from GitHub the same parent's Needs:human sub-issues closed as not planned, compare the requested human-only action against each, and on a same-action match refuse the new filing or route it to review instead of filing it as a blocking human step.\n- Split mixed filings: a request containing a human-only action plus agent-doable work files the agent-doable part as a separate Needs:agent ticket; the human step carries only the human-only action.\n- Leave a record of a refused/routed repeat on the parent or attempted filing so the next run does not retry the same filing.\n\nTicketable acceptance:\n- Replaying the Fantasy-GM sequence from the idea (#329 closed not planned, then #336 asking the same probe plus a docs sentence) does not re-block #312; the probe repeat is refused/routed and the docs sentence files as Needs:agent.\n- Unit tests against fixtures cover a same-action repeat, a different-action non-repeat, and a mixed human-plus-agent filing.\n- Verification runs the canonical test command `python3 -m pytest`.\n\nRejected:\n- Fixing only the review trigger (the unsure inferred-premise reject and missing-sentence reject on PR #320): removes one trigger but leaves the refiling path open, so the guard is still required.\n- A local cache, journal, or denylist of closed human steps: violates GitHub-is-state; the sibling set is derived from GitHub on each filing.\n- A new label for repeat human steps: the label set is closed at needs-shaping and blocked without a plan.md change, and Needs:human plus closed not planned already encodes the state.\n- Auto-reopening the closed-not-planned sibling or silently dropping the repeat: reopening overrides Nate's close, and a silent drop leaves no record to stop the next run retrying.\n- Keeping agent-doable sentences inside the human ticket: Needs routes the owner, so agent work inside Needs:human waits in Nate's queue instead of running as agent work.\n\n## Siblings checked\n\n- nateprich-projects/command-center#1125 (independent): Draft guards human-step refiling while sibling is a no-code token-cost analysis of funnel-watch runs.\n- nateprich-projects/command-center#1194 (independent): Draft guards repeat human-step filing while sibling builds a review-prompt replay harness with local corpus.\n- nateprich-projects/command-center#1272 (independent): Draft changes the Needs:human filing path while sibling builds a read-only metrics tab that never gates or files.\n- nateprich-projects/command-center#1538 (independent): draft guards Needs:human repeat filing and mixed-split while #1538 repairs escalation/marker/decline/landedness predicates with no shared work or ordering\n- nateprich-projects/command-center#1540 (independent): draft builds a filing guard while #1540 is evidence-only GraphQL spend measurement with no behavior change\n- nateprich-projects/command-center#1557 (independent): draft guards human-step filing while #1557 adds a Saturday Claude implement lane in begin/packet/routines\n- nateprich-projects/command-center#1581 (independent): Draft guards human-step refiling repeats while #1581 splits Muse shape calls and backoffs shape/breakdown, with no shared work or ordering.\n- nateprich-projects/command-center#1582 (independent): Draft changes GitHub human-step filing while #1582 adds a machine-local run-keeper reap of leaked Codex MCP processes, disjoint surfaces.\n- nateprich-projects/command-center#1591 (independent): Draft reads the parent's closed-not-planned Needs:human sub-issues at filing time while #1591 narrows begin's Project load, neither needing the other.\n- nateprich-projects/command-center#1595 (independent): draft guards Needs:human filing with repeat check and human/agent split while sibling fixes brief null-vs-empty publication and dashboard rendering\n- nateprich-projects/command-center#1602 (independent): draft guards human-step refiling while sibling deploys connector container/env and reworks connector auth\n- nateprich-projects/command-center#162 (independent): draft guards human-step refiling and splitting while sibling builds nightly pricing/release watch with TickTick notify\n- nateprich-projects/command-center#1626 (independent): Draft guards human-step refiling against closed-not-planned siblings while #1626 fixes review-lister unsure-reject on future-evidence premises.\n- nateprich-projects/command-center#1632 (independent): Draft adds a filing-time repeat/split guard while #1632 only corrects the AGENTS.md shape-split paragraph.\n- nateprich-projects/command-center#1637 (independent): Draft reads GitHub closed-not-planned human steps at filing while #1637 bounds runner timeouts and relocates Codex clones.\n- nateprich-projects/command-center#1638 (independent): draft checks closed-not-planned human-step repeats and splits agent work while sibling guards claim release/push and plants ticket branch\n- nateprich-projects/command-center#1655 (independent): draft guards human-step refiling and splitting while sibling restores token_usage/D4 and runs the metrics backfill\n- nateprich-projects/command-center#25 (independent): draft guards human-step filing while sibling builds the remote MCP connector over funnel.py\n\n## Premises\n\n- Fantasy-GM#329 was a Needs:human step for restoring FantasyPros quota and running a live two-hour drift probe, closed as not planned for #312 with Nate's approval. (label: inferred; evidence: nateprich-projects/command-center#1658 idea body; nateprich-projects/Fantasy-GM#329; nateprich-projects/Fantasy-GM#312)\n- Fantasy-GM#336 asked for the same probe plus a docs sentence, re-blocked #312, and was closed by Nate as a repeat. (label: inferred; evidence: nateprich-projects/command-center#1658 idea body; nateprich-projects/Fantasy-GM#336; run e9646281e2af)\n- PR #320 review rejected on an unsure inferred-premise probe about the #1626 deadlock and on a missing record sentence. (label: inferred; evidence: nateprich-projects/command-center#1658 idea body; PR #320 review; #1626 deadlock)\n- A parent ticket's Needs:human sub-issues closed as not planned are readable from GitHub before filing a new blocking human step. (label: inferred; evidence: nateprich-projects/command-center#1658 draft What it does; nateprich-projects/Fantasy-GM#312 sub-issues)\n- Needs routes the owner, so Needs:human work waits in Nate's queue while Needs:agent work runs as agent work. (label: inferred; evidence: nateprich-projects/command-center#1658 draft Rejected; no agents_md in packet)\n- The docs sentence in the repeat filing is agent-doable work separable from the human-only probe action. (label: inferred; evidence: nateprich-projects/command-center#1658 idea body and draft acceptance; nateprich-projects/Fantasy-GM#336)\n- The label set is closed at needs-shaping and blocked without a plan.md change. (label: inferred; evidence: nateprich-projects/command-center#1658 draft Rejected; no plan_md in packet)\n- GitHub-is-state forbids a local cache, journal, or denylist for closed human steps. (label: inferred; evidence: nateprich-projects/command-center#1658 draft Rejected; no plan_md or agents_md in packet)\n- Verification runs the canonical test command python3 -m pytest. (label: inferred; evidence: nateprich-projects/command-center#1658 draft acceptance; no agents_md in packet)\n\nProposed class: Broken\n\n## Decided from precedent\n\n- Classify each part against the shared capability boundary and file agent-workable work as a separate Needs:agent ticket while Needs:human carries only the human-only action. (source: AGENTS.md Capability boundary (confirmed by Nate 2026-09-07) and plan.md Origin, Risk and Needs plus ticket Risk and Needs select work lane and owner.)\n\n## Decided by the agent\n\n- Run the check in the shared filing path immediately before creating any blocking Needs:human sub-issue, reading siblings from GitHub. (rejected: Let each lane implement the repeat check from prose in its own prompt.; Two vendors implementing from prose drift silently, so the shared program must own the transition.)\n- Match only on the same parent when the sibling is Needs:human closed not planned and the requested human-only action names the same operation on the same resource. (rejected: Treat any closed human step with overlapping wording as a repeat.; A narrow same-parent same-operation rule stops the #329/#336 repeat without blocking legitimate new human steps.)\n- Hard-refuse the blocking filing and post a parent-issue comment citing the closed-not-planned sibling and requested action. (rejected: Route the repeat to review as a non-blocking ticket for a second look.; Nate already closed the action as not planned, so re-queueing wastes his throughput and risks re-blocking the ticket he unblocked.)\n",
+    "escalation_reasons": [
+      "concurrency",
+      "data-migration"
+    ],
+    "plan_is_escalated": []
+  },
+  {
+    "source": "escalation_plan_scan_only_holds.json[1]",
+    "body": "Proposed class: Investigate\nPossible defect: The Codex implement session runs as Nate with Keychain and SSH, so the model can run gh and push beyond prompt restraint.\n\n## What it is\nTicket 1 — Record the real implement launch path: read codex_run.py sandbox and network settings and one live command-center-tickets automation.toml with its prompt, recording which file was read; record which process launches the model shell, which runner calls must keep working from that shell (begin, finish-ticket), and which Codex app-level settings would also affect non-implement use; post the record on the parent issue; no behaviour change.\nTicket 2 — Compare viable levers on their merits and file build follow-ups: document the observed jeffy separate-user setup as readable without admin work, Codex app sandbox tightening with its app-wide blast radius, and moving runner git and gh calls out of the model shell, and GitHub branch rules requiring a pull request to update `main` in each member repo (command-center's `main` had no protection and no rulesets on 2026-09-27; record which member repos' plans allow branch rules, and whether a rule breaks `funnel merge`); record credential separation, durability effect, and admin cost for each; a lever is viable when it would stop model-shell gh and push while keeping begin and finish-ticket working; post the comparison on the parent issue and file each viable build as a new Ideas item linking back; no behaviour change, findings in GitHub only, no local state.\n\n## Rejected\n- PATH-scoped gh and funnel refuse plus git push allowlist around a Command Center-owned implement subprocess: cannot be built, falsified twice by direct observation on 2026-09-24 and 2026-09-25 that the Codex app launches the session and Command Center owns no subprocess to wrap, and refuse-outright would block the automation's own required begin and finish-ticket calls from the same shell.\n- Refusal-count tripwire gating isolation behind a threshold: the counter cannot observe absolute-path gh bypass pinned as known non-interception, so zero refusals is consistent with full exposure; per the 2026-09-25 correction isolation is compared on merits, not deferred behind this count.\n- Building separate-user isolation now without launch-path evidence: premature while Codex app-level effects and runner-call placement are unverified; the jeffy precedent is input to the comparison, not a build order.\n- Hardening scripts/muse-implement: retired since 2026-09-22 while Codex implements both tiers, so it guards no live session.\n- Env-strip of GH_TOKEN and finish-only push rights: env-strip removes nothing because keyring auth and SSH push do not read it, and finish-only breaks mid-run durability.\n- Checked-in shims, logs, or absolute Mac paths, local-only or comment-scattered counts, and historical backfill: leak layout, break checkouts, violate GitHub-is-state, go stale or unsummable, and no refusal record exists to backfill.\n- Broken or Maintenance class: no incident, no failing lane, and no known expiry date.\n\n## Siblings checked\n\n- nateprich-projects/command-center#1125 (independent): Draft records Codex launch path and lever comparison while #1125 reads funnel-watch cost week via heartbeat deltas and #684 log, no shared source or write.\n- nateprich-projects/command-center#1194 (independent): Draft reads codex_run.py plus automation.toml with no behaviour change while #1194 builds review replay tool plus journal-seeded corpus, different code paths.\n- nateprich-projects/command-center#1272 (independent): Draft posts launch record and isolation comparison on parent issue while #1272 builds metrics.py series and Execution tab, no shared mechanism or output.\n- nateprich-projects/command-center#1538 (independent): draft records codex_run.py/automation.toml launch path and compares isolation levers while #1538 repairs plan_escalation_matches/marker/decline/landedness predicates\n- nateprich-projects/command-center#1540 (independent): draft investigates Codex model-shell gh/push exposure while #1540 measures begin GraphQL spend/reserve via rateLimit and heartbeat api_cost\n- nateprich-projects/command-center#1557 (independent): draft investigates Codex launch path with no behaviour change while #1557 builds the Saturday Claude begin/packet/routine implement lane\n- nateprich-projects/command-center#1581 (independent): Draft records Codex launch path and compares isolation levers while sibling splits shape calls and enforces backoff; no shared work or ordering.\n- nateprich-projects/command-center#1582 (independent): Draft investigates launch path and isolation options with no behavior change while sibling adds a run-keeper reap pass for leaked MCP processes; disjoint mechanisms.\n- nateprich-projects/command-center#1591 (independent): Draft reads codex_run.py and automation prompts and compares levers while sibling scopes begin Project paging in funnel.py; no shared file or gate.\n- nateprich-projects/command-center#1595 (independent): draft records Codex launch path and compares isolation levers while sibling fixes brief null-vs-empty publication and dashboard rendering\n- nateprich-projects/command-center#1602 (independent): draft investigates implement launch path with no behaviour change while sibling deploys connector container/env and fixes registrable auth\n- nateprich-projects/command-center#162 (independent): draft records implement launch path and lever comparison while sibling builds nightly pricing/release watch with TickTick notify\n- nateprich-projects/command-center#1626 (independent): Draft records Codex launch path and compares isolation levers while #1626 fixes review-lister unsure-reject for later-ticket evidence.\n- nateprich-projects/command-center#1632 (independent): Draft investigates implement launch path with no file edits while #1632 corrects the AGENTS.md shape-split paragraph only.\n- nateprich-projects/command-center#1637 (independent): Draft records launch path and compares gh/push levers while #1637 bounds finish timeouts and relocates clones outside iCloud.\n- nateprich-projects/command-center#1638 (independent): draft records Codex launch path and compares isolation levers with no behaviour change while sibling implements claim holder guard and branch-at-bind in engine/funnel\n- nateprich-projects/command-center#1655 (independent): draft investigates implement launch path and isolation levers while sibling restores token_usage/D4 and runs the metrics backfill\n- nateprich-projects/command-center#1658 (independent): draft investigates implement launch path and isolation levers while sibling guards Needs:human repeat filing and human/agent split\n- nateprich-projects/command-center#25 (independent): Draft records Codex launch path and compares isolation levers while sibling builds remote MCP connector over funnel.py, with no shared work.\n\n## Premises\n\n- Codex implement session runs as Nate with Keychain and SSH so model can run gh and push beyond prompt restraint. (label: measured; evidence: plan.md Single-in-motion and probe command-center#10 2026-09-05; #1195 thread 2026-09-25T21:09Z exposure question)\n- Codex app launches implement session from its own shell via automation.toml prompt; Command Center owns no subprocess to wrap. (label: measured; evidence: ~/.codex/automations/command-center-tickets-*/automation.toml read 2026-09-25 per #1195 thread 2026-09-25T21:09Z)\n- Runner calls begin and finish-ticket run from model shell and must keep working, so viability preserves both. (label: measured; evidence: #1195 thread 2026-09-25T03:45Z points 1-2: model runs funnel.py begin and finish-ticket from same shell)\n- Codex implements both tiers since 2026-09-22 and scripts/muse-implement is retired guarding no live session. (label: documented; evidence: AGENTS.md Execution rules: Codex implements both tiers and Muse judges since 2026-09-22 (Nate, #1315))\n- jeffy separate-user setup exists on this machine and is readable without admin work for comparison input. (label: inferred; evidence: #1195 thread 2026-09-25T21:09Z correction: jeffy already runs as its own macOS user)\n- gh uses macOS keyring with no GH_TOKEN set and git pushes over SSH, so env-strip removes nothing. (label: measured; evidence: idea body #1195: gh auth status observation and SSH push configuration recorded by prior shaping run)\n- codex_run.py carries sandbox and network settings and Codex app settings apply per app with non-implement blast radius. (label: inferred; evidence: #1195 thread 2026-09-25T03:45Z cites codex_run.py SANDBOX_TYPE workspace-write and NETWORK_ACCESS True)\n\nProposed class: Investigate\n\n## Decided from precedent\n\nNone recorded.\n\n## Decided by the agent\n\nNone recorded.\n\n## Needs Nate\n\n- Exposure: answered by Nate 2026-09-27 ~03:20 PDT (relayed by Claude in session): accepted for now, while this investigation runs and until a build follow-up lands, with a pull-request-required branch rule added to ticket 2's levers. Verbatim: \"Accept, add branch rules (Recommended): approve it and accept the exposure for now, but add 'require a pull request on main' to the options it compares.\"\n",
+    "escalation_reasons": [
+      "data-migration"
+    ],
+    "plan_is_escalated": []
+  },
+  {
+    "source": "escalation_plan_scan_only_holds.json[2]",
+    "body": "Review judges each requirement literally against the diff with no handling for recorded departures, so a PR that lists a justified departure in its body Departures section is rejected for that departure on every review.\n\nWhat this changes:\n- Parse the PR body Departures section in the review path and make each entry available during requirement evaluation alongside the diff and ticket text.\n- Apply the settled departure handling to departed requirements instead of marking them unmet, preserving the departure text and reason in the verdict record.\n- Cover the two observed cases from PR #1649: the shaped allowlist entry and reconcile parity on the fixture pinning the 7-day anchor window.\n- Add unit tests for parsing and verdict handling including malformed entries, plus a regression replay using the recorded #1649 packet.\n- Acceptance: a re-review of the same diff and body no longer lists a recorded departure verbatim as blocking requirement unmet.\n\nRejected:\n- Requiring a ticket-text edit for every wording slip: leaves any slightly wrong text deadlocking in review on the begin path.\n- Removing departures from the implementer answer and PR body: deletes the reasoned signal instead of making review read it.\n- Treating any Departures text as automatically satisfied without reason or evidence: weakens the review bar that checks diff against plan.\n- Relying on watch-posted prose to clear a departure: the 05:46Z prose was already ignored by the 06:37Z verdict, so prose alone does not clear it.\n- Deferring to #1626: that covers post-deploy evidence for an inferred premise proved by a later sibling ticket, not a departure recorded in the PR body.\n\n## Siblings checked\n\n- nateprich-projects/command-center#1125 (independent): draft parses PR Departures in the review path while sibling posts a week-two funnel-watch cost analysis with no code change\n- nateprich-projects/command-center#1194 (independent): draft changes review verdict handling for Departures entries while sibling builds a generic replay tool plus #237 corpus without changing verdict logic\n- nateprich-projects/command-center#1195 (independent): draft changes review Departures evaluation while sibling records the Codex launch path and compares isolation levers with no behaviour change\n- nateprich-projects/command-center#1272 (independent): draft parses PR-body Departures in engine/review.py while #1272 builds a read-only Execution metrics tab that gates nothing\n- nateprich-projects/command-center#1538 (independent): draft adds Departures handling to review verdicts while #1538 repairs shape-time escalation/marker/decline/landedness predicates\n- nateprich-projects/command-center#1540 (independent): draft changes review requirement evaluation while #1540 is an evidence-only GraphQL spend investigation with no shared code\n- nateprich-projects/command-center#1557 (independent): Draft adds Departures parsing to review verdicts while #1557 adds a Saturday Claude implement lane in begin, no shared work.\n- nateprich-projects/command-center#1581 (independent): Draft fixes review handling of recorded departures while #1581 splits Muse shape calls and shape backoff, leaving review unmoved.\n- nateprich-projects/command-center#1582 (independent): Draft changes review requirement evaluation while #1582 adds a machine-local MCP process reaper, disjoint surfaces.\n- nateprich-projects/command-center#1595 (independent): draft parses PR-body Departures in review verdicts while sibling changes brief null-vs-empty publication and dashboard rendering\n- nateprich-projects/command-center#1602 (independent): draft handles recorded Departures in engine/review.py while sibling deploys connector container and reworks auth registration\n- nateprich-projects/command-center#162 (independent): draft fixes review rejection of justified departures while sibling builds nightly pricing/release watch with TickTick notify\n- nateprich-projects/command-center#1626 (independent): draft parses PR-body Departures for verdict handling while #1626 exempts inferred premises pointing at unrunnable later tickets\n- nateprich-projects/command-center#1637 (independent): draft changes review Departures parsing while #1637 bounds implement _run timeouts and relocates clones outside iCloud\n- nateprich-projects/command-center#1638 (independent): draft changes review Departures handling while #1638 adds claim holder guards and branch-at-bind in implement path\n- nateprich-projects/command-center#1655 (independent): draft parses PR Departures in engine/review.py while sibling restores token_usage/D4 and runs metrics backfill\n- nateprich-projects/command-center#1658 (independent): draft handles Departures in review verdicts while sibling guards Needs:human repeat filing and mixed-split\n- nateprich-projects/command-center#25 (independent): draft fixes review Departures handling while sibling builds remote MCP connector over funnel.py\n\n## Premises\n\n- Review path judges each requirement literally against the diff with no handling for recorded departures. (label: measured; evidence: Idea reports command `grep -i departure engine/review*.py` finds nothing in engine/review.py.)\n- Implementer routines require departures in the answer and write them into the PR body Departures section. (label: inferred; evidence: Idea cites routines/codex-work.md and engine/implement.py with no file:line quoted.)\n- PR #1649 listed the shaped allowlist entry and reconcile parity on the 7-day anchor fixture as reasoned Departures yet was rejected for both at 05:01Z and 06:37Z and once earlier. (label: measured; evidence: Record nateprich-projects/command-center#1649 verdicts at 2026-09-27 05:01Z and 06:37Z plus one earlier rejection.)\n- Watch-posted canonical Run evidence and prose at 05:46Z did not clear the departures and the 06:37Z verdict still listed both verbatim twice as blocking requirement unmet. (label: measured; evidence: Record nateprich-projects/command-center#1649 05:46Z watch post versus 06:37Z verdict blocking list.)\n- Both #1649 departures are justified because shaped is not a funnel.py subcommand and the orphan-age difference is the merged #1608 design. (label: inferred; evidence: PR nateprich-projects/command-center#1649 body Departures reasons quoted in idea with no file:line.)\n- Ticket #1626 covers post-deploy evidence for an inferred premise proved by a later sibling, not PR-body recorded departures. (label: inferred; evidence: Record nateprich-projects/command-center#1626 as described in idea open question and draft Rejected section.)\n\nProposed class: Broken\n\n## Decided from precedent\n\nNone recorded.\n\n## Decided by the agent\n\n- A recorded departure with a reason counts as met for its requirement with the departure text and reason preserved in the verdict record. (rejected: Count every departure as unsure or blocking, or route departed requirements to a human gate.; A reasoned body entry is checkable evidence the ticket text is wrong, and blocking on it reproduces the observed #1649 triple-reject deadlock on the begin path.)\n- Well-formed means the entry names the departed requirement plus a non-empty reason, and malformed or reasonless entries are ignored so the requirement is judged literally. (rejected: Accept any Departures text including bare names or empty reasons as clearing the requirement.; Requiring name plus reason keeps the diff-against-plan bar fail-closed while preserving the implementer reasoned signal for judges.)\n- Parse the PR body Departures section once in the review path and present each entry alongside the diff and ticket text during requirement evaluation with fresh re-parse on re-review. (rejected: Let each judge re-parse the body independently or hide raw departure text from judges behind the lister summary.; Single parse with shared presentation keeps lister and judges consistent and honors the fresh-read re-review rule without cross-stage drift.)\n- Only the PR body Departures section counts; watch-posted prose does not clear a departure. (rejected: Watch-posted departure prose counts alongside the PR body Departures section.; Technical default picks one canonical source, the PR body written by the implementer, and the 05:46Z prose already proved ignorable at 06:37Z.)\n- Ship parser plus verdict unit tests including malformed entries and a regression replay of the recorded #1649 packet. (rejected: Ship only unit tests with no replay of the recorded #1649 packet.; Replay proves the observed 05:01Z and 06:37Z failures no longer block while unit tests pin parsing and malformed handling, consistent with #1194 replay direction.)\n- Acceptance requires any re-review of the same diff and body, not a live re-review of PR #1649. (rejected: Acceptance requires a live re-review of PR #1649 itself.; A fresh read of the same diff and body proves the fix deterministically without waiting on live PR state, keeping depends_on empty.)\n",
+    "escalation_reasons": [
+      "concurrency",
+      "data-migration"
+    ],
+    "plan_is_escalated": []
+  },
+  {
+    "source": "escalation_plan_true_proposals.json[0]",
+    "body": "## What it is\n\nThis change will migrate the active schema and backfill the new column.\n",
+    "escalation_reasons": [
+      "data-migration"
+    ],
+    "plan_is_escalated": [
+      "data-migration"
+    ]
+  },
+  {
+    "source": "escalation_plan_true_proposals.json[1]",
+    "body": "## Decided by the agent\n\n- Rotate the access token during cutover.\n",
+    "escalation_reasons": [
+      "credentials"
+    ],
+    "plan_is_escalated": [
+      "credentials"
+    ]
+  },
+  {
+    "source": "escalation_plan_true_proposals.json[2]",
+    "body": "## What it is\n\nRotate the deploy credentials during cutover.\n",
+    "escalation_reasons": [
+      "credentials"
+    ],
+    "plan_is_escalated": [
+      "credentials"
+    ]
+  },
+  {
+    "source": "escalation_plan_true_proposals.json[3]",
+    "body": "## What it is\n\nThe plan rotates the deploy credentials during cutover.\n",
+    "escalation_reasons": [
+      "credentials"
+    ],
+    "plan_is_escalated": [
+      "credentials"
+    ]
+  },
+  {
+    "source": "escalation_plan_true_proposals.json[4]",
+    "body": "## What it is\n\nThe plan rotated the deploy credentials during cutover.\n",
+    "escalation_reasons": [
+      "credentials"
+    ],
+    "plan_is_escalated": [
+      "credentials"
+    ]
+  },
+  {
+    "source": "escalation_plan_true_proposals.json[5]",
+    "body": "## What it is\n\nRotating the deploy credentials during cutover.\n",
+    "escalation_reasons": [
+      "credentials"
+    ],
+    "plan_is_escalated": [
+      "credentials"
+    ]
+  },
+  {
+    "source": "escalation_plan_true_proposals.json[6]",
+    "body": "## What it is\n\nWe will rotate the API key before the deploy.\n",
+    "escalation_reasons": [
+      "credentials"
+    ],
+    "plan_is_escalated": [
+      "credentials"
+    ]
+  },
+  {
+    "source": "escalation_plan_true_proposals.json[7]",
+    "body": "## Decided by the agent\n\n- Permanently delete expired records after the retention cutoff.\n",
+    "escalation_reasons": [
+      "destructive"
+    ],
+    "plan_is_escalated": [
+      "destructive"
+    ]
+  },
+  {
+    "source": "escalation_plan_true_proposals.json[8]",
+    "body": "## Decided by the agent\n\n- Perform concurrent writes to partitioned records during replay.\n",
+    "escalation_reasons": [
+      "concurrency"
+    ],
+    "plan_is_escalated": [
+      "concurrency"
+    ]
+  },
+  {
+    "source": "escalation_plan_true_proposals.json[9]",
+    "body": "## What it is\n\nThis ticket will grant write permissions to the deploy key.\n",
+    "escalation_reasons": [
+      "authorisation"
+    ],
+    "plan_is_escalated": [
+      "authorisation"
+    ]
+  },
+  {
+    "source": "escalation_plan_true_proposals.json[10]",
+    "body": "## Decided by the agent\n\n- Add OAuth to the connector before cutover.\n",
+    "escalation_reasons": [
+      "authorisation"
+    ],
+    "plan_is_escalated": [
+      "authorisation"
+    ]
+  },
+  {
+    "source": "escalation_plan_true_proposals.json[11]",
+    "body": "## What it is\n\nEnter the deploy credentials at the runner prompt.\n",
+    "escalation_reasons": [
+      "credentials"
+    ],
+    "plan_is_escalated": [
+      "credentials"
+    ]
+  },
+  {
+    "source": "escalation_plan_true_proposals.json[12]",
+    "body": "## What it is\n\nRun destructive operations against the stale ticket branches.\n",
+    "escalation_reasons": [
+      "destructive"
+    ],
+    "plan_is_escalated": [
+      "destructive"
+    ]
+  },
+  {
+    "source": "escalation_scan_1167_recorded.md",
+    "body": "## What it is\n\n`escalation_reasons` scans the whole of an item's title and body for risk\nvocabulary. That body includes the evidence a capture pastes in — log\nexcerpts, error strings, job names — and the alternatives a plan explicitly\nrejects. So a report of a problem is scored on the words the problem used.\n\n**The family, from the last four days**, each verified false before it was\noverridden by hand. The pasted evidence:\n\n```\nResource deadlock avoided\nop=snapshot status=error while migrating the cache\nrunner=authorise-deploy-1 permission model unavailable\nstep=hard delete of the stuck branch skipped\n```\n\nEvery line above is something that happened. None of it is a statement about\nwhat this work will do: the change reads one region of a body instead of the\nwhole of it.\n\n> An earlier draft proposed a keyword list instead, which would have been a\n> hard delete of the gate's coverage.\n\nThat alternative is recorded and not taken.\n",
+    "escalation_reasons": [],
+    "plan_is_escalated": []
+  },
+  {
+    "source": "escalation_plan_1503_recorded.md",
+    "body": "## Rejected\n\n- Backfill or rewrite the log lines, or re-fire the lost review: forward-only per the #1393/#1182 convention.\n\n## Decided from precedent\n\n- The fix is forward-only and the 14 invalid-JSON lines and the lost escalated fire stand as the before-measurement. (source: sibling convention #1393 and #1182 no-backfill decisions)\n",
+    "escalation_reasons": [
+      "data-migration"
+    ],
+    "plan_is_escalated": []
+  },
+  {
+    "source": "escalation_scan_ff225_capture.md",
+    "body": "## What it is\n\nFF's 08:00 PDT scheduled advisory has now failed on three consecutive\nscheduled runs and nothing announced any of them. One line, copied from the\noperator log, is the whole of the evidence:\n\n```\n2026-09-20T15:02:11Z provider=sleeper op=migrate status=error\n```\n\nThis work reads a snapshot and announces a failure. It has no other property.\n",
+    "escalation_reasons": [],
+    "plan_is_escalated": []
+  }
+]

@@ -1833,7 +1833,10 @@ def test_brief_surfaces_agent_health_without_counting_it_as_a_decision(
     )
     health = [{
         "agent": "codex",
-        "condition": "`codex` errored 3 times this week. Most recent: reserve",
+        "condition": (
+            "`codex` degraded: errored 3 times consecutively. "
+            "Latest: begin-timeout: reserve"
+        ),
     }]
     monkeypatch.setattr(funnel, "agent_health", lambda now: health)
     monkeypatch.setattr(funnel, "unattended_merges", lambda now: [])
@@ -2753,6 +2756,76 @@ def test_cmd_brief_reads_each_provider_once_and_reuses_the_rows(
     capsys.readouterr()
 
     assert calls == sorted(heartbeat.PROVIDERS)
+
+
+def _brief_with_one_unread_heartbeat(monkeypatch, capsys, failing, error):
+    """Publish the brief with every heartbeat readable except ``failing``."""
+    import heartbeat
+
+    def read(agent, timeout=None):
+        if agent == failing:
+            raise error
+        return []
+
+    monkeypatch.setattr(heartbeat, "read_brief", read)
+    monkeypatch.setattr(
+        funnel, "recent_resend_ratio", _LIVE_RECENT_RESEND_RATIO
+    )
+
+    assert funnel.cmd_brief([], NOW) == 0
+    return json.loads(capsys.readouterr().out)
+
+
+def test_cmd_brief_an_unread_muse_heartbeat_reaches_every_section_reading_muse(
+    monkeypatch, capsys
+):
+    """#2132 reviewer probe: a section given the wrong provider list (say
+    agent_health with only codex and zcode) would publish a reading that
+    never saw Muse."""
+    import heartbeat
+
+    brief = _brief_with_one_unread_heartbeat(
+        monkeypatch, capsys, "muse",
+        heartbeat.HeartbeatError("error connecting to api.github.com"),
+    )
+
+    # resend_ratio reads only the metered agents, codex and zcode.
+    assert brief["resend_ratio"] is not None
+    for section in (
+        "agent_health",
+        "run_summary",
+        "unattended_merges",
+        "working_tree_touched",
+    ):
+        assert brief[section] is None, section
+        entries = [
+            entry for entry in brief["missing"]
+            if entry["section"] == section
+        ]
+        assert [entry.get("agent") for entry in entries] == ["muse"], entries
+
+
+def test_cmd_brief_an_unread_retired_zcode_heartbeat_still_unknowns_its_readers(
+    monkeypatch, capsys
+):
+    """#2132 reviewer probe: health and run summary skip a retired agent,
+    but the sections that read retired zcode's history must not."""
+    import heartbeat
+
+    assert "zcode" in heartbeat.RETIRED_AGENTS
+    brief = _brief_with_one_unread_heartbeat(
+        monkeypatch, capsys, "zcode",
+        subprocess.TimeoutExpired(["gh", "api", "zcode"], 4.0),
+    )
+
+    assert brief["agent_health"] is not None
+    assert brief["run_summary"] is not None
+    for section in (
+        "resend_ratio",
+        "unattended_merges",
+        "working_tree_touched",
+    ):
+        assert brief[section] is None, section
 
 
 def test_genuinely_empty_sections_still_read_as_empty(capsys):

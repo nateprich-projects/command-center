@@ -190,14 +190,22 @@ def test_derive_prices_each_run_and_keeps_missing_tokens_unknown():
     assert record["runs"][0]["notional_api_cost"]["value"] == pytest.approx(.003)
     assert record["notional_api_cost"]["value"] == pytest.approx(.003)
 
+    # #2178: unknown cache reads leave the run valued at its observed kinds
+    # (100 x $1 + 300 x $3 + 400 x $4 per million) and flagged partial; the
+    # ticket total stays unknown.
     observation["token_usage"]["cache_read_input_tokens"] = None
     incomplete = outcomes.derive_outcome(
         ticket(43), now=NOW, run_observations=[observation], rate_rows=rates
     )
-    assert incomplete["runs"][0]["notional_api_cost"]["value"] is None
+    assert incomplete["runs"][0]["notional_api_cost"]["status"] == "partial"
+    assert incomplete["runs"][0]["notional_api_cost"]["value"] == pytest.approx(
+        .0026
+    )
     assert incomplete["runs"][0]["notional_api_cost"]["missing_token_kinds"] == [
         "cache_read_input_tokens"
     ]
+    assert incomplete["token_usage"] is None
+    assert incomplete["notional_api_cost"]["status"] == "incomplete"
     assert incomplete["notional_api_cost"]["value"] is None
 
 
@@ -565,7 +573,9 @@ def test_muse_missing_journal_makes_outcome_partial_not_zero(monkeypatch):
     runs = outcomes._ticket_runs("owner/repo#42", rows)
     record = outcomes.derive_outcome(ticket(), run_observations=runs, now=NOW)
 
-    assert runs[0]["token_usage"] is None
+    # #2178: the run carries its observed tokens, flagged partial; the
+    # ticket total stays unknown rather than counting one call as the run.
+    assert runs[0]["token_usage"] == expected
     assert runs[0]["token_usage_coverage"] == {
         "status": "partial",
         "captured_calls": 2,
@@ -604,7 +614,10 @@ def test_muse_uncaptured_call_reports_captured_versus_made(monkeypatch):
 
     runs = outcomes._ticket_runs("owner/repo#42", rows)
 
-    assert runs[0]["token_usage"] is None
+    # #2178: the two captured calls' tokens, not an estimate for the third.
+    assert runs[0]["token_usage"] == {
+        kind: 2 * value for kind, value in expected.items()
+    }
     assert runs[0]["token_usage_coverage"] == {
         "status": "partial",
         "captured_calls": 2,
@@ -708,6 +721,126 @@ def test_legacy_muse_snapshot_without_call_count_is_not_run_total():
         "uncaptured_calls": None,
         "reasons": ["legacy_call_count_not_recorded"],
     }
+
+
+def _partial_pricing_rates():
+    # $1, $2, $3 and $4 per million tokens for the four kinds in order.
+    return [
+        {
+            "provider": "test-provider",
+            "model": "test-model",
+            "token_kind": token_kind,
+            "usd_per_million_tokens": amount,
+            "effective_from": "1970-01-01T00:00:00Z",
+            "source_url": "https://example.test/pricing",
+            "recorded_at": "2026-09-10T12:00:00Z",
+        }
+        for token_kind, amount in zip(
+            ("fresh_input_tokens", "cache_read_input_tokens",
+             "cache_write_input_tokens", "output_tokens"),
+            (1, 2, 3, 4),
+        )
+    ]
+
+
+def _two_call_muse_run_with_one_readable_journal(tmp_path, monkeypatch):
+    """A Muse run that made two calls; only the first call's journal exists."""
+    journal = tmp_path / "muse-sessions" / "muse-one" / "journal-00000000.bin"
+    journal.parent.mkdir(parents=True)
+    event = json.dumps({
+        "method": "session/tokenUsage",
+        "params": {
+            "turnId": "turn-1",
+            "usage": {
+                "inputTokens": 1000,
+                "cacheReadTokens": 400,
+                "cacheWriteTokens": 0,
+                "outputTokens": 50,
+            },
+        },
+    }).encode()
+    journal.write_bytes(b"binary-prefix" + event + b"binary-suffix")
+    monkeypatch.setitem(
+        outcomes.session_usage.SESSION_GLOBS,
+        "muse",
+        str(tmp_path / "muse-sessions" / "*" / "*"),
+    )
+    return [
+        {"run": "run-1", "phase": "start", "ts": 100,
+         "session_id": "muse-one", "provider": "test-provider",
+         "model": "test-model"},
+        {"run": "run-1", "phase": "bind", "ts": 101,
+         "do": "ticket", "work": "owner/repo#42"},
+        {"run": "run-1", "phase": "finish", "ts": 110,
+         "outcome": "done", "muse_session_ids": [
+             "muse-one", "muse-missing"], "muse_calls_made": 2},
+    ]
+
+
+def test_partial_muse_run_is_valued_at_its_observed_tokens(
+        tmp_path, monkeypatch):
+    """#2178 reproduction: one readable journal of two calls is a partial run.
+
+    The journal holds 1000 input tokens of which 400 were cache reads, no cache
+    writes and 50 output tokens: 600 fresh, 400 cached, 0 written, 50 out.
+    """
+    rows = {"muse": _two_call_muse_run_with_one_readable_journal(
+        tmp_path, monkeypatch)}
+
+    runs = outcomes._ticket_runs("owner/repo#42", rows)
+
+    assert runs[0]["token_usage"] == {
+        "fresh_input_tokens": 600,
+        "cache_read_input_tokens": 400,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 50,
+    }
+    assert runs[0]["token_usage_coverage"]["status"] == "partial"
+    assert runs[0]["token_usage_coverage"]["readable_journals"] == 1
+    assert runs[0]["token_usage_coverage"]["unreadable_journals"] == 1
+
+    cost = outcomes.api_pricing.price_run(runs[0], _partial_pricing_rates())
+
+    # 600 x $1 + 400 x $2 + 0 x $3 + 50 x $4 per million = $0.0016, the first
+    # call only: the missing call is listed, not estimated and not zeroed.
+    assert cost["status"] == "partial"
+    assert cost["value"] == pytest.approx(0.0016)
+    assert cost["missing_calls"] == 1
+
+
+def test_ticket_with_a_partial_run_keeps_its_whole_totals_unknown(
+        tmp_path, monkeypatch):
+    """#2178: a partial run's observed tokens never enter a whole total."""
+    rows = {
+        "muse": _two_call_muse_run_with_one_readable_journal(
+            tmp_path, monkeypatch),
+        "codex": [
+            {"run": "run-2", "phase": "start", "ts": 200,
+             "provider": "test-provider", "model": "test-model"},
+            {"run": "run-2", "phase": "bind", "ts": 201,
+             "do": "ticket", "work": "owner/repo#42"},
+            {"run": "run-2", "phase": "finish", "ts": 210,
+             "outcome": "done", "token_usage": {
+                 "fresh_input_tokens": 100,
+                 "cache_read_input_tokens": 200,
+                 "cache_write_input_tokens": 300,
+                 "output_tokens": 400,
+             }},
+        ],
+    }
+
+    runs = outcomes._ticket_runs("owner/repo#42", rows)
+    record = outcomes.derive_outcome(
+        ticket(), run_observations=runs, rate_rows=_partial_pricing_rates(),
+        now=NOW,
+    )
+
+    by_run = {run["run"]: run for run in record["runs"]}
+    assert by_run["run-1"]["notional_api_cost"]["status"] == "partial"
+    assert by_run["run-2"]["notional_api_cost"]["status"] == "priced"
+    assert record["token_usage"] is None
+    assert record["notional_api_cost"]["status"] == "incomplete"
+    assert record["notional_api_cost"]["value"] is None
 
 
 def test_ticket_run_with_unreadable_session_and_all_null_snapshot_stays_unknown(
@@ -846,6 +979,24 @@ def test_signal_summary_does_not_treat_raw_tokens_as_priced_cost():
     assert cost["available"] is False
     assert cost["value"] is None
     assert cost["by_lane"] == []
+
+
+def test_signal_summary_does_not_count_a_partial_run_value_as_its_cost():
+    # #2178: a partial run's observed value is not the run's cost.
+    row = signal_record(1, cost=None)
+    row["runs"][0]["notional_api_cost"] = {
+        "value": 0.0016, "unit": "USD",
+        "basis": "notional_api_list_price", "status": "partial",
+        "reason": "observed_tokens_only", "missing_calls": 1,
+    }
+
+    cost = outcomes.signal_summary([row], now=NOW)["signals"][
+        "cost_per_merged_pr"
+    ]
+
+    assert cost["available"] is False
+    assert cost["by_lane"] == []
+    assert cost["missing_examples"] == ["owner/repo#1"]
 
 
 def test_signal_summary_reports_null_values_when_a_signal_has_no_data():

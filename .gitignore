@@ -8,3 +8,6 @@ __pycache__/
 .venv/
 node_modules/
 .wrangler/
+.pytest-tmp/
+# Runtime-root replay pools are local evaluation data, not source.
+eval-replay/

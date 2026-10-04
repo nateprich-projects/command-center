@@ -1,0 +1,19 @@
+{
+  "head_commit_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "main_commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "next_main_commit_sha": "cccccccccccccccccccccccccccccccccccccccc",
+  "packet_results": {
+    "must_approve": {
+      "expected": "approved",
+      "verdicts": ["approved", "approved"],
+      "failed_parts": [[], []],
+      "pass": true
+    },
+    "must_reject": {
+      "expected": "rejected",
+      "verdicts": ["rejected", "rejected"],
+      "failed_parts": [[], []],
+      "pass": true
+    }
+  }
+}

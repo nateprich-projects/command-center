@@ -12,7 +12,7 @@ STORE_ROOTS = {
     "muse": os.path.expanduser("~/.local/share/muse/sessions"),
     "codex": os.path.expanduser("~/.codex/sessions"),
 }
-DEFAULT_ARCHIVE_BASE = "/Volumes/External SSD/Agent-Logs"
+DEFAULT_ARCHIVE_BASE = "/Volumes/External SSD/Archives/session-logs"
 ARCHIVE_ROOT_ENV = "COMMAND_CENTER_AGENT_LOG_ARCHIVE_ROOT"
 
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
+import os
 import pathlib
 import re
 import shlex
@@ -493,7 +494,8 @@ def test_the_ticket_pr_is_created_rather_than_a_foreign_one_edited(
     monkeypatch.setattr(funnel, "_run_gh", fake_run)
 
     pr = implement.create_or_update_pr(
-        REPO, {"branch": "ticket/42", "root": tmp_path},
+        REPO, {"branch": "ticket/42", "head_sha": "new-head",
+               "root": tmp_path},
         {"title": "Do it", "number": 42}, "body")
 
     assert pr == {"number": 95, "url": "https://github.com/owner/repo/pull/95"}
@@ -501,6 +503,51 @@ def test_the_ticket_pr_is_created_rather_than_a_foreign_one_edited(
     fields = asked[0][asked[0].index("--json") + 1].split(",")
     assert {"isCrossRepository", "headRepository", "headRepositoryOwner",
             "author"} <= set(fields)
+
+
+def test_a_merged_pr_on_the_pushed_head_is_returned_without_creating_another(
+        monkeypatch, tmp_path):
+    """Source check: implement.py:1798-1803 lists with --repo, --state open,
+    and --head before the gh pr create fallback at lines 1818-1822.
+    """
+    asked = []
+    runs = []
+    merged = {
+        "number": 94,
+        "url": "https://github.com/owner/repo/pull/94",
+        "headRefOid": "same-head",
+        "isCrossRepository": False,
+        "author": {"login": "nateprich"},
+    }
+
+    def fake_json(*args):
+        asked.append(args)
+        state = args[args.index("--state") + 1]
+        if state == "open":
+            return []
+        if state == "merged":
+            return [{**FOREIGN_PRS[0], "headRefOid": "same-head"}, merged]
+        raise AssertionError(args)
+
+    def fake_run(argv, **kwargs):
+        runs.append(list(argv))
+        return type("R", (), {
+            "returncode": 0, "stderr": "",
+            "stdout": "https://github.com/owner/repo/pull/95\n",
+        })()
+
+    monkeypatch.setattr(funnel, "_gh_json", fake_json)
+    monkeypatch.setattr(funnel, "_run_gh", fake_run)
+
+    pr = implement.create_or_update_pr(
+        REPO, {"branch": "ticket/42", "head_sha": "same-head",
+               "root": tmp_path},
+        {"title": "Do it", "number": 42}, "body")
+
+    assert pr == {"number": 94, "url": merged["url"], "merged": True}
+    assert [args[args.index("--state") + 1] for args in asked] == [
+        "open", "merged"]
+    assert [argv[:3] for argv in runs] == []
 
 
 def test_the_owners_open_ticket_pr_is_still_updated(monkeypatch, tmp_path):
@@ -1087,9 +1134,27 @@ def test_pre_pr_stray_check_catches_other_run_scratch(tmp_path, name):
         implement._commit_if_needed(clone, 42, "Added the implementation.")
 
 
-def test_pre_pr_stray_check_passes_a_clean_checkout(tmp_path):
+def test_pre_pr_stray_check_rejects_pytest_tmp_with_file_and_absolute_symlink(
+        tmp_path):
+    _, clone = make_clone(tmp_path)
+    scratch = clone / ".pytest-tmp"
+    scratch.mkdir()
+    (scratch / "scratch.bin").write_text("temporary output\n")
+    target = tmp_path / "outside-target"
+    target.write_text("local target\n")
+    link = scratch / "absolute-target-link"
+    link.symlink_to(target.resolve())
+
+    assert link.is_symlink()
+    assert pathlib.Path(os.readlink(link)).is_absolute()
+    with pytest.raises(implement.StrayFileError, match=r"\.pytest-tmp"):
+        implement._check_no_run_scratch(clone)
+
+
+def test_pre_pr_stray_check_passes_without_pytest_tmp(tmp_path):
     _, clone = make_clone(tmp_path)
 
+    assert not (clone / ".pytest-tmp").exists()
     implement._check_no_run_scratch(clone)
 
 
@@ -1625,6 +1690,60 @@ def test_heartbeat_root_cleanup_removes_ticket_1950_shaped_pushed_checkout(
     )
     assert implement._remove_codex_run_checkout(checkout, 1950, "codex")
     assert not checkout.exists()
+
+
+def make_clean_main_ancestor_with_newer_ticket_tip(tmp_path, monkeypatch):
+    _remote, checkout = make_heartbeat_codex_run_clone(tmp_path, monkeypatch)
+    run_git("switch", "--quiet", "main", cwd=checkout)
+    (checkout / "ticket-only.txt").write_text("remote ticket tip\n")
+    run_git("add", "ticket-only.txt", cwd=checkout)
+    run_git("commit", "--quiet", "-m", "advance remote ticket tip",
+            cwd=checkout)
+    run_git("push", "--quiet", "origin", "HEAD:refs/heads/ticket/42",
+            cwd=checkout)
+    run_git("fetch", "--quiet", "origin", cwd=checkout)
+    run_git("switch", "--quiet", "ticket/42", cwd=checkout)
+    return checkout
+
+
+# Baseline origin/main f4a13cae7 at engine/implement.py:2979-2984 had the
+# strict `head.stdout.strip() != remote_head.stdout.strip()` guard. A clean
+# ticket-2202 checkout had HEAD == origin/main (68c50ae), differed from
+# origin/ticket/2202 (d24c1a8), and had empty status, so that guard kept it.
+def test_heartbeat_root_cleanup_removes_clean_main_ancestor_with_newer_ticket_tip(
+        tmp_path, monkeypatch):
+    checkout = make_clean_main_ancestor_with_newer_ticket_tip(
+        tmp_path, monkeypatch)
+
+    head = run_git("rev-parse", "HEAD", cwd=checkout).stdout.strip()
+    main = run_git("rev-parse", "refs/remotes/origin/main",
+                   cwd=checkout).stdout.strip()
+    ticket = run_git("rev-parse", "refs/remotes/origin/ticket/42",
+                     cwd=checkout).stdout.strip()
+    assert head == main
+    assert head != ticket
+    assert run_git("status", "--porcelain", cwd=checkout).stdout == ""
+
+    assert implement._remove_codex_run_checkout(checkout, 42, "codex")
+    assert not checkout.exists()
+
+
+def test_heartbeat_root_cleanup_keeps_dirty_main_ancestor_with_newer_ticket_tip(
+        tmp_path, monkeypatch):
+    checkout = make_clean_main_ancestor_with_newer_ticket_tip(
+        tmp_path, monkeypatch)
+    head = run_git("rev-parse", "HEAD", cwd=checkout).stdout.strip()
+    main = run_git("rev-parse", "refs/remotes/origin/main",
+                   cwd=checkout).stdout.strip()
+    ticket = run_git("rev-parse", "refs/remotes/origin/ticket/42",
+                     cwd=checkout).stdout.strip()
+    assert head == main
+    assert head != ticket
+    (checkout / "local-only.txt").write_text("uncommitted local work\n")
+    assert run_git("status", "--porcelain", cwd=checkout).stdout
+
+    assert not implement._remove_codex_run_checkout(checkout, 42, "codex")
+    assert checkout.is_dir()
 
 
 @pytest.mark.parametrize("work_state", ("unpushed", "dirty"))
@@ -2416,7 +2535,8 @@ def test_finish_blocked_on_human_pushes_tracked_wip_before_blocking(
         sub_issues_effect=lambda *args: [],
     )
 
-    assert effects == ["create", "needs", "block", "comment", "release",
+    # #2168: the ticket's block record is posted before the label goes on.
+    assert effects == ["create", "needs", "comment", "block", "release",
                        "finish"]
     assert run_git(
         "--git-dir", str(remote), "rev-list", "--count",
@@ -4233,6 +4353,79 @@ def test_finish_main_routes_blocked_and_declined_answers(
         ["--answer-file", str(path), "--run", "run-42"]) == 1
 
 
+def test_failed_decline_removes_a_clean_content_safe_checkout(
+        tmp_path, monkeypatch, capsys):
+    # Reproduction: run d969170d07f3's declined finish-ticket for #2076
+    # exited 1 on the GitHub API rate limit before _finish_exit. The retained
+    # ticket-2076 checkout was clean with HEAD equal to origin/ticket/2076,
+    # so its bytes were already durable; the CLI error path never offered it
+    # to _remove_codex_run_checkout.
+    remote, clone = make_heartbeat_codex_run_clone(
+        tmp_path, monkeypatch, number=2076)
+    run_git("branch", "--quiet", "--move", "ticket/2076", cwd=clone)
+    run_git("push", "--quiet", "--set-upstream", "origin", "ticket/2076",
+            cwd=clone)
+    head = run_git("rev-parse", "HEAD", cwd=clone).stdout.strip()
+    remote_head = run_git(
+        "rev-parse", "refs/remotes/origin/ticket/2076", cwd=clone,
+    ).stdout.strip()
+    assert head == remote_head
+    assert run_git("status", "--porcelain", cwd=clone).stdout == ""
+    assert run_git("--git-dir", str(remote), "rev-parse",
+                   "refs/heads/ticket/2076").stdout.strip() == head
+
+    answer_path = tmp_path / "answer.json"
+    answer_path.write_text(json.dumps({"declined": "The run hit the API limit."}))
+    _stub_claim_state(monkeypatch, "owned")
+
+    def rate_limited_decline(*args, **kwargs):
+        raise funnel.GitHubError(
+            "gh: API rate limit already exceeded for user ID 263208503.")
+
+    monkeypatch.setattr(implement, "finish_declined", rate_limited_decline)
+    monkeypatch.chdir(clone)
+
+    assert implement.finish_main([
+        "--answer-file", str(answer_path), "--run", "d969170d07f3",
+        "--repo", REPO,
+    ]) == 1
+
+    assert "API rate limit" in capsys.readouterr().err
+    assert not clone.exists()
+
+
+def test_failed_decline_keeps_a_dirty_codex_run_checkout(
+        tmp_path, monkeypatch, capsys):
+    remote, clone = make_heartbeat_codex_run_clone(
+        tmp_path, monkeypatch, number=2076)
+    run_git("branch", "--quiet", "--move", "ticket/2076", cwd=clone)
+    run_git("push", "--quiet", "--set-upstream", "origin", "ticket/2076",
+            cwd=clone)
+    local_work = clone / "local-only.txt"
+    local_work.write_text("keep this unpushed work\n")
+
+    answer_path = tmp_path / "answer.json"
+    answer_path.write_text(json.dumps({"declined": "The run hit the API limit."}))
+    _stub_claim_state(monkeypatch, "owned")
+
+    def rate_limited_decline(*args, **kwargs):
+        raise funnel.GitHubError("gh: API rate limit already exceeded")
+
+    monkeypatch.setattr(implement, "finish_declined", rate_limited_decline)
+    monkeypatch.chdir(clone)
+
+    assert implement.finish_main([
+        "--answer-file", str(answer_path), "--run", "run-2076",
+        "--repo", REPO,
+    ]) == 1
+
+    assert "API rate limit" in capsys.readouterr().err
+    assert clone.is_dir()
+    assert local_work.read_text() == "keep this unpushed work\n"
+    assert run_git("--git-dir", str(remote), "rev-parse",
+                   "refs/heads/ticket/2076").returncode == 0
+
+
 def test_finish_main_accepts_inline_json(monkeypatch, capsys):
     _stub_claim_state(monkeypatch, "empty")
     routed = {}
@@ -4999,15 +5192,15 @@ def test_finish_git_invocation_sites_match_the_recorded_inventory():
         ("diff", "--name-status"): 1,
         ("rev-list", "--count"): 2,
         ("fetch", "origin"): 2,
-        ("merge-base", "--is-ancestor"): 1,
+        ("merge-base", "--is-ancestor"): 2,
         ("merge", "-s"): 1,
         ("push", "--set-upstream"): 1,
     })
     assert actual == expected
 
     inventory = (ROOT / "docs" / "finish-subprocess-bounds.md").read_text()
-    assert "27 bounded Git callsites" in inventory
-    assert "26 static callsites" in inventory
+    assert "28 bounded Git callsites" in inventory
+    assert "27 static callsites" in inventory
     for command in (
         "git diff --name-only -z",
         "git diff --cached --name-only -z",
@@ -6159,3 +6352,448 @@ def test_run_tests_missing_executable_uses_fixed_start_failure(tmp_path):
 
     assert str(caught.value) == "test command could not start"
     assert missing not in str(caught.value)
+
+
+# --- One shared tail ends every finish-ticket exit (#2167) ---
+#
+# Completed exits release their claim once, finish their heartbeat once and
+# offer checkout removal through ``_finish_exit``. A failed declined-answer
+# handoff also offers clean, already-durable checkouts for removal from the
+# CLI error path. The rows replay #1494 (a no-diff close releases and
+# finishes), #1638 (a superseded run releases nothing), #1795 (a member
+# note carries no test id), #1825 (a pushed checkout under the heartbeat's
+# runs root is removed) and #2014 (a decline removes a pushed clean
+# checkout).
+
+#: The names the tail's three effects are called by in engine/implement.py:
+#: the injected release and its default, the injected heartbeat finish and
+#: its default, and the checkout cleanup.
+TAIL_EFFECTS = {
+    "release": "release",
+    "release_effect": "release",
+    "release_claim": "release",
+    "heartbeat_finish": "heartbeat",
+    "finish_heartbeat": "heartbeat",
+    "_remove_codex_run_checkout": "cleanup",
+}
+
+
+def test_only_the_shared_tail_releases_finishes_or_removes_the_checkout():
+    tree = ast.parse(pathlib.Path(implement.__file__).read_text())
+    functions = {node.name: node for node in tree.body
+                 if isinstance(node, ast.FunctionDef)}
+    # A lambda around release_claim builds the release callable an exit
+    # hands the tail; it releases nothing where it is written.
+    builders = {
+        id(node.body) for node in ast.walk(tree)
+        if isinstance(node, ast.Lambda)
+        and isinstance(node.body, ast.Call)
+        and isinstance(node.body.func, ast.Name)
+        and node.body.func.id == "release_claim"
+    }
+    calls = [
+        (name, node.func.id)
+        for name, function in functions.items()
+        for node in ast.walk(function)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        and node.func.id in TAIL_EFFECTS and id(node) not in builders
+    ]
+
+    # The superseded finish records its heartbeat alone: it releases
+    # nothing and keeps its checkout (#1638, #1856). A failed decline offers
+    # its checkout directly, subject to the shared clean/content-safe guard.
+    assert [call for call in calls
+            if call[0] != "_finish_exit"
+            and call != ("_record_superseded_finish", "finish_heartbeat")
+            and call != ("_finish_ticket", "_remove_codex_run_checkout")
+            ] == []
+    assert calls.count(("_finish_ticket", "_remove_codex_run_checkout")) == 1
+    assert sorted(TAIL_EFFECTS[callee] for name, callee in calls
+                  if name == "_finish_exit") == [
+        "cleanup", "heartbeat", "release"]
+    assert {
+        name for name, function in functions.items()
+        for node in ast.walk(function)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        and node.func.id == "_finish_exit"
+    } == {"finish_done", "_recover_answer_error", "finish_declined",
+          "finish_blocked_on_human", "_finish_closed_human_step",
+          "_record_command_timeout"}
+
+
+#: Planted in each exit's exception text, test ids, paths, decline reason
+#: or step action. REPO stands for a private member repository, so no
+#: heartbeat note may carry it (#1795, #1796).
+SENTINEL = "zq_member_secret"
+
+SENTINEL_PYTEST_OUTPUT = (
+    "FAILED tests/test_{0}.py::test_{0} - AssertionError: {0}\n"
+    "ERROR tests/test_gadgets.py::test_{0}_vault - RuntimeError: {0}\n"
+    "1 failed, 4 passed, 1 error in 0.21s\n"
+).format(SENTINEL)
+
+
+def _push_ticket_branch_now(clone):
+    """Leave the checkout clean and on its pushed ticket branch, so the
+    cleanup removes it wherever an exit offers it (#2014's fixture)."""
+    run_git("push", "--quiet", "--set-upstream", "origin", "ticket/42",
+            cwd=clone)
+
+
+def _refuse_commits_naming_the_sentinel(clone):
+    """A pre-commit hook whose refusal git quotes in the exception text."""
+    hooks = clone / ".git" / "hooks"
+    (hooks / "pre-commit").write_text(
+        "#!/bin/sh\necho 'refused {}' >&2\nexit 1\n".format(SENTINEL))
+    (hooks / "pre-commit").chmod(0o755)
+    run_git("config", "core.hooksPath", str(hooks), cwd=clone)
+
+
+def _raise(exc):
+    def effect(*args, **kwargs):
+        raise exc
+    return effect
+
+
+def _exit_pr(clone, tmp_path, monkeypatch, tail):
+    (clone / "implemented.txt").write_text("done\n")
+    implement.finish_done(
+        {**answer(), "summary": "Added the {} handling.".format(SENTINEL)},
+        run="run-42", repo=REPO, cwd=clone,
+        test_commands=[[sys.executable, "-c", "pass"]],
+        pr_effect=lambda *args: {"number": 91,
+                                 "url": "https://example.test/pull/91"},
+        **tail)
+
+
+def _exit_no_diff_close(clone, tmp_path, monkeypatch, tail):
+    _push_ticket_branch_now(clone)
+    monkeypatch.setattr(implement, "_verify_done_evidence",
+                        lambda evidence, *, run, agent: list(evidence))
+    implement.finish_done(
+        {**answer(), "summary": "Verified {}.".format(SENTINEL),
+         "evidence": ["https://github.com/example/project/issues/1"]},
+        run="run-42", repo=REPO, cwd=clone,
+        test_commands=[[sys.executable, "-c", "pass"]],
+        pr_effect=lambda *args: pytest.fail("a no-diff close opens no PR"),
+        close_effect=lambda *args, **kwargs: None, **tail)
+
+
+def _exit_test_failure(clone, tmp_path, monkeypatch, tail):
+    (clone / "implemented.txt").write_text("done\n")
+    with pytest.raises(implement.ImplementError):
+        implement.finish_done(
+            answer(), run="run-42", repo=REPO, cwd=clone,
+            test_commands=[failing_pytest(tmp_path, SENTINEL_PYTEST_OUTPUT)],
+            pr_effect=lambda *args: pytest.fail("failed tests open no PR"),
+            comment_effect=lambda *args, **kwargs: None, **tail)
+
+
+def _exit_checkpoint_failure(clone, tmp_path, monkeypatch, tail):
+    _refuse_commits_naming_the_sentinel(clone)
+    (clone / "{}.txt".format(SENTINEL)).write_text("only copy\n")
+    with pytest.raises(implement.ImplementError, match=SENTINEL):
+        implement.finish_done(
+            answer(), run="run-42", repo=REPO, cwd=clone,
+            test_commands=[[sys.executable, "-c", "pass"]],
+            pr_effect=lambda *args: pytest.fail("a failed commit opens no PR"),
+            **tail)
+
+
+def _exit_conflict(clone, tmp_path, monkeypatch, tail):
+    (clone / "implemented.txt").write_text("done\n")
+    monkeypatch.setattr(implement, "_run_finish_tests", _raise(
+        implement.MergeConflictError(
+            "0123456789abcdef", ["src/{}.py".format(SENTINEL)])))
+    with pytest.raises(implement.MergeConflictError):
+        implement.finish_done(
+            answer(), run="run-42", repo=REPO, cwd=clone,
+            pr_effect=lambda *args: pytest.fail("a conflict opens no PR"),
+            comment_effect=lambda *args, **kwargs: pytest.fail(
+                "a conflict posts nothing to the ticket"),
+            **tail)
+
+
+def _exit_stray_file(clone, tmp_path, monkeypatch, tail):
+    # Scratch already pushed on the branch: the tree is clean and pushed, so
+    # only the caller's choice keeps the checkout (#1856).
+    (clone / "tmp").mkdir()
+    (clone / "tmp" / "{}.txt".format(SENTINEL)).write_text("notes\n")
+    run_git("add", "tmp", cwd=clone)
+    run_git("commit", "--quiet", "-m", "scratch", cwd=clone)
+    _push_ticket_branch_now(clone)
+    with pytest.raises(implement.StrayFileError):
+        implement.finish_done(
+            answer(), run="run-42", repo=REPO, cwd=clone,
+            test_commands=[[sys.executable, "-c", "pass"]],
+            pr_effect=lambda *args: pytest.fail("a stray file opens no PR"),
+            **tail)
+
+
+def _exit_timeout_after_checkpoint(clone, tmp_path, monkeypatch, tail):
+    (clone / "implemented.txt").write_text("done\n")
+    monkeypatch.setattr(funnel, "_gh_api_json",
+                        lambda endpoint: {"visibility": "private"})
+    monkeypatch.setattr(implement, "_run_finish_tests", _raise(
+        implement.CommandTimeoutError(
+            ["./ci/{}.sh".format(SENTINEL)], 7, captured_output=SENTINEL)))
+    with pytest.raises(implement.CommandTimeoutError):
+        implement.finish_done(
+            answer(), run="run-42", repo=REPO, cwd=clone,
+            pr_effect=lambda *args: pytest.fail("a timeout opens no PR"),
+            **tail)
+
+
+def _exit_timeout_before_checkpoint(clone, tmp_path, monkeypatch, tail):
+    (clone / "implemented.txt").write_text("only copy\n")
+    monkeypatch.setattr(funnel, "_gh_api_json",
+                        lambda endpoint: {"visibility": "private"})
+    monkeypatch.setattr(implement, "_checkpoint_work", _raise(
+        implement.CommandTimeoutError(["make", SENTINEL], 9)))
+    with pytest.raises(implement.CommandTimeoutError):
+        implement.finish_done(
+            answer(), run="run-42", repo=REPO, cwd=clone,
+            test_commands=[[sys.executable, "-c", "pass"]],
+            pr_effect=lambda *args: pytest.fail("a timeout opens no PR"),
+            **tail)
+
+
+def _exit_answer_error(clone, tmp_path, monkeypatch, tail):
+    (clone / "{}.txt".format(SENTINEL)).write_text("done\n")
+    assert implement._recover_answer_error(
+        implement.ImplementError("answer is not valid JSON: Expecting value"),
+        run="run-42", repo=REPO, cwd=clone, **tail)
+
+
+def _exit_answer_error_not_kept(clone, tmp_path, monkeypatch, tail):
+    _refuse_commits_naming_the_sentinel(clone)
+    _exit_answer_error(clone, tmp_path, monkeypatch, tail)
+
+
+def _decline(reason, *, facts=None, found=ticket):
+    def run_exit(clone, tmp_path, monkeypatch, tail):
+        _push_ticket_branch_now(clone)
+        monkeypatch.setattr(implement, "fetch_ticket",
+                            lambda repo, number: found(number))
+        implement.finish_declined(
+            reason, run="run-42", repo=REPO, cwd=clone,
+            block_effect=lambda *args, **kwargs: None,
+            comment_effect=lambda *args, **kwargs: None,
+            needs_effect=lambda *args: None,
+            declined_needs_effect=lambda *args: None,
+            external_event_needs_effect=lambda *args: None,
+            prerequisite_facts_effect=lambda ref: facts,
+            clear_block_effect=lambda *args, **kwargs: None,
+            prerequisite_edge_effect=lambda *args, **kwargs: None,
+            defer_note_close_effect=lambda *args, **kwargs: None,
+            **tail)
+    return run_exit
+
+
+def _blocked_on_human(rows):
+    def run_exit(clone, tmp_path, monkeypatch, tail):
+        _push_ticket_branch_now(clone)
+        implement.finish_blocked_on_human(
+            blocked("entering a credential",
+                    "Approve the {} OAuth app".format(SENTINEL)
+                    )["blocked_on_human"],
+            run="run-42", repo=REPO, cwd=clone,
+            create_effect=lambda *args, **kwargs: {
+                "number": 43, "ref": REPO + "#43",
+                "url": "https://github.com/{}/issues/43".format(REPO)},
+            block_effect=lambda *args, **kwargs: None,
+            comment_effect=lambda *args, **kwargs: None,
+            needs_effect=lambda *args: None,
+            sub_issues_effect=lambda *args: list(rows),
+            comments_effect=lambda *args: [],
+            head_effect=lambda *args: CLOSED_STEP_HEAD,
+            route_needs_effect=lambda *args: None,
+            human_needs_effect=lambda *args: None,
+            **tail)
+    return run_exit
+
+
+def _exit_superseded(clone, tmp_path, monkeypatch, tail):
+    # Through the CLI, as every lane runs it: another run holds the claim.
+    _push_ticket_branch_now(clone)
+    answer_path = tmp_path / "answer.json"
+    answer_path.write_text(json.dumps(answer()))
+    _stub_claim_state(monkeypatch, "other")
+    monkeypatch.setattr(implement, "release_claim",
+                        lambda ref, **kwargs: tail["release"](ref))
+    monkeypatch.setattr(implement, "finish_heartbeat",
+                        tail["heartbeat_finish"])
+    monkeypatch.chdir(clone)
+    assert implement.finish_main([
+        "--answer-file", str(answer_path), "--run", "run-42", "--repo", REPO,
+    ]) == 0
+
+
+LANDED_PREREQUISITE = {"number": 165, "state": "CLOSED",
+                       "children_total": 5, "children_completed": 5}
+OPEN_PREREQUISITE = {"number": 165, "state": "OPEN",
+                     "children_total": 0, "children_completed": 0}
+UNLANDED_165 = "Unlanded prerequisite #165 is still open; {} waits on it."
+
+#: Every finish-ticket exit: (run it, releases, heartbeat outcome, whether
+#: the cleanup is offered the checkout). Each fixture leaves the checkout
+#: clean and pushed where the exit offers it, so offered means removed.
+FINISH_EXITS = {
+    "pr": (_exit_pr, 1, "done", True),
+    "no-diff close": (_exit_no_diff_close, 1, "done", True),
+    "test failure": (_exit_test_failure, 1, "errored", True),
+    "checkpoint failure": (_exit_checkpoint_failure, 1, "errored", False),
+    "conflict": (_exit_conflict, 1, "errored", True),
+    "stray file": (_exit_stray_file, 1, "errored", False),
+    "timeout after checkpoint":
+        (_exit_timeout_after_checkpoint, 1, "errored", True),
+    "timeout before checkpoint":
+        (_exit_timeout_before_checkpoint, 1, "errored", False),
+    "answer error": (_exit_answer_error, 1, "errored", True),
+    "answer error, not kept":
+        (_exit_answer_error_not_kept, 1, "errored", False),
+    "decline: unknown": (_decline(
+        "I cannot verify the evidence in {}.py.".format(SENTINEL)),
+        1, "skipped-blocked", True),
+    "decline: open prerequisite": (_decline(
+        UNLANDED_165.format(SENTINEL), facts=OPEN_PREREQUISITE),
+        1, "skipped-blocked", True),
+    "decline: landed prerequisite": (_decline(
+        UNLANDED_165.format(SENTINEL), facts=LANDED_PREREQUISITE),
+        1, "skipped-blocked", True),
+    "decline: accept-body conflict": (_decline(
+        ACCEPT_BODY_CONFLICT_REASON + " It names {}.".format(SENTINEL)),
+        1, "skipped-blocked", True),
+    "decline: unsatisfiable acceptance": (_decline(
+        LIVE_1453_UNSATISFIABLE_ACCEPTANCE + " It names {}.".format(SENTINEL)),
+        1, "skipped-blocked", True),
+    "decline: pending gate answer": (_decline(
+        LIVE_1497_PENDING_GATE_ANSWER + " It names {}.".format(SENTINEL)),
+        1, "skipped-blocked", True),
+    "decline: defer-note proof": (_decline(
+        DEFER_NOTE_REASON + " It names {}.".format(SENTINEL),
+        found=defer_note_proof_ticket), 1, "done", True),
+    "human step": (_blocked_on_human([]), 1, "skipped-human-step", True),
+    "closed step": (_blocked_on_human([human_step_row(57)]),
+                    1, "skipped-blocked", True),
+    "superseded": (_exit_superseded, 0, "errored", False),
+}
+
+
+@pytest.mark.parametrize("name", FINISH_EXITS)
+def test_every_finish_exit_releases_finishes_and_cleans_up_once(
+        tmp_path, monkeypatch, name):
+    run_exit, releases, outcome, offered = FINISH_EXITS[name]
+    _, clone = make_heartbeat_codex_run_clone(tmp_path, monkeypatch)
+    _stub_claim_state(monkeypatch, "owned")
+    monkeypatch.setattr(implement, "fetch_ticket",
+                        lambda repo, number: ticket(number))
+    released, finished, cleanups = [], [], []
+    real_cleanup = implement._remove_codex_run_checkout
+
+    def cleanup(root, number, agent):
+        cleanups.append(number)
+        return real_cleanup(root, number, agent)
+
+    monkeypatch.setattr(implement, "_remove_codex_run_checkout", cleanup)
+
+    run_exit(clone, tmp_path, monkeypatch, {
+        "release": released.append,
+        "heartbeat_finish": lambda *args: finished.append(args),
+    })
+
+    assert released == [REPO + "#42"] * releases
+    (row,) = finished
+    assert row[:3] == ("codex", "run-42", outcome)
+    assert row[4] == REPO + "#42"
+    assert SENTINEL not in row[3]
+    assert cleanups == ([42] if offered else [])
+    assert clone.exists() is not offered
+
+
+def test_a_refused_heartbeat_finish_names_the_pr_and_release_already_done(
+        tmp_path, monkeypatch):
+    # Live 2026-10-02: a same-session re-begin had closed the run's start,
+    # so finish-ticket opened the PR, released the claim and then failed on
+    # "heartbeat finish refused run ...", which named neither.
+    _, clone = make_heartbeat_codex_run_clone(tmp_path, monkeypatch)
+    _stub_claim_state(monkeypatch, "owned")
+    (clone / "implemented.txt").write_text("done\n")
+    monkeypatch.setattr(implement, "fetch_ticket",
+                        lambda repo, number: ticket(number))
+    prs, released = [], []
+
+    with pytest.raises(implement.ImplementError) as raised:
+        implement.finish_done(
+            answer(), run="run-42", repo=REPO, cwd=clone,
+            test_commands=[[sys.executable, "-c", "pass"]],
+            release=released.append,
+            heartbeat_finish=_raise(implement.ImplementError(
+                "heartbeat finish refused run run-42")),
+            pr_effect=lambda *args: prs.append(args) or {
+                "number": 91, "url": "https://example.test/pull/91"},
+        )
+
+    assert str(raised.value) == (
+        "heartbeat finish refused run run-42; already done: PR #91 is open, "
+        "claim released")
+    assert len(prs) == 1
+    assert released == [REPO + "#42"]
+    # The outcome is not recorded, so the checkout stays (#1856).
+    assert clone.is_dir()
+
+
+def test_a_refused_heartbeat_finish_keeps_the_cli_exit_and_output(
+        tmp_path, monkeypatch, capsys):
+    _, clone = make_heartbeat_codex_run_clone(tmp_path, monkeypatch)
+    _stub_claim_state(monkeypatch, "owned")
+    (clone / "implemented.txt").write_text("done\n")
+    answer_path = tmp_path / "answer.json"
+    answer_path.write_text(json.dumps(answer()))
+    monkeypatch.setattr(implement, "fetch_ticket",
+                        lambda repo, number: ticket(number))
+    released = []
+    monkeypatch.setattr(implement, "release_claim",
+                        lambda ref, **kwargs: released.append(ref))
+    real_finish_done = implement.finish_done
+    monkeypatch.setattr(
+        implement, "finish_done",
+        lambda found, **kwargs: real_finish_done(
+            found, test_commands=[[sys.executable, "-c", "pass"]],
+            heartbeat_finish=_raise(implement.ImplementError(
+                "heartbeat finish refused run run-42")),
+            pr_effect=lambda *args: {
+                "number": 91, "url": "https://example.test/pull/91"},
+            **kwargs))
+    monkeypatch.chdir(clone)
+
+    assert implement.finish_main([
+        "--answer-file", str(answer_path), "--run", "run-42", "--repo", REPO,
+    ]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == (
+        "finish-ticket: heartbeat finish refused run run-42; already done: "
+        "PR #91 is open, claim released\n")
+    assert released == [REPO + "#42"]
+
+
+def test_a_timeout_still_releases_before_its_visibility_read(monkeypatch):
+    # The note reads the repository's visibility over gh, unbounded; the
+    # release came first before #2167 so a slow read cannot hold the claim.
+    events = []
+
+    def read_visibility(endpoint):
+        events.append("visibility")
+        return {"visibility": "private"}
+
+    monkeypatch.setattr(funnel, "_gh_api_json", read_visibility)
+    implement._record_command_timeout(
+        implement.CommandTimeoutError(["make", "suite"], 7),
+        run="run-42", agent="codex", ref=REPO + "#42",
+        release=lambda ref: events.append("release"),
+        heartbeat_finish=lambda *args: events.append("finish"),
+    )
+
+    assert events == ["release", "visibility", "finish"]

@@ -288,6 +288,19 @@ def test_the_engine_runs_from_this_checkout_on_the_given_inputs(
     assert run["routine"] == str(routine_path.resolve())
 
 
+def test_the_default_replay_leaves_prompt_selection_to_the_active_adapter(
+        tmp_path, stub_engine):
+    packet = private_packet(tmp_path)
+
+    result = replay.replay(packet, runs=1, expected="approved",
+                           runtime_root=tmp_path)
+
+    assert result["pass"] is True
+    calls = stub_engine()
+    assert len(calls) == 1
+    assert calls[0]["routine"] is None
+
+
 def test_the_default_engine_is_this_checkouts_runner():
     assert replay.ENGINE == ROOT / "scripts" / "muse-review-engine"
     assert replay.ENGINE.stat().st_mode & stat.S_IXUSR
@@ -700,3 +713,196 @@ def test_cli_entry_point_exists_and_is_executable():
 
     assert entry.exists()
     assert entry.stat().st_mode & stat.S_IXUSR
+
+
+def _replay_pool_fixture():
+    path = ROOT / "tests" / "fixtures" / "replay_pool_v1.json"
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _replay_pool_context(tmp_path, monkeypatch, fixture):
+    head = tmp_path / "head"
+    main = tmp_path / "main"
+    head.mkdir()
+    main.mkdir()
+    runtime_root = tmp_path / "runtime"
+    runtime_root.mkdir(mode=0o700)
+    revisions = {
+        "head": fixture["head_commit_sha"],
+        "main": fixture["main_commit_sha"],
+    }
+    calls = []
+
+    def checkout_revision(path):
+        path = pathlib.Path(path)
+        return path, revisions[path.name]
+
+    def run_checkout(checkout, _packet_path, runs, expected, _runtime_root):
+        calls.append((checkout.name, runs, expected))
+        summary = next(
+            value for value in fixture["packet_results"].values()
+            if value["expected"] == expected
+        )
+        return {
+            **summary,
+            "verdicts": summary["verdicts"][:runs],
+            "failed_parts": summary["failed_parts"][:runs],
+        }
+
+    monkeypatch.setattr(replay, "_checkout_revision", checkout_revision)
+    monkeypatch.setattr(replay, "_run_checkout_replay", run_checkout)
+    return head, main, runtime_root, revisions, calls
+
+
+@pytest.mark.parametrize(
+    "packet_name,expected",
+    [("must_reject", "rejected"), ("must_approve", "approved")],
+)
+def test_replay_packet_runs_each_v1_packet_on_head_and_main(
+        tmp_path, monkeypatch, packet_name, expected):
+    fixture = _replay_pool_fixture()
+    head, main, runtime_root, _revisions, calls = _replay_pool_context(
+        tmp_path, monkeypatch, fixture)
+
+    result = replay.replay_packet(
+        packet_name, head, main, runs=2, runtime_root=runtime_root)
+
+    assert [call[0] for call in calls] == ["head", "main"]
+    assert [call[2] for call in calls] == [expected, expected]
+    assert result["head"]["commit_sha"] == fixture["head_commit_sha"]
+    assert result["main"]["commit_sha"] == fixture["main_commit_sha"]
+    assert [run["verdict"] for run in result["head"]["runs"]] == [
+        expected, expected]
+    assert [run["verdict"] for run in result["main"]["runs"]] == [
+        expected, expected]
+    assert all(run["main_commit_sha"] == fixture["main_commit_sha"]
+               for run in result["main"]["runs"])
+
+
+def test_replay_packet_reuses_same_sha_pool_with_identical_output(
+        tmp_path, monkeypatch):
+    fixture = _replay_pool_fixture()
+    head, main, runtime_root, _revisions, calls = _replay_pool_context(
+        tmp_path, monkeypatch, fixture)
+
+    assert replay.load_main_pool(
+        fixture["main_commit_sha"], runtime_root=runtime_root)["packets"] == {}
+    first = replay.replay_packet(
+        "must_reject", head, main, runs=2, runtime_root=runtime_root)
+    second = replay.replay_packet(
+        "must_reject", head, main, runs=2, runtime_root=runtime_root)
+
+    pool = replay.load_main_pool(
+        fixture["main_commit_sha"], runtime_root=runtime_root)
+    [records] = pool["packets"].values()
+    pool_path = runtime_root / "eval-replay" / "main-pool.json"
+    assert first == second
+    assert [call[0] for call in calls] == ["head", "main", "head"]
+    assert len(records) == 2
+    assert pool_path == runtime_root / replay.MAIN_POOL_RELATIVE_PATH
+    assert pool_path.is_file()
+    assert all(record["main_commit_sha"] == fixture["main_commit_sha"]
+               for record in records)
+
+
+def test_eval_replay_pool_path_is_ignored_by_git():
+    result = subprocess.run(
+        ["git", "-C", str(ROOT), "check-ignore", "--quiet",
+         "eval-replay/main-pool.json"],
+        capture_output=True, text=True, check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_replay_packet_reuses_prior_head_samples_for_the_next_batch(
+        tmp_path, monkeypatch):
+    fixture = _replay_pool_fixture()
+    head, main, runtime_root, _revisions, calls = _replay_pool_context(
+        tmp_path, monkeypatch, fixture)
+
+    first = replay.replay_packet(
+        "must_reject", head, main, runs=2, runtime_root=runtime_root)
+    second = replay.replay_packet(
+        "must_reject", head, main, runs=4, runtime_root=runtime_root,
+        head_runs=first["head"]["runs"])
+
+    assert [call[0] for call in calls] == ["head", "main", "head", "main"]
+    assert [call[1] for call in calls] == [2, 2, 2, 2]
+    assert len(second["head"]["runs"]) == 4
+    assert len(second["main"]["runs"]) == 4
+    assert second["head"]["runs"][:2] == first["head"]["runs"]
+
+
+def test_replay_packet_misses_and_replaces_pool_when_main_sha_changes(
+        tmp_path, monkeypatch):
+    fixture = _replay_pool_fixture()
+    head, main, runtime_root, revisions, calls = _replay_pool_context(
+        tmp_path, monkeypatch, fixture)
+
+    replay.replay_packet(
+        "must_reject", head, main, runs=2, runtime_root=runtime_root)
+    revisions["main"] = fixture["next_main_commit_sha"]
+    after_advance = replay.replay_packet(
+        "must_reject", head, main, runs=2, runtime_root=runtime_root)
+
+    assert [call[0] for call in calls] == ["head", "main", "head", "main"]
+    assert after_advance["main"]["commit_sha"] == fixture[
+        "next_main_commit_sha"]
+    assert all(run["main_commit_sha"] == fixture["next_main_commit_sha"]
+               for run in after_advance["main"]["runs"])
+    assert replay.load_main_pool(
+        fixture["main_commit_sha"], runtime_root=runtime_root)["packets"] == {}
+    advanced_pool = replay.load_main_pool(
+        fixture["next_main_commit_sha"], runtime_root=runtime_root)
+    [records] = advanced_pool["packets"].values()
+    assert len(records) == 2
+    assert all(record["main_commit_sha"] == fixture[
+        "next_main_commit_sha"] for record in records)
+
+
+def test_checkout_revision_records_the_full_git_commit_sha(tmp_path):
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    subprocess.run(["git", "init", "--quiet", str(checkout)], check=True)
+    subprocess.run(["git", "-C", str(checkout), "config", "user.name",
+                    "Replay Fixture"], check=True)
+    subprocess.run(["git", "-C", str(checkout), "config", "user.email",
+                    "replay-fixture@example.invalid"], check=True)
+    (checkout / "README.md").write_text("fixture\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(checkout), "add", "README.md"],
+                   check=True)
+    subprocess.run(["git", "-C", str(checkout), "commit", "--quiet", "-m",
+                    "fixture"], check=True)
+    expected = subprocess.run(
+        ["git", "-C", str(checkout), "rev-parse", "HEAD"],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+
+    assert replay._checkout_revision(checkout) == (checkout.resolve(), expected)
+    assert re.fullmatch(r"[0-9a-f]{40}", expected)
+
+
+def test_checkout_replay_invokes_the_selected_replay_entry(tmp_path):
+    checkout = tmp_path / "selected-checkout"
+    engine_dir = checkout / "engine"
+    engine_dir.mkdir(parents=True)
+    entry = engine_dir / "replay.py"
+    entry.write_text(
+        "import json\n"
+        "print(json.dumps({'expected': 'rejected', 'verdicts': ['rejected'], "
+        "'failed_parts': [[]], 'pass': True}))\n",
+        encoding="utf-8",
+    )
+    packet_path = tmp_path / "packet.json"
+    packet_path.write_text("{}", encoding="utf-8")
+
+    summary = replay._run_checkout_replay(
+        checkout, packet_path, 1, "rejected", tmp_path)
+
+    assert summary == {
+        "expected": "rejected",
+        "verdicts": ["rejected"],
+        "failed_parts": [[]],
+        "pass": True,
+    }

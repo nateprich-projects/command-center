@@ -95,9 +95,10 @@ def test_brief_lists_regressions_with_the_runtime_head(monkeypatch):
     assert funnel.agent_health(NOW) == [{
         "agent": "muse",
         "condition": (
-            "`muse` had 3 regression errors this week. Latest: "
-            "head 0123456789ab: boom 0; head 0123456789ab: boom 1; "
-            "head 0123456789ab: boom 2"
+            "`muse` degraded: 3 consecutive regression errors with runtime "
+            "heads. Latest: regression head 0123456789ab: boom 0; "
+            "regression head 0123456789ab: boom 1; "
+            "regression head 0123456789ab: boom 2"
         ),
     }]
 
@@ -304,10 +305,8 @@ def test_sparse_history_uses_the_absolute_silence_floor_and_reaches_the_brief(
     assert "absolute silence floor 6h exceeded" in conditions[0]
     assert "Nothing recorded for 1d8h1m" in conditions[0]
     assert "normal gap" not in conditions[0]
-    # The retired agent stays quiet on the same silence. zcode, since Codex
-    # came back off the retired list (#1325). zcode is live again as the z.ai
-    # standard tier until `heartbeat.ZAI_STANDARD_UNTIL`, so the control is
-    # pinned rather than read from the clock.
+    # Pin zcode as retired to test that its silence stays quiet independently
+    # of the current cutoff record.
     monkeypatch.setattr(heartbeat, "RETIRED_AGENTS", frozenset({"zcode"}))
     assert assess("zcode", silent, now.timestamp()) == []
 
@@ -372,7 +371,7 @@ def test_finished_start_is_not_reported_as_open():
     assert assess("codex", rows, NOW.timestamp()) == []
 
 
-def test_three_bound_open_starts_keep_only_the_rate_limit_condition():
+def test_three_bound_open_starts_report_rate_limit_and_degraded_conditions():
     rows = [
         _start("one", 180),
         _start("two", 150),
@@ -384,13 +383,18 @@ def test_three_bound_open_starts_keep_only_the_rate_limit_condition():
 
     conditions = assess("codex", rows, NOW.timestamp())
 
-    assert len(conditions) == 1
-    assert "3 runs this week that started and never finished" in conditions[0]
-    assert "Check whether the reserves in `usage.py` are too low." in conditions[0]
-    assert "never returned a job" not in conditions[0]
+    dying = [condition for condition in conditions if "runs this week" in condition]
+    degraded = [condition for condition in conditions if "degraded" in condition]
+
+    assert len(dying) == 1
+    assert "3 runs this week that started and never finished" in dying[0]
+    assert "Check whether the reserves in `usage.py` are too low." in dying[0]
+    assert "never returned a job" not in dying[0]
+    assert len(degraded) == 1
+    assert "missing-end" in degraded[0]
 
 
-def test_three_never_bound_open_starts_get_only_the_begin_condition():
+def test_three_never_bound_open_starts_report_begin_and_degraded_conditions():
     rows = [
         _start("one", 180),
         _start("two", 150),
@@ -399,11 +403,16 @@ def test_three_never_bound_open_starts_get_only_the_begin_condition():
 
     conditions = assess("codex", rows, NOW.timestamp())
 
-    assert len(conditions) == 1
-    assert "3 begins this week that started and never returned a job" in conditions[0]
-    assert "passed the 180 s budget (#1519)" in conditions[0]
-    assert "This is not a usage-reserve problem." in conditions[0]
-    assert "usage.py" not in conditions[0]
+    dying = [condition for condition in conditions if "begins this week" in condition]
+    degraded = [condition for condition in conditions if "degraded" in condition]
+
+    assert len(dying) == 1
+    assert "3 begins this week that started and never returned a job" in dying[0]
+    assert "passed the 180 s budget (#1519)" in dying[0]
+    assert "This is not a usage-reserve problem." in dying[0]
+    assert "usage.py" not in dying[0]
+    assert len(degraded) == 1
+    assert "missing-end" in degraded[0]
 
 
 def test_mixed_open_starts_report_independent_bound_and_never_bound_counts():
@@ -489,9 +498,134 @@ def test_begin_timeout_finishes_are_classified_from_the_record():
     conditions = assess("muse", rows, NOW.timestamp())
 
     assert len(conditions) == 1
-    assert "3 begin-timeout errors this week" in conditions[0]
+    assert "degraded" in conditions[0]
+    assert "begin-timeout:" in conditions[0]
     assert "slow command: begin" in conditions[0]
     assert "usage.py" not in conditions[0]
+
+
+def test_errors_spread_across_a_week_between_successes_are_not_degraded():
+    outcomes = [
+        ("error-6d", 6 * 86400, "errored"),
+        ("success-5d", 5 * 86400, "done"),
+        ("error-4d", 4 * 86400, "errored"),
+        ("success-3d", 3 * 86400, "done"),
+        ("error-2d", 2 * 86400, "errored"),
+        ("success-1d", 1 * 86400, "done"),
+        ("success-1h", 3600, "done"),
+    ]
+    rows = []
+    for run, age, outcome in outcomes:
+        started = NOW.timestamp() - age
+        rows.extend([
+            {
+                "run": run,
+                "phase": "start",
+                "ts": started,
+                "agent": "codex",
+                "tier": "standard",
+            },
+            {
+                "run": run,
+                "phase": "finish",
+                "ts": started + 5,
+                "agent": "codex",
+                "outcome": outcome,
+                "note": "failure in {}".format(run) if outcome == "errored" else None,
+            },
+        ])
+
+    assert assess("codex", rows, NOW.timestamp()) == []
+
+
+def test_newest_three_errors_in_one_lane_ignore_interleaved_lane_successes():
+    records = [
+        ("standard-error-3d", 3 * 86400, "standard", "errored",
+         "first standard failure", None),
+        ("escalated-success-2d5", int(2.5 * 86400), "escalated", "done",
+         None, None),
+        ("standard-timeout-2d", 2 * 86400, "standard", "errored",
+         "begin timeout detail", "begin-timeout"),
+        ("escalated-success-1d5", int(1.5 * 86400), "escalated", "done",
+         None, None),
+        ("standard-error-1d", 1 * 86400, "standard", "errored",
+         "third standard failure", None),
+        ("escalated-success-1h", 3600, "escalated", "done", None, None),
+    ]
+    rows = []
+    for run, age, tier, outcome, note, error_class in records:
+        started = NOW.timestamp() - age
+        start = {
+            "run": run,
+            "phase": "start",
+            "ts": started,
+            "agent": "codex",
+            "tier": tier,
+        }
+        finish = {
+            "run": run,
+            "phase": "finish",
+            "ts": started + 5,
+            "agent": "codex",
+            "outcome": outcome,
+        }
+        if note:
+            finish["note"] = note
+        if error_class:
+            finish["error_class"] = error_class
+        rows.extend([start, finish])
+
+    conditions = assess("codex", rows, NOW.timestamp())
+
+    assert len(conditions) == 1
+    assert "`standard`" in conditions[0]
+    assert "degraded" in conditions[0]
+    assert "begin-timeout" in conditions[0]
+    assert "first standard failure" in conditions[0]
+    assert "third standard failure" in conditions[0]
+    assert "escalated" not in conditions[0]
+
+
+def test_open_run_is_judged_as_missing_end_only_after_unfinished_seconds():
+    now = NOW.timestamp()
+    rows = []
+    for run, age in (("error-a", 20 * 60), ("error-b", 15 * 60)):
+        started = now - age
+        rows.extend([
+            {
+                "run": run,
+                "phase": "start",
+                "ts": started,
+                "agent": "codex",
+                "tier": "standard",
+            },
+            {
+                "run": run,
+                "phase": "finish",
+                "ts": started + 5,
+                "agent": "codex",
+                "outcome": "errored",
+                "note": "failure in {}".format(run),
+            },
+        ])
+    rows.append({
+        "run": "still-running",
+        "phase": "start",
+        "ts": now - 30,
+        "agent": "codex",
+        "tier": "standard",
+    })
+
+    assert assess("codex", rows, now, unfinished_seconds=60) == []
+
+    conditions = assess("codex", rows, now + 31, unfinished_seconds=60)
+
+    assert any(
+        "`standard`" in condition
+        and "degraded" in condition
+        and "missing-end" in condition
+        for condition in conditions
+    )
 
 
 # -- provider park (#1172) --------------------------------------------------
@@ -531,6 +665,53 @@ def test_a_future_hold_reports_parked_instead_of_silence():
     assert "provider quota" in parked[0]
     # The last record before the park stays visible.
     assert "<t:{}:f>".format(int(rows[0]["ts"])) in parked[0]
+
+
+def test_open_auth_outage_and_recovery_are_read_from_the_run_view(monkeypatch):
+    rows = _muse_rows(12, first_minutes_ago=190, gap_minutes=10)
+    opened_at = NOW.timestamp() - 3 * 3600
+    rows.append({
+        "run": "auth-outage",
+        "phase": "finish",
+        "ts": opened_at,
+        "agent": "muse",
+        "outcome": "errored",
+        "note": heartbeat.MUSE_AUTH_OUTAGE_NOTE,
+    })
+    outage_view = heartbeat.run_views(rows)["auth-outage"]["muse_auth_outage"]
+    assert outage_view["opened"] == rows[-1]
+    assert outage_view["cleared_by"] is None
+
+    def raw_auth_reader_used(_rows):
+        raise AssertionError("assess must read auth-outage state from run_views")
+
+    monkeypatch.setattr(
+        heartbeat, "muse_auth_outage", raw_auth_reader_used, raising=False
+    )
+
+    conditions = assess("muse", rows, NOW.timestamp())
+
+    parked = [condition for condition in conditions if "auth outage" in condition]
+    assert len(parked) == 1
+    assert "Nothing recorded for" not in parked[0]
+    assert "<t:{}:f>".format(int(opened_at)) in parked[0]
+    assert "successful login probe clears it" in parked[0]
+
+    probe = {
+        "phase": "auth_probe",
+        "ts": opened_at + 60,
+        "agent": "muse",
+        "result": "success",
+    }
+    recovered = rows + [probe]
+    recovered_view = heartbeat.run_views(recovered)["auth-outage"][
+        "muse_auth_outage"
+    ]
+    assert recovered_view["cleared_by"] == probe
+    conditions = assess("muse", recovered, NOW.timestamp())
+
+    assert not any("auth outage" in condition for condition in conditions)
+    assert any("Nothing recorded for" in condition for condition in conditions)
 
 
 def test_an_expired_hold_returns_the_normal_alarm():

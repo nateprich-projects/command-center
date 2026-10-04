@@ -305,6 +305,69 @@ IN_OVERRIDE = OVERRIDE_RESET - 3 * 86400.0
 PAIR_AT = datetime.datetime(
     2026, 9, 30, 3, 55, tzinfo=datetime.timezone.utc).timestamp()
 PAIR_DAYS_LEFT = (OVERRIDE_RESET - PAIR_AT) / 86400.0
+TRIAL_DURING_OVERRIDE = datetime.datetime(
+    2026, 10, 3, 12, tzinfo=datetime.timezone.utc).timestamp()
+TRIAL_AFTER_OVERRIDE = datetime.datetime(
+    2026, 10, 6, 12, tzinfo=datetime.timezone.utc).timestamp()
+
+
+def test_muse_trial_total_fits_both_existing_allowance_caps():
+    """The $20 trial is below the live $109 cap and the $200 base cap."""
+    active = usage.muse_trial_counter_read(0.0, TRIAL_DURING_OVERRIDE)
+    assert active["cap_dollars"] == 20.0
+    assert active["allowance_dollars"] == 109.0
+    assert active["contained"]
+    assert not active["stop"]
+
+    after_override = usage.muse_trial_counter_read(0.0, TRIAL_AFTER_OVERRIDE)
+    assert after_override["allowance_dollars"] == 200.0
+    assert after_override["contained"]
+
+
+def test_muse_trial_counter_increment_adds_observed_spend():
+    updated = usage.muse_trial_counter_increment(
+        3.25, 2.50, TRIAL_DURING_OVERRIDE)
+    assert updated["spent_dollars"] == 5.75
+    assert updated["increment_dollars"] == 2.50
+    assert updated["known"]
+    assert not updated["stop"]
+
+
+def test_muse_trial_counter_stops_when_next_session_could_exceed_total():
+    # The existing $4.50 Muse session reserve is preserved inside the $20 cap.
+    assert not usage.muse_trial_counter_read(
+        15.50, TRIAL_DURING_OVERRIDE)["stop"]
+    assert usage.muse_trial_counter_read(
+        15.51, TRIAL_DURING_OVERRIDE)["stop"]
+
+
+def test_muse_trial_counter_stops_after_recorded_total_exceeds_cap():
+    result = usage.muse_trial_counter_read(20.01, TRIAL_DURING_OVERRIDE)
+    assert result["known"]
+    assert result["spent_dollars"] == 20.01
+    assert result["stop"]
+
+
+def test_muse_trial_counter_stops_when_counter_is_unreadable():
+    result = usage.muse_trial_counter_read(None, TRIAL_DURING_OVERRIDE)
+    assert not result["known"]
+    assert result["stop"]
+
+
+def test_muse_trial_counter_stops_when_increment_is_unreadable():
+    result = usage.muse_trial_counter_increment(
+        1.0, None, TRIAL_DURING_OVERRIDE)
+    assert not result["known"]
+    assert result["stop"]
+
+
+def test_muse_trial_counter_stops_if_allowance_cannot_contain_cap(monkeypatch):
+    monkeypatch.setattr(usage, "MUSE_PACE_OVERRIDE", None)
+    monkeypatch.setattr(usage, "MUSE_WEEKLY_CAP_DOLLARS", 19.0)
+    result = usage.muse_trial_counter_read(0.0, TRIAL_AFTER_OVERRIDE)
+    assert result["allowance_dollars"] == 19.0
+    assert not result["contained"]
+    assert result["stop"]
 
 
 def test_the_override_names_the_window_resetting_sunday_2026_10_04():

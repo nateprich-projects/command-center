@@ -145,10 +145,33 @@ is not already a symlink, and refuses to touch a `settings.json` it cannot parse
 - `heartbeat.py` — records run **start and finish separately**, each with a usage
   snapshot, to an orphan `heartbeat` branch via the Contents API (compare-and-swap on
   the blob sha, so a concurrent write is rejected rather than lost). Smoke-tested live.
+  Readers pair records through one per-run view, `heartbeat.run_views` (#2174, plan
+  #1750): per run id over the distinct records, the start, finish (re-begin flagged),
+  binding, job, api_cost events and pairing (open, finished, re-begun, closed by an
+  unresolved finish), with each API cost field measured, missing or lost rather than a
+  bare null. `open_starts` and `api_cost_for_run` are thin adapters over it, so a run
+  read twice (GitHub plus spool) is one run. `agent_health.assess` takes its open
+  starts, bindings, completed durations and per-run outcomes (the finish, or one of the
+  run's events, where `config-drift` lives) from the same view; an outcome that names
+  no run (an unresolved finish) still counts, once. It also carries the Muse auth-outage
+  finish and associates an unbound successful login probe with that opener's run (#2176).
+  Built and fixture-tested;
+  not yet checked against the live branch (#2179).
+  `heartbeat start` and `finish` read GitHub strictly (#2175): a failed read is lost,
+  never "no records", and only a missing file is an empty history. They carry on from
+  the spool alone; `finish` trusts the run id it was given instead of refusing ("no
+  start recorded"), writes the run's API cost, job and token fields as unknown and says
+  so on stderr, and takes start, binding, job and API cost through the per-run view.
+  The Muse quota-hit record reads its paired total the same way, so an unread GitHub
+  is "could not be read". Built and fixture-tested; not checked live.
 - `.github/workflows/watchdog.yml` + `.github/scripts/watchdog.py` — hourly. Reports
   silence, dying runs, and repeated errors; deliberately silent on over-pace, locked and
   nothing-to-do, which are the system working. Full cycle verified live: opened an issue,
-  detected recovery, closed it.
+  detected recovery, closed it. A Muse lane parked on an open auth outage (#1946)
+  reports as that park — the finish that opened it, and that a successful login probe
+  clears it — in place of the silence alarm, in the watchdog and the brief alike;
+  `heartbeat.run_views` carries that state, and the lane gate's `muse_auth_outage` is a
+  thin adapter over the same view (#2176). Fixture-tested only.
 - `routines/codex-work.md` and `routines/claude-review.md` — the prompts to paste into
   Codex Scheduled and a Claude Code Routine.
 

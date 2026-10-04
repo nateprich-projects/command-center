@@ -27,7 +27,9 @@ WATCH_GATES_QUESTIONS = (
     "`{unblock}`, `{unblock_or_park}` and `{block_unread}` item not waiting\n"
     "on Nate's hands (the last asked instead when a block's comments could\n"
     "not be read, #2134), and `{plan}` on an agent-origin Broken or Bug plan\n"
-    "with no open Exposure or Preference question."
+    "with no open Exposure or Preference question. `{held_recheck}` is the\n"
+    "Shaped-hold prompt only while a condition remains unresolved and the\n"
+    "Plan-Version matches the issue body."
 ).format(**GATE_QUESTIONS)
 
 RENDER_TEMPLATE = """\

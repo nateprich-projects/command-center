@@ -209,7 +209,14 @@ def test_muse_missing_session_journal_is_partial_not_zero(tmp_path, monkeypatch)
         "muse", ["muse-one", "missing"], 2
     )
 
-    assert usage is None
+    # #2178: the readable journal's own tokens (10 input, 2 of them cached, 3
+    # out), neither scaled up to two calls nor dropped to nothing.
+    assert usage == {
+        "fresh_input_tokens": 8,
+        "cache_read_input_tokens": 2,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 3,
+    }
     assert coverage == {
         "status": "partial",
         "captured_calls": 2,
@@ -219,6 +226,58 @@ def test_muse_missing_session_journal_is_partial_not_zero(tmp_path, monkeypatch)
         "uncaptured_calls": 0,
         "reasons": ["unreadable_session_journals_or_usage"],
     }
+
+
+def test_muse_uncaptured_call_sums_the_captured_journals_as_partial(
+    tmp_path, monkeypatch
+):
+    _write_muse_session(tmp_path, "muse-one", 10, 2, 3)
+    _write_muse_session(tmp_path, "muse-three", 20, 5, 7)
+    monkeypatch.setitem(
+        session_usage.SESSION_GLOBS,
+        "muse",
+        str(tmp_path / "*" / "*"),
+    )
+
+    usage, coverage = session_usage.usage_for_sessions(
+        "muse", ["muse-one", None, "muse-three"], 3
+    )
+
+    assert usage == {
+        "fresh_input_tokens": 23,
+        "cache_read_input_tokens": 7,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 10,
+    }
+    assert coverage == {
+        "status": "partial",
+        "captured_calls": 2,
+        "made_calls": 3,
+        "readable_journals": 2,
+        "unreadable_journals": 0,
+        "uncaptured_calls": 1,
+        "reasons": ["uncaptured_session_ids"],
+    }
+
+
+def test_muse_partial_with_no_readable_journal_has_no_tokens(
+    tmp_path, monkeypatch
+):
+    # Nothing was observed, so there is no observed value: an all-zero sum
+    # would read as a free run.
+    monkeypatch.setitem(
+        session_usage.SESSION_GLOBS,
+        "muse",
+        str(tmp_path / "*" / "*"),
+    )
+
+    usage, coverage = session_usage.usage_for_sessions(
+        "muse", ["missing", None], 2
+    )
+
+    assert usage is None
+    assert coverage["status"] == "partial"
+    assert coverage["readable_journals"] == 0
 
 
 def test_malformed_session_list_is_a_fault_not_a_partial_sum():

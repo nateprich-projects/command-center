@@ -3,7 +3,8 @@
 
 Each replay runs ``scripts/muse-review-engine``'s replay entry from this
 checkout: the same lister, judges and derived answer the review lanes run,
-on the given packet and routine, recording nothing (#1730). Replay used to
+on the given packet and active versioned prompt (or an explicitly supplied
+routine), recording nothing (#1730). Replay used to
 make one max call over the routine and packet, and on a large packet that
 call went silent past Muse's stream-idle limit where the lanes' split would
 not have (#1698).
@@ -34,6 +35,7 @@ import agent_health  # noqa: E402
 import funnel  # noqa: E402
 import usage  # noqa: E402
 from engine import review_apply  # noqa: E402
+from engine import review_packets  # noqa: E402
 
 
 DEFAULT_RUNS = 3
@@ -44,10 +46,14 @@ RUNTIME_ROOT = pathlib.Path(funnel.CLAUDE_DIR)
 #: branch's engine, routine and judges rather than the maintained clone's.
 CHECKOUT = pathlib.Path(__file__).resolve().parents[1]
 ENGINE = CHECKOUT / "scripts" / "muse-review-engine"
-ROUTINE_DEFAULT = (
-    pathlib.Path(__file__).resolve().parents[1]
-    / "routines" / "muse-review.md"
-)
+MAIN_POOL_SCHEMA = 1
+MAIN_POOL_RELATIVE_PATH = pathlib.Path("eval-replay") / "main-pool.json"
+PACKET_EXPECTED_VERDICTS = {
+    "must_reject": "rejected",
+    "must_approve": "approved",
+}
+COMMIT_SHA = re.compile(r"[0-9a-f]{40}\Z")
+PACKET_DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 #: One engine timing line, exactly as `log_call_timing` in
 #: scripts/muse-review-engine writes it (#1719):
 #:
@@ -219,7 +225,8 @@ def _report_failed_run(run: int, status: int, failed_parts: Sequence[str],
           file=sys.stderr)
 
 
-def _engine_run(packet_path: pathlib.Path, routine_path: pathlib.Path, *,
+def _engine_run(packet_path: pathlib.Path,
+                routine_path: Optional[pathlib.Path], *,
                 runtime_root: pathlib.Path, run: int = 1
                 ) -> tuple[str, list[str]]:
     """Run the engine's replay entry once; return its answer and failed parts.
@@ -241,9 +248,12 @@ def _engine_run(packet_path: pathlib.Path, routine_path: pathlib.Path, *,
                 os.environ,
                 MUSE_REVIEW_ENGINE_REPO=str(CHECKOUT),
                 MUSE_REVIEW_ENGINE_REPLAY_PACKET=str(packet_path),
-                MUSE_REVIEW_ENGINE_REPLAY_ROUTINE=str(routine_path),
                 MUSE_REVIEW_ENGINE_REPLAY_ANSWER=str(answer_path),
             )
+            if routine_path is not None:
+                env["MUSE_REVIEW_ENGINE_REPLAY_ROUTINE"] = str(routine_path)
+            else:
+                env.pop("MUSE_REVIEW_ENGINE_REPLAY_ROUTINE", None)
             # The escalated tier at max, which is Muse's whatever the z.ai
             # cutoff says; /bin/bash because launchd runs the lanes with it.
             result = subprocess.run(
@@ -268,10 +278,14 @@ def _engine_run(packet_path: pathlib.Path, routine_path: pathlib.Path, *,
         raise ReplayError("the review engine could not run") from exc
 
 
-def replay(packet: str | pathlib.Path, routine: str | pathlib.Path, *,
+def replay(packet: str | pathlib.Path,
+           routine: Optional[str | pathlib.Path] = None, *,
            runs: int = DEFAULT_RUNS, expected: str,
            runtime_root: str | pathlib.Path = RUNTIME_ROOT) -> dict:
     """Replay one packet N times and return verdict-only summary data.
+
+    With no explicit routine, the engine loads the active versioned reviewer
+    prompt through the same adapter as a live review.
 
     Any run that fails, or leaves an answer review-apply would refuse, fails
     the whole replay with no verdicts: a lister that went silent records no
@@ -290,7 +304,9 @@ def replay(packet: str | pathlib.Path, routine: str | pathlib.Path, *,
     check_budget(runs)
     root = pathlib.Path(runtime_root).expanduser().resolve()
     packet_path = resolve_packet_path(packet, root)
-    routine_path = resolve_routine_path(routine)
+    routine_path = (
+        resolve_routine_path(routine) if routine is not None else None
+    )
 
     verdicts = []
     failed_parts = []
@@ -311,13 +327,276 @@ def replay(packet: str | pathlib.Path, routine: str | pathlib.Path, *,
     }
 
 
+def _checkout_revision(checkout: str | pathlib.Path
+                       ) -> tuple[pathlib.Path, str]:
+    """Resolve a checkout and read its full HEAD commit SHA."""
+    try:
+        path = pathlib.Path(checkout).expanduser().resolve(strict=True)
+        if not path.is_dir():
+            raise ReplayError("review checkout must be a directory")
+        result = subprocess.run(
+            ["git", "-C", str(path), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ReplayError("review checkout could not be read") from exc
+    commit = result.stdout.strip()
+    if result.returncode != 0 or not COMMIT_SHA.fullmatch(commit):
+        raise ReplayError("review checkout has no full commit SHA")
+    return path, commit
+
+
+def _empty_main_pool(main_commit_sha: str) -> dict:
+    return {
+        "schema": MAIN_POOL_SCHEMA,
+        "main_commit_sha": main_commit_sha,
+        "packets": {},
+    }
+
+
+def _main_pool_key(version: str, packet_name: str, packet_sha256: str) -> str:
+    return "{}/{}/{}".format(version, packet_name, packet_sha256)
+
+
+def load_main_pool(main_commit_sha: str, *,
+                   runtime_root: str | pathlib.Path = RUNTIME_ROOT) -> dict:
+    """Load only main-side runs recorded for this exact full main commit SHA.
+
+    A missing, malformed, or older-SHA pool is a cache miss. The pool file
+    holds only sanitized verdict records; packet contents stay in the
+    versioned repository fixture and are never copied into the pool.
+    """
+    if not isinstance(main_commit_sha, str) or not COMMIT_SHA.fullmatch(
+            main_commit_sha):
+        raise ReplayError("main commit SHA must contain 40 lowercase hex digits")
+    empty = _empty_main_pool(main_commit_sha)
+    root = pathlib.Path(runtime_root).expanduser().resolve()
+    pool_dir = root / MAIN_POOL_RELATIVE_PATH.parent
+    pool_path = root / MAIN_POOL_RELATIVE_PATH
+    try:
+        if (pool_dir.is_symlink() or not pool_dir.is_dir()
+                or pool_dir.stat().st_mode & 0o077
+                or pool_path.is_symlink() or not pool_path.is_file()
+                or pool_path.stat().st_mode & 0o077):
+            return empty
+        stored = json.loads(pool_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return empty
+    if (not isinstance(stored, dict)
+            or stored.get("schema") != MAIN_POOL_SCHEMA
+            or stored.get("main_commit_sha") != main_commit_sha
+            or not isinstance(stored.get("packets"), dict)):
+        return empty
+
+    for key, records in stored["packets"].items():
+        if not isinstance(key, str) or not isinstance(records, list):
+            return empty
+        for record in records:
+            if not isinstance(record, dict):
+                return empty
+            packet_name = record.get("packet")
+            version = record.get("version")
+            digest = record.get("packet_sha256")
+            failed_parts = record.get("failed_parts")
+            if (not isinstance(packet_name, str) or not packet_name
+                    or not isinstance(version, str) or not version
+                    or not isinstance(digest, str)
+                    or not PACKET_DIGEST.fullmatch(digest)
+                    or record.get("main_commit_sha") != main_commit_sha
+                    or record.get("verdict") not in EXPECTED_VERDICTS
+                    or not isinstance(failed_parts, list)
+                    or not all(isinstance(part, str) for part in failed_parts)
+                    or key != _main_pool_key(version, packet_name, digest)):
+                return empty
+    return stored
+
+
+def _save_main_pool(pool: dict,
+                    runtime_root: str | pathlib.Path = RUNTIME_ROOT) -> None:
+    """Atomically replace the owner-only pool with its current main SHA."""
+    root = pathlib.Path(runtime_root).expanduser().resolve()
+    if not root.is_dir():
+        raise ReplayError("review runtime root is unavailable")
+    pool_dir = root / MAIN_POOL_RELATIVE_PATH.parent
+    try:
+        pool_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if pool_dir.is_symlink() or not pool_dir.is_dir():
+            raise ReplayError("main replay pool directory is unavailable")
+        pool_dir.chmod(0o700)
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=".main-pool-", dir=pool_dir)
+        try:
+            os.fchmod(descriptor, 0o600)
+            with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+                json.dump(pool, stream, separators=(",", ":"), sort_keys=True)
+                stream.write("\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary_name, root / MAIN_POOL_RELATIVE_PATH)
+        finally:
+            try:
+                os.unlink(temporary_name)
+            except FileNotFoundError:
+                pass
+    except OSError as exc:
+        raise ReplayError("main replay pool could not be written") from exc
+
+
+def _run_checkout_replay(checkout: pathlib.Path, packet_path: pathlib.Path,
+                         runs: int, expected: str,
+                         runtime_root: pathlib.Path) -> dict:
+    """Run this checkout's replay CLI without exposing captured diagnostics."""
+    entry = checkout / "engine" / "replay.py"
+    if not entry.is_file():
+        raise ReplayError("review checkout has no replay entry point")
+    try:
+        result = subprocess.run(
+            [sys.executable, str(entry), str(packet_path), "--runs",
+             str(runs), "--expected-verdict", expected,
+             "--runtime-root", str(runtime_root)],
+            cwd=str(checkout), capture_output=True, text=True, check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ReplayError("review replay could not run in a checkout") from exc
+    if result.returncode != 0:
+        raise ReplayError("review replay failed in a checkout")
+    try:
+        summary = json.loads(result.stdout)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise ReplayError("review replay returned invalid output") from exc
+    return summary
+
+
+def _summary_runs(summary: dict, *, expected: str, count: int) -> list[dict]:
+    """Validate replay output and retain only per-run verdict evidence."""
+    if not isinstance(summary, dict) or summary.get("expected") != expected:
+        raise ReplayError("review replay returned an unexpected summary")
+    verdicts = summary.get("verdicts")
+    failed_parts = summary.get("failed_parts")
+    if (not isinstance(verdicts, list) or len(verdicts) != count
+            or not all(verdict in EXPECTED_VERDICTS for verdict in verdicts)
+            or not isinstance(failed_parts, list)
+            or len(failed_parts) != count
+            or not all(isinstance(parts, list)
+                       and all(isinstance(part, str) for part in parts)
+                       for parts in failed_parts)):
+        raise ReplayError("review replay returned invalid run records")
+    return [
+        {"verdict": verdict, "failed_parts": list(parts)}
+        for verdict, parts in zip(verdicts, failed_parts)
+    ]
+
+
+def replay_packet(packet_name: str, head_checkout: str | pathlib.Path,
+                  main_checkout: str | pathlib.Path, *,
+                  runs: int = DEFAULT_RUNS, version: str = "v1",
+                  runtime_root: str | pathlib.Path = RUNTIME_ROOT,
+                  head_runs: Optional[Sequence[dict]] = None) -> dict:
+    """Replay one frozen packet on PR head and current main.
+
+    Main-side runs are reused only for the same 40-character main SHA. A new
+    main SHA starts with an empty pool and replaces the older pool on its
+    first saved run. ``head_runs`` lets a bounded evaluation pass its earlier
+    samples so only the next batch is replayed on head. This helper reports
+    run records only; it does not compare head and main or apply thresholds.
+    """
+    if isinstance(runs, bool) or not isinstance(runs, int) or runs < 1:
+        raise ReplayError("runs must be a positive integer")
+    if not isinstance(packet_name, str):
+        raise ReplayError("versioned review packet name is invalid")
+    try:
+        expected = PACKET_EXPECTED_VERDICTS[packet_name]
+        packet = review_packets.load_packet(packet_name, version)
+        packet_sha256 = review_packets.verify_checksums(version)[packet_name]
+    except (KeyError, review_packets.PacketSetError) as exc:
+        raise ReplayError("versioned review packet is unavailable") from exc
+
+    head_path, head_commit_sha = _checkout_revision(head_checkout)
+    main_path, main_commit_sha = _checkout_revision(main_checkout)
+    root = pathlib.Path(runtime_root).expanduser().resolve()
+    if not root.is_dir():
+        raise ReplayError("review runtime root is unavailable")
+
+    packet_bytes = json.dumps(
+        packet, ensure_ascii=False, separators=(",", ":"), sort_keys=True
+    ).encode("utf-8")
+    with tempfile.TemporaryDirectory(
+            prefix="command-center-review-packet-", dir=root) as temporary:
+        packet_path = pathlib.Path(temporary) / "packet.json"
+        packet_path.write_bytes(packet_bytes)
+        packet_path.chmod(0o600)
+
+        cached_head_runs = list(head_runs or [])
+        if len(cached_head_runs) > runs:
+            cached_head_runs = cached_head_runs[:runs]
+        for record in cached_head_runs:
+            if (not isinstance(record, dict)
+                    or record.get("head_commit_sha") != head_commit_sha
+                    or record.get("packet") != packet_name
+                    or record.get("version") != version
+                    or record.get("packet_sha256") != packet_sha256
+                    or record.get("verdict") not in EXPECTED_VERDICTS
+                    or not isinstance(record.get("failed_parts"), list)
+                    or not all(isinstance(part, str)
+                               for part in record["failed_parts"])):
+                raise ReplayError(
+                    "cached head replay runs do not match this head")
+        missing_head_runs = runs - len(cached_head_runs)
+        if missing_head_runs:
+            head_summary = _run_checkout_replay(
+                head_path, packet_path, missing_head_runs, expected, root)
+            new_head_runs = _summary_runs(
+                head_summary, expected=expected, count=missing_head_runs)
+            cached_head_runs.extend(
+                {"packet": packet_name, "version": version,
+                 "packet_sha256": packet_sha256,
+                 "head_commit_sha": head_commit_sha, **run}
+                for run in new_head_runs
+            )
+
+        pool = load_main_pool(main_commit_sha, runtime_root=root)
+        key = _main_pool_key(version, packet_name, packet_sha256)
+        cached_runs = list(pool["packets"].get(key, []))
+        if len(cached_runs) < runs:
+            missing = runs - len(cached_runs)
+            main_summary = _run_checkout_replay(
+                main_path, packet_path, missing, expected, root)
+            new_runs = _summary_runs(
+                main_summary, expected=expected, count=missing)
+            for run in new_runs:
+                cached_runs.append({
+                    "packet": packet_name,
+                    "version": version,
+                    "packet_sha256": packet_sha256,
+                    "main_commit_sha": main_commit_sha,
+                    **run,
+                })
+            pool["packets"][key] = cached_runs
+            _save_main_pool(pool, runtime_root=root)
+
+        main_runs = cached_runs[:runs]
+    return {
+        "packet": packet_name,
+        "version": version,
+        "packet_sha256": packet_sha256,
+        "head": {
+            "commit_sha": head_commit_sha,
+            "runs": cached_head_runs,
+        },
+        "main": {
+            "commit_sha": main_commit_sha,
+            "runs": main_runs,
+        },
+    }
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         description="Replay a private review packet and print only its "
                     "verdicts and failed part names")
     parser.add_argument("packet", help="packet path relative to the runtime root")
-    parser.add_argument("--routine", default=str(ROUTINE_DEFAULT),
-                        help="review routine path (default: live review routine)")
+    parser.add_argument("--routine", default=None,
+                        help="explicit review routine path (default: active variant)")
     parser.add_argument("--runs", type=int, default=DEFAULT_RUNS,
                         help="number of replays (default: 3)")
     parser.add_argument("--expected-verdict", required=True,

@@ -7,12 +7,16 @@ It reports six distinct conditions, because they have different causes and
 different fixes:
 
 - **Silent.** No record at all within the window. The watchdog can report that
-  absence and when the last record arrived, but cannot observe its cause.
+  absence and when the last record arrived, but cannot observe its cause —
+  except a Muse auth outage (#1946), which the records themselves name: while
+  no successful login probe has cleared it, Muse's silence reports as that
+  park, with the time of the finish that opened it (#2176).
 - **Dying.** Runs that started and never finished. That is the signature of a
   session killed mid-work by a rate limit, and it is the one condition a single
   outcome line could never have detected.
-- **Erroring.** Repeated `errored` outcomes. Something is broken in the run
-  itself.
+- **Degraded lane.** The newest three judged runs in one lane each errored or
+  passed `unfinished_seconds` without an end. The condition names the lane and
+  each run's failure detail.
 - **Stale runtime.** Three consecutive scheduled runs used a checkout that
   GitHub reports behind `main` after the normal keeper lag.
 - **Config drift.** A Codex run refused in the last day because its model,
@@ -20,6 +24,8 @@ different fixes:
   refusal repeats on every run until someone fixes the automation.
 - **Unreadable.** A heartbeat file the watchdog could not read. Reading it as
   empty would pass an agent it cannot see as one that never ran (#1335).
+  A readable file with some bad lines is assessed on the rest, and the
+  run log's note names how many lines were left out (#2173).
 
 Deliberately *not* reported: any `skipped-*` outcome and `nothing-to-do`. Those
 are the system working, and paging on them would train the alert to be ignored.
@@ -239,6 +245,9 @@ def records(agent: str) -> List[Dict]:
     watchdog would close a real alarm as healthy. Any other failure raises
     after one retry, because an agent the watchdog cannot see must be
     reported, not passed as silent.
+
+    A readable file with a bad line in it reads as its object records, with
+    the count of lines left out on the result's `unreadable` (#2173).
     """
     path = "repos/{}/contents/{}.jsonl?ref={}".format(REPO, agent, BRANCH)
     try:
@@ -255,13 +264,9 @@ def records(agent: str) -> List[Dict]:
     else:
         content = base64.b64decode(payload.get("content", "")).decode(
             "utf-8", "replace")
-    out = []
-    for line in content.splitlines():
-        try:
-            out.append(json.loads(line))
-        except ValueError:
-            continue
-    return out
+    # The heartbeat's own line parser, so a line that is not a JSON object
+    # never reaches `assess`; `note` names how many were left out (#2173).
+    return heartbeat.parse_records(content)
 
 
 def _history(rows: List[Dict], now: float) -> Tuple[List[float], List[float]]:
@@ -327,12 +332,23 @@ def assess(agent: str, rows: List[Dict], now: float) -> List[str]:
 
 
 def note(agent: str, rows: List[Dict], now: Optional[float] = None) -> str:
-    """Informational only — printed to the run log, never filed as an issue."""
+    """Informational only — printed to the run log, never filed as an issue.
+
+    Names any lines `records` left out as unreadable (#2173), so an agent
+    whose file holds only bad lines does not read as one that never ran.
+    """
+    unreadable = getattr(rows, "unreadable", 0)
+    left_out = (
+        "`{}` has {} unreadable heartbeat line(s), left out of the "
+        "assessment.".format(agent, unreadable)
+        if unreadable else ""
+    )
     if not rows:
-        return "`{}` has never recorded a run (not scheduled yet?)".format(agent)
+        return left_out or (
+            "`{}` has never recorded a run (not scheduled yet?)".format(agent))
     if now is None:
         now = time.time()
-    notes = []
+    notes = [left_out] if left_out else []
     line = health_line(agent, rows, now)
     if line:
         notes.append(line)

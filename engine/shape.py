@@ -502,6 +502,11 @@ def render_plan(answer: Dict) -> str:
     Canonical Risk and Needs values live in Project fields. Takes a
     validated answer; ``apply_shape`` validates before calling. The body
     carries exactly one ``Proposed class:`` line, the runner's (#1723).
+
+    No origin override is rendered (#2138). The runner carries the one the
+    decision honoured after this body, so an override marker anywhere in
+    the model's fields, the narrative or a one-line field, is made inert:
+    the model never moves an idea toward agents or toward Nate.
     """
     lines = [_without_proposed_class_lines(answer["plan_markdown"]).rstrip(),
              "", "## Premises", ""]
@@ -551,7 +556,12 @@ def render_plan(answer: Dict) -> str:
         for category, questions in open_questions:
             lines.append("- {}: {}".format(category, "; ".join(questions)))
     lines.append("")
-    return "\n".join(lines)
+    # Only model text can hold the marker: no runner line above writes it.
+    # ``&lt;!--`` renders as ``<!--`` on GitHub, as in
+    # ``funnel.inert_comment_text``, but no reader takes it for the marker.
+    marker = funnel.ORIGIN_OVERRIDE_MARKER
+    return "\n".join(lines).replace(
+        marker, marker.replace("<!--", "&lt;!--", 1))
 
 
 def open_need_categories(answer: Dict) -> List[str]:
@@ -565,7 +575,8 @@ def _plan_escalation_scan_body(answer: Dict) -> str:
 
     Declared risks are evaluated separately from the wording scan. Every
     other rendered section must be in the scan so preview and the persisted
-    Risk field read the same plan.
+    Risk field read the same plan; ``funnel.plan_scan_text`` then decides
+    which regions of it the scan reads (#2180).
     """
     scan_answer = dict(answer)
     scan_answer["escalated_risk"] = []
@@ -1113,6 +1124,91 @@ def shape_decision(items: Sequence, item, answer_data: object
     return decision_record(items, item, reviewed)
 
 
+def carried_override_blocks(original_body: str,
+                            override_target: Optional[str]) -> List[str]:
+    """The idea's blocks that carry the override the decision used (#2138).
+
+    ``funnel.parse_origin_override`` honours an override to agents only
+    while the body's newest provenance, in body order, is a Nate voice, and
+    the plan body ends with the shaper's own provenance. So an override to
+    agents is carried with the provenance block that authorised it, the
+    one that reader checked on the idea's body, verbatim and after the
+    shaper's: the runner never writes a Nate voice of its own. An override
+    toward Nate needs no voice. An override the decision did not honour is
+    not carried, so a nate-relayed shaping cannot lend it the voice it
+    lacked. Each block is the newest parseable one, the one the reader read.
+    """
+    if override_target is None:
+        return []
+    markers = [funnel.ORIGIN_OVERRIDE_MARKER]
+    if override_target == "agents":
+        markers.append(funnel.PROVENANCE_MARKER)
+    blocks = []
+    for marker in markers:
+        block = funnel._marked_json_block(original_body, marker)
+        if block is not None:
+            blocks.append(block)
+    return blocks
+
+
+def read_back_mismatches(body: str, decision: ShapeDecision) -> List[str]:
+    """Where funnel's stored-body readers disagree with the decision (#2138).
+
+    Every later reader, the Shaped sweep above all, reads the stored plan
+    body, never the idea's body the decision read. Each entry names one
+    reader that would see something other than what the decision used: the
+    origin override, the runner's risk record, or the proposed Class.
+    """
+    mismatches = []
+    override = funnel.parse_origin_override(body)
+    target = override["target"] if override is not None else None
+    if target != decision.inputs.override_target:
+        mismatches.append(
+            "the origin override reads {} where the decision used {}".format(
+                target or "none", decision.inputs.override_target or "none"))
+    runner_record = funnel._marked_json(
+        decision.risk_record, funnel.SHAPE_RISK_MARKER)
+    if funnel.parse_shape_risk_record(body) != runner_record:
+        mismatches.append(
+            "the shape-risk record read is not the runner's")
+    proposed = funnel.proposed_class_for_approval(body)
+    if proposed is None or proposed[0] != decision.answer["proposed_class"]:
+        mismatches.append("the proposed Class does not read {}".format(
+            decision.answer["proposed_class"]))
+    return mismatches
+
+
+def written_body(decision: ShapeDecision, original_body: str, *,
+                 voice: str, now: datetime,
+                 run: Optional[str] = None,
+                 agent: Optional[str] = None) -> str:
+    """The plan body ``apply_shape`` writes for ``decision`` (#2138).
+
+    The rendered plan, the runner's risk record, the shaper's provenance,
+    then the carried override blocks. The runner's record and provenance
+    come before the carried blocks, so a later copied marker must not read
+    as newer (#1937). Raises ``ShapeError``, before anything is written,
+    when the body would not read back to the decision. In practice that is
+    a carried Nate-voiced block dated at or after ``now``: it would become
+    the provenance ``parse_shape_risk_record`` reads the runner's record
+    against, and that record would read as unreadable.
+    """
+    body = funnel.append_provenance(
+        "{}\n\n{}\n".format(decision.rendered.rstrip("\n"),
+                            decision.risk_record),
+        voice, at=now, run=run, agent=agent)
+    for block in carried_override_blocks(
+            original_body, decision.inputs.override_target):
+        body = "{}\n\n{}".format(body, block)
+    mismatches = read_back_mismatches(body, decision)
+    if mismatches:
+        raise ShapeError(
+            "refusing to write the plan: its body would not read back to "
+            "the decision it was written from: {}".format(
+                "; ".join(mismatches)))
+    return body
+
+
 def issue_url(ref: str) -> str:
     """Render an owner/repo#n ref as the issue URL `gh` takes for edges."""
     match = REF_RE.match(ref.strip())
@@ -1449,8 +1545,11 @@ def apply_shape(items: list, now: datetime, ref: str,
     Project read refuses a stale apply before it can overwrite the issue.
 
     The open-question record comes from the needs_nate fields rather than a
-    Needs-section parse. A manually placed origin-override block is carried
-    over verbatim; Origin itself lives in the Project field.
+    Needs-section parse. The origin override the decision honoured is
+    carried over verbatim, with the Nate-voiced provenance that authorised
+    an override to agents (``written_body``, #2138); Origin itself lives in
+    the Project field. The written body, and the in-session item, read back
+    to the decision through funnel's stored-body readers.
 
     Sequencing dependencies ride the body write as native blocked-by
     edges (#1053): one ``gh issue edit`` carries the rendered plan and
@@ -1469,21 +1568,10 @@ def apply_shape(items: list, now: datetime, ref: str,
     scan_only = decision.scan_only
     authority_signals = decision.authority_signals
 
-    original_body = item.body or ""
-    carried_blocks = []
-    for marker in (funnel.ORIGIN_OVERRIDE_MARKER,):
-        block = funnel._marked_json_block(original_body, marker)
-        if block is not None:
-            carried_blocks.append(block)
-    # The runner risk record and provenance are written before these carried
-    # blocks below. The parser must not treat a later copied marker as newer.
-
-    body = funnel.append_provenance(
-        "{}\n\n{}\n".format(decision.rendered.rstrip("\n"),
-                            decision.risk_record),
-        voice, at=now, run=run, agent=agent)
-    for block in carried_blocks:
-        body = "{}\n\n{}".format(body, block)
+    # The body reads back to this decision through funnel's stored-body
+    # readers, or nothing is written (#2138).
+    body = written_body(decision, item.body or "", voice=voice, now=now,
+                        run=run, agent=agent)
 
     depends_on = answer.get("depends_on", [])
     current_blockers = getattr(item, "blocked_by_refs", None)
@@ -1567,6 +1655,9 @@ def apply_shape(items: list, now: datetime, ref: str,
             item=item.item_id, field=funnel.CLASS_FIELD_ID,
             option=funnel._option_id(funnel.CLASS_FIELD_ID,
                                      decision.inputs.klass))
+        # A same-session reader, the Shaped sweep included, reads the Class
+        # from this object, as it reads the body above (#2138).
+        item.klass = decision.inputs.klass
     funnel.write_project_select(item.item_id, "Risk", decision.risk, item.ref)
     funnel.write_project_select(
         item.item_id, "Needs", decision.needs, item.ref)

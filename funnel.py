@@ -47,6 +47,43 @@ from typing import (IO, Any, Callable, Collection, Dict, FrozenSet, Iterable,
 import agent_health as agent_health_module
 from agent_health import assess as assess_agent_health
 from decline_classifier import classify_decline_reason
+# The block, decision and decline headers and their single-comment parsers
+# have one owner (#2165); funnel.py keeps the row-level reading.
+from block_record import (  # noqa: F401 -- re-exported under the old names
+    BLOCK_COMMENT_PREFIX,
+    BLOCK_COMMENT_RE,
+    BLOCK_EVENT_COMMENT_PREFIX,
+    BLOCK_EVENT_COMMENT_RE,
+    BLOCK_EVENT_KIND_HEADER_RE,
+    BLOCK_FENCED_PAYLOAD_RE,
+    DECLINED_PREFIX,
+    NEEDS_DECISION_PREFIX,
+    NEEDS_DECISION_RE,
+    SHAPED_HOLD_COMMENT_PREFIX,
+    SHAPED_HOLD_CLEAR_PREFIX,
+    SHAPED_HOLD_RELEASE_PREFIX,
+    _parse_block_comment_details,
+    _parse_block_comment_header,
+    _parse_block_event_spec,
+    _unconditioned_event_reason,
+    _unique_json_object,
+    inert_comment_text,
+    parse_block_comment,
+    parse_decline_comment,
+    parse_shaped_hold_clear_comment,
+    parse_shaped_hold_comment,
+    shaped_hold_id,
+    shaped_plan_version,
+    unparseable_block_comment_lines,
+    validate_proof_comment_url,
+)
+# funnel's block, hold and needs-decision writers render through the owner
+# too, so their reasons are inert and their headers read back (#2169).
+from block_record import (
+    render_blocked, render_needs_decision, render_shaped_hold,
+    render_conditioned_shaped_hold_clear,
+    render_explicit_shaped_hold_release,
+)
 import nightly_watch
 import price_watch
 
@@ -415,6 +452,7 @@ GATE_QUESTIONS = {
     # A block whose comments could not be read: its condition is unknown,
     # not absent, so it is never asked as a silent block.
     "block_unread": "Block unread — recheck?",
+    "held_recheck": "Held — recheck?",
 }
 
 #: Which stages can wait on a human, and the question each one asks.
@@ -544,46 +582,10 @@ SELF_APPROVED_LINE = re.compile(
     re.IGNORECASE | re.MULTILINE,
 )
 
-#: A blocked comment names an optional, knowable condition after this marker.
-#: The parser below owns the rest of the fixed header shape.
-BLOCK_COMMENT_PREFIX = "**Blocked"
-BLOCK_COMMENT_RE = re.compile(
-    r"\A" + re.escape(BLOCK_COMMENT_PREFIX)
-    + r"(?: until (?P<blocked_until>[0-9]{4}-[0-9]{2}-[0-9]{2}))?"
-      r"(?: on (?P<references>#[0-9]+(?: and #[0-9]+)*))?:\*\*"
-)
-
-#: A blocked ticket may wait on the one event kind the queue understands.
-#: The body after this header must be a strict fenced JSON spec.
-BLOCK_EVENT_COMMENT_PREFIX = "**Blocked until event:**"
-BLOCK_EVENT_COMMENT_RE = re.compile(
-    r"\A" + re.escape(BLOCK_EVENT_COMMENT_PREFIX)
-    + r"[ \t]*\r?\n(?:[ \t]*\r?\n)?[ \t]*```json[ \t]*\r?\n"
-      r"(?P<event_spec>.*?)\r?\n[ \t]*```[ \t]*(?:\r?\n|$)",
-    re.DOTALL,
-)
-BLOCK_EVENT_KIND_HEADER_RE = re.compile(
-    r"\A\*\*Blocked until (?P<kind>[^:\r\n]+):\*\*"
-)
-BLOCK_FENCED_PAYLOAD_RE = re.compile(
-    r"\A[ \t]*\r?\n(?:[ \t]*\r?\n)?[ \t]*```[^\r\n]*\r?\n"
-    r".*?\r?\n[ \t]*```[ \t]*(?:\r?\n|$)",
-    re.DOTALL,
-)
-
-#: A breakdown can leave a project waiting on Nate's answer. The header is
-#: deliberately strict and anchored just like the ordinary block header so a
-#: quoted or embedded sentence cannot become a gate question by accident.
-NEEDS_DECISION_PREFIX = "**Needs a decision:**"
-NEEDS_DECISION_RE = re.compile(
-    r"\A" + re.escape(NEEDS_DECISION_PREFIX)
-    + r"[ \t]+(?P<question>.+)", flags=re.DOTALL
-)
-
-#: The implement runner's decline record (``finish_declined``). It names a
-#: reason in prose, not a condition the funnel can clear, so readers show it
-#: and ``stranded_items`` flags the block until a parseable one replaces it.
-DECLINED_PREFIX = "**Declined:**"
+#: The four block-record header kinds (``**Blocked[ until/on ...]:**``,
+#: ``**Blocked until event:**``, ``**Needs a decision:**`` and
+#: ``**Declined:**``) live in ``block_record.py`` and are imported above
+#: under their old names (#2165).
 
 #: Broken is observed, not latent (#1832). A Broken capture carries its
 #: evidence on this line in the issue body, and `promote` posts it as a comment
@@ -857,6 +859,8 @@ class Item:
     labels: List[str] = field(default_factory=list)
     block_references: List[str] = field(default_factory=list)
     block_reason: Optional[str] = None
+    shaped_hold: Optional[Dict[str, object]] = None
+    shaped_hold_clear: Optional[Dict[str, object]] = None
     blocked_until: Optional[date] = None
     needs_decision: Optional[str] = None
     decline_reason: Optional[str] = None
@@ -1099,10 +1103,76 @@ def block_condition(item: Item) -> Optional[str]:
     return None
 
 
-def gate_question(item: Item) -> Optional[str]:
-    """The decision this item is waiting on, or None if it waits on no one."""
+def _current_shaped_hold_record(item: Item) -> Optional[Dict[str, object]]:
+    """Return the parsed, current Shaped hold record on a blocked plan."""
+    record = item.shaped_hold
+    if (
+        item.state != "OPEN"
+        or item.status != "Shaped"
+        or not item.is_blocked
+        or item.block_comments_error is not None
+        or item.block_reason is None
+        or not isinstance(record, dict)
+    ):
+        return None
+    conditions = record.get("Hold-Conditions")
+    proofs = record.get("Proof")
+    if (
+        not isinstance(record.get("Hold-Reason"), str)
+        or not record["Hold-Reason"].strip()
+        or not isinstance(conditions, list)
+        or not conditions
+        or any(not isinstance(ref, str) or not ref.strip() for ref in conditions)
+        or not isinstance(record.get("Plan-Version"), str)
+        or not isinstance(proofs, list)
+        or not proofs
+        or any(not isinstance(proof, str) or not proof.strip() for proof in proofs)
+    ):
+        return None
+    return record
+
+
+def _shaped_hold_is_unresolved(
+    item: Item,
+    record: Mapping[str, object],
+    by_ref: Optional[Dict[str, Item]],
+) -> bool:
+    """Whether a proved hold still applies to this exact plan version."""
+    if not isinstance(item.body, str):
+        return False
+    if record.get("Plan-Version") != shaped_plan_version(item.body):
+        return False
+    conditions = record.get("Hold-Conditions")
+    if not isinstance(conditions, list) or not conditions:
+        return False
+    for ref in conditions:
+        if not isinstance(ref, str):
+            return False
+        condition = by_ref.get(ref) if by_ref is not None else None
+        # The hold remains unresolved until every named issue is read closed.
+        if condition is None or condition.state != "CLOSED":
+            return True
+    return False
+
+
+def gate_question(
+    item: Item, by_ref: Optional[Dict[str, Item]] = None,
+) -> Optional[str]:
+    """The decision this item is waiting on, or None if it waits on no one.
+
+    A current Shaped hold asks the funnel watch to recheck while its named
+    conditions remain open. A changed plan version or fully satisfied hold
+    returns to a fresh Shaped review.
+    """
     if item.state != "OPEN":
         return None
+    shaped_hold = _current_shaped_hold_record(item)
+    if shaped_hold is not None:
+        if _shaped_hold_is_unresolved(item, shaped_hold, by_ref):
+            return GATE_QUESTIONS["held_recheck"]
+        # A changed plan version or fully satisfied hold must reach a fresh
+        # Shaped review. The old blocked label describes the held version.
+        return GATES["Shaped"]
     if item.is_blocked:
         # A lane decline still needs an Unblock gate even after its routing
         # field changes to ``agent``. Ordinary agent-owned blocks stay quiet.
@@ -1282,13 +1352,21 @@ def watch_owns_gate(
     except one whose Needs Nate section still holds an Exposure or Preference
     line. A plan body that was not loaded, or a Needs Nate section that
     cannot be read, stays with Nate. ``Block unread — recheck?`` (#2134)
-    is routed as the two silent-block questions are.
+    is routed as the two silent-block questions are. ``Held — recheck?`` is
+    watch-owned only while a proved Shaped hold's conditions remain unresolved
+    and its Plan-Version matches the current body.
 
     This partitions the shared gate question for the brief and queue. A
     Declined marker distinguishes a legacy lane decline that still carries
     Needs ``human`` from a hands-on step; new declines use Needs ``agent``.
     Other readers use the same question predicate.
     """
+    if question == GATE_QUESTIONS["held_recheck"]:
+        shaped_hold = _current_shaped_hold_record(item)
+        return (
+            shaped_hold is not None
+            and _shaped_hold_is_unresolved(item, shaped_hold, by_ref)
+        )
     if question in WATCH_UNBLOCK_QUESTIONS:
         return item.needs != "human" or item.decline_reason is not None
     if question != GATES["Shaped"]:
@@ -1317,7 +1395,7 @@ def split_decisions(
     nate: List[Item] = []
     watch: List[Item] = []
     for item in awaiting_decision(rows):
-        if watch_owns_gate(item, gate_question(item), by_ref):
+        if watch_owns_gate(item, gate_question(item, by_ref), by_ref):
             watch.append(item)
         else:
             nate.append(item)
@@ -1333,7 +1411,7 @@ def watch_gate_json(
         "title": item.title,
         "url": item.url,
         "class": effective_class(item, by_ref),
-        "question": gate_question(item),
+        "question": gate_question(item, by_ref),
         "waited": humanise(item.waited(now)),
     }
 
@@ -1535,30 +1613,45 @@ _CREDENTIALS_MATCHER_NAMED_TERMS = (
     r"api[- ]key|access token|client secret|credential store|password|private key"
 )
 _CREDENTIALS_MATCHER_ACTION_NOUN = r"credentials?"
+# These stems are the ticket-side boundary: retain their spelling and only
+# widen them when the category gains a listed verb form (#2181).
+_ESCALATION_MATCHER_VERB_STEMS = {
+    "authorisation": r"broaden|chang|elevat|expand|grant|reduc|revok|tighten",
+    "credentials": (
+        r"access|chang|creat|enter|expos|grant|handl|load|read|replac|revok|"
+        r"rotat|stor|suppl|touch|updat|use|uses|used|using|writ|wrote"
+    ),
+    "destructive": r"allow|enable|enabling|perform|permit|ran|run",
+}
+_DESTRUCTIVE_MATCHER_PHRASE_OBJECT = (
+    r"(?:destructive|irreversible)"
+    r"\s+(?:actions?|changes?|commands?|operations?)"
+)
 
 ESCALATION_PATTERNS = {
     "credentials": (
         r"(?<!no )\b(" + _CREDENTIALS_MATCHER_NAMED_TERMS + r")\b|"
-        r"(?<!not )(?<!never )\b(?:access|chang|creat|enter|expos|"
-        r"handl|load|read|replac|revok|rotat|stor|suppl|touch|"
-        r"use|uses|used|using|writ)\w*"
+        r"(?<!not )(?<!never )\b(?:"
+        + _ESCALATION_MATCHER_VERB_STEMS["credentials"] + r")\w*"
         r"(?:\s+(?!(?:no|not|nothing)\b)[\w'’-]+){0,4}"
         r"\s+" + _CREDENTIALS_MATCHER_ACTION_NOUN + r"\b"
     ),
     "authorisation": r"(?<!no )(?<!not )(?<!never )\b("
                      r"authoris(?:e|es|ed|ing)|authoriz(?:e|es|ed|ing)|"
                      r"permission model|access control|oauth|scope grant)\b|"
-                     r"(?<!not )(?<!never )\b(?:broaden|chang|elevat|expand|"
-                     r"grant|reduc|revok|tighten)\w*"
+                     r"(?<!not )(?<!never )\b(?:"
+                     + _ESCALATION_MATCHER_VERB_STEMS["authorisation"]
+                     + r")\w*"
                      r"(?:\s+(?!(?:no|not|nothing)\b)[\w'’-]+){0,4}"
                      r"\s+permissions?\b",
     "data-migration": r"(?<!no )\b(data migration|schema migration|backfill|"
                       r"irreversible migration|migrat(?:e|es|ed|ing))\b",
     "destructive": r"(?<!no )\b(force[- ]push|hard delete|permanently delete|"
                    r"drop the (table|branch)|rewrite history|"
-                   r"(?:allow|enable|perform|permit|run)\w*"
-                   r"(?:\s+[\w'’-]+){0,4}\s+(?:destructive|irreversible)"
-                   r"\s+(?:actions?|changes?|commands?|operations?))\b",
+                   r"(?:" + _ESCALATION_MATCHER_VERB_STEMS["destructive"]
+                   + r")\w*"
+                   r"(?:\s+[\w'’-]+){0,4}\s+"
+                   + _DESTRUCTIVE_MATCHER_PHRASE_OBJECT + r")\b",
     "concurrency": r"(?<!no )\b(race condition|deadlock|thread[- ]safe|mutex|"
                    r"atomic (write|commit)|"
                    r"(?:concurrent|overlapping)\s+(?:mutations?|processes|runs?|"
@@ -1621,6 +1714,28 @@ def asserted_text(text: str) -> str:
     )
 
 
+def _walk_escalation_matches(
+        text: str,
+        proposal: Optional[Callable[[str, re.Match, str], bool]] = None,
+        ) -> List[Dict[str, Optional[str]]]:
+    """Return the first accepted, trimmed matching line per category."""
+    found: List[Dict[str, Optional[str]]] = []
+    for name, pattern in sorted(ESCALATION_PATTERNS.items()):
+        for match in re.finditer(pattern, text, re.IGNORECASE):
+            if proposal is not None and not proposal(text, match, name):
+                continue
+            line_start = text.rfind("\n", 0, match.start()) + 1
+            line_end = text.find("\n", match.start())
+            if line_end < 0:
+                line_end = len(text)
+            found.append({
+                "reason": name,
+                "line": text[line_start:line_end].strip(),
+            })
+            break
+    return found
+
+
 def escalation_matches(title: str, body: str,
                        failed_before: bool = False
                        ) -> List[Dict[str, Optional[str]]]:
@@ -1656,19 +1771,7 @@ def escalation_matches(title: str, body: str,
             found.append({"reason": "prior attempt failed", "line": None})
         return found
 
-    found: List[Dict[str, Optional[str]]] = []
-    for name, pattern in sorted(ESCALATION_PATTERNS.items()):
-        match = re.search(pattern, text, re.IGNORECASE)
-        if not match:
-            continue
-        line_start = text.rfind("\n", 0, match.start()) + 1
-        line_end = text.find("\n", match.start())
-        if line_end < 0:
-            line_end = len(text)
-        found.append({
-            "reason": name,
-            "line": text[line_start:line_end].strip(),
-        })
+    found = _walk_escalation_matches(text)
     if failed_before:
         found.append({"reason": "prior attempt failed", "line": None})
     return found
@@ -1759,20 +1862,54 @@ _PLAN_FENCE_CLOSE_RE = re.compile(
 _PLAN_MALFORMED_ATX_RE = re.compile(
     r"^ {0,3}(?:#{7,}|#{1,6}(?!#)\S).*$"
 )
-_PLAN_MALFORMED_REJECTED_RE = re.compile(
-    r"^ {0,3}#{1,6}(?!#)[ \t]*Rejected\b", re.IGNORECASE
-)
 _PLAN_REJECTED_INLINE_RE = re.compile(
     r"[ \t]+\(rejected:[^\r\n]*\)[ \t]*$", re.IGNORECASE
 )
+_PLAN_LIST_ITEM_RE = re.compile(
+    r"^(?P<indent> {0,3})(?P<marker>[-*+]|\d{1,9}[.)])(?:[ \t]|$)"
+)
+#: A setext heading underline, when the line above it is not blank.
+_PLAN_SETEXT_UNDERLINE_RE = re.compile(r"^ {0,3}(?:=+|-+)[ \t]*$")
+#: Line breaks to ``str.splitlines`` that Markdown does not break on, so the
+#: two disagree about where a line, and so a heading, starts.
+_PLAN_NON_MARKDOWN_BREAK_RE = re.compile(
+    "[\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029]"
+)
+
+#: Every region of a plan body the wording scan does not read (#2180), as
+#: ``(kind, name)``; ``plan_scan_text`` is the one filter that applies it.
+#:
+#: - ``quoted``: text the plan shows rather than asserts, blanked in table
+#:   order.
+#: - ``section``: the content of a level-2 heading with exactly this title,
+#:   up to the next heading of level 2 or above. The heading line stays.
+#: - ``label``: a plain or bold ``Name:`` line on its own and the list
+#:   directly after it, the form 41 of 84 shaped plans give Rejected (#1749).
+#: - ``clause``: the trailing ``(rejected: ...)`` of each line in the
+#:   level-2 section with this title.
+#:
+#: Rejected text is an alternative the plan will not take; Premises is the
+#: runner's evidence and Siblings checked its citations of other plans, so
+#: none of them proposes the plan's own work.
+PLAN_SCAN_IGNORED_REGIONS: Tuple[Tuple[str, str], ...] = (
+    ("quoted", "code block"),            # fenced or indented (#1643)
+    ("quoted", "block quote"),           # (#1235)
+    ("quoted", "inline code"),           # paired backticks on a line (#1367)
+    ("quoted", "prose quote"),           # balanced quotation marks (#1643)
+    ("section", "Rejected"),             # (#1525)
+    ("section", "Premises"),             # (#2180)
+    ("section", "Siblings checked"),     # (#2180)
+    ("label", "Rejected"),               # (#2180)
+    ("clause", "Decided by the agent"),  # (#1525)
+)
 
 _PLAN_QUOTE_PAIRS = {"\"": "\"", "“": "”", "‘": "’", "«": "»"}
-# These literal forms are already used by the credentials proposal matcher.
-# The direct-action table below shares this list, like the existing direct
-# action entries use their category's established verbs.
+# Credentials forms are explicit because open stems accept misspellings. The
+# direct-action table and proposal matcher share this list (#2181).
 _CREDENTIALS_PLAN_ACTION_FORMS = (
     r"access|accesses|accessed|accessing|change|changes|changed|changing|"
-    r"create|creates|created|creating|expose|exposes|exposed|exposing|"
+    r"create|creates|created|creating|enter|enters|entered|entering|"
+    r"expose|exposes|exposed|exposing|"
     r"grant|grants|granted|granting|handle|handles|handled|handling|"
     r"load|loads|loaded|loading|read|reads|reading|replace|replaces|"
     r"replaced|replacing|revoke|revokes|revoked|revoking|rotate|rotates|"
@@ -1780,6 +1917,29 @@ _CREDENTIALS_PLAN_ACTION_FORMS = (
     r"supplied|supplying|touch|touches|touched|touching|update|updates|"
     r"updated|updating|use|uses|used|using|write|writes|wrote|written|writing"
 )
+# Each category's in-phrase verbs, with every inflection spelled out. The
+# direct-action entries below come from these lists; concurrency has no
+# in-phrase verb (#2181).
+_PLAN_IN_PHRASE_VERB_FORMS = {
+    "authorisation": (
+        r"broaden|broadens|broadened|broadening|change|changes|changed|"
+        r"changing|elevate|elevates|elevated|elevating|expand|expands|"
+        r"expanded|expanding|grant|grants|granted|granting|reduce|reduces|"
+        r"reduced|reducing|revoke|revokes|revoked|revoking|tighten|tightens|"
+        r"tightened|tightening"
+    ),
+    "concurrency": "",
+    "credentials": _CREDENTIALS_PLAN_ACTION_FORMS,
+    "data-migration": (
+        r"backfill|backfills|backfilled|backfilling|migrate|migrates|"
+        r"migrated|migrating|migration"
+    ),
+    "destructive": (
+        r"allow|allows|allowed|allowing|enable|enables|enabled|enabling|"
+        r"perform|performs|performed|performing|permit|permits|permitted|"
+        r"permitting|run|runs|ran|running"
+    ),
+}
 _PLAN_PROPOSAL_ACTIONS = {
     # Every inflection is spelled out: an optional suffix on a stem that
     # ends in "e" matches "changeing", never "changing" (#1681 review).
@@ -1845,33 +2005,37 @@ _PLAN_DIRECT_PROPOSAL_PREFIX_RE = re.compile(
 )
 _PLAN_DIRECT_ACTIONS = {
     # The authorisation pattern's own terms can carry the verb: "authorise
-    # the client", or "grant ... permissions" (#1678).
+    # the client, or a verb plus permissions (#1678). Spell every in-phrase
+    # inflection out rather than letting an open stem accept "changeing".
     "authorisation": re.compile(
         r"\b(?:authori[sz](?:e|es|ed|ing)|"
-        r"(?:broaden|chang|elevat|expand|grant|reduc|revok|tighten)\w*"
+        r"(?:" + _PLAN_IN_PHRASE_VERB_FORMS["authorisation"] + r")"
         r"(?:\s+[\w'’-]+){0,4}\s+permissions?)\b",
         re.IGNORECASE,
     ),
-    # "migrat\w*" also took "migrateing" (#1722). "migration" stays: it
-    # carries the proposal in a clause-led "Schema migration ..." item.
+    # "migration" stays: it carries the proposal in a clause-led
+    # "Schema migration ..." item (#1722).
     "data-migration": re.compile(
-        r"\b(?:backfill|backfills|backfilled|backfilling|migrate|migrates|"
-        r"migrated|migrating|migration)\b",
+        r"\b(?:" + _PLAN_IN_PHRASE_VERB_FORMS["data-migration"] + r")\b",
         re.IGNORECASE,
     ),
     # Like data-migration and authorisation, this category gets a direct
     # action entry for its own verb-inside-phrase proposal shape. Reuse the
     # credentials proposal forms and matcher terms verbatim (#1770).
     "credentials": re.compile(
-        r"\b(?:" + _CREDENTIALS_PLAN_ACTION_FORMS + r")"
+        r"\b(?:" + _PLAN_IN_PHRASE_VERB_FORMS["credentials"] + r")"
         r"(?:\s+[\w'’-]+){0,4}\s+"
         r"(?:" + _CREDENTIALS_MATCHER_NAMED_TERMS + r"|"
         + _CREDENTIALS_MATCHER_ACTION_NOUN + r")\b",
         re.IGNORECASE,
     ),
+    # The destructive phrase can carry its own proposing verb (#2181).
     "destructive": re.compile(
         r"\b(?:force[- ]push|hard[- ]delete|permanently\s+delete|"
-        r"drop\s+(?:the\s+)?(?:table|branch)|rewrite\s+history)\b",
+        r"drop\s+(?:the\s+)?(?:table|branch)|rewrite\s+history|"
+        r"(?:" + _PLAN_IN_PHRASE_VERB_FORMS["destructive"] + r")"
+        r"(?:\s+[\w'’-]+){0,4}\s+"
+        + _DESTRUCTIVE_MATCHER_PHRASE_OBJECT + r")\b",
         re.IGNORECASE,
     ),
 }
@@ -1969,109 +2133,267 @@ def _plan_match_is_proposed(text: str, match: re.Match,
     )
 
 
-def _plan_escalation_scan_text(plan_body: str) -> str:
-    """Remove code blocks and rejected prose before using the shared matcher.
+#: How each ``quoted`` entry of ``PLAN_SCAN_IGNORED_REGIONS`` is blanked.
+#: ``asserted_text`` blanks fences, block quotes and inline code in one pass.
+_PLAN_QUOTED_REGION_FILTERS = {
+    "code block": _strip_plan_code_blocks,
+    "block quote": asserted_text,
+    "inline code": asserted_text,
+    "prose quote": _strip_plan_prose_quotes,
+}
 
-    A malformed Rejected heading or a malformed heading inside its section
-    makes the section boundary ambiguous. In that case keep the original body
-    intact outside code blocks so an uncertain parse cannot hide an asserted
-    scan hit.
+
+def _plan_scan_regions(kind: str) -> Tuple[str, ...]:
+    """The names ``PLAN_SCAN_IGNORED_REGIONS`` lists for one kind."""
+    return tuple(name for region_kind, name in PLAN_SCAN_IGNORED_REGIONS
+                 if region_kind == kind)
+
+
+def _plan_scan_unquoted(text: str, skip: Collection[str] = ()) -> str:
+    """Blank the table's quoted regions, in table order, keeping lines.
+
+    ``skip`` names quoted regions to leave in place.
     """
-    body = _strip_plan_code_blocks(plan_body or "")
-    raw_lines = body.splitlines(keepends=True)
-    visible_lines = _strip_plan_prose_quotes(asserted_text(body)).splitlines()
-    if len(visible_lines) > len(raw_lines):
-        return body
-    visible_lines.extend([""] * (len(raw_lines) - len(visible_lines)))
+    applied = []
+    for name in _plan_scan_regions("quoted"):
+        if name in skip:
+            continue
+        blank = _PLAN_QUOTED_REGION_FILTERS[name]
+        if blank not in applied:
+            applied.append(blank)
+            text = blank(text)
+    return text
 
+
+def _plan_label_re(name: str) -> re.Pattern:
+    """A ``Name:`` label alone on its line, plain or bold."""
+    word = re.escape(name)
+    return re.compile(
+        r"^ {0,3}(?:" + word + r":|\*\*" + word + r"(?::\*\*|\*\*:)|"
+        r"__" + word + r"(?::__|__:))[ \t]*$",
+        re.IGNORECASE,
+    )
+
+
+def _plan_list_item(line: str) -> Optional[Tuple[int, str]]:
+    """A list item's indent and marker kind, or ``None`` for another line.
+
+    The kind is the bullet character, or the delimiter of a numbered item.
+    """
+    match = _PLAN_LIST_ITEM_RE.match(line)
+    if match is None:
+        return None
+    marker = match.group("marker")
+    return len(match.group("indent")), marker[-1]
+
+
+def _plan_label_list_end(lines: Sequence[str], label: int) -> Optional[int]:
+    """The line after a label's list, or ``None`` when its end is unclear.
+
+    The list may follow blank lines, and its first item sets its indent and
+    marker. It runs through items with that indent and marker, and through
+    lines indented deeper than its items directly below one. A blank line
+    continues it only into another such item; anything else after a blank
+    line ends it, as do a heading and a different marker at or outside the
+    list's indent. A label followed by prose or by an item indented less
+    than itself, or an unindented line directly after an item, leaves the
+    end unclear. A label with nothing before the next heading covers only
+    its own line.
+    """
+    label_indent = len(lines[label]) - len(lines[label].lstrip(" "))
+    index = label + 1
+    while index < len(lines) and not lines[index].strip():
+        index += 1
+    if index == len(lines) or _PLAN_ATX_HEADING_RE.match(lines[index]):
+        return label + 1
+    first = _plan_list_item(lines[index])
+    if first is None or first[0] < label_indent:
+        return None
+    end = index + 1
+    after_blank = False
+    for index in range(index + 1, len(lines)):
+        line = lines[index]
+        if not line.strip():
+            after_blank = True
+            continue
+        if _PLAN_ATX_HEADING_RE.match(line):
+            break
+        item = _plan_list_item(line)
+        if item == first:
+            end = index + 1
+            after_blank = False
+            continue
+        if after_blank or (item is not None and item[0] <= first[0]):
+            break
+        if len(line) - len(line.lstrip(" \t")) > first[0]:
+            end = index + 1
+            continue
+        return None
+    return end
+
+
+def _plan_boundary_like(line: str) -> bool:
+    """Whether a line is, or may be, a heading or a heading underline."""
+    return bool(_PLAN_ATX_HEADING_RE.match(line)
+                or _PLAN_MALFORMED_ATX_RE.match(line)
+                or _PLAN_SETEXT_UNDERLINE_RE.match(line))
+
+
+def _plan_scan_ignored_lines(lines: Sequence[str],
+                             unquoted_prose: Sequence[str]
+                             ) -> Optional[Tuple[Set[int], Set[int]]]:
+    """Lines to blank and lines whose rejected clause to blank (#2180).
+
+    ``lines`` are the body with its quoted regions already blank, so a
+    heading or label inside a quote is not one; ``unquoted_prose`` is the
+    same body with prose quotes left in. ``None`` means a boundary cannot
+    be read: a heading or heading underline that a prose quote hides, a
+    named section whose heading is malformed, at another level or repeated,
+    a malformed heading or a setext underline inside one, or a label whose
+    list has no clear end.
+    """
+    for line, shown in zip(lines, unquoted_prose):
+        if _plan_boundary_like(shown) and not _plan_boundary_like(line):
+            return None
+    sections = _plan_scan_regions("section")
+    clauses = _plan_scan_regions("clause")
+    named_malformed = [
+        re.compile(r"^ {0,3}#{1,6}(?!#)[ \t]*" + re.escape(name) + r"\b",
+                   re.IGNORECASE)
+        for name in sections
+    ]
     headings = []
     malformed = []
-    rejected_sections = []
-    malformed_rejected = False
-    for index, line in enumerate(visible_lines):
+    starts: Dict[str, List[int]] = {name: [] for name in sections + clauses}
+    for index, line in enumerate(lines):
         match = _PLAN_ATX_HEADING_RE.match(line)
         if match:
             level = len(match.group("hashes"))
             title = (match.group("title") or "").strip()
             title = re.sub(r"[ \t]+#+[ \t]*$", "", title).strip()
             headings.append((index, level, title))
-            if re.match(r"(?i)^rejected\b", title):
-                if level != 2 or title != "Rejected":
-                    malformed_rejected = True
-                else:
-                    rejected_sections.append(index)
+            for name in sections:
+                if re.match(r"(?i)^" + re.escape(name) + r"\b", title):
+                    if level != 2 or title != name:
+                        return None
+                    starts[name].append(index)
+            for name in clauses:
+                if level == 2 and title == name:
+                    starts[name].append(index)
         elif _PLAN_MALFORMED_ATX_RE.match(line):
             malformed.append(index)
-            if _PLAN_MALFORMED_REJECTED_RE.match(line):
-                malformed_rejected = True
+            if any(pattern.match(line) for pattern in named_malformed):
+                return None
 
-    if malformed_rejected or len(rejected_sections) > 1:
-        return body
+    def section_end(start: int) -> int:
+        return next((index for index, level, _ in headings
+                     if index > start and level <= 2), len(lines))
 
-    start = rejected_sections[0] if rejected_sections else None
-    end = len(raw_lines)
-    if start is not None:
-        end = next((index for index, level, _ in headings
-                    if index > start and level <= 2), len(raw_lines))
-        if any(start < index < end for index in malformed):
-            return body
+    blank: Set[int] = set()
+    for name in sections:
+        if len(starts[name]) > 1:
+            return None
+        for start in starts[name]:
+            end = section_end(start)
+            if any(start < index < end for index in malformed):
+                return None
+            if any(_PLAN_SETEXT_UNDERLINE_RE.match(lines[index])
+                   and lines[index - 1].strip()
+                   for index in range(start + 2, end)):
+                return None
+            blank.update(range(start + 1, end))
 
-    agent_decision_lines = set()
-    for section_start, level, title in headings:
-        if level != 2 or title != "Decided by the agent":
-            continue
-        section_end = next((index for index, next_level, _ in headings
-                            if index > section_start and next_level <= 2),
-                           len(raw_lines))
-        if any(section_start < index < section_end for index in malformed):
-            continue
-        agent_decision_lines.update(range(section_start + 1, section_end))
+    clause_lines: Set[int] = set()
+    for name in clauses:
+        for start in starts[name]:
+            end = section_end(start)
+            if any(start < index < end for index in malformed):
+                continue
+            clause_lines.update(range(start + 1, end))
+
+    for name in _plan_scan_regions("label"):
+        label_re = _plan_label_re(name)
+        for index, line in enumerate(lines):
+            # A label inside an ignored section is blank already.
+            if index in blank or not label_re.match(line):
+                continue
+            end = _plan_label_list_end(lines, index)
+            if end is None:
+                return None
+            blank.update(range(index, end))
+    return blank, clause_lines
+
+
+def plan_scan_text(plan_body: str) -> str:
+    """The plan text the wording scan reads (#2180).
+
+    Every region ``PLAN_SCAN_IGNORED_REGIONS`` names is blanked in place,
+    keeping line structure, and an ignored section keeps its heading line so
+    the Risk rationale reader still sees where the section before it ends.
+    When a boundary cannot be read, only the quoted regions are blanked, so
+    an uncertain parse cannot hide an asserted proposal. That includes a
+    body with a line break Markdown does not share, and one where blanking
+    a region pairs the prose quotes outside it differently.
+    """
+    body = _strip_plan_code_blocks(plan_body or "")
+    whole = _plan_scan_unquoted(body)
+    if _PLAN_NON_MARKDOWN_BREAK_RE.search(body):
+        return whole
+    raw_lines = body.splitlines(keepends=True)
+    visible_lines = whole.splitlines()
+    shown_lines = _plan_scan_unquoted(body, skip=("prose quote",)).splitlines()
+    if max(len(visible_lines), len(shown_lines)) > len(raw_lines):
+        return whole
+    visible_lines.extend([""] * (len(raw_lines) - len(visible_lines)))
+    shown_lines.extend([""] * (len(raw_lines) - len(shown_lines)))
+
+    ignored = _plan_scan_ignored_lines(visible_lines, shown_lines)
+    if ignored is None:
+        return whole
+    blank, clause_lines = ignored
 
     for index, line in enumerate(raw_lines):
         content = line.rstrip("\r\n")
         ending = line[len(content):]
-        if start is not None and start <= index < end:
-            raw_lines[index] = ending
-            continue
-        if index in agent_decision_lines:
+        if index in clause_lines:
             content = _PLAN_REJECTED_INLINE_RE.sub(
                 lambda match: " " * len(match.group(0)), content
             )
         raw_lines[index] = content + ending
-    return "".join(raw_lines)
+    # The text outside the blanked lines must read as it does with only the
+    # rejected clauses blanked. Prose quotes pair across the whole body, so a
+    # quote mark inside a blanked region can re-pair the ones outside it and
+    # blank active text; that makes the boundary unreadable too.
+    expected = _plan_scan_unquoted("".join(raw_lines)).splitlines()
+    for index in blank:
+        line = raw_lines[index]
+        raw_lines[index] = line[len(line.rstrip("\r\n")):]
+    scanned = _plan_scan_unquoted("".join(raw_lines))
+    scanned_lines = scanned.splitlines()
+    for lines in (expected, scanned_lines):
+        lines.extend([""] * (len(raw_lines) - len(lines)))
+    if any(scanned_lines[index] != expected[index]
+           for index in range(len(raw_lines)) if index not in blank):
+        return whole
+    return scanned
 
 
 def plan_escalation_matches(plan_body: str
                             ) -> List[Dict[str, Optional[str]]]:
-    """Return risks a plan affirmatively proposes after removing quoted text.
+    """Return risks a plan affirmatively proposes in the text it asserts.
 
     Plan-only section and proposal rules stay here; ticket text still uses the
-    canonical matcher unchanged. If a Rejected boundary cannot be parsed, the
-    whole asserted body is scanned, but a risk term still needs an affirmative
-    action in its sentence or list clause. If a Risk marker is present, its
-    existing authority remains unchanged.
+    canonical matcher unchanged. ``plan_scan_text`` decides what is read
+    (#2180). If a region boundary cannot be parsed, the whole asserted body is
+    scanned, but a risk term still needs an affirmative action in its
+    sentence or list clause. If a Risk marker is present, its existing
+    authority remains unchanged.
     """
-    text = _strip_plan_prose_quotes(
-        asserted_text(_plan_escalation_scan_text(plan_body))
-    )
+    text = plan_scan_text(plan_body)
     if RISK_LINE.search(text):
         return escalation_matches("", text)
 
-    found: List[Dict[str, Optional[str]]] = []
-    for name, pattern in sorted(ESCALATION_PATTERNS.items()):
-        for match in re.finditer(pattern, text, re.IGNORECASE):
-            if not _plan_match_is_proposed(text, match, name):
-                continue
-            line_start = text.rfind("\n", 0, match.start()) + 1
-            line_end = text.find("\n", match.start())
-            if line_end < 0:
-                line_end = len(text)
-            found.append({
-                "reason": name,
-                "line": text[line_start:line_end].strip(),
-            })
-            break
-    return found
+    return _walk_escalation_matches(text, _plan_match_is_proposed)
 
 
 def open_needs_nate_categories(plan_body: str) -> Optional[FrozenSet[str]]:
@@ -3752,30 +4074,8 @@ def checks_still_running(checks: Sequence[dict]) -> bool:
 
 _LINE_LEADING_MARKER_RE = re.compile(r"(?m)^[ \t]*<!-- command-center-")
 
-#: Every line break ``str.splitlines`` honours, with the blanks around it.
-_COMMENT_LINE_BREAK_RE = re.compile(
-    r"\s*[\n\r\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029]\s*")
-
-
-def inert_comment_text(text: object) -> str:
-    """Model text made safe to write outside a JSON block in a comment (#1798).
-
-    A runner comment is the owner's own, so the author filter (#1787, #1788)
-    trusts all of it, the model's words it echoes included: a blocking or
-    unsure item, a decline reason, a question. A blocking reason once carried
-    a line-leading ``<!-- command-center-review -->`` and a JSON block, and
-    the owner's rejection read as an approval (#1797). Line breaks collapse to
-    one space, so the text never begins a line or opens a fence, and ``<!--``
-    becomes ``&lt;!--``, so it holds no marker even mid-line. GitHub renders
-    the entity as ``<!--``, so a reader still sees every word. One pass is
-    enough: neither replacement can put a ``<!--`` together.
-
-    Text inside a JSON block needs none of this: ``json.dumps`` escapes the
-    line breaks, and a marker quoted there is content (#1688).
-    """
-    cleaned = _COMMENT_LINE_BREAK_RE.sub(
-        " ", "" if text is None else str(text)).strip()
-    return cleaned.replace("<!--", "&lt;!--")
+# ``inert_comment_text`` lives in ``block_record.py`` with the headers whose
+# model words it makes safe, and is imported above under its old name (#2165).
 
 
 def _marked_json_block_at(
@@ -4337,123 +4637,9 @@ def answered_gates_body(body: str, answer: str, decider: str,
     return updated
 
 
-def _unique_json_object(pairs: List[Tuple[str, object]]) -> Dict[str, object]:
-    """Reject ambiguous JSON objects instead of silently taking the last key."""
-    result: Dict[str, object] = {}
-    for key, value in pairs:
-        if key in result:
-            raise ValueError("duplicate JSON key")
-        result[key] = value
-    return result
-
-
-def _parse_block_event_spec(raw: str) -> Optional[Dict[str, str]]:
-    """Return the one supported event spec, or None for malformed input."""
-    try:
-        spec = json.loads(raw, object_pairs_hook=_unique_json_object)
-    except (TypeError, ValueError):
-        return None
-    if not isinstance(spec, dict) or set(spec) != {
-        "agent", "job", "outcome", "after"
-    }:
-        return None
-    if (
-        not isinstance(spec["agent"], str)
-        or not spec["agent"].strip()
-        or not isinstance(spec["job"], str)
-        or not spec["job"].strip()
-        or spec["outcome"] != "errored"
-        or not isinstance(spec["after"], str)
-        or parse_time(spec["after"]) is None
-    ):
-        return None
-    return spec
-
-
-def _unconditioned_event_reason(body: str) -> Optional[str]:
-    """Keep malformed or unknown event forms as unconditioned block reasons."""
-    header = BLOCK_EVENT_KIND_HEADER_RE.match(body)
-    if header is None:
-        return None
-    if re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", header.group("kind")):
-        return None
-    suffix = body[header.end():]
-    payload = BLOCK_FENCED_PAYLOAD_RE.match(suffix)
-    if payload is not None:
-        suffix = suffix[payload.end():]
-    return suffix.strip()
-
-
-def _parse_block_comment_header(
-    body: str,
-) -> Optional[Tuple[re.Match, Optional[date], Optional[Dict[str, str]]]]:
-    """Return a block header and its validated date or event condition."""
-    event_match = BLOCK_EVENT_COMMENT_RE.match(body)
-    if event_match is not None:
-        event = _parse_block_event_spec(event_match.group("event_spec"))
-        if event is None:
-            return None
-        return event_match, None, event
-
-    match = BLOCK_COMMENT_RE.match(body)
-    if match is None:
-        return None
-    raw_date = match.group("blocked_until")
-    if raw_date is None:
-        return match, None, None
-    try:
-        blocked_until = date.fromisoformat(raw_date)
-    except ValueError:
-        # The regex establishes the shape; the date parser establishes that
-        # the calendar date actually exists (for example, no February 30).
-        return None
-    return match, blocked_until, None
-
-
-def _parse_block_comment_details(
-    bodies: Iterable[str],
-) -> Optional[Tuple[List[str], Optional[date], str, Optional[Dict[str, str]]]]:
-    """Return the newest parseable block's refs, date, reason and event."""
-    for body in reversed(list(bodies)):
-        if not isinstance(body, str):
-            continue
-        parsed_header = _parse_block_comment_header(body)
-        if parsed_header is None:
-            reason = _unconditioned_event_reason(body)
-            if reason is not None:
-                return [], None, reason, None
-            continue
-        match, blocked_until, event = parsed_header
-        references = match.groupdict().get("references")
-        return (
-            references.split(" and ") if references else [],
-            blocked_until,
-            body[match.end():].strip(),
-            event,
-        )
-    return None
-
-
-def parse_block_comment(
-    bodies: Iterable[str],
-) -> Optional[Tuple[List[str], Optional[date], str]]:
-    """Return the newest parseable block comment's refs, date and reason.
-
-    The header is deliberately strict and anchored at the start of the body so
-    an old or embedded mention cannot accidentally become a condition.
-    """
-    parsed = _parse_block_comment_details(bodies)
-    return parsed[:3] if parsed is not None else None
-
-
-def parse_decline_comment(bodies: Iterable[str]) -> Optional[str]:
-    """Return the newest decline record's first line of reason, if any."""
-    for body in reversed(list(bodies)):
-        if not isinstance(body, str) or not body.startswith(DECLINED_PREFIX):
-            continue
-        reason = body[len(DECLINED_PREFIX):].strip()
-        return reason.splitlines()[0].strip() if reason else ""
-    return None
+# The single-comment block and decline parsers (``parse_block_comment``,
+# ``parse_decline_comment``, ``unparseable_block_comment_lines`` and their
+# helpers) live in ``block_record.py`` and are imported above (#2165).
 
 
 def parse_decline_route_comment(
@@ -4552,21 +4738,6 @@ def parse_satisfied_block_comment(body: str) -> Optional[Dict[str, object]]:
     ):
         return None
     return found
-
-
-def unparseable_block_comment_lines(bodies: Iterable[str]) -> List[str]:
-    """Return first lines that look like block comments but fail the parser."""
-    findings: List[str] = []
-    for body in bodies:
-        if not isinstance(body, str):
-            continue
-        if not body.lstrip().startswith(BLOCK_COMMENT_PREFIX):
-            continue
-        if _parse_block_comment_header(body) is not None:
-            continue
-        lines = body.splitlines()
-        findings.append(lines[0] if lines else body)
-    return findings
 
 
 def _heartbeat_context(run: Optional[str], agent: Optional[str]):
@@ -12684,7 +12855,7 @@ def class_display(item: Item, by_ref: Dict[str, Item]) -> str:
 def item_json(item: Item, now: datetime, by_ref: Optional[Dict[str, Item]] = None) -> dict:
     by_ref = by_ref if by_ref is not None else {}
     breakdown = breakdown_latency(item)
-    question = gate_question(item)
+    question = gate_question(item, by_ref)
     acceptance_reason = _acceptance_waiting_reason(item, question)
     rendered = {
         "ref": item.ref,
@@ -14339,6 +14510,8 @@ def held_at_accept_json(items: Iterable[Item]) -> List[Dict[str, object]]:
 def _event_block_mismatch(item: Item) -> Optional[str]:
     """How a blocked ticket's event spec and Needs routing disagree, if at all.
 
+    A parsed issue-reference or date condition also makes external-event a
+    consistent route.
     Only tickets are checked, and only when their block comments were read:
     an unread comment cannot show whether a spec is there.
     """
@@ -14349,6 +14522,8 @@ def _event_block_mismatch(item: Item) -> Optional[str]:
             return None
         return "well-formed event spec without Needs: external-event"
     if item.needs == "external-event":
+        if item.block_references or _item_blocked_until(item) is not None:
+            return None
         return "Needs: external-event without a well-formed event spec"
     return None
 # Approval may adopt an unset Class only from an explicit, whole-line
@@ -14924,6 +15099,124 @@ def _record_covers_current_block(item: Item, conditions: Sequence[str]) -> bool:
     )
 
 
+def _live_shaped_hold_body(item: Item) -> Optional[str]:
+    """Read the held project's current issue state and plan body from GitHub."""
+    if live_issue_state(item) != "OPEN":
+        return None
+    try:
+        body = _ticket_body(item.repo, item.number)
+    except (GitHubError, OSError, subprocess.SubprocessError, ValueError):
+        return None
+    return body if isinstance(body, str) and body.strip() else None
+
+
+def _shaped_hold_proof_is_live_owner_comment(url: object) -> bool:
+    """Whether one proof URL still resolves to a comment by the owner account."""
+    try:
+        canonical = validate_proof_comment_url(url)
+        target, fragment = canonical.split("#", 1)
+        owner, repository, _route, _issue_number = target[
+            len("https://github.com/"):].split("/")
+        raw_id = fragment.removeprefix("issuecomment-")
+        comment_id = int(raw_id)
+        comment = _gh_api_json(
+            "repos/{}/{}/issues/comments/{}".format(
+                owner, repository, comment_id)
+        )
+    except (GitHubError, OSError, subprocess.SubprocessError, ValueError):
+        return False
+    return (
+        isinstance(comment, Mapping)
+        and comment.get("id") == comment_id
+        and isinstance(comment.get("html_url"), str)
+        and comment["html_url"].rstrip("/").lower()
+        == canonical.rstrip("/").lower()
+        and trusted_comment(comment)
+    )
+
+
+def _shaped_hold_clear_inputs(
+    item: Item, record: Mapping[str, object],
+) -> Optional[Tuple[str, str]]:
+    """Return a live plan version only after every issue and proof rechecks."""
+    body = _live_shaped_hold_body(item)
+    if body is None:
+        return None
+    plan_version = shaped_plan_version(body)
+    conditions = record.get("Hold-Conditions")
+    if not isinstance(conditions, list) or not conditions:
+        return None
+
+    all_closed = True
+    for ref in conditions:
+        if not isinstance(ref, str) or "#" not in ref:
+            all_closed = False
+            continue
+        repo, raw_number = ref.rsplit("#", 1)
+        try:
+            number = int(raw_number)
+        except ValueError:
+            all_closed = False
+            continue
+        condition = Item(
+            repo=repo, number=number, title="", url="", state="OPEN")
+        if live_issue_state(condition) != "CLOSED":
+            all_closed = False
+
+    proofs = record.get("Proof")
+    if not isinstance(proofs, list) or not proofs:
+        return None
+    all_proofs_present = True
+    for proof in proofs:
+        if not _shaped_hold_proof_is_live_owner_comment(proof):
+            all_proofs_present = False
+
+    if not all_closed or not all_proofs_present:
+        return None
+    return body, plan_version
+
+
+def _shaped_hold_clear_matches(
+    item: Item, record: Mapping[str, object],
+) -> bool:
+    clear = item.shaped_hold_clear
+    if not isinstance(clear, Mapping):
+        return False
+    try:
+        expected_id = shaped_hold_id(record)
+    except ValueError:
+        return False
+    return clear.get("Hold-ID") == expected_id
+
+
+def _finish_shaped_hold_clear(item: Item, body: str, now: datetime) -> None:
+    """Restore decision routing and remove the blocked label after its record."""
+    remaining_needs = "human" if plan_needs_nate(body) else "none"
+    if item.needs != remaining_needs:
+        if not item.item_id:
+            raise GitHubError("{} is not in the Project".format(item.ref))
+        write_project_select(
+            item.item_id, "Needs", remaining_needs, item.ref)
+        item.needs = remaining_needs
+
+    if item.is_blocked:
+        edit = _run_gh(
+            [
+                "gh", "issue", "edit", str(item.number),
+                "--repo", item.repo, "--remove-label", "blocked",
+            ],
+            capture_output=True, text=True,
+        )
+        if edit.returncode != 0:
+            raise GitHubError(
+                "recorded hold clear on {}, but could not remove its blocked "
+                "label: {}".format(item.ref, edit.stderr.strip())
+            )
+        item.labels = [label for label in item.labels if label != "blocked"]
+    item.body = body
+    item.blocked_cleared_at = now
+
+
 def clear_satisfied_blocks(
     items: Sequence[Item], now: datetime,
     run: Optional[str] = None, agent: Optional[str] = None,
@@ -14974,6 +15267,65 @@ def clear_satisfied_blocks(
                 )
 
     for item in candidates:
+        shaped_hold = _current_shaped_hold_record(item)
+        if shaped_hold is not None:
+            if _shaped_hold_clear_matches(item, shaped_hold):
+                # The durable clear comment was written by an earlier run;
+                # finish any routing or label write left by a partial failure.
+                body = _live_shaped_hold_body(item)
+                if body is None:
+                    continue
+                _finish_shaped_hold_clear(item, body, now)
+                clear = item.shaped_hold_clear or {}
+                cleared.append({
+                    "ref": item.ref,
+                    "kind": "shaped-hold",
+                    "clear": clear.get("kind"),
+                    "conditions": list(shaped_hold["Hold-Conditions"]),
+                    "proof": list(shaped_hold["Proof"]),
+                    "plan_version": clear.get("Plan-Version"),
+                    "cleared_at": now.isoformat(),
+                })
+                continue
+
+            inputs = _shaped_hold_clear_inputs(item, shaped_hold)
+            if inputs is None:
+                continue
+            body, plan_version = inputs
+            clear_body = render_conditioned_shaped_hold_clear(
+                shaped_hold, plan_version)
+            comment = _run_gh(
+                [
+                    "gh", "issue", "comment", str(item.number),
+                    "--repo", item.repo,
+                    "--body", append_provenance(
+                        clear_body, "agent", at=now, run=run, agent=agent),
+                ],
+                capture_output=True, text=True,
+            )
+            if comment.returncode != 0:
+                raise GitHubError(
+                    "could not record conditioned hold clear on {}: {}".format(
+                        item.ref, comment.stderr.strip())
+                )
+            item.shaped_hold_clear = parse_shaped_hold_clear_comment(clear_body)
+            if item.shaped_hold_clear is None:
+                raise GitHubError(
+                    "conditioned hold clear for {} did not parse back".format(
+                        item.ref)
+                )
+            _finish_shaped_hold_clear(item, body, now)
+            cleared.append({
+                "ref": item.ref,
+                "kind": "shaped-hold",
+                "clear": "conditioned",
+                "conditions": list(shaped_hold["Hold-Conditions"]),
+                "proof": list(shaped_hold["Proof"]),
+                "plan_version": plan_version,
+                "cleared_at": now.isoformat(),
+            })
+            continue
+
         event_records = (
             heartbeat_records.get(item.block_event.get("agent"), [])
             if isinstance(item.block_event, dict) else []
@@ -15619,7 +15971,7 @@ def cmd_queue(
             class_display(item, by_ref),
             item.ref,
             humanise(item.waited(now)),
-            gate_question(item),
+            gate_question(item, by_ref),
         ),
     )
 
@@ -15636,7 +15988,7 @@ def cmd_queue(
                 class_display(item, by_ref),
                 item.ref,
                 humanise(item.waited(now)),
-                gate_question(item),
+                gate_question(item, by_ref),
             ),
         )
 
@@ -16611,6 +16963,8 @@ def claim_ticket(
     now: datetime,
     target: Item,
     pr_facts: Optional[Dict[str, Optional[Dict[str, object]]]] = None,
+    run: Optional[str] = None,
+    agent: Optional[str] = None,
 ) -> Optional[str]:
     """Write a ticket claim, or return the reason it must be refused."""
     running = in_motion(items, now, pr_facts=pr_facts)
@@ -16642,6 +16996,20 @@ def claim_ticket(
         print("took over stale claim on {}".format(item.ref), file=sys.stderr)
 
     write_lock(target, now.strftime("%Y-%m-%dT%H:%M:%SZ"))
+    if run and agent:
+        try:
+            import heartbeat
+
+            by_ref = {item.ref: item for item in items}
+            heartbeat.record_binding(
+                agent, run, "ticket", target.ref,
+                repo=target.repo,
+                klass=effective_class(target, by_ref),
+            )
+        except Exception:
+            # Binding is bookkeeping; keep the successful claim as the
+            # correctness-bearing write, like begin's run binding.
+            pass
     # `Ready -> Building` is written on the first claim, here in the shared
     # implementation so `funnel begin` (#349) and `funnel claim` promote alike.
     _begin_parent(items, target)
@@ -16728,6 +17096,8 @@ def cmd_claim(
     now: datetime,
     ref: str,
     pr_facts: Optional[Dict[str, Optional[Dict[str, object]]]] = None,
+    run: Optional[str] = None,
+    agent: Optional[str] = None,
 ) -> int:
     """Claim a ticket, or refuse. Two separate refusals, deliberately.
 
@@ -16742,8 +17112,14 @@ def cmd_claim(
     Refusing is the normal outcome and is not an error worth shouting about; the
     caller distinguishes by exit code.
     """
+    if bool(run) != bool(agent):
+        print("refused — --run and --agent must be supplied together",
+              file=sys.stderr)
+        return 1
     target = find(items, ref)
-    refusal = claim_ticket(items, now, target, pr_facts=pr_facts)
+    refusal = claim_ticket(
+        items, now, target, pr_facts=pr_facts, run=run, agent=agent,
+    )
     if refusal is not None:
         print(refusal, file=sys.stderr)
         return 1
@@ -17312,9 +17688,11 @@ def cmd_send_back(items: List[Item], now: datetime, ref: str, reason: str,
 
 
 def _hold_refusal(item: Item) -> Optional[str]:
-    """Why ``item`` cannot be held at Accept, or ``None`` when it can (#1724).
+    """Why item cannot be held at Shaped or Accept, or None when it can (#1724).
 
-    A hold means something only where ``gate_question`` would otherwise ask
+    A Shaped hold is for an open root project and carries named conditions
+    and proof. An Accept hold means something only where ``gate_question``
+    would otherwise ask
     "Accept it?": an open Building project with every ticket closed that does
     not close itself. The unattended close (``_auto_closeable_project``)
     never reads ``blocked``, so a hold on a project that closes itself would
@@ -17326,6 +17704,8 @@ def _hold_refusal(item: Item) -> Optional[str]:
     if item.state != "OPEN":
         return "{} is {}; only an open project waits at Accept".format(
             item.ref, item.state)
+    if item.status == "Shaped":
+        return None
     if item.status != "Building":
         return (
             "{} is at {}, not Building; only a finished Building project "
@@ -17355,15 +17735,13 @@ def cmd_hold(items: List[Item], now: datetime, ref: str, reason: str,
              until: Optional[date] = None, on: Sequence[str] = (),
              confirmed: bool = False, run: Optional[str] = None,
              agent: Optional[str] = None,
-             instruction: Optional[str] = None) -> int:
-    """Record Nate's hold on a finished project at Accept (#1724).
+             instruction: Optional[str] = None,
+             proof: Sequence[str] = ()) -> int:
+    """Record a Shaped-plan hold or finished-project Accept hold (#1724).
 
-    A hold written as prose ("Accept held by Nate ...") is read by nothing, so
-    the project kept asking "Accept it?". The ``blocked`` label with a
-    parseable ``**Blocked until/on ...:**`` comment already takes an item out
-    of his queue, shows its condition, and is lifted by
-    ``clear_satisfied_blocks`` once that condition is met; this verb writes
-    exactly that form, in Nate's relayed voice.
+    Shaped holds write one proof-linked record with the current plan version,
+    named issue conditions, and the owner reason. Finished Building projects
+    retain their existing date- or issue-conditioned Accept hold record.
 
     **Dry run unless ``confirmed``**, like the gate answers: holding is
     Nate's call at his own gate.
@@ -17374,13 +17752,23 @@ def cmd_hold(items: List[Item], now: datetime, ref: str, reason: str,
         raise GitHubError(refusal)
     if (until is None) == (not on):
         raise GitHubError("a hold needs exactly one of --until or --on")
+    shaped_hold = item.status == "Shaped"
+    if shaped_hold and until is not None:
+        raise GitHubError("a Shaped hold needs issue conditions via --on")
     if until is not None and until <= _block_condition_date(now):
         raise GitHubError("hold date must be after today's UTC date")
-    body = _hold_comment_body(reason, until=until, on=on)
+    if shaped_hold:
+        if not proof:
+            raise GitHubError(
+                "a Shaped hold needs at least one --proof comment URL")
+        body = _shaped_hold_record_body(item, reason, on, proof)
+    else:
+        body = _hold_comment_body(reason, until=until, on=on)
 
     if not confirmed:
-        print("would hold {} at Accept ({}) with the blocked label and:".format(
-            item.ref, item.title))
+        place = "as a Shaped plan" if shaped_hold else "at Accept"
+        print("would hold {} {} ({}) with the blocked label and:".format(
+            item.ref, place, item.title))
         print(body)
         print("\nNothing was changed. Re-run with --yes to record the hold.")
         return 1
@@ -17398,6 +17786,10 @@ def cmd_hold(items: List[Item], now: datetime, ref: str, reason: str,
     )
     if comment.returncode != 0:
         raise GitHubError(comment.stderr.strip())
+    if shaped_hold:
+        write_project_select(
+            item.item_id, "Needs", "external-event", item.ref)
+        item.needs = "external-event"
     edit = _run_gh(
         ["gh", "issue", "edit", str(item.number), "--repo", item.repo,
          "--add-label", "blocked"],
@@ -17411,7 +17803,120 @@ def cmd_hold(items: List[Item], now: datetime, ref: str, reason: str,
     if not item.is_blocked:
         item.labels.append("blocked")
 
-    print("{} held at Accept\n{}".format(item.ref, body))
+    place = "at Shaped" if shaped_hold else "at Accept"
+    print("{} held {}\n{}".format(item.ref, place, body))
+    return 0
+
+
+def _reload_shaped_hold_for_release(item: Item) -> str:
+    """Re-read a Shaped hold, its plan and labels before an owner release."""
+    live_state = live_issue_state(item)
+    if live_state != "OPEN":
+        raise GitHubError(
+            "{} is not open on GitHub; its Shaped hold cannot be released"
+            .format(item.ref)
+        )
+    payload = _gh_json(
+        "gh", "issue", "view", str(item.number), "--repo", item.repo,
+        "--json", "state,body,comments,labels",
+    )
+    if (
+        not isinstance(payload, Mapping)
+        or not isinstance(payload.get("body"), str)
+        or not isinstance(payload.get("comments"), list)
+        or not isinstance(payload.get("labels"), list)
+        or str(payload.get("state") or "").upper() != "OPEN"
+    ):
+        raise GitHubError(
+            "could not re-read the live Shaped hold on {}".format(item.ref)
+        )
+    labels = []
+    for label in payload["labels"]:
+        name = label.get("name") if isinstance(label, Mapping) else label
+        if isinstance(name, str):
+            labels.append(name)
+    comments = trusted_comments(payload["comments"])
+    (
+        item.block_references,
+        item.blocked_until,
+        item.block_reason,
+        item.block_event,
+        item.needs_decision,
+        item.shaped_hold,
+    ) = _current_block_comment_details(comments)
+    item.shaped_hold_clear = _current_shaped_hold_clear(comments)
+    item.block_comments_error = None
+    item.state = "OPEN"
+    item.body = payload["body"]
+    item.labels = labels
+
+    if item.parent is not None or item.status != "Shaped":
+        raise GitHubError(
+            "{} is not an open Shaped project".format(item.ref)
+        )
+    if not item.item_id:
+        raise GitHubError("{} is not in the Project".format(item.ref))
+    if not isinstance(item.shaped_hold, dict):
+        raise GitHubError("{} has no current Shaped hold to release".format(
+            item.ref))
+    if not item.body.strip():
+        raise GitHubError("{} has no current Shaped plan to re-present".format(
+            item.ref))
+    return item.body
+
+
+def cmd_release_shaped_hold(
+    items: List[Item], now: datetime, ref: str, confirmed: bool,
+    instruction: Optional[str] = None, run: Optional[str] = None,
+    agent: Optional[str] = None,
+) -> int:
+    """Release a Shaped hold only on Nate's explicit owner instruction."""
+    item = find(items, ref)
+    if not confirmed:
+        print("would explicitly release the Shaped hold on {}".format(item.ref))
+        print("\nNothing was changed. Re-run with --yes and --instruction.")
+        return 1
+    if not isinstance(instruction, str) or not instruction.strip():
+        raise GitHubError(
+            "an explicit hold release requires Nate's verbatim --instruction"
+        )
+
+    body = _reload_shaped_hold_for_release(item)
+    record = item.shaped_hold
+    if not isinstance(record, dict):
+        raise GitHubError("{} has no current Shaped hold to release".format(
+            item.ref))
+    if _shaped_hold_clear_matches(item, record):
+        _finish_shaped_hold_clear(item, body, now)
+        print("{} was already cleared; the Shaped approval gate is pending again"
+              .format(item.ref))
+        return 0
+    if not item.is_blocked:
+        raise GitHubError("{} has no active blocked Shaped hold".format(
+            item.ref))
+
+    current_plan_version = shaped_plan_version(body)
+    clear_body = render_explicit_shaped_hold_release(
+        record, current_plan_version)
+    comment = _run_gh(
+        [
+            "gh", "issue", "comment", str(item.number), "--repo", item.repo,
+            "--body", append_provenance(
+                clear_body, "nate-relayed", at=now, run=run, agent=agent,
+                instruction=instruction,
+            ),
+        ],
+        capture_output=True, text=True,
+    )
+    if comment.returncode != 0:
+        raise GitHubError(comment.stderr.strip())
+    item.shaped_hold_clear = parse_shaped_hold_clear_comment(clear_body)
+    if item.shaped_hold_clear is None:
+        raise GitHubError("explicit hold release for {} did not parse back".format(
+            item.ref))
+    _finish_shaped_hold_clear(item, body, now)
+    print("{} explicitly released; the Shaped approval gate is pending again"
+          .format(item.ref))
     return 0
 
 
@@ -17419,11 +17924,16 @@ def cmd_answer_gates(items: List[Item], now: datetime, ref: str,
                      answer: str, decider: str,
                      run: Optional[str] = None,
                      agent: Optional[str] = None) -> int:
-    """Record one answered Gates question in the plan body.
+    """Record one answered Gates question and re-check delegated Shaped work.
 
     The sanctioned post-Ready write. It is one ``gh issue edit``: the marker
     and the Gates line move together or neither does, so no reader can catch
     the body in a state where the two disagree.
+
+    Once the answer clears Needs, a Nate-origin Shaped plan is checked with
+    the existing self-approval predicate. The ordinary sweep remains
+    agent-origin only; this command handles the one plan whose answer just
+    made its delegation actionable.
 
     Deliberately not gated on Status. The question this answers is asked from
     a block, and a blocked project can be sitting at Shaped, Ready or Building
@@ -17454,8 +17964,8 @@ def cmd_answer_gates(items: List[Item], now: datetime, ref: str,
     )
     if out.returncode != 0:
         raise GitHubError(out.stderr.strip())
-    # The caller may evaluate this item again in the same session; keep it
-    # aligned with what GitHub now holds rather than with what it held.
+    # Keep the same-session item aligned with what GitHub now holds before
+    # the single-plan self-approval check.
     item.body = body
     remaining_needs = "human" if plan_needs_nate(body) else "none"
     write_project_select(item.item_id, "Needs", remaining_needs, item.ref)
@@ -17470,8 +17980,66 @@ def cmd_answer_gates(items: List[Item], now: datetime, ref: str,
             "wrote {} but the answered-Gates reader rejects the "
             "record".format(item.ref)
         )
-    print("{} Gates answered by {}\n{}\n{}".format(
-        item.ref, recorded["decider"], recorded["answer"], item.url))
+
+    self_approved = False
+    if item.status == "Shaped" and item.origin == "Nate":
+        by_ref = {item.ref: item}
+        if shaped_self_approvable(item, by_ref):
+            body = _loaded_item_body(item)
+            klass = effective_class(item, by_ref)
+            reason = (
+                "needs_nate all null; class {} self-approvable; "
+                "origin override to agents"
+            ).format(klass)
+            scan_only = item.risk == "escalated"
+            if scan_only:
+                reason += "; " + scan_only_escalation_note(
+                    plan_is_escalated(body))
+
+            try:
+                status_error = _write_status(item, "Ready", now)
+            except (OSError, subprocess.SubprocessError, GitHubError) as exc:
+                status_error = str(exc)
+            if status_error is not None:
+                raise GitHubError(
+                    "Gates answer recorded, but {} could not advance to "
+                    "Ready: {}".format(item.ref, status_error)
+                )
+
+            basis = "{}; {}".format(
+                reason, "no declared risk" if scan_only
+                else "no escalated risk"
+            )
+            authority_signals = needs_nate_signals(body)
+            if authority_signals:
+                basis += "; authority signals: {}".format(
+                    ", ".join(authority_signals)
+                )
+            try:
+                comment = _run_gh(
+                    ["gh", "issue", "comment", str(item.number),
+                     "--repo", item.repo,
+                     "--body", self_approval_comment(
+                         basis, at=now, run=run, agent=agent
+                     )],
+                    capture_output=True, text=True,
+                )
+            except (OSError, subprocess.SubprocessError, GitHubError) as exc:
+                raise GitHubError(
+                    "Ready was written but the Self-approved marker "
+                    "failed: {}".format(exc)
+                ) from exc
+            if comment.returncode != 0:
+                raise GitHubError(
+                    "Ready was written but the Self-approved marker "
+                    "failed: {}".format(comment.stderr.strip())
+                )
+            self_approved = True
+
+    status_note = "\nShaped self-approved → Ready" if self_approved else ""
+    print("{} Gates answered by {}\n{}{}\n{}".format(
+        item.ref, recorded["decider"], recorded["answer"], status_note,
+        item.url))
     return 0
 
 
@@ -17545,11 +18113,33 @@ def _set_pinned(items: List[Item], now: datetime, ref: str, pinned: bool,
 def cmd_comment(items: List[Item], now: datetime, ref: str, body: str,
                 voice: str, run: Optional[str] = None,
                 agent: Optional[str] = None,
-                apply_blocked: bool = False) -> int:
+                apply_blocked: bool = False,
+                blocked_on: Optional[Sequence[str]] = None,
+                because: Optional[str] = None,
+                proof: Sequence[str] = ()) -> int:
     """Post an issue comment with an explicit, stamped voice."""
-    if not body.strip():
+    if not body.strip() and not blocked_on:
         raise GitHubError("a non-empty comment body is required")
     item = find(items, ref)
+    if blocked_on:
+        if not item.item_id:
+            raise GitHubError("{} is not in the Project".format(item.ref))
+        if item.status == "Shaped" and item.parent is None:
+            if voice != "nate-relayed":
+                raise GitHubError(
+                    "a Shaped hold needs the Nate-relayed comment voice")
+            if not proof:
+                raise GitHubError(
+                    "a Shaped hold needs at least one --proof comment URL")
+            body = _shaped_hold_record_body(
+                item, because or "", blocked_on, proof)
+        else:
+            if proof:
+                raise GitHubError(
+                    "--proof is only supported for a Shaped plan block")
+            body = _blocked_comment_body(blocked_on, because or "")
+    elif apply_blocked and not item.item_id:
+        raise GitHubError("{} is not in the Project".format(item.ref))
     comment = _run_gh(
         ["gh", "issue", "comment", str(item.number), "--repo", item.repo,
          "--body", append_provenance(body, voice, at=now, run=run, agent=agent)],
@@ -17557,11 +18147,10 @@ def cmd_comment(items: List[Item], now: datetime, ref: str, body: str,
     )
     if comment.returncode != 0:
         raise GitHubError(comment.stderr.strip())
-    if apply_blocked:
-        if not item.item_id:
-            raise GitHubError("{} is not in the Project".format(item.ref))
-        write_project_select(item.item_id, "Needs", "human", item.ref)
-        item.needs = "human"
+    if apply_blocked or blocked_on:
+        needs = "human" if apply_blocked else "external-event"
+        write_project_select(item.item_id, "Needs", needs, item.ref)
+        item.needs = needs
         edit = _run_gh(
             [
                 "gh", "issue", "edit", str(item.number), "--repo", item.repo,
@@ -17570,9 +18159,13 @@ def cmd_comment(items: List[Item], now: datetime, ref: str, body: str,
             capture_output=True, text=True,
         )
         if edit.returncode != 0:
+            purpose = (
+                "needs-decision comment" if apply_blocked
+                else "blocked-on comment"
+            )
             raise GitHubError(
-                "recorded needs-decision comment on {}, but could not add its "
-                "blocked label: {}".format(item.ref, edit.stderr.strip())
+                "recorded {} on {}, but could not add its blocked label: {}"
+                .format(purpose, item.ref, edit.stderr.strip())
             )
         if not item.is_blocked:
             item.labels.append("blocked")
@@ -18278,41 +18871,110 @@ def classify_blockers(blockers: Iterable[dict], repo: str) -> Dict[str, List[str
 
 def _current_block_comment_details(
     comments: Sequence[Mapping[str, object]],
-) -> Optional[Tuple[List[str], Optional[date], str,
-                    Optional[Dict[str, str]]]]:
-    """Choose the newest block-making comment by its GitHub creation time.
+) -> Tuple[List[str], Optional[date], Optional[str],
+           Optional[Dict[str, str]], Optional[str],
+           Optional[Dict[str, object]]]:
+    """Read the current block record: the newest one of any kind (#2166).
 
-    A later Declined comment starts a new blocked episode without machine-
-    readable conditions. An older Blocked-on header must not satisfy it. A
-    newer Blocked-on header can establish conditions for that later episode.
+    Three kinds of comment record a block: a parseable block header, a
+    Needs-a-decision question, a Declined, or a Shaped hold. The newest
+    record is current; its fields are returned in a six-field tuple:
+    references, blocked date, reason, event, question, and Shaped-hold record.
+    Other kinds' fields are empty when the thread has no current record.
+
+    A later Declined starts a new blocked episode without machine-readable
+    conditions (#2019), and a later question is waiting on Nate's answer, so
+    an older header's conditions must satisfy neither. A newer header can
+    establish conditions for a later episode, and then an older question is
+    no longer the one being asked.
+
+    Newest is by GitHub creation time when every record carries one, the later
+    comment winning a tie; when any record lacks it, by body order, which is
+    the order GitHub returns comments in.
     """
-    bodies = [str(comment.get("body") or "") for comment in comments]
-    block_rows = []
-    decline_times = []
-    has_decline = False
-    for comment, body in zip(comments, bodies):
+    records = []
+    for index, comment in enumerate(comments):
+        body = str(comment.get("body") or "")
+        shaped_hold = parse_shaped_hold_comment(body)
+        if shaped_hold is not None:
+            # Hold conditions stay out of generic block references until the
+            # hold gate has checked the attached proof.
+            fields = (
+                [], None, str(shaped_hold["Hold-Reason"]), None, None,
+                shaped_hold,
+            )
+            records.append((parse_time(comment.get("createdAt")), index, fields))
+            continue
         details = _parse_block_comment_details([body])
         if details is not None:
-            block_rows.append((parse_time(comment.get("createdAt")), details))
-        if body.lstrip().startswith(DECLINED_PREFIX):
-            has_decline = True
-            decline_times.append(parse_time(comment.get("createdAt")))
+            fields = details + (None, None)
+        elif NEEDS_DECISION_RE.match(body):
+            # A question header whose text reads as empty is still the
+            # current record: it asks rather than lets an older header clear.
+            fields = ([], None, None, None,
+                      parse_needs_decision_comment([body]), None)
+        elif body.lstrip().startswith(DECLINED_PREFIX):
+            fields = ([], None, None, None, None, None)
+        else:
+            continue
+        records.append((parse_time(comment.get("createdAt")), index, fields))
 
-    if has_decline:
+    if not records:
+        return [], None, None, None, None, None
+    if all(at is not None for at, _, _ in records):
+        return max(records, key=lambda record: record[:2])[2]
+    return records[-1][2]
+
+
+def _current_shaped_hold_clear(
+    comments: Sequence[Mapping[str, object]],
+) -> Optional[Dict[str, object]]:
+    """The newest owner-authored clear that follows the matching hold."""
+    records = []
+    for index, comment in enumerate(comments):
+        if not isinstance(comment, Mapping) or not trusted_comment(comment):
+            continue
+        body = str(comment.get("body") or "")
+        hold = parse_shaped_hold_comment(body)
+        if hold is not None:
+            records.append((parse_time(comment.get("createdAt")), index,
+                            "hold", hold))
+            continue
+        cleared = parse_shaped_hold_clear_comment(body)
+        if cleared is not None:
+            records.append((parse_time(comment.get("createdAt")), index,
+                            "clear", cleared))
+            continue
         if (
-            not block_rows
-            or any(at is None for at, _ in block_rows)
-            or any(at is None for at in decline_times)
+            _parse_block_comment_details([body]) is not None
+            or NEEDS_DECISION_RE.match(body)
+            or body.lstrip().startswith(DECLINED_PREFIX)
         ):
-            return None
-        newest_block = max(at for at, _ in block_rows)
-        newest_decline = max(decline_times)
-        if newest_decline >= newest_block:
-            return None
+            records.append((parse_time(comment.get("createdAt")), index,
+                            "reset", None))
 
-    if block_rows and all(at is not None for at, _ in block_rows):
-        return max(block_rows, key=lambda row: row[0])[1]
-    return _parse_block_comment_details(bodies)
+    if all(at is not None for at, _, _, _ in records):
+        records.sort(key=lambda record: (record[0], record[1]))
+
+    active_hold_id = None
+    active_clear = None
+    for _at, _index, kind, value in records:
+        if kind == "hold":
+            try:
+                active_hold_id = shaped_hold_id(value)
+            except ValueError:
+                active_hold_id = None
+            active_clear = None
+        elif kind == "clear":
+            if (
+                active_hold_id is not None
+                and value.get("Hold-ID") == active_hold_id
+            ):
+                active_clear = value
+        else:
+            active_hold_id = None
+            active_clear = None
+    return active_clear
 
 
 def _load_block_comment(item: Item) -> None:
@@ -18321,7 +18983,20 @@ def _load_block_comment(item: Item) -> None:
     Block comments are intentionally loaded outside the Project query. The
     normal load pays for this only for open blocked items, and the parsed state
     stays on ``Item`` for pure queue functions and the brief to reuse.
+
+    The current block record alone sets ``block_references``,
+    ``blocked_until``, ``block_reason``, ``block_event`` and
+    ``needs_decision`` and ``shaped_hold`` (#2166): an older
+    header's conditions never read beside a newer question, so the clear
+    cannot lift a block that is waiting on Nate's answer.
+
+    ``decline_reason`` stays thread-wide: it is the newest Declined however
+    old. ``gate_question`` and ``watch_owns_gate`` read it as "this ticket
+    was declined", and so does the #1942 reset of a legacy Needs ``human``
+    in ``clear_satisfied_blocks``, which runs only once a newer header's
+    conditions are satisfied.
     """
+    item.shaped_hold_clear = None
     payload = _gh_json(
         "gh", "issue", "view", str(item.number), "--repo", item.repo,
         "--json", "comments",
@@ -18340,16 +19015,15 @@ def _load_block_comment(item: Item) -> None:
     ]
     bodies = [comment.get("body") or "" for comment in comments]
     item.unparseable_block_comments = unparseable_block_comment_lines(bodies)
-    item.block_event = None
-    parsed = _current_block_comment_details(comments)
-    if parsed is not None:
-        (
-            item.block_references,
-            item.blocked_until,
-            item.block_reason,
-            item.block_event,
-        ) = parsed
-    item.needs_decision = parse_needs_decision_comment(bodies)
+    (
+        item.block_references,
+        item.blocked_until,
+        item.block_reason,
+        item.block_event,
+        item.needs_decision,
+        item.shaped_hold,
+    ) = _current_block_comment_details(comments)
+    item.shaped_hold_clear = _current_shaped_hold_clear(comments)
     item.decline_reason = parse_decline_comment(bodies)
     item.decline_route = parse_decline_route_comment(payload["comments"])
     for body in reversed(bodies):
@@ -19359,14 +20033,12 @@ def plan_declared_risks(plan_body: str) -> List[str]:
     ``Risk rationale`` section, however it got into the body, or a
     ``Risk: escalated`` line; either holds a plan at Shaped, while a hit from
     ``plan_escalation_matches`` alone only raises the review tier. The text is
-    the one that scan reads, so quoted, code and Rejected text declares
-    nothing. A rationale section with prose but no readable entry counts as
-    ``declared``, so a malformed record holds rather than releases; one that
-    is empty or says ``None`` declares nothing.
+    the one that scan reads (``plan_scan_text``, #2180), so nothing in a
+    region it ignores declares anything. A rationale section with prose but
+    no readable entry counts as ``declared``, so a malformed record holds
+    rather than releases; one that is empty or says ``None`` declares nothing.
     """
-    text = _strip_plan_prose_quotes(
-        asserted_text(_plan_escalation_scan_text(plan_body or ""))
-    )
+    text = plan_scan_text(plan_body or "")
     declared: List[str] = []
 
     def add(reason: str) -> None:
@@ -22321,7 +22993,8 @@ def cmd_show(items: List[Item], now: datetime, ref: str) -> int:
         humanise(item.waited(now))))
     print(item.url)
     print("=" * 72)
-    question = gate_question(item)
+    by_ref = {row.ref: row for row in items}
+    question = gate_question(item, by_ref)
     print("GATE: {}".format(question or "not waiting on you"))
     if item.needs_decision is not None:
         print("NEEDS DECISION: {}".format(item.needs_decision))
@@ -22622,6 +23295,35 @@ def _decision_question(value: str) -> str:
     return question
 
 
+def _proof_comment_url(value: str) -> str:
+    """Parse one GitHub comment URL used as hold proof."""
+    try:
+        return validate_proof_comment_url(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc))
+
+
+def _shaped_hold_record_body(
+    item: Item, reason: str, conditions: Sequence[str],
+    proof: Sequence[str],
+) -> str:
+    """Render a Shaped hold from the loaded issue body and supplied evidence."""
+    if not item.item_id:
+        raise GitHubError("{} is not in the Project".format(item.ref))
+    if not isinstance(item.body, str) or not item.body.strip():
+        raise GitHubError("{} has no Shaped plan body to version".format(
+            item.ref))
+    condition_refs = [
+        "{}#{}".format(item.repo, str(value).lstrip("#"))
+        for value in conditions
+    ]
+    try:
+        return render_shaped_hold(
+            reason, condition_refs, shaped_plan_version(item.body), proof)
+    except (TypeError, ValueError) as exc:
+        raise GitHubError(str(exc))
+
+
 def _blocked_reference(value: str) -> str:
     """Normalise one issue number for the strict block-comment header."""
     reference = value.strip()
@@ -22635,17 +23337,21 @@ def _blocked_reference(value: str) -> str:
 
 
 def _blocked_comment_body(blocked_on: Sequence[str], because: str) -> str:
-    """Render the block-comment header owned by ``BLOCK_COMMENT_RE``."""
-    references = " and ".join("#{}".format(number) for number in blocked_on)
-    return "**Blocked on {}:** {}".format(references, because)
+    """Render ``comment --blocked-on`` through ``block_record`` (#2169).
+
+    The reason is made inert like a question or a decline reason (#1798):
+    a line break or ``<!--`` in it once put a runner marker at the start of
+    a line in an owner-trusted comment.
+    """
+    return render_blocked(because, on=blocked_on)
 
 
 def _needs_decision_comment_body(question: str) -> str:
-    """Render the breakdown-question header owned by its parser.
+    """Render the breakdown-question header through ``block_record`` (#2169).
 
     The question is a model's words, so it is made inert (#1798).
     """
-    return "{} {}".format(NEEDS_DECISION_PREFIX, inert_comment_text(question))
+    return render_needs_decision(question)
 
 
 def _hold_reference(value: str) -> str:
@@ -22681,16 +23387,17 @@ def _hold_until_date(value: str) -> date:
 
 def _hold_comment_body(reason: str, until: Optional[date] = None,
                        on: Sequence[str] = ()) -> str:
-    """Render an Accept hold as the block header ``BLOCK_COMMENT_RE`` owns.
+    """Render an Accept hold through ``block_record.render_blocked`` (#2169).
 
     Exactly one condition: a hold on both a date and an issue would parse,
-    but the verb offers one so the brief can say plainly what lifts it.
+    but the verb offers one so the brief can say plainly what lifts it. The
+    reason is made inert, as ``comment --blocked-on``'s is.
     """
     if (until is None) == (not on):
         raise ValueError("a hold needs exactly one of a date or issues")
     if until is not None:
-        return "**Blocked until {}:** {}".format(until.isoformat(), reason)
-    return _blocked_comment_body(on, reason)
+        return render_blocked(reason, until=until)
+    return render_blocked(reason, on=on)
 
 
 #: Whether each command's shared Project load must carry item history (#1622).
@@ -22891,6 +23598,14 @@ def main(argv: Optional[Sequence[str]] = None, *,
     )
     claim = sub.add_parser("claim", help="take the single-in-motion lock on a ticket")
     claim.add_argument("ref", help="issue number, owner/repo#number, or URL")
+    claim.add_argument(
+        "--run", default=None,
+        help="heartbeat run id to bind after the claim succeeds",
+    )
+    claim.add_argument(
+        "--agent", default=None, choices=tuple(AGENTS_BY_ROLE["implement"]),
+        help="implementing agent that owns the heartbeat run",
+    )
     release = sub.add_parser("release", help="give up the lock on a ticket")
     release.add_argument("ref", help="issue number, owner/repo#number, or URL")
     for verb, help_text in (
@@ -22993,7 +23708,7 @@ def main(argv: Optional[Sequence[str]] = None, *,
     comment_body.add_argument("--body-file", help="file containing the comment text")
     comment_body.add_argument(
         "--blocked-on", action="append", type=_blocked_reference, metavar="N",
-        help="post a canonical block header; repeat for multiple issue numbers",
+        help="post a routed block record; repeat for multiple issue numbers",
     )
     comment_body.add_argument(
         "--needs-decision", type=_decision_question, metavar="QUESTION",
@@ -23001,7 +23716,11 @@ def main(argv: Optional[Sequence[str]] = None, *,
     )
     comment.add_argument(
         "--because", type=_comment_reason,
-        help="reason appended to a canonical block header (requires --blocked-on)",
+        help="reason for the block record (requires --blocked-on)",
+    )
+    comment.add_argument(
+        "--proof", action="append", type=_proof_comment_url, default=None,
+        help="GitHub comment URL proving a Shaped hold; repeat as needed",
     )
     comment.add_argument(
         "--run", default=None,
@@ -23013,8 +23732,8 @@ def main(argv: Optional[Sequence[str]] = None, *,
     )
     hold = sub.add_parser(
         "hold",
-        help="Nate's hold on a finished project at Accept, recorded as a "
-             "conditioned block — dry run without --yes",
+        help="owner-authorized hold or explicit release of a Shaped plan — "
+             "dry run without --yes",
     )
     hold.add_argument("ref", help="issue number, owner/repo#number, or URL")
     hold_condition = hold.add_mutually_exclusive_group(required=True)
@@ -23026,9 +23745,13 @@ def main(argv: Optional[Sequence[str]] = None, *,
         "--on", nargs="+", type=_hold_reference, default=None, metavar="N",
         help="hold until these issues in the project's repository close",
     )
+    hold_condition.add_argument(
+        "--release", action="store_true",
+        help="explicitly release a Shaped hold (requires --yes and --instruction)",
+    )
     hold.add_argument(
-        "--reason", required=True, type=_comment_reason,
-        help="why Nate is holding it (required)",
+        "--reason", required=False, type=_comment_reason,
+        help="why Nate is holding it (required unless --release)",
     )
     hold.add_argument(
         "--yes", action="store_true", dest="confirmed",
@@ -23037,6 +23760,10 @@ def main(argv: Optional[Sequence[str]] = None, *,
     hold.add_argument(
         "--instruction", type=_verbatim_instruction, default=None,
         help="verbatim instruction received from Nate; recorded in provenance",
+    )
+    hold.add_argument(
+        "--proof", action="append", type=_proof_comment_url, default=None,
+        help="GitHub comment URL proving a Shaped hold; repeat as needed",
     )
     hold.add_argument(
         "--run", default=None,
@@ -23104,11 +23831,22 @@ def main(argv: Optional[Sequence[str]] = None, *,
     reject.add_argument("--note", default=None, help="what is broken")
     args = parser.parse_args(argv)
 
+    if args.command == "hold":
+        if not args.release and not args.reason:
+            parser.error("hold needs --reason unless --release is used")
+        if args.release and args.confirmed and not args.instruction:
+            parser.error("--instruction is required for a confirmed --release")
+
     if args.command == "comment":
         if args.blocked_on and args.because is None:
             parser.error("--because is required with --blocked-on")
         if args.because is not None and not args.blocked_on:
             parser.error("--because requires --blocked-on")
+        if args.proof and not args.blocked_on:
+            parser.error("--proof requires --blocked-on")
+    if (args.command == "claim"
+            and bool(args.run) != bool(args.agent)):
+        parser.error("--run and --agent must be supplied together")
     if (args.command == "capture" and args.origin == "agent"
             and args.klass is None):
         parser.error("--class is required with --origin agent")
@@ -23445,7 +24183,8 @@ def main(argv: Optional[Sequence[str]] = None, *,
                 ) = pr_facts_future.result()
         if args.command == "claim":
             return cmd_claim(
-                items, now, args.ref, pr_facts=ticket_pr_facts(items)
+                items, now, args.ref, pr_facts=ticket_pr_facts(items),
+                run=args.run, agent=args.agent,
             )
         if args.command == "release":
             return cmd_release(items, now, args.ref)
@@ -23468,10 +24207,16 @@ def main(argv: Optional[Sequence[str]] = None, *,
             return cmd_answer_gates(items, now, args.ref, args.answer,
                                     args.decider, args.run, args.agent)
         if args.command == "hold":
+            if args.release:
+                return cmd_release_shaped_hold(
+                    items, now, args.ref, args.confirmed,
+                    instruction=args.instruction, run=args.run, agent=args.agent,
+                )
             return cmd_hold(items, now, args.ref, args.reason,
                             until=args.until, on=args.on or (),
                             confirmed=args.confirmed, run=args.run,
-                            agent=args.agent, instruction=args.instruction)
+                            agent=args.agent, instruction=args.instruction,
+                            proof=args.proof or ())
         if args.command == "comment":
             if args.needs_decision is not None:
                 body = _needs_decision_comment_body(args.needs_decision)
@@ -23488,7 +24233,10 @@ def main(argv: Optional[Sequence[str]] = None, *,
                     )
             return cmd_comment(
                 items, now, args.ref, body or "", args.voice,
-                args.run, args.agent, apply_blocked=args.needs_decision is not None,
+                args.run, args.agent,
+                apply_blocked=args.needs_decision is not None,
+                blocked_on=args.blocked_on, because=args.because,
+                proof=args.proof or (),
             )
         if args.command == "reject":
             return cmd_reject(items, now, args.pr, args.note)

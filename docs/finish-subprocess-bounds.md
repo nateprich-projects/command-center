@@ -18,7 +18,7 @@ git show origin/main:engine/implement.py | rg -n "def _run|subprocess\\.run|time
 
 ## Finish-path command inventory
 
-The AST inventory test pins **27 bounded Git callsites** in `engine/implement.py`:
+The AST inventory test pins **28 bounded Git callsites** in `engine/implement.py`:
 
 | Callsite | Git commands |
 | --- | --- |
@@ -35,7 +35,7 @@ The AST inventory test pins **27 bounded Git callsites** in `engine/implement.py
 | `_checkpoint_work` | `git commit -m <WIP checkpoint>` |
 | `_run_finish_tests` | `git fetch origin +refs/heads/main:refs/remotes/origin/main` (#1804) |
 | `finish_done` | `git rev-parse HEAD` after the push, the SHA the PR's evidence block is keyed to (#1805) |
-| `_remove_codex_run_checkout` | `git rev-parse --show-toplevel`; `git branch --show-current`; `git status --porcelain --untracked-files=all`; `git rev-parse --verify HEAD`; `git rev-parse --verify refs/remotes/origin/ticket/<n>` (#2014) |
+| `_remove_codex_run_checkout` | `git rev-parse --show-toplevel`; `git branch --show-current`; `git status --porcelain --untracked-files=all`; `git rev-parse --verify HEAD`; `git rev-parse --verify refs/remotes/origin/ticket/<n>`; `git merge-base --is-ancestor HEAD origin/main` when the ticket-tip check does not match (#2014, #2225) |
 
 `_git_name_paths` expands to these five distinct command forms; the cached diff
 form is reused by two callers:
@@ -91,7 +91,7 @@ took at most 0.0160 seconds across seven runs. The latest green CI run
 
 Every bound is below the 2-hour claim TTL. `test_every_subprocess_callsite_has_an_explicit_timeout`
 checks that every `_run` caller supplies one. The Git AST inventory test pins its
-26 static callsites and the dynamic path-list command forms documented above.
+27 static callsites and the dynamic path-list command forms documented above.
 Timeout fixtures assert that a never-returning child is killed without a wait,
 the run finishes `errored` with work not kept, no PR effect occurs, and a slow
 call that finishes under its bound succeeds.

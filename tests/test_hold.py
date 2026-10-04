@@ -18,6 +18,7 @@ import pytest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
+import block_record  # noqa: E402
 import funnel  # noqa: E402
 
 #: Comment markers count only from the owner account (#1788).
@@ -107,9 +108,9 @@ def _assert_hold_written(calls, item):
     assert [call[:3] for call in calls] == [
         ("gh", "issue", "comment"), ("gh", "issue", "edit"),
     ]
-    assert calls[0][3:6] == ("42", "--repo", "nateprich/beta")
+    assert calls[0][3:6] == (str(item.number), "--repo", item.repo)
     assert calls[1] == (
-        "gh", "issue", "edit", "42", "--repo", "nateprich/beta",
+        "gh", "issue", "edit", str(item.number), "--repo", item.repo,
         "--add-label", "blocked",
     )
     assert item.is_blocked
@@ -220,6 +221,403 @@ def test_hold_records_a_verbatim_instruction(monkeypatch):
     provenance = funnel.parse_provenance(calls[0][-1])
     assert provenance["voice"] == "nate-relayed"
     assert provenance["instruction"] == instruction
+
+
+# -- Shaped hold write reproduction ------------------------------------------
+
+SHAPED_PLAN_BODY = "# Decision\nKeep current service plan.\n"
+SHAPED_PLAN_VERSION = (
+    "371883196b99396eca7d9b9cb6613ec0395df5ca683d36fe7415b71343e40dbb"
+)
+SHAPED_CONDITIONS = ("1590", "1997", "1998", "1999", "2000")
+SHAPED_PROOF = (
+    "https://github.com/nateprich-projects/command-center/issues/2003"
+    "#issuecomment-5945296610"
+)
+
+
+def shaped_project(**overrides):
+    fields = dict(
+        repo="nateprich-projects/command-center", number=2003,
+        title="A Shaped project",
+        url="https://github.com/nateprich-projects/command-center/issues/2003",
+        state="OPEN",
+        body=SHAPED_PLAN_BODY, status="Shaped", klass="New", origin="Nate",
+        needs="none", item_id="project-item-2003",
+    )
+    fields.update(overrides)
+    return funnel.Item(**fields)
+
+
+def test_reproduction_owner_authorized_shaped_hold_writes_block_and_header(
+        monkeypatch):
+    item = shaped_project()
+    calls = _record_github(monkeypatch, [item])
+    project_writes = []
+    monkeypatch.setattr(
+        funnel, "write_project_select",
+        lambda item_id, field, value, ref: project_writes.append(
+            (item_id, field, value, ref)),
+    )
+    args = ["hold", "2003", "--on"] + list(SHAPED_CONDITIONS)
+    args.extend([
+        "--reason", "Hold until the open prerequisites clear",
+        "--proof", SHAPED_PROOF,
+        "--yes", "--run", "run-hold", "--agent", "claude",
+        "--instruction", "Nate asked to hold this Shaped plan",
+    ])
+
+    assert funnel.main(args) == 0
+
+    posted = _assert_hold_written(calls, item)
+    visible = funnel._visible_comment(posted)
+    # The #2003 fixture keeps #1590 and #1997-#2000; stale closed #2120 is
+    # not a live condition.
+    expected_hold = {
+        "Hold-Reason": "Hold until the open prerequisites clear",
+        "Hold-Conditions": [
+            "nateprich-projects/command-center#1590",
+            "nateprich-projects/command-center#1997",
+            "nateprich-projects/command-center#1998",
+            "nateprich-projects/command-center#1999",
+            "nateprich-projects/command-center#2000",
+        ],
+        "Plan-Version": SHAPED_PLAN_VERSION,
+        "Proof": [SHAPED_PROOF],
+    }
+    assert "nateprich-projects/command-center#2120" not in (
+        expected_hold["Hold-Conditions"])
+    assert block_record.parse_shaped_hold_comment(visible) == expected_hold
+    assert project_writes == [
+        ("project-item-2003", "Needs", "external-event", item.ref),
+    ]
+    assert item.needs == "external-event"
+    assert item.status == "Shaped"
+    assert item.klass == "New"
+    assert "approval" not in visible.lower()
+    _read_back(monkeypatch, item, posted)
+    assert item.shaped_hold == expected_hold
+    assert item.block_references == []
+    assert item.block_reason == expected_hold["Hold-Reason"]
+
+
+def test_shaped_hold_refusal_allows_open_owner_project():
+    item = shaped_project()
+
+    assert funnel._hold_refusal(item) is None
+
+
+def _load_live_shaped_hold(monkeypatch, item, *, condition_states=None,
+                           proof_author="nateprich", extra_comments=()):
+    record = {
+        "Hold-Reason": "Wait for the named prerequisites",
+        "Hold-Conditions": [
+            "{}#{}".format(item.repo, number)
+            for number in SHAPED_CONDITIONS
+        ],
+        "Plan-Version": SHAPED_PLAN_VERSION,
+        "Proof": [SHAPED_PROOF],
+    }
+    hold_body = block_record.render_shaped_hold(
+        record["Hold-Reason"], record["Hold-Conditions"],
+        record["Plan-Version"], record["Proof"],
+    )
+    comments = [
+        {
+            "author": OWNER,
+            "createdAt": "2026-10-01T00:00:00Z",
+            "body": hold_body,
+        },
+        *extra_comments,
+    ]
+    live_states = {item.number: "OPEN"}
+    live_states.update({
+        int(number): state
+        for number, state in (condition_states or {}).items()
+    })
+
+    def gh_json(*args):
+        command = list(args)
+        if "--json" in command:
+            requested = command[command.index("--json") + 1]
+            if requested == "comments":
+                return {"comments": list(comments)}
+            if requested == "state":
+                issue_number = int(command[command.index("view") + 1])
+                return {"state": live_states.get(issue_number)}
+            if requested == "body":
+                return {"body": SHAPED_PLAN_BODY}
+            if requested == "state,body,comments,labels":
+                return {
+                    "state": "OPEN",
+                    "body": SHAPED_PLAN_BODY,
+                    "comments": list(comments),
+                    "labels": [{"name": label} for label in item.labels],
+                }
+        return None
+
+    monkeypatch.setattr(funnel, "_gh_json", gh_json)
+    monkeypatch.setattr(
+        funnel, "_gh_api_json",
+        lambda endpoint, **kwargs: {
+            "id": int(SHAPED_PROOF.rsplit("issuecomment-", 1)[1]),
+            "html_url": SHAPED_PROOF,
+            "user": {"login": proof_author},
+        },
+    )
+    funnel._load_block_comment(item)
+    item.labels = ["blocked"]
+    item.needs = "external-event"
+    return record, comments, live_states
+
+
+def test_shaped_hold_clear_inputs_rechecks_live_state_and_owner_proof(
+        monkeypatch):
+    item = shaped_project(state="CLOSED")
+    record = {
+        "Hold-Reason": "Wait for the named prerequisites",
+        "Hold-Conditions": [
+            "nateprich-projects/command-center#1590",
+            "nateprich-projects/command-center#1997",
+            "nateprich-projects/command-center#1998",
+            "nateprich-projects/command-center#1999",
+            "nateprich-projects/command-center#2000",
+        ],
+        "Plan-Version": SHAPED_PLAN_VERSION,
+        "Proof": [SHAPED_PROOF],
+    }
+    state_reads = []
+    body_reads = []
+    api_reads = []
+
+    def gh_json(*args):
+        command = list(args)
+        if command[:3] == ["gh", "issue", "view"]:
+            number = int(command[3])
+            repo = command[5]
+            requested = command[-1]
+            if requested == "state":
+                state_reads.append((repo, number))
+                return {"state": "OPEN" if number == 2003 else "CLOSED"}
+            if requested == "body":
+                body_reads.append((repo, number))
+                return {"body": SHAPED_PLAN_BODY}
+        if command[:2] == ["gh", "api"]:
+            api_reads.append(command[2])
+            return {
+                "id": 5945296610,
+                "html_url": SHAPED_PROOF,
+                "user": OWNER,
+            }
+        pytest.fail("unexpected live helper request: {!r}".format(command))
+
+    monkeypatch.setattr(funnel, "_gh_json", gh_json)
+
+    assert funnel._shaped_hold_clear_inputs(item, record) == (
+        SHAPED_PLAN_BODY, SHAPED_PLAN_VERSION,
+    )
+    assert state_reads == [
+        ("nateprich-projects/command-center", 2003),
+        ("nateprich-projects/command-center", 1590),
+        ("nateprich-projects/command-center", 1997),
+        ("nateprich-projects/command-center", 1998),
+        ("nateprich-projects/command-center", 1999),
+        ("nateprich-projects/command-center", 2000),
+    ]
+    assert body_reads == [("nateprich-projects/command-center", 2003)]
+    assert api_reads == [
+        "repos/nateprich-projects/command-center/issues/comments/5945296610",
+    ]
+
+
+def test_live_satisfied_shaped_hold_clears_once_and_reasks_plan_gate(
+        monkeypatch):
+    item = shaped_project(labels=["blocked"], needs="external-event")
+    all_closed = {number: "CLOSED" for number in SHAPED_CONDITIONS}
+    record, _comments, _states = _load_live_shaped_hold(
+        monkeypatch, item, condition_states=all_closed)
+    calls = []
+    project_writes = []
+
+    def run(args, capture_output, text=True):
+        calls.append(tuple(args))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(funnel.subprocess, "run", run)
+    monkeypatch.setattr(
+        funnel, "write_project_select",
+        lambda item_id, field, value, ref: project_writes.append(
+            (item_id, field, value, ref)),
+    )
+
+    cleared = funnel.clear_satisfied_blocks(
+        [item], datetime(2026, 10, 3, 12, 0, tzinfo=timezone.utc),
+        run="run-clear", agent="codex",
+    )
+
+    assert [row["kind"] for row in cleared] == ["shaped-hold"]
+    assert cleared[0]["conditions"] == record["Hold-Conditions"]
+    assert cleared[0]["proof"] == [SHAPED_PROOF]
+    assert not item.is_blocked
+    assert item.needs == "none"
+    assert project_writes == [
+        (item.item_id, "Needs", "none", item.ref),
+    ]
+    assert [call[2] for call in calls] == ["comment", "edit"]
+    visible = funnel._visible_comment(calls[0][-1])
+    assert visible.startswith(block_record.SHAPED_HOLD_CLEAR_PREFIX)
+    assert SHAPED_PROOF in visible
+    assert visible.count(SHAPED_PLAN_VERSION) == 1
+    assert funnel.parse_provenance(calls[0][-1])["run"] == "run-clear"
+    assert funnel.gate_question(item) == "Is the plan good?"
+
+
+def test_stale_closed_issue_does_not_clear_open_current_shaped_conditions(
+        monkeypatch):
+    item = shaped_project(labels=["blocked"], needs="external-event")
+    states = {2120: "CLOSED"}
+    states.update({number: "OPEN" for number in SHAPED_CONDITIONS})
+    _record, _comments, _live_states = _load_live_shaped_hold(
+        monkeypatch, item, condition_states=states)
+    calls = _record_github(monkeypatch, [item])
+    monkeypatch.setattr(
+        funnel, "live_issue_state",
+        lambda issue: states.get(issue.number),
+    )
+    monkeypatch.setattr(funnel, "_ticket_body", lambda repo, number: item.body)
+    monkeypatch.setattr(
+        funnel, "_gh_api_json",
+        lambda endpoint, **kwargs: {
+            "id": 5945296610, "html_url": SHAPED_PROOF,
+            "user": OWNER,
+        },
+    )
+
+    assert funnel.clear_satisfied_blocks(
+        [item], datetime(2026, 10, 3, 12, 0, tzinfo=timezone.utc),
+    ) == []
+    assert calls == []
+    assert item.is_blocked
+    assert item.needs == "external-event"
+
+
+def test_recorded_shaped_clear_recovers_without_posting_it_twice(monkeypatch):
+    item = shaped_project(labels=["blocked"], needs="external-event")
+    all_closed = {int(number): "CLOSED" for number in SHAPED_CONDITIONS}
+    _record, comments, _states = _load_live_shaped_hold(
+        monkeypatch, item, condition_states=all_closed)
+    calls = []
+    fail_label_write = [True]
+    project_writes = []
+
+    def run(args, capture_output, text=True):
+        call = tuple(args)
+        calls.append(call)
+        if call[2] == "comment":
+            comments.append({
+                "author": OWNER,
+                "createdAt": "2026-10-01T00:01:00Z",
+                "body": call[-1],
+            })
+        if call[2] == "edit" and "--remove-label" in call and fail_label_write[0]:
+            fail_label_write[0] = False
+            return SimpleNamespace(
+                returncode=1, stdout="", stderr="temporary label-write failure",
+            )
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(funnel.subprocess, "run", run)
+    monkeypatch.setattr(
+        funnel, "write_project_select",
+        lambda item_id, field, value, ref: project_writes.append(
+            (item_id, field, value, ref)),
+    )
+    now = datetime(2026, 10, 3, 12, 0, tzinfo=timezone.utc)
+
+    with pytest.raises(funnel.GitHubError, match="could not remove its blocked label"):
+        funnel.clear_satisfied_blocks([item], now, run="run-clear", agent="codex")
+
+    assert item.is_blocked
+    assert item.needs == "none"
+    assert sum(call[2] == "comment" for call in calls) == 1
+    funnel._load_block_comment(item)
+    cleared = funnel.clear_satisfied_blocks([item], now, run="run-retry", agent="codex")
+
+    assert len(cleared) == 1
+    assert cleared[0]["clear"] == "conditioned"
+    assert not item.is_blocked
+    assert sum(call[2] == "comment" for call in calls) == 1
+    assert project_writes == [(item.item_id, "Needs", "none", item.ref)]
+
+
+def test_closed_conditions_do_not_clear_without_owner_authored_live_proof(
+        monkeypatch):
+    item = shaped_project(labels=["blocked"], needs="external-event")
+    all_closed = {int(number): "CLOSED" for number in SHAPED_CONDITIONS}
+    _load_live_shaped_hold(
+        monkeypatch, item, condition_states=all_closed,
+        proof_author="mallory",
+    )
+    calls = _record_github(monkeypatch, [item])
+    monkeypatch.setattr(
+        funnel, "live_issue_state",
+        lambda issue: "CLOSED" if issue.number in all_closed else "OPEN",
+    )
+    monkeypatch.setattr(funnel, "_ticket_body", lambda repo, number: item.body)
+    monkeypatch.setattr(
+        funnel, "_gh_api_json",
+        lambda endpoint, **kwargs: {
+            "id": 5945296610, "html_url": SHAPED_PROOF,
+            "user": {"login": "mallory"},
+        },
+    )
+
+    assert funnel.clear_satisfied_blocks(
+        [item], datetime(2026, 10, 3, 12, 0, tzinfo=timezone.utc),
+    ) == []
+    assert calls == []
+    assert item.is_blocked
+
+
+def test_explicit_release_ignores_conditions_and_proof_but_reasks_plan_gate(
+        monkeypatch):
+    item = shaped_project(labels=["blocked"], needs="external-event")
+    _record, _comments, _states = _load_live_shaped_hold(
+        monkeypatch, item,
+        condition_states={int(number): "OPEN" for number in SHAPED_CONDITIONS},
+    )
+    calls = _record_github(monkeypatch, [item])
+    project_writes = []
+    monkeypatch.setattr(
+        funnel, "_gh_api_json",
+        lambda endpoint, **kwargs: pytest.fail(
+            "explicit release does not recheck proof URLs"),
+    )
+    monkeypatch.setattr(
+        funnel, "write_project_select",
+        lambda item_id, field, value, ref: project_writes.append(
+            (item_id, field, value, ref)),
+    )
+    instruction = "Release the hold now and show me the current plan again."
+
+    assert funnel.main([
+        "hold", "2003", "--release", "--yes", "--instruction", instruction,
+        "--run", "run-release", "--agent", "codex",
+    ], _items=[item]) == 0
+
+    visible = funnel._visible_comment(calls[0][-1])
+    assert visible.startswith(block_record.SHAPED_HOLD_RELEASE_PREFIX)
+    assert "does not approve the plan" in visible
+    assert visible.count(SHAPED_PLAN_VERSION) == 1
+    provenance = funnel.parse_provenance(calls[0][-1])
+    assert provenance["voice"] == "nate-relayed"
+    assert provenance["instruction"] == instruction
+    assert [call[2] for call in calls] == ["comment", "edit"]
+    assert project_writes == [(item.item_id, "Needs", "none", item.ref)]
+    assert not item.is_blocked
+    assert item.status == "Shaped"
+    assert item.klass == "New"
+    assert funnel.gate_question(item) == "Is the plan good?"
 
 
 def test_dry_run_prints_the_hold_and_changes_nothing(monkeypatch, capsys):

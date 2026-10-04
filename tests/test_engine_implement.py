@@ -507,6 +507,9 @@ def test_the_ticket_pr_is_created_rather_than_a_foreign_one_edited(
 
 def test_a_merged_pr_on_the_pushed_head_is_returned_without_creating_another(
         monkeypatch, tmp_path):
+    """Source check: implement.py:1798-1803 lists with --repo, --state open,
+    and --head before the gh pr create fallback at lines 1818-1822.
+    """
     asked = []
     runs = []
     merged = {

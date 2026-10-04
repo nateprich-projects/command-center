@@ -400,12 +400,12 @@ def test_a_blocked_ticket_asks_only_whether_to_unblock():
     assert gate_question(blocked) == "Unblock?"
 
 
-def test_a_blocked_ticket_with_a_breakdown_question_still_asks_to_unblock():
+def test_a_blocked_ticket_with_a_needs_decision_asks_its_record_question():
     blocked = ticket(
         1, 9, labels=["blocked"], needs_decision="Where should this live?"
     )
 
-    assert gate_question(blocked) == "Unblock?"
+    assert gate_question(blocked) == "Where should this live?"
 
 
 def test_a_ready_project_with_a_breakdown_question_leaves_breakdown_queue():

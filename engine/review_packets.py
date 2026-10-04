@@ -153,6 +153,10 @@ def _validate_v2_selection(manifest: dict, records: dict) -> None:
                             isinstance(line.get("parent_line"), bool) or
                             line["parent_line"] <= 0):
                         raise PacketSetError("v2 selected candidate blame line is invalid")
+                    if line.get("commit_sha") != source_sha:
+                        raise PacketSetError(
+                            "v2 selected candidate blame line does not match source commit"
+                        )
                 proof_examples.add(example_sha)
             if proof_examples != set(fix_by_example):
                 raise PacketSetError("v2 selected candidate blame proof is incomplete")

@@ -146,19 +146,30 @@ def test_v2_manifest_preserves_recurrence_ranking_and_selected_blame_lineage():
         assert packet_source["ticket"] == candidate["source_ticket"]
         assert packet_source["commit_sha"] == candidate["source_commit_sha"]
         assert candidate["blame_proof"]
+        proofs_by_example = {
+            proof["example_sha"]: proof for proof in candidate["blame_proof"]
+        }
         for fix in candidate["later_fixes"]:
             example = examples[fix["example_sha"]]
+            assert example["sha"] == fix["example_sha"]
             assert (example["ticket"], example["commit_sha"]) == (
                 fix["fix_ticket"], fix["fix_commit_sha"]
             )
+            proof = proofs_by_example[example["sha"]]
+            assert proof["fix_ticket"] == example["ticket"]
+            assert proof["fix_commit_sha"] == example["commit_sha"]
         for proof in candidate["blame_proof"]:
             assert proof["source_commit_sha"] == candidate["source_commit_sha"]
             assert proof["blamed_lines"]
-            assert all(line["path"] and line["parent_line"] > 0
+            assert all(line["path"] and line["parent_line"] > 0 and
+                       line["commit_sha"] == candidate["source_commit_sha"]
                        for line in proof["blamed_lines"])
 
 
-@pytest.mark.parametrize("corruption", ["missing_example_mapping", "wrong_source_rank"])
+@pytest.mark.parametrize(
+    "corruption",
+    ["missing_example_mapping", "wrong_source_rank", "wrong_blame_commit"],
+)
 def test_v2_manifest_rejects_broken_recurrence_lineage(
     tmp_path, monkeypatch, corruption
 ):
@@ -172,9 +183,14 @@ def test_v2_manifest_rejects_broken_recurrence_lineage(
             "example_sha"
         ] = "000000000000"
         expected_error = "later-fix example is unmatched"
-    else:
+    elif corruption == "wrong_source_rank":
         manifest["packets"]["bad_01"]["source"]["rank"] = 2
         expected_error = "selected packet source does not match"
+    else:
+        manifest["selection"]["known_bad_candidates"][0]["blame_proof"][0][
+            "blamed_lines"
+        ][0]["commit_sha"] = "0" * 40
+        expected_error = "blame line does not match source commit"
     manifest_path.write_text(json.dumps(manifest))
     monkeypatch.setattr(review_packets, "_PACKET_ROOT", packet_root)
 

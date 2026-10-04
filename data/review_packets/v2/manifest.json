@@ -278,55 +278,68 @@
             "blamed_lines": [
               {
                 "path": "session_log_archive.py",
-                "parent_line": 4
+                "parent_line": 4,
+                "commit_sha": "ac9a873069fbd27235f8dccfaf96ba2978b50ea8"
               },
               {
                 "path": "session_log_archive.py",
-                "parent_line": 5
+                "parent_line": 5,
+                "commit_sha": "ac9a873069fbd27235f8dccfaf96ba2978b50ea8"
               },
               {
                 "path": "session_log_archive.py",
-                "parent_line": 6
+                "parent_line": 6,
+                "commit_sha": "ac9a873069fbd27235f8dccfaf96ba2978b50ea8"
               },
               {
                 "path": "session_log_archive.py",
-                "parent_line": 207
+                "parent_line": 207,
+                "commit_sha": "ac9a873069fbd27235f8dccfaf96ba2978b50ea8"
               },
               {
                 "path": "session_log_archive.py",
-                "parent_line": 208
+                "parent_line": 208,
+                "commit_sha": "ac9a873069fbd27235f8dccfaf96ba2978b50ea8"
               },
               {
                 "path": "session_log_archive.py",
-                "parent_line": 209
+                "parent_line": 209,
+                "commit_sha": "ac9a873069fbd27235f8dccfaf96ba2978b50ea8"
               },
               {
                 "path": "session_log_archive.py",
-                "parent_line": 210
+                "parent_line": 210,
+                "commit_sha": "ac9a873069fbd27235f8dccfaf96ba2978b50ea8"
               },
               {
                 "path": "session_log_archive.py",
-                "parent_line": 211
+                "parent_line": 211,
+                "commit_sha": "ac9a873069fbd27235f8dccfaf96ba2978b50ea8"
               },
               {
                 "path": "session_log_archive.py",
-                "parent_line": 212
+                "parent_line": 212,
+                "commit_sha": "ac9a873069fbd27235f8dccfaf96ba2978b50ea8"
               },
               {
                 "path": "session_log_archive.py",
-                "parent_line": 213
+                "parent_line": 213,
+                "commit_sha": "ac9a873069fbd27235f8dccfaf96ba2978b50ea8"
               },
               {
                 "path": "session_log_archive.py",
-                "parent_line": 258
+                "parent_line": 258,
+                "commit_sha": "ac9a873069fbd27235f8dccfaf96ba2978b50ea8"
               },
               {
                 "path": "session_log_archive.py",
-                "parent_line": 273
+                "parent_line": 273,
+                "commit_sha": "ac9a873069fbd27235f8dccfaf96ba2978b50ea8"
               },
               {
                 "path": "session_log_archive.py",
-                "parent_line": 275
+                "parent_line": 275,
+                "commit_sha": "ac9a873069fbd27235f8dccfaf96ba2978b50ea8"
               }
             ]
           }
@@ -355,7 +368,8 @@
             "blamed_lines": [
               {
                 "path": "session_logs.py",
-                "parent_line": 15
+                "parent_line": 15,
+                "commit_sha": "32b40fe241a34bf1fe192b9880bdacc48f48ca8c"
               }
             ]
           }
@@ -389,47 +403,58 @@
             "blamed_lines": [
               {
                 "path": "engine/implement.py",
-                "parent_line": 2894
+                "parent_line": 2894,
+                "commit_sha": "293e619f63dfbb1430ac77447c12c3fb149d49da"
               },
               {
                 "path": "engine/implement.py",
-                "parent_line": 2895
+                "parent_line": 2895,
+                "commit_sha": "293e619f63dfbb1430ac77447c12c3fb149d49da"
               },
               {
                 "path": "engine/implement.py",
-                "parent_line": 2896
+                "parent_line": 2896,
+                "commit_sha": "293e619f63dfbb1430ac77447c12c3fb149d49da"
               },
               {
                 "path": "engine/implement.py",
-                "parent_line": 2910
+                "parent_line": 2910,
+                "commit_sha": "293e619f63dfbb1430ac77447c12c3fb149d49da"
               },
               {
                 "path": "engine/implement.py",
-                "parent_line": 2911
+                "parent_line": 2911,
+                "commit_sha": "293e619f63dfbb1430ac77447c12c3fb149d49da"
               },
               {
                 "path": "engine/implement.py",
-                "parent_line": 2912
+                "parent_line": 2912,
+                "commit_sha": "293e619f63dfbb1430ac77447c12c3fb149d49da"
               },
               {
                 "path": "engine/implement.py",
-                "parent_line": 2913
+                "parent_line": 2913,
+                "commit_sha": "293e619f63dfbb1430ac77447c12c3fb149d49da"
               },
               {
                 "path": "engine/implement.py",
-                "parent_line": 2914
+                "parent_line": 2914,
+                "commit_sha": "293e619f63dfbb1430ac77447c12c3fb149d49da"
               },
               {
                 "path": "engine/implement.py",
-                "parent_line": 2980
+                "parent_line": 2980,
+                "commit_sha": "293e619f63dfbb1430ac77447c12c3fb149d49da"
               },
               {
                 "path": "engine/implement.py",
-                "parent_line": 2983
+                "parent_line": 2983,
+                "commit_sha": "293e619f63dfbb1430ac77447c12c3fb149d49da"
               },
               {
                 "path": "engine/implement.py",
-                "parent_line": 2984
+                "parent_line": 2984,
+                "commit_sha": "293e619f63dfbb1430ac77447c12c3fb149d49da"
               }
             ]
           },
@@ -442,15 +467,18 @@
             "blamed_lines": [
               {
                 "path": "engine/implement.py",
-                "parent_line": 3187
+                "parent_line": 3187,
+                "commit_sha": "293e619f63dfbb1430ac77447c12c3fb149d49da"
               },
               {
                 "path": "engine/implement.py",
-                "parent_line": 3188
+                "parent_line": 3188,
+                "commit_sha": "293e619f63dfbb1430ac77447c12c3fb149d49da"
               },
               {
                 "path": "engine/implement.py",
-                "parent_line": 3189
+                "parent_line": 3189,
+                "commit_sha": "293e619f63dfbb1430ac77447c12c3fb149d49da"
               }
             ]
           }
@@ -479,15 +507,18 @@
             "blamed_lines": [
               {
                 "path": "funnel.py",
-                "parent_line": 16298
+                "parent_line": 16298,
+                "commit_sha": "f3f7b494265af85cb8d1c5ecb81fcc63966b9b2c"
               },
               {
                 "path": "funnel.py",
-                "parent_line": 16340
+                "parent_line": 16340,
+                "commit_sha": "f3f7b494265af85cb8d1c5ecb81fcc63966b9b2c"
               },
               {
                 "path": "funnel.py",
-                "parent_line": 16341
+                "parent_line": 16341,
+                "commit_sha": "f3f7b494265af85cb8d1c5ecb81fcc63966b9b2c"
               }
             ]
           }
@@ -516,7 +547,8 @@
             "blamed_lines": [
               {
                 "path": "scripts/muse-review-engine",
-                "parent_line": 2193
+                "parent_line": 2193,
+                "commit_sha": "379e8ddd0f0798fdf75a6853b7ca098964e0dffe"
               }
             ]
           }
@@ -545,15 +577,18 @@
             "blamed_lines": [
               {
                 "path": "engine/shape.py",
-                "parent_line": 1347
+                "parent_line": 1347,
+                "commit_sha": "71f91d1c00e153bdad5242a562051673828a785a"
               },
               {
                 "path": "engine/shape.py",
-                "parent_line": 1348
+                "parent_line": 1348,
+                "commit_sha": "71f91d1c00e153bdad5242a562051673828a785a"
               },
               {
                 "path": "heartbeat.py",
-                "parent_line": 98
+                "parent_line": 98,
+                "commit_sha": "71f91d1c00e153bdad5242a562051673828a785a"
               }
             ]
           }
@@ -582,15 +617,18 @@
             "blamed_lines": [
               {
                 "path": "engine/review.py",
-                "parent_line": 2231
+                "parent_line": 2231,
+                "commit_sha": "591c5e80feb981cbcd8ab5d8f4a55a91b1a4920e"
               },
               {
                 "path": "engine/review.py",
-                "parent_line": 2235
+                "parent_line": 2235,
+                "commit_sha": "591c5e80feb981cbcd8ab5d8f4a55a91b1a4920e"
               },
               {
                 "path": "engine/review.py",
-                "parent_line": 2236
+                "parent_line": 2236,
+                "commit_sha": "591c5e80feb981cbcd8ab5d8f4a55a91b1a4920e"
               }
             ]
           }
@@ -619,11 +657,13 @@
             "blamed_lines": [
               {
                 "path": "scripts/review_evidence.py",
-                "parent_line": 419
+                "parent_line": 419,
+                "commit_sha": "1349b8a5833ba785db29eb2051d2a8dd1b791d81"
               },
               {
                 "path": "scripts/review_evidence.py",
-                "parent_line": 420
+                "parent_line": 420,
+                "commit_sha": "1349b8a5833ba785db29eb2051d2a8dd1b791d81"
               }
             ]
           }
@@ -657,19 +697,23 @@
             "blamed_lines": [
               {
                 "path": "scripts/muse-review-engine",
-                "parent_line": 2118
+                "parent_line": 2118,
+                "commit_sha": "b2c619a609882192a195186649fadab9580a5c9c"
               },
               {
                 "path": "scripts/muse-review-engine",
-                "parent_line": 2119
+                "parent_line": 2119,
+                "commit_sha": "b2c619a609882192a195186649fadab9580a5c9c"
               },
               {
                 "path": "scripts/muse-review-engine",
-                "parent_line": 2120
+                "parent_line": 2120,
+                "commit_sha": "b2c619a609882192a195186649fadab9580a5c9c"
               },
               {
                 "path": "scripts/muse-review-engine",
-                "parent_line": 2121
+                "parent_line": 2121,
+                "commit_sha": "b2c619a609882192a195186649fadab9580a5c9c"
               }
             ]
           },
@@ -682,15 +726,18 @@
             "blamed_lines": [
               {
                 "path": "scripts/muse-review-engine",
-                "parent_line": 2095
+                "parent_line": 2095,
+                "commit_sha": "b2c619a609882192a195186649fadab9580a5c9c"
               },
               {
                 "path": "scripts/muse-review-engine",
-                "parent_line": 2096
+                "parent_line": 2096,
+                "commit_sha": "b2c619a609882192a195186649fadab9580a5c9c"
               },
               {
                 "path": "scripts/muse-review-engine",
-                "parent_line": 2097
+                "parent_line": 2097,
+                "commit_sha": "b2c619a609882192a195186649fadab9580a5c9c"
               }
             ]
           }

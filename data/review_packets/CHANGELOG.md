@@ -25,4 +25,6 @@
   history, and parent rejected excerpts for blinded review.
 - Preserve the frozen fix_recurrence snapshot's 44 examples and all 53 ranked
   source PR candidates. Each later-fix example maps to its source PR; the nine
-  selected bad candidates include fix-parent blame paths and line references.
+  selected bad candidates include fix-parent blame paths, line references, and
+  the source commit reported by git blame for each referenced line. The loader
+  checks that each attribution matches the selected source PR commit.

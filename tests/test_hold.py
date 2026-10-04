@@ -249,9 +249,6 @@ def shaped_project(**overrides):
     return funnel.Item(**fields)
 
 
-# Pre-fix verification in run 126d507ebade against origin/main e9705259:
-# funnel.py:17191-17195 refused a Shaped item as "not Building"; this public-
-# interface reproduction exited 2 before posting a comment or adding a label.
 def test_reproduction_owner_authorized_shaped_hold_writes_block_and_header(
         monkeypatch):
     item = shaped_project()
@@ -302,6 +299,12 @@ def test_reproduction_owner_authorized_shaped_hold_writes_block_and_header(
     assert item.shaped_hold == expected_hold
     assert item.block_references == []
     assert item.block_reason == expected_hold["Hold-Reason"]
+
+
+def test_shaped_hold_refusal_allows_open_owner_project():
+    item = shaped_project()
+
+    assert funnel._hold_refusal(item) is None
 
 
 def test_dry_run_prints_the_hold_and_changes_nothing(monkeypatch, capsys):

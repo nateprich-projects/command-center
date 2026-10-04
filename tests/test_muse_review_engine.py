@@ -1259,6 +1259,16 @@ def _covered_verdict_packet():
     )
 
 
+def _standing_packet(state, reason):
+    return _packet(
+        standing={"state": state, "reason": reason},
+        precheck={"pass": False, "reasons": [
+            "ci: CI not green (state unknown)",
+            "stop: stop_auto_merging set",
+        ]},
+    )
+
+
 def test_a_failing_precheck_applies_rejected_without_calling_muse(tmp_path):
     proc, repo = _stubbed_runner(tmp_path, _begin(), _failing_packet())
 
@@ -1342,6 +1352,27 @@ def test_a_could_not_run_ci_stands_down_without_a_verdict_or_rejection(tmp_path)
     assert not (repo / "applied.marker").exists()
     heartbeat = _heartbeat(repo)
     assert "CI could not run: Recent account payments have failed" in heartbeat
+    assert "no verdict recorded" in heartbeat
+    assert "--review-result" not in heartbeat
+
+
+@pytest.mark.parametrize(("state", "reason"), [
+    ("wait", "mergeability UNKNOWN"),
+    ("conflict", "branch 'ticket/9' is conflicting with the base — "
+                 "an engineer rebase is required"),
+], ids=["wait", "conflict"])
+def test_wait_or_conflict_standing_overrides_other_precheck_rows(
+        tmp_path, state, reason):
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), _standing_packet(state, reason))
+
+    assert proc.returncode == 0, proc.stderr
+    assert _muse_calls(repo) == 0
+    assert _apply_calls(repo) == []
+    assert not (repo / "applied.marker").exists()
+    assert not (repo / "gh.log").exists()
+    heartbeat = _heartbeat_without_muse_call_record(repo)
+    assert reason in heartbeat
     assert "no verdict recorded" in heartbeat
     assert "--review-result" not in heartbeat
 
@@ -5129,8 +5160,13 @@ def test_a_replay_runs_no_heartbeat_funnel_gh_or_review_apply(tmp_path):
 @pytest.mark.parametrize("packet", [
     _failing_packet(), _non_open_packet(), _could_not_run_packet(),
     _covered_verdict_packet(), _rerun_packet(), _wait_packet(),
+    _standing_packet("wait", "mergeability UNKNOWN"),
+    _standing_packet(
+        "conflict", "branch 'ticket/9' is conflicting with the base — "
+        "an engineer rebase is required"),
 ], ids=["failing precheck", "not open", "CI could not run",
-        "covered verdict", "CI re-run", "CI wait"])
+        "covered verdict", "CI re-run", "CI wait", "standing wait",
+        "standing conflict"])
 def test_a_replay_judges_the_packet_past_the_precheck_and_ci_branches(
         tmp_path, packet):
     """Each of these ends a live run before the lister; a replay asks the

@@ -24,11 +24,13 @@ import stat
 import subprocess
 import sys
 import uuid
+from types import SimpleNamespace
 
 import pytest
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+import funnel  # noqa: E402
 from engine import review_prompts  # noqa: E402
 
 SCRIPT = ROOT / "scripts" / "muse-review-engine"
@@ -1399,6 +1401,71 @@ def test_wait_or_conflict_standing_overrides_other_precheck_rows(
     assert reason in heartbeat
     assert "no verdict recorded" in heartbeat
     assert "--review-result" not in heartbeat
+
+
+def test_conflict_standing_leaves_the_canonical_rejection_for_next_listing(
+        tmp_path, monkeypatch):
+    reason = "branch 'ticket/6'" + funnel.CONFLICTING_BRANCH_SUFFIX
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), _standing_packet("conflict", reason))
+
+    assert proc.returncode == 0, proc.stderr
+    assert _muse_calls(repo) == 0
+    assert _apply_calls(repo) == []
+    assert not (repo / "applied.marker").exists()
+    assert not (repo / "gh.log").exists()
+    heartbeat = _heartbeat_without_muse_call_record(repo)
+    assert reason in heartbeat
+    assert "no verdict recorded" in heartbeat
+    assert "--review-result" not in heartbeat
+
+    # The later listing owns the deterministic conflict rejection (#1351).
+    ticket = SimpleNamespace(
+        ref=REPO + "#6", repo=REPO, number=6, title="Do the thing",
+        url="https://github.com/{}/issues/6".format(REPO),
+        state="OPEN", risk="standard",
+    )
+    row = {
+        "number": PR,
+        "state": "OPEN",
+        "headRefName": "ticket/6",
+        "headRefOid": HEAD,
+        "mergeable": "CONFLICTING",
+        "mergeStateStatus": "DIRTY",
+        "statusCheckRollup": [{"name": "tests", "status": "IN_PROGRESS"}],
+        "isCrossRepository": False,
+        "headRepository": {"nameWithOwner": REPO},
+        "author": {"login": "nateprich"},
+        "verdict": None,
+    }
+    facts = funnel.TicketPRFacts(rows_by_ref={ticket.ref: [row]})
+    writes = []
+
+    def capture_write(repo_name, pr, sha, verdict, ci, blocking, note,
+                      **kwargs):
+        writes.append({
+            "repo": repo_name,
+            "pr": pr,
+            "head_sha": sha,
+            "verdict": verdict,
+            "ci": ci,
+            "blocking": list(blocking),
+            "agent": kwargs.get("agent"),
+        })
+        return 0
+
+    monkeypatch.setattr(funnel, "_write_verdict", capture_write)
+
+    assert funnel.review_queue([ticket], pr_facts=facts) == []
+    assert writes == [{
+        "repo": REPO,
+        "pr": PR,
+        "head_sha": HEAD,
+        "verdict": "rejected",
+        "ci": "unknown",
+        "blocking": [reason],
+        "agent": funnel.MERGE_GATE_AGENT,
+    }]
 
 
 # -- passing precheck with a CI re-run outstanding (#1019) ----------------------

@@ -3466,6 +3466,7 @@ def test_fetch_pr_reads_the_recorded_base_sha(monkeypatch):
     fields = seen["args"][seen["args"].index("--json") + 1].split(",")
     assert "baseRefOid" in fields
     assert "mergedBy" in fields
+    assert "mergeStateStatus" in fields
 
 
 def _stub_collect_prereqs(monkeypatch, view):

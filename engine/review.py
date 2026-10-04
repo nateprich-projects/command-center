@@ -978,8 +978,12 @@ def _overlap_facts(packet: dict) -> Dict[str, object]:
     """The shared inputs row 5 and the re-run decision both read."""
     ci = packet.get("ci") or {}
     seed = ci.get("latest_run_id")
+    mergeable = str(packet.get("mergeable") or "").upper()
+    merge_state = str(packet.get("merge_state_status") or "").upper()
     return {
-        "clean": str(packet.get("mergeable") or "").upper() == "MERGEABLE",
+        "clean": mergeable == "MERGEABLE",
+        "conflicting": (mergeable == "CONFLICTING" or
+                        merge_state == "DIRTY"),
         "green_dt": parse_ci_time(ci.get("green_run_at")),
         "runs": [run for run in (ci.get("runs") or [])
                  if isinstance(run, dict)],
@@ -991,14 +995,16 @@ def _overlap_facts(packet: dict) -> Dict[str, object]:
 def _overlap_hold(entry: dict, facts: Dict[str, object]) -> str:
     """One overlap's standing: covered, rerun, wait, or blocked.
 
-    Covered needs a green run newer than the merge. A clean branch with
-    older green runs is rerun when a finished run seeds it, wait when a
-    newer attempt is already in flight. Everything else blocks: a
-    conflicting or uncomputed branch, an unorderable merge, and an
-    uncovered overlap with no run to re-run all reject as stale.
+    A branch GitHub has not established as mergeable waits unless it is
+    explicitly conflicting. Covered needs a green run newer than the merge.
+    A clean branch with older green runs is rerun when a finished run seeds
+    it, or waits when a newer attempt is already in flight. Conflicts, an
+    unorderable merge, and an uncovered overlap with no run to re-run block.
     """
-    if not facts["clean"]:
+    if facts["conflicting"]:
         return "blocked"
+    if not facts["clean"]:
+        return "wait"
     merged_dt = parse_ci_time(entry.get("merged_at"))
     if merged_dt is None:
         return "blocked"
@@ -1291,7 +1297,9 @@ def precheck_pr_open(packet: dict) -> List[str]:
 
 
 def precheck_ci(packet: dict) -> List[str]:
-    """Row 3: green passes; pending/red fail; startup stops stand down."""
+    """Row 3: a waiting head stands down; otherwise green passes and red fails."""
+    if (packet.get("standing") or {}).get("state") == "wait":
+        return []
     ci = packet.get("ci") or {}
     if ci.get("state") in ("green", funnel.CI_COULD_NOT_RUN):
         # ``could-not-run`` is not approval evidence, but it is also not a
@@ -1306,9 +1314,9 @@ def precheck_ci(packet: dict) -> List[str]:
     return ["ci: CI not green (state {}){}".format(ci.get("state"), detail)]
 
 
-def precheck_verdict(packet: dict) -> List[str]:
-    """Row 4: a verdict already covering this head needs no new review."""
-    comments_section = packet.get("pr_comments")
+def _review_standing_comments(pr_comments: object):
+    """Restore GitHub comment rows for the shared standing predicate."""
+    comments_section = pr_comments
     comments = (
         comments_section.get("comments")
         if isinstance(comments_section, dict)
@@ -1325,8 +1333,14 @@ def precheck_verdict(packet: dict) -> List[str]:
              "createdAt": entry.get("created_at")}
             for entry in comments if isinstance(entry, dict)
         ]
+    return comments
+
+
+def precheck_verdict(packet: dict) -> List[str]:
+    """Row 4: a verdict already covering this head needs no new review."""
     if not funnel.verdict_covers_head(
-        packet.get("verdict"), packet.get("head_sha"), comments
+        packet.get("verdict"), packet.get("head_sha"),
+        _review_standing_comments(packet.get("pr_comments")),
     ):
         return []
     return ["verdict: a verdict already covers head {}".format(
@@ -1342,8 +1356,9 @@ def precheck_merged_overlap(packet: dict) -> List[str]:
     a main containing the overlap (#1019, Nate 2026-09-17). A clean branch
     whose green runs all predate the merge is not rejected here: the
     runner re-runs CI once and waits (see ``decide_ci_rerun``), so the
-    engineer needs no rebase. Anything else — conflicting, uncomputed, or
-    uncovered with no run to re-run — rejects as stale, as before.
+    engineer needs no rebase. A branch GitHub has not computed waits; only
+    a conflict, unorderable merge, or uncovered overlap with no run to
+    re-run rejects as stale.
     """
     overlaps = [entry for entry in (packet.get("merged_overlap") or [])
                 if isinstance(entry, dict)]
@@ -3168,6 +3183,8 @@ def build_packet(*, repo: str, pr_number: int, pr_view: dict, diff: str,
     ``"pr"``), so a reviewer can see when the two bases differ.
     """
     pr_view = pr_view or {}
+    standing = funnel.review_standing(
+        repo, pr_view, verdict, _review_standing_comments(pr_comments))
     if changed_files is None:
         changed_files = sorted({
             entry.get("path") for entry in (pr_view.get("files") or [])
@@ -3203,7 +3220,9 @@ def build_packet(*, repo: str, pr_number: int, pr_view: dict, diff: str,
         "merged_at": pr_view.get("mergedAt") or pr_view.get("merged_at"),
         "closed_at": pr_view.get("closedAt") or pr_view.get("closed_at"),
         "mergeable": pr_view.get("mergeable"),
+        "merge_state_status": pr_view.get("mergeStateStatus"),
         "head_sha": pr_view.get("headRefOid"),
+        "standing": {"state": standing.state, "reason": standing.reason},
         "head_date": head,
         "ticket": ticket_packet,
         "tickets": tickets_packet,
@@ -3276,7 +3295,7 @@ def fetch_pr(repo: str, pr_number: int) -> dict:
     data = funnel._gh_json(
         "gh", "pr", "view", str(pr_number), "--repo", repo, "--json",
         "number,title,body,headRefName,headRefOid,baseRefName,baseRefOid,"
-        "state,mergeable,"
+        "state,mergeable,mergeStateStatus,"
         "mergedAt,mergedBy,closedAt,"
         "statusCheckRollup,commits,files,closingIssuesReferences,"
         + funnel.PR_TRUST_JSON_FIELDS)

@@ -45,6 +45,17 @@ _SHAPED_HOLD_COMMENT_RE = re.compile(
       r"(?P<hold_record>.*?)\r?\n[ \t]*\x60{3}[ \t]*(?:\r?\n|$)",
     re.DOTALL,
 )
+SHAPED_HOLD_CLEAR_PREFIX = "**Conditioned Shaped hold cleared:**"
+SHAPED_HOLD_RELEASE_PREFIX = "**Explicit Shaped hold release:**"
+_SHAPED_HOLD_TRANSITION_RE = re.compile(
+    r"\A(?P<header>"
+    + re.escape(SHAPED_HOLD_CLEAR_PREFIX)
+    + r"|"
+    + re.escape(SHAPED_HOLD_RELEASE_PREFIX)
+    + r")[ \t]*\r?\n(?:[ \t]*\r?\n)?[ \t]*\x60{3}json[ \t]*\r?\n"
+      r"(?P<transition_record>.*?)\r?\n[ \t]*\x60{3}[ \t]*(?:\r?\n|$)",
+    re.DOTALL,
+)
 _SHAPED_HOLD_FIELDS = frozenset({
     "Hold-Reason", "Hold-Conditions", "Plan-Version", "Proof",
 })
@@ -401,6 +412,136 @@ def render_shaped_hold(reason: object, conditions: Sequence[object],
     fence = chr(96) * 3
     return "{}\n{}json\n{}\n{}".format(
         SHAPED_HOLD_COMMENT_PREFIX, fence, raw, fence)
+
+
+def shaped_hold_id(record: Mapping[str, object]) -> str:
+    """Stable identity for one strict Shaped hold record."""
+    try:
+        raw = json.dumps(dict(record), ensure_ascii=False)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("invalid Shaped hold record") from exc
+    parsed = _parse_shaped_hold_payload(raw)
+    if parsed is None:
+        raise ValueError("invalid Shaped hold record")
+    canonical = json.dumps(
+        parsed, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def parse_shaped_hold_clear_comment(body: object) -> Optional[Dict[str, object]]:
+    """Read one trusted-reader payload for a conditioned or explicit clear."""
+    if not isinstance(body, str):
+        return None
+    match = _SHAPED_HOLD_TRANSITION_RE.match(body)
+    if match is None:
+        return None
+    try:
+        record = json.loads(
+            match.group("transition_record"), object_pairs_hook=_unique_json_object
+        )
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(record, dict) or set(record) != {
+        "Hold-ID", "Hold-Conditions", "Proof", "Plan-Version",
+    }:
+        return None
+    hold_id = record.get("Hold-ID")
+    conditions = record.get("Hold-Conditions")
+    proof = record.get("Proof")
+    plan_version = record.get("Plan-Version")
+    if (
+        not isinstance(hold_id, str)
+        or not _SHAPED_HOLD_PLAN_VERSION_RE.fullmatch(hold_id)
+        or not isinstance(conditions, list)
+        or not conditions
+        or any(
+            not isinstance(value, str)
+            or not _SHAPED_HOLD_CONDITION_RE.fullmatch(value)
+            for value in conditions
+        )
+        or len(set(conditions)) != len(conditions)
+        or not isinstance(proof, list)
+        or not proof
+        or not isinstance(plan_version, str)
+        or not _SHAPED_HOLD_PLAN_VERSION_RE.fullmatch(plan_version)
+    ):
+        return None
+    try:
+        checked_proof = [validate_proof_comment_url(value) for value in proof]
+    except ValueError:
+        return None
+    if len(set(checked_proof)) != len(checked_proof):
+        return None
+    return {
+        "kind": (
+            "conditioned"
+            if match.group("header") == SHAPED_HOLD_CLEAR_PREFIX
+            else "explicit"
+        ),
+        "Hold-ID": hold_id,
+        "Hold-Conditions": list(conditions),
+        "Proof": checked_proof,
+        "Plan-Version": plan_version,
+    }
+
+
+def _render_shaped_hold_transition(
+    header: str, record: Mapping[str, object], plan_version: object,
+    *, explicit: bool,
+) -> str:
+    try:
+        raw_hold = json.dumps(dict(record), ensure_ascii=False)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("invalid Shaped hold record") from exc
+    hold = _parse_shaped_hold_payload(raw_hold)
+    if hold is None:
+        raise ValueError("invalid Shaped hold record")
+    if (
+        not isinstance(plan_version, str)
+        or not _SHAPED_HOLD_PLAN_VERSION_RE.fullmatch(plan_version)
+    ):
+        raise ValueError("a hold clear needs a SHA-256 plan version")
+    transition = {
+        "Hold-ID": shaped_hold_id(hold),
+        "Hold-Conditions": hold["Hold-Conditions"],
+        "Proof": hold["Proof"],
+        "Plan-Version": plan_version,
+    }
+    raw = json.dumps(transition, ensure_ascii=False, indent=2)
+    proof_label = (
+        "Prior hold proof references (the explicit release does not depend on them):"
+        if explicit else "Verified proof links:"
+    )
+    proof_lines = "\n".join("- {}".format(url) for url in hold["Proof"])
+    explanation = (
+        "The owner explicitly released this hold. The Shaped approval gate "
+        "is pending again; release does not approve the plan."
+        if explicit else
+        "All named issues and proof comments were re-read live. The Shaped "
+        "approval gate is pending again until answered."
+    )
+    return "{}\n```json\n{}\n```\n\n{}\n\n{}\n{}".format(
+        header, raw, explanation, proof_label, proof_lines
+    )
+
+
+def render_conditioned_shaped_hold_clear(
+    record: Mapping[str, object], plan_version: object,
+) -> str:
+    """Render one live-verified conditioned clear and plan re-presentation."""
+    return _render_shaped_hold_transition(
+        SHAPED_HOLD_CLEAR_PREFIX, record, plan_version, explicit=False
+    )
+
+
+def render_explicit_shaped_hold_release(
+    record: Mapping[str, object], plan_version: object,
+) -> str:
+    """Render one owner-authorized release, distinct from a conditioned clear."""
+    return _render_shaped_hold_transition(
+        SHAPED_HOLD_RELEASE_PREFIX, record, plan_version, explicit=True
+    )
 
 
 def render_blocked_until_event(spec: Mapping[str, object],

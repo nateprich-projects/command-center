@@ -490,13 +490,15 @@ def _summary_runs(summary: dict, *, expected: str, count: int) -> list[dict]:
 def replay_packet(packet_name: str, head_checkout: str | pathlib.Path,
                   main_checkout: str | pathlib.Path, *,
                   runs: int = DEFAULT_RUNS, version: str = "v1",
-                  runtime_root: str | pathlib.Path = RUNTIME_ROOT) -> dict:
+                  runtime_root: str | pathlib.Path = RUNTIME_ROOT,
+                  head_runs: Optional[Sequence[dict]] = None) -> dict:
     """Replay one frozen packet on PR head and current main.
 
     Main-side runs are reused only for the same 40-character main SHA. A new
     main SHA starts with an empty pool and replaces the older pool on its
-    first saved run. This helper reports run records only; it does not compare
-    head and main or apply evaluation thresholds.
+    first saved run. ``head_runs`` lets a bounded evaluation pass its earlier
+    samples so only the next batch is replayed on head. This helper reports
+    run records only; it does not compare head and main or apply thresholds.
     """
     if isinstance(runs, bool) or not isinstance(runs, int) or runs < 1:
         raise ReplayError("runs must be a positive integer")
@@ -524,10 +526,33 @@ def replay_packet(packet_name: str, head_checkout: str | pathlib.Path,
         packet_path.write_bytes(packet_bytes)
         packet_path.chmod(0o600)
 
-        head_summary = _run_checkout_replay(
-            head_path, packet_path, runs, expected, root)
-        head_runs = _summary_runs(
-            head_summary, expected=expected, count=runs)
+        cached_head_runs = list(head_runs or [])
+        if len(cached_head_runs) > runs:
+            cached_head_runs = cached_head_runs[:runs]
+        for record in cached_head_runs:
+            if (not isinstance(record, dict)
+                    or record.get("head_commit_sha") != head_commit_sha
+                    or record.get("packet") != packet_name
+                    or record.get("version") != version
+                    or record.get("packet_sha256") != packet_sha256
+                    or record.get("verdict") not in EXPECTED_VERDICTS
+                    or not isinstance(record.get("failed_parts"), list)
+                    or not all(isinstance(part, str)
+                               for part in record["failed_parts"])):
+                raise ReplayError(
+                    "cached head replay runs do not match this head")
+        missing_head_runs = runs - len(cached_head_runs)
+        if missing_head_runs:
+            head_summary = _run_checkout_replay(
+                head_path, packet_path, missing_head_runs, expected, root)
+            new_head_runs = _summary_runs(
+                head_summary, expected=expected, count=missing_head_runs)
+            cached_head_runs.extend(
+                {"packet": packet_name, "version": version,
+                 "packet_sha256": packet_sha256,
+                 "head_commit_sha": head_commit_sha, **run}
+                for run in new_head_runs
+            )
 
         pool = load_main_pool(main_commit_sha, runtime_root=root)
         key = _main_pool_key(version, packet_name, packet_sha256)
@@ -549,17 +574,14 @@ def replay_packet(packet_name: str, head_checkout: str | pathlib.Path,
             pool["packets"][key] = cached_runs
             _save_main_pool(pool, runtime_root=root)
 
-    main_runs = cached_runs[:runs]
+        main_runs = cached_runs[:runs]
     return {
         "packet": packet_name,
         "version": version,
         "packet_sha256": packet_sha256,
         "head": {
             "commit_sha": head_commit_sha,
-            "runs": [
-                {"head_commit_sha": head_commit_sha, **run}
-                for run in head_runs
-            ],
+            "runs": cached_head_runs,
         },
         "main": {
             "commit_sha": main_commit_sha,

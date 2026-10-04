@@ -851,7 +851,7 @@ test("Muse panel usage is unavailable without a validated source reading", () =>
     "https://github.com/nateprich-projects/command-center/issues/2123");
 });
 
-test("the Muse derived-spend estimate labels its journal source and sample age", () => {
+test("the Muse derived-spend estimate labels its source without a sample age", () => {
   const now = Date.parse("2026-09-29T21:40:00-07:00");
   const estimate = {
     source: "Local Muse session journal estimate",
@@ -862,10 +862,8 @@ test("the Muse derived-spend estimate labels its journal source and sample age",
     calls: 42,
   };
   assert.deepEqual(museEstimate(estimate, now), {
-    state: "live",
+    state: "estimate",
     source: "Local Muse session journal estimate",
-    sampledAt: new Date(estimate.captured_at * 1000).toISOString(),
-    ageText: "45m old",
     spent: 14.3,
     cap: 200,
     percent: 7.15,
@@ -876,18 +874,34 @@ test("the Muse derived-spend estimate labels its journal source and sample age",
   assert.ok(row.querySelectorAll(".usage-label").some((node) => (
     node.textContent === "Local Muse session journal estimate"
   )));
-  const sampledAt = row.querySelectorAll(".usage-age").find((node) => node.tagName === "time");
-  assert.equal(sampledAt.textContent, "Sampled 2026-09-30T03:55:00.000Z · 45m old");
+  assert.equal(row.querySelectorAll(".usage-age").some((node) => node.tagName === "time"), false);
+});
 
-  const stale = museEstimate(estimate, Date.parse("2026-09-29T22:26:00-07:00"));
-  assert.equal(stale.state, "stale");
-  const staleRow = usageRow(renderUsageFixture({ muse: estimate },
-    Date.parse("2026-09-29T22:26:00-07:00")), "Muse 7-day spend estimate");
-  assert.match(staleRow.textContent, /Stale/);
-  assert.equal(staleRow.querySelector(".usage-percent"), null);
-  assert.ok(staleRow.querySelectorAll(".usage-label").some((node) => (
-    node.textContent === "Local Muse session journal estimate"
-  )));
+test("the Muse estimate remains a bar when its meter capture is old", () => {
+  const now = Date.parse("2026-09-29T22:26:00-07:00");
+  const estimate = {
+    source: "Local Muse session journal estimate",
+    captured_at: Date.parse("2026-09-29T20:55:00-07:00") / 1000,
+    spent_dollars: 14.3,
+    cap_dollars: 200,
+    used_percent: 7.15,
+    calls: 42,
+  };
+
+  const row = usageRow(renderUsageFixture({ muse: estimate }, now),
+    "Muse 7-day spend estimate");
+
+  assert.ok(row.querySelector(".usage-fill"));
+  assert.equal(row.querySelector(".usage-percent").textContent, "7.2%");
+  assert.doesNotMatch(row.textContent, /stale|unavailable|sampled|old/i);
+});
+
+test("the Muse estimate omits availability and freshness copy without a value", () => {
+  const row = usageRow(renderUsageFixture({}, Date.parse("2026-10-04T10:00:00Z")),
+    "Muse 7-day spend estimate");
+
+  assert.equal(row.querySelector(".usage-fill"), null);
+  assert.doesNotMatch(row.textContent, /stale|unavailable|sampled|old/i);
 });
 
 test("Claude weekly usage shows the exact percentage and recomputed sample age", () => {

@@ -924,20 +924,11 @@ function musePanelUsage(panel, nowMs = Date.now()) {
   return { ...freshness, source, sourceUrl, sampledAt };
 }
 
-function museEstimate(muse, nowMs = Date.now()) {
+function museEstimate(muse) {
   const parsed = museUsage(muse);
-  const capturedAtMs = usageTimestampMs(muse && muse.captured_at);
   const source = muse && typeof muse.source === "string" ? muse.source.trim() : "";
-  if (!parsed || !Number.isFinite(capturedAtMs) || !source) {
-    return { state: "unavailable" };
-  }
-  const freshness = claudeUsage({ u: { sd: parsed.percent }, t: muse.captured_at }, nowMs);
-  if (freshness.state === "unavailable") return freshness;
-  const sampledAt = new Date(capturedAtMs).toISOString();
-  if (freshness.state === "stale") {
-    return { ...freshness, source, sampledAt };
-  }
-  return { ...freshness, source, sampledAt, ...parsed };
+  if (!parsed || !source) return { state: "unavailable" };
+  return { state: "estimate", source, ...parsed };
 }
 
 function claudeUsage(claude, nowMs = Date.now()) {
@@ -1022,7 +1013,7 @@ function renderUsage(usage, nowMs = Date.now()) {
 
   const estimate = museEstimate(usage && usage.muse, nowMs);
   const estimateRow = element("div", "usage");
-  if (estimate.state === "live") {
+  if (estimate.state === "estimate") {
     estimateRow.append(element("span", "usage-label",
       `Muse 7-day spend estimate $${estimate.spent.toFixed(2)} of $${estimate.cap.toFixed(2)}`));
     const bar = element("div", "usage-bar");
@@ -1033,18 +1024,9 @@ function renderUsage(usage, nowMs = Date.now()) {
     estimateRow.append(element("span", "usage-percent", `${estimate.percent.toFixed(1)}%`));
   } else {
     estimateRow.append(element("span", "usage-label", "Muse 7-day spend estimate"));
-    const state = estimate.state === "stale"
-      ? `Stale · ${estimate.ageText}`
-      : "Unavailable";
-    estimateRow.append(element("span", `usage-state ${estimate.state}`, state));
   }
   estimateRow.append(element("span", "usage-label",
     estimate.source || "Local Muse session journal estimate"));
-  if (estimate.sampledAt) {
-    const sampledAt = element("time", "usage-age", `Sampled ${estimate.sampledAt} · ${estimate.ageText}`);
-    sampledAt.setAttribute("datetime", estimate.sampledAt);
-    estimateRow.append(sampledAt);
-  }
   container.append(estimateRow);
 
   const claude = claudeUsage(usage && usage.claude, nowMs);

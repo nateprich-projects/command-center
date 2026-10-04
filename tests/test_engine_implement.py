@@ -494,7 +494,8 @@ def test_the_ticket_pr_is_created_rather_than_a_foreign_one_edited(
     monkeypatch.setattr(funnel, "_run_gh", fake_run)
 
     pr = implement.create_or_update_pr(
-        REPO, {"branch": "ticket/42", "root": tmp_path},
+        REPO, {"branch": "ticket/42", "head_sha": "new-head",
+               "root": tmp_path},
         {"title": "Do it", "number": 42}, "body")
 
     assert pr == {"number": 95, "url": "https://github.com/owner/repo/pull/95"}
@@ -502,6 +503,51 @@ def test_the_ticket_pr_is_created_rather_than_a_foreign_one_edited(
     fields = asked[0][asked[0].index("--json") + 1].split(",")
     assert {"isCrossRepository", "headRepository", "headRepositoryOwner",
             "author"} <= set(fields)
+
+
+def test_a_merged_pr_on_the_pushed_head_is_returned_without_creating_another(
+        monkeypatch, tmp_path):
+    """Source check: implement.py:1798-1803 lists with --repo, --state open,
+    and --head before the gh pr create fallback at lines 1818-1822.
+    """
+    asked = []
+    runs = []
+    merged = {
+        "number": 94,
+        "url": "https://github.com/owner/repo/pull/94",
+        "headRefOid": "same-head",
+        "isCrossRepository": False,
+        "author": {"login": "nateprich"},
+    }
+
+    def fake_json(*args):
+        asked.append(args)
+        state = args[args.index("--state") + 1]
+        if state == "open":
+            return []
+        if state == "merged":
+            return [{**FOREIGN_PRS[0], "headRefOid": "same-head"}, merged]
+        raise AssertionError(args)
+
+    def fake_run(argv, **kwargs):
+        runs.append(list(argv))
+        return type("R", (), {
+            "returncode": 0, "stderr": "",
+            "stdout": "https://github.com/owner/repo/pull/95\n",
+        })()
+
+    monkeypatch.setattr(funnel, "_gh_json", fake_json)
+    monkeypatch.setattr(funnel, "_run_gh", fake_run)
+
+    pr = implement.create_or_update_pr(
+        REPO, {"branch": "ticket/42", "head_sha": "same-head",
+               "root": tmp_path},
+        {"title": "Do it", "number": 42}, "body")
+
+    assert pr == {"number": 94, "url": merged["url"], "merged": True}
+    assert [args[args.index("--state") + 1] for args in asked] == [
+        "open", "merged"]
+    assert [argv[:3] for argv in runs] == []
 
 
 def test_the_owners_open_ticket_pr_is_still_updated(monkeypatch, tmp_path):

@@ -446,6 +446,7 @@ GATE_QUESTIONS = {
     # A block whose comments could not be read: its condition is unknown,
     # not absent, so it is never asked as a silent block.
     "block_unread": "Block unread — recheck?",
+    "held_recheck": "Held — recheck?",
 }
 
 #: Which stages can wait on a human, and the question each one asks.
@@ -1095,10 +1096,76 @@ def block_condition(item: Item) -> Optional[str]:
     return None
 
 
-def gate_question(item: Item) -> Optional[str]:
-    """The decision this item is waiting on, or None if it waits on no one."""
+def _current_shaped_hold_record(item: Item) -> Optional[Dict[str, object]]:
+    """Return the parsed, current Shaped hold record on a blocked plan."""
+    record = item.shaped_hold
+    if (
+        item.state != "OPEN"
+        or item.status != "Shaped"
+        or not item.is_blocked
+        or item.block_comments_error is not None
+        or item.block_reason is None
+        or not isinstance(record, dict)
+    ):
+        return None
+    conditions = record.get("Hold-Conditions")
+    proofs = record.get("Proof")
+    if (
+        not isinstance(record.get("Hold-Reason"), str)
+        or not record["Hold-Reason"].strip()
+        or not isinstance(conditions, list)
+        or not conditions
+        or any(not isinstance(ref, str) or not ref.strip() for ref in conditions)
+        or not isinstance(record.get("Plan-Version"), str)
+        or not isinstance(proofs, list)
+        or not proofs
+        or any(not isinstance(proof, str) or not proof.strip() for proof in proofs)
+    ):
+        return None
+    return record
+
+
+def _shaped_hold_is_unresolved(
+    item: Item,
+    record: Mapping[str, object],
+    by_ref: Optional[Dict[str, Item]],
+) -> bool:
+    """Whether a proved hold still applies to this exact plan version."""
+    if not isinstance(item.body, str):
+        return False
+    if record.get("Plan-Version") != shaped_plan_version(item.body):
+        return False
+    conditions = record.get("Hold-Conditions")
+    if not isinstance(conditions, list) or not conditions:
+        return False
+    for ref in conditions:
+        if not isinstance(ref, str):
+            return False
+        condition = by_ref.get(ref) if by_ref is not None else None
+        # The hold remains unresolved until every named issue is read closed.
+        if condition is None or condition.state != "CLOSED":
+            return True
+    return False
+
+
+def gate_question(
+    item: Item, by_ref: Optional[Dict[str, Item]] = None,
+) -> Optional[str]:
+    """The decision this item is waiting on, or None if it waits on no one.
+
+    A current Shaped hold asks the funnel watch to recheck while its named
+    conditions remain open. A changed plan version or fully satisfied hold
+    returns to a fresh Shaped review.
+    """
     if item.state != "OPEN":
         return None
+    shaped_hold = _current_shaped_hold_record(item)
+    if shaped_hold is not None:
+        if _shaped_hold_is_unresolved(item, shaped_hold, by_ref):
+            return GATE_QUESTIONS["held_recheck"]
+        # A changed plan version or fully satisfied hold must reach a fresh
+        # Shaped review. The old blocked label describes the held version.
+        return GATES["Shaped"]
     if item.is_blocked:
         # A lane decline still needs an Unblock gate even after its routing
         # field changes to ``agent``. Ordinary agent-owned blocks stay quiet.
@@ -1278,13 +1345,21 @@ def watch_owns_gate(
     except one whose Needs Nate section still holds an Exposure or Preference
     line. A plan body that was not loaded, or a Needs Nate section that
     cannot be read, stays with Nate. ``Block unread — recheck?`` (#2134)
-    is routed as the two silent-block questions are.
+    is routed as the two silent-block questions are. ``Held — recheck?`` is
+    watch-owned only while a proved Shaped hold's conditions remain unresolved
+    and its Plan-Version matches the current body.
 
     This partitions the shared gate question for the brief and queue. A
     Declined marker distinguishes a legacy lane decline that still carries
     Needs ``human`` from a hands-on step; new declines use Needs ``agent``.
     Other readers use the same question predicate.
     """
+    if question == GATE_QUESTIONS["held_recheck"]:
+        shaped_hold = _current_shaped_hold_record(item)
+        return (
+            shaped_hold is not None
+            and _shaped_hold_is_unresolved(item, shaped_hold, by_ref)
+        )
     if question in WATCH_UNBLOCK_QUESTIONS:
         return item.needs != "human" or item.decline_reason is not None
     if question != GATES["Shaped"]:
@@ -1313,7 +1388,7 @@ def split_decisions(
     nate: List[Item] = []
     watch: List[Item] = []
     for item in awaiting_decision(rows):
-        if watch_owns_gate(item, gate_question(item), by_ref):
+        if watch_owns_gate(item, gate_question(item, by_ref), by_ref):
             watch.append(item)
         else:
             nate.append(item)
@@ -1329,7 +1404,7 @@ def watch_gate_json(
         "title": item.title,
         "url": item.url,
         "class": effective_class(item, by_ref),
-        "question": gate_question(item),
+        "question": gate_question(item, by_ref),
         "waited": humanise(item.waited(now)),
     }
 
@@ -12529,7 +12604,7 @@ def class_display(item: Item, by_ref: Dict[str, Item]) -> str:
 def item_json(item: Item, now: datetime, by_ref: Optional[Dict[str, Item]] = None) -> dict:
     by_ref = by_ref if by_ref is not None else {}
     breakdown = breakdown_latency(item)
-    question = gate_question(item)
+    question = gate_question(item, by_ref)
     acceptance_reason = _acceptance_waiting_reason(item, question)
     rendered = {
         "ref": item.ref,
@@ -15468,7 +15543,7 @@ def cmd_queue(
             class_display(item, by_ref),
             item.ref,
             humanise(item.waited(now)),
-            gate_question(item),
+            gate_question(item, by_ref),
         ),
     )
 
@@ -15485,7 +15560,7 @@ def cmd_queue(
                 class_display(item, by_ref),
                 item.ref,
                 humanise(item.waited(now)),
-                gate_question(item),
+                gate_question(item, by_ref),
             ),
         )
 
@@ -22236,7 +22311,8 @@ def cmd_show(items: List[Item], now: datetime, ref: str) -> int:
         humanise(item.waited(now))))
     print(item.url)
     print("=" * 72)
-    question = gate_question(item)
+    by_ref = {row.ref: row for row in items}
+    question = gate_question(item, by_ref)
     print("GATE: {}".format(question or "not waiting on you"))
     if item.needs_decision is not None:
         print("NEEDS DECISION: {}".format(item.needs_decision))

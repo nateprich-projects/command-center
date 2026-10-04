@@ -317,6 +317,7 @@ def test_every_gate_question_literal_appears_once_in_funnel():
     for question in (
         "Is the plan good?", "Accept it?", "Answer the breakdown's question?",
         "Unblock?", "Unblock or park?", "Block unread — recheck?",
+        "Held — recheck?",
     ):
         assert constants.count(question) == 1, question
         assert question in funnel.GATE_QUESTIONS.values()
@@ -338,8 +339,12 @@ def test_the_render_template_names_the_watch_questions_from_the_map():
     section = template.split("Then `watch_gates`", 1)[1].split("\n\n", 1)[0]
     for question in sorted(funnel.WATCH_UNBLOCK_QUESTIONS) + [
         funnel.GATES["Shaped"],
+        funnel.GATE_QUESTIONS["held_recheck"],
     ]:
         assert "`{}`".format(question) in section, question
     for constant in _string_constants(ROOT / "funnel_render.py"):
-        for question in funnel.WATCH_UNBLOCK_QUESTIONS:
+        for question in (
+            set(funnel.WATCH_UNBLOCK_QUESTIONS)
+            | {funnel.GATE_QUESTIONS["held_recheck"]}
+        ):
             assert question not in constant, question

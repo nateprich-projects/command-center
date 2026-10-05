@@ -1011,10 +1011,10 @@ def test_the_review_prompt_limits_blocking_to_the_three_stopping_kinds():
     prompt = review_prompts.load_active_prompt(ROOT).routine
     normalized = " ".join(prompt.split()).lower()
 
-    assert "outside the plan's `## review focus`, edge cases are notes" in normalized
-    assert "real defect with realistic reproduction" in normalized
-    assert "missing or tautological `accept` test" in normalized
-    assert "merged-main failure" in normalized
+    assert "the stopping rule wins over `## review focus`" in normalized
+    assert "real defect with a realistic reproduction blocks even outside the focus" in normalized
+    assert "a missing or tautological `accept` test and a merged-main failure also block" in normalized
+    assert "other edge cases outside the focus are notes" in normalized
 
 
 def test_the_review_prompt_requires_a_per_requirement_pass():

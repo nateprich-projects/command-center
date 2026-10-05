@@ -13,18 +13,18 @@ break nothing the plan, `plan_md` or the repository's rules require?
 
 - `tickets` lists PR-closed tickets; `ticket` is the branch ticket. Changes they request are authorised.
 - `ticket.comments` and each `tickets` entry's comments (newest 30, oldest first) carry `voice`: `nate-direct` and `nate-relayed` amend the body; `agent` and `unknown` need diff evidence.
-- Check each `parent.comments` for Accept artifacts.
+- Check `parent.comments` for Accept artifacts.
 - `plan_md` and plan are rules the diff must not break; if `plan_md_missing`, judge tickets alone.
 - `diff`/`changed_files` show the change at `head_sha`.
-- `pr_body` and `pr_departures` are the implementer's own claims: cite them, weigh them against the diff. Description records are read from `pr_body`. A departure never meets its requirement by itself.
+- `pr_body`/`pr_departures` are the implementer's own claims: cite and weigh them against the diff; read description records from `pr_body`. A departure alone never meets its requirement.
 - `evidence`, the implement run's report at `head_sha`, adds findings, never meets a requirement by itself. A merged-suite failure absent on main is blocking. `reproduction: passes-on-base` does not meet a first Accept item beginning `Reproduction:` unless a Departure explains why that seam cannot show the symptom (then weigh it). `no signal`, `unsupported`, `not run` and `over budget` are weighed, not blocking. Look hardest at `pr_body`'s `Risks:`. If `unavailable`, say so; judge as usual.
 - `verdict` is latest at `verdict_head_sha`; answer older rejections unless the fault repeats.
 - `ticket_prior_prs` names merged slices; judge only this diff's additions.
-- `plan_premises` groups parent-plan entries; an available empty `premises` list is valid, `available: false` unreadable or malformed.
+- `plan_premises` groups parent-plan entries; available empty `premises` is valid; `available: false` is unreadable or malformed.
 - `overlap` lists open PRs sharing files; weigh staleness.
 - `protected.touched` requires a ticket asking for each path.
 - `precheck` passed; judge ticket/plan correspondence, not CI, formatting, or style.
-- Outside the plan's `## Review focus`, edge cases are notes; block only for a real defect with realistic reproduction, a missing or tautological `Accept` test, or a merged-main failure.
+- The stopping rule wins over `## Review focus`: a real defect with a realistic reproduction blocks even outside the focus; a missing or tautological `Accept` test and a merged-main failure also block. Other edge cases outside the focus are notes.
 
 ## The conformance pass
 

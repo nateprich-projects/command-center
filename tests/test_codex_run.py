@@ -177,6 +177,51 @@ def test_a_run_matching_the_manifest_is_ok(tmp_path):
     assert result["effective"] == {"model": "gpt-6-luna", "effort": "max"}
 
 
+def test_partial_cloud_profile_metadata_is_refused_until_issue_2289_is_verified():
+    """Cloud facts stay unknown until the named proof records them."""
+    findings = codex_run.drift(
+        {"model": "fixture-model", "effort": "fixture-effort"},
+        profile="cloud",
+    )
+
+    assert any("workspace" in line and "unknown" in line for line in findings)
+    assert any("usage" in line and "unknown" in line for line in findings)
+    assert any("disabled" in line and "#2289" in line for line in findings)
+
+
+def test_cloud_profile_check_does_not_read_a_mac_rollout(monkeypatch):
+    """Unknown cloud metadata fails closed without guessing a local rollout."""
+    monkeypatch.setattr(
+        codex_run,
+        "find_rollout",
+        lambda *args, **kwargs: pytest.fail("cloud check read a Mac rollout"),
+    )
+
+    result = codex_run.check(profile="cloud", metadata={"model": "unknown"})
+
+    assert result["ok"] is False
+    assert any("model" in line and "unknown" in line
+               for line in result["drift"])
+    assert result["rollout"] is None
+
+
+def test_synthetic_complete_cloud_metadata_does_not_enable_the_profile():
+    metadata = {
+        "model": "fixture-model",
+        "effort": "fixture-effort",
+        "workspace": "fixture-workspace",
+        "sandbox": {"fixture": True},
+        "approval": "fixture-approval",
+        "usage": {"fixture": True},
+    }
+
+    result = codex_run.check(profile="cloud", metadata=metadata)
+
+    assert result["ok"] is False
+    assert "disabled" in result["why"]
+    assert "#2289" in result["why"]
+
+
 def test_a_run_with_no_thread_id_is_refused(tmp_path):
     _rollout(tmp_path)
 

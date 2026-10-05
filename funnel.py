@@ -20801,7 +20801,9 @@ def claude_window_refusal(local: datetime) -> Optional[str]:
 
 
 def _begin_preflight(
-    now: datetime, agent: str, idle: bool, tier: Optional[str] = None
+    now: datetime, agent: str, idle: bool, tier: Optional[str] = None, *,
+    codex_profile: str = "mac",
+    cloud_metadata: Optional[Mapping[str, object]] = None,
 ) -> Tuple[Dict[str, object], Optional[Dict[str, object]]]:
     """Apply only run-level local gates before reading Project state.
 
@@ -20813,7 +20815,9 @@ def _begin_preflight(
     envelope, not that a caller may guess at headroom.  Project listing
     belongs to the shared ``load_items(scope="begin")`` path after this gate
     passes.  Candidate hydration and ordering stay in their shared post-load
-    paths; keep all three out of this preflight.
+    paths; keep all three out of this preflight. The optional Codex profile
+    inputs only expose the fail-closed evaluator; the normal begin command
+    keeps using the Mac profile and adds no cloud start path.
     """
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import usage
@@ -20826,7 +20830,11 @@ def _begin_preflight(
         # Before the usage read: a run on the wrong model or with a wider
         # sandbox must not reach anything, including the budget it would
         # spend (#1316).
-        settings = _codex_settings_check()
+        if codex_profile == "mac" and cloud_metadata is None:
+            settings = _codex_settings_check()
+        else:
+            settings = _codex_settings_check(
+                profile=codex_profile, metadata=cloud_metadata)
         if not settings.get("ok"):
             why = settings.get("why") or "Codex run settings could not be checked"
             _record_begin_config_drift(agent, out["run"], why)
@@ -20979,7 +20987,10 @@ def _record_queue_empty(agent: str, run: Optional[str],
         pass
 
 
-def _codex_settings_check() -> Dict[str, object]:
+def _codex_settings_check(
+    profile: Optional[str] = None,
+    metadata: Optional[Mapping[str, object]] = None,
+) -> Dict[str, object]:
     """Whether this Codex run is the one ``codex_run.py`` describes.
 
     One seam, so the suite's shared fixture can stand in for a machine's
@@ -20991,7 +21002,9 @@ def _codex_settings_check() -> Dict[str, object]:
     try:
         import codex_run
 
-        return codex_run.check()
+        if profile is None and metadata is None:
+            return codex_run.check()
+        return codex_run.check(profile=profile or "mac", metadata=metadata)
     except Exception as exc:  # pragma: no cover - defensive; see docstring
         return {"ok": False,
                 "why": "Codex run settings could not be checked: {}".format(

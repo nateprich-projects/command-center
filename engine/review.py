@@ -3705,6 +3705,47 @@ SCOPED_REREVIEW_KINDS = {
     "merged_main_suite_failure",
 }
 
+# A review cannot prove its own verdict or a later merge. These are process
+# gates checked after the reviewer answers, not defects in the PR's code.
+_REVIEW_PROCESS_GATE = re.compile(
+    r"\b(?:pass(?:es|ed)?|receiv(?:e|es|ed)|obtain(?:s|ed)?|await(?:s|ed)?|"
+    r"requir(?:e|es|ed))\s+(?:an?\s+)?(?:independent\s+)?(?:escalated\s+)?"
+    r"(?:current[- ]head\s+)?(?:code\s+)?review\b|"
+    r"\b(?:independent|escalated|current[- ]head)\s+review\s+"
+    r"(?:has\s+not\s+yet\s+)?approv(?:al|ed)\b|"
+    r"\bcurrent[- ]head\s+approval\b|"
+    r"\b(?:pr|pull request)\s+(?:is\s+)?merged\b",
+    re.IGNORECASE,
+)
+_ONLY_REVIEW_PROCESS_GATE = re.compile(
+    r"^(?:(?:accept(?:ance)?|requirement)\s*:\s*)?(?:the\s+)?"
+    r"(?:(?:pr|pull request)\s+)?(?:pass(?:es|ed)?|receiv(?:e|es|ed)|"
+    r"obtain(?:s|ed)?|await(?:s|ed)?|requir(?:e|es|ed))\s+"
+    r"(?:an?\s+)?(?:independent\s+)?(?:escalated\s+)?"
+    r"(?:current[- ]head\s+)?(?:code\s+)?review"
+    r"(?:\s+(?:approval|verdict))?[.!]?\s*$|"
+    r"^(?:the\s+)?(?:independent|escalated|current[- ]head)\s+review\s+"
+    r"approv(?:es|ed)\s+(?:this\s+)?(?:pr|pull request)[.!]?\s*$|"
+    r"^(?:the\s+)?(?:pr|pull request)\s+(?:is\s+)?merged[.!]?\s*$",
+    re.IGNORECASE,
+)
+
+
+def _review_process_prerequisite(item: object) -> bool:
+    return isinstance(item, str) and bool(_REVIEW_PROCESS_GATE.search(item))
+
+
+def omit_review_process_requirements(requirements: Sequence[str]) -> List[str]:
+    """Omit only standalone self-review gates; refuse ambiguous mixed rows."""
+    kept = []
+    for requirement in _canonical_requirements(requirements):
+        if not _review_process_prerequisite(requirement):
+            kept.append(requirement)
+        elif not _ONLY_REVIEW_PROCESS_GATE.fullmatch(requirement):
+            raise ReviewJudgeError(
+                "review or merge gate mixed with a checkable requirement")
+    return kept
+
 def empty_scoped_rereview() -> Dict[str, object]:
     """The explicit no-prior-rejection packet shape."""
     return {
@@ -3731,6 +3772,8 @@ def _stopping_rule_kind(item: object) -> Optional[str]:
         return None
     text = re.sub(r"\s+", " ", item.casefold()).strip()
     if text.startswith("unsure:"):
+        return None
+    if _review_process_prerequisite(text):
         return None
 
     for prefix in ("requirement unmet:", "requirement unsure:"):
@@ -3884,11 +3927,20 @@ def build_scoped_rereview(
     raw_blocking = raw_blocking if isinstance(raw_blocking, list) else []
     classified = []
     unclassified = False
+    process_gate = False
+    seen_findings = set()
     for item in raw_blocking:
+        if _review_process_prerequisite(item):
+            process_gate = True
+            continue
         kind = _stopping_rule_kind(item)
         if kind is None or kind not in SCOPED_REREVIEW_KINDS:
             unclassified = True
             continue
+        key = (kind, item)
+        if key in seen_findings:
+            continue
+        seen_findings.add(key)
         classified.append({"kind": kind, "finding": item})
     packet["prior_blocking_items"] = classified
     fallback_reasons: List[str] = []
@@ -3943,6 +3995,8 @@ def build_scoped_rereview(
 
     interdiff = _diff_of_diffs(str(prior_diff), str(current_diff))
     packet["interdiff"] = interdiff
+    if process_gate:
+        fallback_reasons.append("prior_review_process_gate")
     if not raw_blocking or unclassified:
         fallback_reasons.append("prior_blockers_unclassified")
 

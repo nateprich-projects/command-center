@@ -3,9 +3,10 @@
 # then stop. Muse answers both standard and escalated tiers; the standard-tier
 # bridge retired at 2026-09-27 06:00 PDT (#1987).
 #
-# Usage: muse-review-engine [tier] [reasoning-effort]
+# Usage: muse-review-engine [tier] [reasoning-effort] [--omit-failure-modes]
 #   tier   -- escalated (default) or standard; substituted into begin
 #   effort -- max (default) or high
+#   --omit-failure-modes -- shape without Review focus as a safe fallback
 #
 # review-replay runs the same review on a given packet and records nothing,
 # through the MUSE_REVIEW_ENGINE_REPLAY_* variables (#1730; below).
@@ -39,9 +40,11 @@ set -uo pipefail
 
 TIER="escalated"
 EFFORT="max"
+OMIT_FAILURE_MODES=0
 SEEN=0
 for arg in "$@"; do
   case "$arg" in
+    --omit-failure-modes) OMIT_FAILURE_MODES=1 ;;
     --*) echo "muse-review-engine: unknown flag '$arg'" >&2; exit 1 ;;
     *)
       SEEN=$((SEEN + 1))
@@ -216,6 +219,10 @@ if ! PROMPT_REVIEW="$(printf '%s' "$REVIEW_PROMPT_JSON" | python3 -c 'import jso
 fi
 if ! PROMPT_REVIEW_JUDGE_RULES="$(printf '%s' "$REVIEW_PROMPT_JSON" | python3 -c 'import json,sys; print("\n".join(json.load(sys.stdin)["judge_rules"]))')"; then
   echo "muse-review-engine: the active reviewer judge rules are invalid" >&2
+  exit 1
+fi
+if ! PROMPT_REVIEW_B="$(python3 "$REPO/engine/reviewer_b.py" prompt-template 2>&1)"; then
+  echo "muse-review-engine: cannot load the reviewer-B prompt: $PROMPT_REVIEW_B" >&2
   exit 1
 fi
 # An explicit path to the canonical routine still means the active variant;
@@ -777,6 +784,520 @@ muse_auth_outage() {
   exit 1
 }
 
+shadow_state_read() {
+  local output="$1"
+  local diagnostic="$2"
+  if ! python3 "$REPO/heartbeat.py" shadow-state --agent muse \
+      >"$output" 2>"$diagnostic"; then
+    echo "muse-review-engine: reviewer-B trial state is unreadable; skipping B" >&2
+    [[ ! -s "$diagnostic" ]] || cat "$diagnostic" >&2
+    return 1
+  fi
+  return 0
+}
+
+shadow_state_value() {
+  python3 - "$1" "$2" <<'PY'
+import json
+import sys
+
+state = json.load(open(sys.argv[1]))
+value = state.get(sys.argv[2])
+print("" if value is None else value)
+PY
+}
+
+shadow_pair_packet_safe() {
+  python3 - "$1" <<'PY'
+import json
+import sys
+
+try:
+    packet = json.load(open(sys.argv[1]))
+except (OSError, ValueError):
+    raise SystemExit(1)
+if not isinstance(packet, dict):
+    raise SystemExit(1)
+precheck = packet.get("precheck")
+ci = packet.get("ci")
+standing = packet.get("standing") or {}
+rerun = packet.get("ci_rerun") or {}
+if (not isinstance(precheck, dict) or precheck.get("pass") is not True
+        or not isinstance(ci, dict) or ci.get("state") != "green"
+        or (isinstance(standing, dict) and standing.get("state") in
+            ("wait", "conflict", "closed", "covered"))
+        or (isinstance(rerun, dict) and rerun.get("action"))):
+    raise SystemExit(1)
+head = packet.get("head_sha")
+if not isinstance(head, str) or len(head) != 40:
+    raise SystemExit(1)
+print(head)
+PY
+}
+
+shadow_pair_packet_value() {
+  python3 - "$1" "$2" <<'PY'
+import json
+import sys
+
+packet = json.load(open(sys.argv[1]))
+field = sys.argv[2]
+if field == "head":
+    print(packet.get("head_sha") or "")
+elif field == "ci":
+    print((packet.get("ci") or {}).get("state") or "")
+elif field == "repo":
+    print(packet.get("repo") or "")
+elif field == "pr":
+    print(packet.get("pr") or "")
+elif field == "side":
+    print(packet.get("side") or "")
+PY
+}
+
+shadow_read_answer_verdict() {
+  python3 - "$1" <<'PY'
+import json
+import sys
+
+value = json.load(open(sys.argv[1]))
+verdict = value.get("verdict") if isinstance(value, dict) else None
+if verdict not in ("approved", "rejected"):
+    raise SystemExit("review answer has no canonical verdict")
+print(verdict)
+PY
+}
+
+shadow_replay_a() {
+  local packet_path="$1"
+  local answer_path="$2"
+  local diagnostic_path="$3"
+  rm -f -- "$answer_path"
+  if ! MUSE_REVIEW_ENGINE_REPLAY_PACKET="$packet_path" \
+      MUSE_REVIEW_ENGINE_REPLAY_ANSWER="$answer_path" \
+      MUSE_REVIEW_ENGINE_REPLAY_ROUTINE="$ROUTINE_REVIEW" \
+      MUSE_REVIEW_ENGINE_REPO="$REPO" \
+      bash "${BASH_SOURCE[0]}" "$TIER" "$EFFORT" \
+      >"$diagnostic_path" 2>&1; then
+    echo "muse-review-engine: reviewer-B head moved; reviewer A replay failed" >&2
+    [[ ! -s "$diagnostic_path" ]] || cat "$diagnostic_path" >&2
+    return 1
+  fi
+  [[ -s "$answer_path" ]]
+}
+
+shadow_reserve_pair() {
+  local kind="$1"
+  local repo="$2"
+  local pr="$3"
+  local head="$4"
+  local sample="$5"
+  local output
+  local status
+  B_PAIR_ID="$(python3 -c 'import uuid; print(uuid.uuid4().hex)' 2>/dev/null)"
+  if [[ -z "$B_PAIR_ID" ]]; then
+    echo "muse-review-engine: could not allocate reviewer-B pair id" >&2
+    return 1
+  fi
+  if ! output="$(python3 "$REPO/heartbeat.py" shadow-reserve \
+      --run "$BEGIN_RUN" --pair "$B_PAIR_ID" --kind "$kind" \
+      --repo "$repo" --pr "$pr" --head "$head" --sample "$sample" \
+      2>"$RUN_DIR/reviewer-b-reserve.err")"; then
+    echo "muse-review-engine: reviewer-B slot reservation failed; continuing A" >&2
+    [[ ! -s "$RUN_DIR/reviewer-b-reserve.err" ]] \
+      || cat "$RUN_DIR/reviewer-b-reserve.err" >&2
+    return 1
+  fi
+  status="$(printf '%s' "$output" | tail -n 1)"
+  if [[ "$status" != "reserved" ]]; then
+    echo "muse-review-engine: reviewer-B sample not started ($status)" >&2
+    return 1
+  fi
+  return 0
+}
+
+reviewer_b_model() {
+  local packet_path="$1"
+  local model_repo="${2:-$BEGIN_REPO}"
+  local A_MODEL="$MUSE_MODEL"
+  local B_MODEL
+  local MUSE_MODEL
+  local CALL_EFFORT
+  local attempt=1
+  local model_status
+  local parse_err
+  local packet_json
+  # Bind B to the repository's muse-spark-1.3 id at this call site. The
+  # resolver selects its contributor variant only where the existing posture
+  # allows it; if that no longer matches A's resolved model, skip this pair.
+  B_MODEL="$(resolve_muse_model "$model_repo")"
+  if [[ "$B_MODEL" != "$A_MODEL" ]]; then
+    echo "muse-review-engine: reviewer-B model for $model_repo no longer matches reviewer A; skipping the pair" >&2
+    return 1
+  fi
+  MUSE_MODEL="$B_MODEL"
+  CALL_EFFORT="max"
+  local -a MUSE_EXEC=("$MUSE_BIN" exec --model "$MUSE_MODEL" --json)
+  local -a MUSE_EXEC_UNBOUND=("$MUSE_BIN" exec --model "$MUSE_MODEL" --json)
+  B_VALID=0
+  B_VERDICT="unsure"
+  B_RAW_ANSWER="$RUN_DIR/reviewer-b-raw.$B_PAIR_ID.json"
+  B_NORMALIZED_ANSWER="$RUN_DIR/reviewer-b-answer.$B_PAIR_ID.json"
+  B_PROMPT_PATH="$RUN_DIR/reviewer-b-prompt.$B_PAIR_ID.txt"
+  B_DIAG_PATH="$RUN_DIR/reviewer-b-diag.$B_PAIR_ID.txt"
+  packet_json="$(cat "$packet_path")"
+  PROMPT="${PROMPT_REVIEW_B//PACKET_JSON/$packet_json}"
+  if ! printf '%s' "$PROMPT" >"$B_PROMPT_PATH"; then
+    echo "muse-review-engine: could not write reviewer-B prompt" >&2
+    return 1
+  fi
+  while true; do
+    call_model_files "$B_PROMPT_PATH" "$B_RAW_ANSWER" "$B_DIAG_PATH"
+    model_status=$?
+    if (( model_status != 0 )); then
+      if MUSE_QUOTA_RESET="$(muse_quota_record "$B_DIAG_PATH" "$BEGIN_RUN")"; then
+        echo "muse-review-engine: reviewer B saw Muse quota refusal until $MUSE_QUOTA_RESET; A continues" >&2
+      elif muse_auth_failure "$B_DIAG_PATH"; then
+        echo "muse-review-engine: reviewer B could not authenticate; A continues" >&2
+      elif (( model_status == 124 )); then
+        echo "muse-review-engine: reviewer B timed out; A continues" >&2
+      else
+        echo "muse-review-engine: reviewer B call failed; A continues" >&2
+        [[ ! -s "$B_DIAG_PATH" ]] || cat "$B_DIAG_PATH" >&2
+      fi
+      return 1
+    fi
+    if python3 "$REPO/engine/reviewer_b.py" answer \
+        "$B_RAW_ANSWER" "$B_NORMALIZED_ANSWER" 2>"$B_DIAG_PATH"; then
+      if ! B_VERDICT="$(shadow_read_answer_verdict "$B_NORMALIZED_ANSWER")"; then
+        echo "muse-review-engine: reviewer-B answer has no verdict; A continues" >&2
+        return 1
+      fi
+      B_VALID=1
+      return 0
+    fi
+    parse_err="$(cat "$B_DIAG_PATH")"
+    if (( attempt == 1 )); then
+      printf '\nYour prior response did not match the required JSON schema: %s\nReturn one valid JSON object only.\n' \
+        "$parse_err" >>"$B_PROMPT_PATH"
+      attempt=2
+      continue
+    fi
+    echo "muse-review-engine: reviewer-B answer stayed invalid after one retry; A continues" >&2
+    return 1
+  done
+}
+
+reviewer_b_start_pair() {
+  local kind="$1"
+  local repo="$2"
+  local pr="$3"
+  local head="$4"
+  local sample="$5"
+  local a_verdict="$6"
+  if ! python3 "$REPO/heartbeat.py" shadow-start --run "$BEGIN_RUN" \
+      --pair "$B_PAIR_ID" --kind "$kind" --repo "$repo" --pr "$pr" \
+      --head "$head" --sample "$sample" --a-verdict "$a_verdict" \
+      >"$RUN_DIR/reviewer-b-start.out" 2>"$RUN_DIR/reviewer-b-start.err"; then
+    echo "muse-review-engine: reviewer-B heartbeat start was not recorded; A continues" >&2
+    [[ ! -s "$RUN_DIR/reviewer-b-start.err" ]] \
+      || cat "$RUN_DIR/reviewer-b-start.err" >&2
+    return 1
+  fi
+  return 0
+}
+
+reviewer_b_finish_pair() {
+  local kind="$1"
+  local repo="$2"
+  local pr="$3"
+  local head="$4"
+  local sample="$5"
+  local a_verdict="$6"
+  local stable="$7"
+  local finish_verdict="$B_VERDICT"
+  local state_path="$RUN_DIR/reviewer-b-state.$B_PAIR_ID.json"
+  local note_path="$RUN_DIR/reviewer-b-note.$B_PAIR_ID.md"
+  if (( ! B_VALID )); then
+    finish_verdict="unsure"
+  fi
+  if ! python3 "$REPO/heartbeat.py" shadow-finish --run "$BEGIN_RUN" \
+      --pair "$B_PAIR_ID" --kind "$kind" --repo "$repo" --pr "$pr" \
+      --head "$head" --sample "$sample" --a-verdict "$a_verdict" \
+      --b-verdict "$finish_verdict" --stable "$stable" \
+      >"$RUN_DIR/reviewer-b-finish.out" 2>"$RUN_DIR/reviewer-b-finish.err"; then
+    echo "muse-review-engine: reviewer-B heartbeat end was not recorded; A continues" >&2
+    [[ ! -s "$RUN_DIR/reviewer-b-finish.err" ]] \
+      || cat "$RUN_DIR/reviewer-b-finish.err" >&2
+    return 1
+  fi
+  if [[ "$stable" != "yes" || "$finish_verdict" == "unsure" ]]; then
+    return 0
+  fi
+  if ! shadow_state_read "$state_path" "$RUN_DIR/reviewer-b-state.err"; then
+    return 1
+  fi
+  if ! python3 "$REPO/engine/reviewer_b.py" note "$state_path" \
+      "$B_PAIR_ID" "$B_NORMALIZED_ANSWER" "$note_path" \
+      2>"$RUN_DIR/reviewer-b-note.err"; then
+    echo "muse-review-engine: measured reviewer-B note could not be rendered" >&2
+    [[ ! -s "$RUN_DIR/reviewer-b-note.err" ]] \
+      || cat "$RUN_DIR/reviewer-b-note.err" >&2
+    return 1
+  fi
+  if ! "$GH_BIN" pr comment "$pr" --repo "$repo" \
+      --body-file "$note_path" >"$RUN_DIR/reviewer-b-comment.out" \
+      2>"$RUN_DIR/reviewer-b-comment.err"; then
+    echo "muse-review-engine: reviewer-B PR note failed; A continues" >&2
+    [[ ! -s "$RUN_DIR/reviewer-b-comment.err" ]] \
+      || cat "$RUN_DIR/reviewer-b-comment.err" >&2
+    return 1
+  fi
+  return 0
+}
+
+fetch_live_pair_packet() {
+  local output="$1"
+  local diagnostic="$2"
+  python3 "$REPO/review-packet" "$BEGIN_PR" --repo "$BEGIN_REPO" \
+    >"$output" 2>"$diagnostic"
+}
+
+run_live_reviewer_b() {
+  local initial_state="$RUN_DIR/reviewer-b-live-state.json"
+  local current_packet="$RUN_DIR/reviewer-b-current-packet.json"
+  local next_packet="$RUN_DIR/reviewer-b-next-packet.json"
+  local pair_packet="$PACKET_FILE"
+  local pair_answer="$ANSWER_FILE"
+  local pair_head="$PACKET_HEAD"
+  local current_head
+  local a_verdict
+  local fresh_ci
+  local fresh_answer
+  local cycle=1
+  local safe
+  if ! shadow_state_read "$initial_state" "$RUN_DIR/reviewer-b-live-state.err"; then
+    return 0
+  fi
+  if (( $(shadow_state_value "$initial_state" live_used_count) >= 30 )); then
+    return 0
+  fi
+  while (( cycle <= 10 )); do
+    if ! fetch_live_pair_packet "$current_packet" \
+        "$RUN_DIR/reviewer-b-current-packet.err"; then
+      echo "muse-review-engine: current head could not be rechecked for reviewer B; A continues" >&2
+      return 0
+    fi
+    if ! safe="$(shadow_pair_packet_safe "$current_packet")"; then
+      echo "muse-review-engine: current packet no longer passes A safeguards; reviewer B stands down" >&2
+      return 0
+    fi
+    current_head="$(shadow_pair_packet_value "$current_packet" head)"
+    if [[ "$current_head" != "$pair_head" ]]; then
+      fresh_answer="$RUN_DIR/reviewer-b-a-rerun.$cycle.json"
+      if ! shadow_replay_a "$current_packet" "$fresh_answer" \
+          "$RUN_DIR/reviewer-b-a-rerun.$cycle.log"; then
+        return 0
+      fi
+      if ! a_verdict="$(shadow_read_answer_verdict "$fresh_answer")"; then
+        echo "muse-review-engine: rerun reviewer A has no verdict; reviewer B stands down" >&2
+        return 0
+      fi
+      cp -- "$fresh_answer" "$ANSWER_FILE"
+      pair_answer="$ANSWER_FILE"
+      pair_packet="$current_packet"
+      pair_head="$current_head"
+      PACKET_HEAD="$pair_head"
+      PACKET_CI="$(shadow_pair_packet_value "$pair_packet" ci)"
+      HEAD_SHORT="${PACKET_HEAD:0:12}"
+      cycle=$((cycle + 1))
+      continue
+    fi
+    if ! a_verdict="$(shadow_read_answer_verdict "$pair_answer")"; then
+      echo "muse-review-engine: reviewer-A answer has no verdict; reviewer B stands down" >&2
+      return 0
+    fi
+    if ! shadow_reserve_pair live "$BEGIN_REPO" "$BEGIN_PR" \
+        "$pair_head" ""; then
+      return 0
+    fi
+    B_NORMALIZED_ANSWER="$RUN_DIR/reviewer-b-answer.$B_PAIR_ID.json"
+    B_VALID=0
+    B_VERDICT="unsure"
+    if reviewer_b_start_pair live "$BEGIN_REPO" "$BEGIN_PR" \
+        "$pair_head" "" "$a_verdict"; then
+      reviewer_b_model "$pair_packet" "$BEGIN_REPO"
+    else
+      echo "muse-review-engine: reviewer B was not called because its start reading is unavailable" >&2
+    fi
+    local b_valid="$B_VALID"
+    local b_verdict="$B_VERDICT"
+    local b_answer="$B_NORMALIZED_ANSWER"
+    if ! fetch_live_pair_packet "$next_packet" \
+        "$RUN_DIR/reviewer-b-next-packet.err"; then
+      reviewer_b_finish_pair live "$BEGIN_REPO" "$BEGIN_PR" \
+        "$pair_head" "" "$a_verdict" no
+      echo "muse-review-engine: post-B head could not be rechecked; discarding pair" >&2
+      return 0
+    fi
+    safe=""
+    shadow_pair_packet_safe "$next_packet" >"$RUN_DIR/reviewer-b-safe-head" \
+      2>/dev/null && safe="yes"
+    current_head="$(shadow_pair_packet_value "$next_packet" head)"
+    if [[ "$safe" == "yes" && "$current_head" == "$pair_head" \
+          && "$b_valid" == "1" ]]; then
+      B_VALID="$b_valid"
+      B_VERDICT="$b_verdict"
+      B_NORMALIZED_ANSWER="$b_answer"
+      reviewer_b_finish_pair live "$BEGIN_REPO" "$BEGIN_PR" \
+        "$pair_head" "" "$a_verdict" yes
+      return 0
+    fi
+    B_VALID="$b_valid"
+    B_VERDICT="$b_verdict"
+    B_NORMALIZED_ANSWER="$b_answer"
+    reviewer_b_finish_pair live "$BEGIN_REPO" "$BEGIN_PR" \
+      "$pair_head" "" "$a_verdict" no
+    if [[ "$safe" != "yes" || "$current_head" == "$pair_head" ]]; then
+      echo "muse-review-engine: reviewer-B pair was not stable; A continues" >&2
+      return 0
+    fi
+    fresh_answer="$RUN_DIR/reviewer-b-a-rerun.$cycle.json"
+    if ! shadow_replay_a "$next_packet" "$fresh_answer" \
+        "$RUN_DIR/reviewer-b-a-rerun.$cycle.log"; then
+      return 0
+    fi
+    if ! a_verdict="$(shadow_read_answer_verdict "$fresh_answer")"; then
+      echo "muse-review-engine: moved-head reviewer A answer has no verdict" >&2
+      return 0
+    fi
+    cp -- "$fresh_answer" "$ANSWER_FILE"
+    pair_answer="$ANSWER_FILE"
+    pair_packet="$next_packet"
+    pair_head="$current_head"
+    PACKET_HEAD="$pair_head"
+    PACKET_CI="$(shadow_pair_packet_value "$pair_packet" ci)"
+    HEAD_SHORT="${PACKET_HEAD:0:12}"
+    cycle=$((cycle + 1))
+  done
+  echo "muse-review-engine: head kept moving during reviewer-B pairing; no shadow pair recorded" >&2
+}
+
+calibration_head_matches() {
+  local repo="$1"
+  local pr="$2"
+  local expected="$3"
+  local output="$RUN_DIR/reviewer-b-calibration-head.json"
+  if ! "$GH_BIN" pr view "$pr" --repo "$repo" --json headRefOid \
+      >"$output" 2>"$RUN_DIR/reviewer-b-calibration-head.err"; then
+    return 1
+  fi
+  python3 - "$output" "$expected" <<'PY'
+import json
+import sys
+
+try:
+    data = json.load(open(sys.argv[1]))
+except (OSError, ValueError):
+    raise SystemExit(1)
+raise SystemExit(0 if data.get("headRefOid") == sys.argv[2] else 1)
+PY
+}
+
+run_calibration_reviewer_b() {
+  local state_path="$RUN_DIR/reviewer-b-calibration-state.json"
+  local sample
+  local packet="$RUN_DIR/reviewer-b-calibration-packet.json"
+  local answer="$RUN_DIR/reviewer-b-calibration-a.json"
+  local repo
+  local pr
+  local head
+  local kind
+  local a_verdict
+  if ! shadow_state_read "$state_path" "$RUN_DIR/reviewer-b-calibration-state.err"; then
+    return 0
+  fi
+  if (( $(shadow_state_value "$state_path" calibration_used_count) >= 20 )); then
+    return 0
+  fi
+  sample="$(shadow_state_value "$state_path" next_calibration)"
+  [[ -n "$sample" ]] || return 0
+  if ! python3 "$REPO/engine/reviewer_b.py" calibration "$sample" "$packet" \
+      2>"$RUN_DIR/reviewer-b-calibration-packet.err"; then
+    echo "muse-review-engine: fixed reviewer-B calibration packet is unavailable" >&2
+    [[ ! -s "$RUN_DIR/reviewer-b-calibration-packet.err" ]] \
+      || cat "$RUN_DIR/reviewer-b-calibration-packet.err" >&2
+    return 0
+  fi
+  if ! shadow_pair_packet_safe "$packet" >/dev/null; then
+    echo "muse-review-engine: fixed calibration packet failed its frozen A/CI checks" >&2
+    return 0
+  fi
+  repo="$(shadow_pair_packet_value "$packet" repo)"
+  pr="$(shadow_pair_packet_value "$packet" pr)"
+  head="$(shadow_pair_packet_value "$packet" head)"
+  kind="$(shadow_pair_packet_value "$packet" side)"
+  if [[ "$kind" != "bad" && "$kind" != "good" ]]; then
+    case "$sample" in
+      must_reject) kind="bad" ;;
+      must_approve) kind="good" ;;
+      *) echo "muse-review-engine: calibration packet has no declared side" >&2; return 0 ;;
+    esac
+  fi
+  if ! calibration_head_matches "$repo" "$pr" "$head"; then
+    echo "muse-review-engine: calibration PR head no longer matches its frozen packet" >&2
+    return 0
+  fi
+  if ! shadow_replay_a "$packet" "$answer" \
+      "$RUN_DIR/reviewer-b-calibration-a.log"; then
+    return 0
+  fi
+  if ! a_verdict="$(shadow_read_answer_verdict "$answer")"; then
+    echo "muse-review-engine: calibration reviewer A answer has no verdict" >&2
+    return 0
+  fi
+  if ! calibration_head_matches "$repo" "$pr" "$head"; then
+    echo "muse-review-engine: calibration PR head moved after reviewer A; discarding it" >&2
+    return 0
+  fi
+  if ! shadow_reserve_pair "$kind" "$repo" "$pr" "$head" "$sample"; then
+    return 0
+  fi
+  B_NORMALIZED_ANSWER="$RUN_DIR/reviewer-b-answer.$B_PAIR_ID.json"
+  B_VALID=0
+  B_VERDICT="unsure"
+  if reviewer_b_start_pair "$kind" "$repo" "$pr" "$head" \
+      "$sample" "$a_verdict"; then
+    reviewer_b_model "$packet" "$repo"
+  else
+    echo "muse-review-engine: calibration reviewer B has no heartbeat start; skipping it" >&2
+  fi
+  local b_valid="$B_VALID"
+  local b_verdict="$B_VERDICT"
+  local b_answer="$B_NORMALIZED_ANSWER"
+  if (( b_valid )) && calibration_head_matches "$repo" "$pr" "$head"; then
+    B_VALID="$b_valid"
+    B_VERDICT="$b_verdict"
+    B_NORMALIZED_ANSWER="$b_answer"
+    reviewer_b_finish_pair "$kind" "$repo" "$pr" "$head" \
+      "$sample" "$a_verdict" yes
+  else
+    B_VALID="$b_valid"
+    B_VERDICT="$b_verdict"
+    B_NORMALIZED_ANSWER="$b_answer"
+    reviewer_b_finish_pair "$kind" "$repo" "$pr" "$head" \
+      "$sample" "$a_verdict" no
+    echo "muse-review-engine: calibration pair was stale or unavailable; A continues" >&2
+  fi
+}
+
+run_reviewer_b_trial() {
+  (( REPLAY )) && return 0
+  [[ "$JOB" == "review" ]] || return 0
+  run_live_reviewer_b
+  run_calibration_reviewer_b
+}
+
 # The optional second argument is the failed call's own diagnostic, for a
 # call that ran in a directory of its own (the shape framer, #1599).
 model_failed() {
@@ -928,6 +1449,10 @@ run_issue_apply() {
   if [[ "$JOB" == "breakdown" ]]; then
     python3 "$REPO/breakdown-apply" "$BEGIN_REF" --answer "$ANSWER_FILE" \
       --attempt "$attempt" "$@" --run "$BEGIN_RUN" --agent "$AGENT"
+  elif (( OMIT_FAILURE_MODES )); then
+    python3 "$REPO/shape-apply" "$SUBJECT_NUM" --repo "$SUBJECT_REPO" \
+      --answer "$ANSWER_FILE" --attempt "$attempt" "$@" \
+      --omit-failure-modes --run "$BEGIN_RUN" --agent "$AGENT"
   else
     python3 "$REPO/shape-apply" "$SUBJECT_NUM" --repo "$SUBJECT_REPO" \
       --answer "$ANSWER_FILE" --attempt "$attempt" "$@" \
@@ -1036,6 +1561,9 @@ from engine import shape_split
 from engine.shape import ShapeError
 
 command, args = sys.argv[2], sys.argv[3:]
+omit_failure_modes = bool(args and args[-1] == "--omit-failure-modes")
+if omit_failure_modes:
+    args = args[:-1]
 
 
 def load(path):
@@ -1093,7 +1621,8 @@ try:
         with open(os.path.join(call_dir, "answer.json")) as handle:
             raw = handle.read()
         if kind == "framer":
-            parsed = shape_split.parse_framer(raw)
+            parsed = shape_split.parse_framer(
+                raw, include_failure_modes=not omit_failure_modes)
         elif kind == "sibling":
             parsed = shape_split.parse_siblings(
                 raw, load(os.path.join(call_dir, "assigned.json")))
@@ -1116,7 +1645,8 @@ try:
                 decisions.extend(result(run_dir, name))
         dump(shape_split.merge_shape_answer(
             result(run_dir, "framer"), siblings, decisions,
-            result(run_dir, "auditor")), out)
+            result(run_dir, "auditor"),
+            include_failure_modes=not omit_failure_modes), out)
     else:
         raise SystemExit("unknown shape_split command {!r}".format(command))
 except ShapeError as exc:
@@ -1147,10 +1677,23 @@ escalated risk. So:
   plan waits on nothing.
 - `proposed_class` names one ladder class: Investigate, Broken, Maintenance,
   Improve, New, Replace, or Bug.
+- Optional `failure_modes` is an array of zero to three non-empty strings.
 
 Answer with exactly one JSON object and nothing else:
 
+HEADER
+  if (( OMIT_FAILURE_MODES )); then
+    cat <<'HEADER'
+The runner's `--omit-failure-modes` fallback is active; omit that field.
+
 {"proposed_class": "Improve", "plan_markdown": "the plan", "decision_points": ["one open decision"], "depends_on": ["owner/repo#n"]}
+HEADER
+  else
+    cat <<'HEADER'
+{"proposed_class": "Improve", "plan_markdown": "the plan", "decision_points": ["one open decision"], "depends_on": ["owner/repo#n"], "failure_modes": []}
+HEADER
+  fi
+  cat <<'HEADER'
 
 The text after this paragraph is the shaping question, included for the
 rules and the packet it carries. Read its packet and follow its rules for the
@@ -1330,7 +1873,12 @@ shape_part_calls() {
       return 1
     fi
     # Read the status directly, for the same reason the judging loop does.
-    shape_split parse "$kind" "$call_dir" 2>"$call_dir/parse.txt"
+    if (( OMIT_FAILURE_MODES )); then
+      shape_split parse "$kind" "$call_dir" --omit-failure-modes \
+        2>"$call_dir/parse.txt"
+    else
+      shape_split parse "$kind" "$call_dir" 2>"$call_dir/parse.txt"
+    fi
     parse_status=$?
     if (( parse_status == 0 )); then
       answered=1
@@ -1435,7 +1983,13 @@ run_shape_split() {
     exit 1
   fi
 
-  if ! shape_split merge "$RUN_DIR" "$ANSWER_FILE" 2>"$DIAG_FILE"; then
+  if (( OMIT_FAILURE_MODES )); then
+    shape_split merge "$RUN_DIR" "$ANSWER_FILE" --omit-failure-modes \
+      2>"$DIAG_FILE"
+  else
+    shape_split merge "$RUN_DIR" "$ANSWER_FILE" 2>"$DIAG_FILE"
+  fi
+  if (( $? != 0 )); then
     split_err="$(cat "$DIAG_FILE")"
     echo "muse-review-engine: could not merge the shape parts: $split_err" >&2
     failure "could not merge the shape parts for $BEGIN_REF: $split_err" || true
@@ -2201,6 +2755,11 @@ the ticket or the plan wherever it states one. Every later judge reads this
 list and nothing else, so a requirement missing here is never checked, and a
 vague one cannot be answered.
 
+Do not list a requirement that this PR pass this independent review, receive
+the current-head review verdict or approval, or be merged. Those are later
+process gates, not facts this review can establish about its own diff. Keep
+the ticket's separate code, test, and evidence obligations as checkable rows.
+
 An explicit Nate override can supersede only the requirement or gate it names.
 Check comments in `ticket.comments`, `tickets[].comments`, each ticket's
 `parent.comments`, and `pr_comments.comments`. A comment qualifies only when
@@ -2323,7 +2882,9 @@ import json
 import sys
 
 sys.path.insert(0, sys.argv[1])
-from engine.review import normalize_plan_premise_requirements
+from engine.review import (ReviewJudgeError,
+                           normalize_plan_premise_requirements,
+                           omit_review_process_requirements)
 
 answer_path, out_path, packet_path = sys.argv[2], sys.argv[3], sys.argv[4]
 
@@ -2365,6 +2926,10 @@ if not requirements:
     malformed("'requirements' must name at least one requirement")
 packet = json.load(open(packet_path))
 requirements = normalize_plan_premise_requirements(packet, requirements)
+try:
+    requirements = omit_review_process_requirements(requirements)
+except ReviewJudgeError as exc:
+    malformed(str(exc))
 if not requirements:
     malformed("'requirements' must name at least one requirement")
 with open(out_path, "w") as handle:
@@ -2932,6 +3497,11 @@ if (( REPLAY )); then
   fi
   exit 0
 fi
+
+# Reviewer B is a nonblocking observation. It gets only the cached packet,
+# runs after A has produced its verdict, and cannot reach review-apply. The
+# helper reuses the live packet's existing precheck and head safeguards.
+run_reviewer_b_trial
 
 # The recorded verdict word, read back from review-apply's own report — never
 # trusted from a model answer. The runner has already derived it from every

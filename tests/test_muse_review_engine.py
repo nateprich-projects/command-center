@@ -9,8 +9,8 @@ checks, deciders and an auditor in parallel, and the runner merges them
 every side effect.
 
 The harness below stubs the funnel, heartbeat, packet, apply, gh, and muse
-binaries; the routine text is the real files, so the prompt-substitution
-and word-count tests pin the artifacts that ship.
+binaries; the routine text and Reviewer B prompt come from the real checkout,
+so prompt-substitution tests pin the artifacts that ship.
 """
 
 from __future__ import annotations
@@ -251,6 +251,27 @@ HEARTBEAT_STUB = (
     "import os, pathlib, sys\n"
     "root = pathlib.Path(__file__).parent\n"
     "command = sys.argv[1] if len(sys.argv) > 1 else ''\n"
+    "if command == 'shadow-state':\n"
+    "    import json, shlex\n"
+    "    base = json.loads(os.environ.get('MUSE_SHADOW_STATE', '{\"live_used_count\":30,\"live_count\":30,\"calibration_used_count\":20,\"calibration_count\":20,\"next_calibration\":null,\"pairs\":[]}'))\n"
+    "    if os.environ.get('MUSE_SHADOW_AUTO_STATE') == '1':\n"
+    "        rows = (root / 'heartbeat.log').read_text().splitlines() if (root / 'heartbeat.log').exists() else []\n"
+    "        starts = [shlex.split(row) for row in rows if row.startswith('shadow-start ')]\n"
+    "        finishes = [shlex.split(row) for row in rows if row.startswith('shadow-finish ')]\n"
+    "        if starts and finishes:\n"
+    "            def field(argv, name): return argv[argv.index(name) + 1] if name in argv else ''\n"
+    "            start, finish = starts[-1], finishes[-1]\n"
+    "            base['pairs'] = [{'pair_id': field(start, '--pair'), 'run': field(start, '--run'), 'kind': field(start, '--kind'), 'repo': field(start, '--repo'), 'pr': int(field(start, '--pr')), 'head_sha': field(start, '--head'), 'sample_name': field(start, '--sample') or None, 'a_verdict': field(start, '--a-verdict'), 'b_verdict': field(finish, '--b-verdict'), 'started_at': 1, 'finished_at': 2, 'latency_seconds': 1.0, 'cost_dollars': 0.0012}]\n"
+    "    print(json.dumps(base))\n"
+    "    raise SystemExit(0)\n"
+    "if command == 'shadow-reserve':\n"
+    "    with (root / 'heartbeat.log').open('a') as fh: fh.write(' '.join(sys.argv[1:]) + '\\n')\n"
+    "    print(os.environ.get('MUSE_SHADOW_RESERVE_RESULT', 'closed'))\n"
+    "    raise SystemExit(int(os.environ.get('MUSE_SHADOW_RESERVE_STATUS', '0')))\n"
+    "if command in ('shadow-start', 'shadow-finish'):\n"
+    "    with (root / 'heartbeat.log').open('a') as fh: fh.write(' '.join(sys.argv[1:]) + '\\n')\n"
+    "    print('pushed')\n"
+    "    raise SystemExit(int(os.environ.get('MUSE_SHADOW_WRITE_STATUS', '0')))\n"
     "if command == 'muse-auth-state':\n"
     "    (root / 'auth.state.calls').open('a').write('state\\n')\n"
     "    print(os.environ.get('MUSE_AUTH_STATE', 'clear'))\n"
@@ -515,6 +536,16 @@ MUSE_STUB = (
     "  previous=\"$argument\"\n"
     "done\n"
     "cp \"$prompt_file\" \"$MUSE_PROMPT.$n\"\n"
+    "if [[ -n \"${MUSE_HEAD_MOVE_AFTER_B:-}\" ]] && grep -q '^You are reviewer B' \"$prompt_file\" && [[ ! -e \"$MUSE_COUNT.moved-head\" ]]; then\n"
+    "  python3 - \"$MUSE_REVIEW_ENGINE_REPO/packet.json\" \"$MUSE_HEAD_MOVE_AFTER_B\" <<'PY'\n"
+    "import json, sys\n"
+    "path, head = sys.argv[1:]\n"
+    "packet = json.load(open(path))\n"
+    "packet['head_sha'] = head\n"
+    "open(path, 'w').write(json.dumps(packet))\n"
+    "PY\n"
+    "  touch \"$MUSE_COUNT.moved-head\"\n"
+    "fi\n"
     "if grep -q '^AUTH_LOGIN_PROBE$' \"$prompt_file\"; then\n"
     "  if [[ -n \"${MUSE_AUTH_PROBE_STDERR:-}\" ]]; then printf '%s' \"$MUSE_AUTH_PROBE_STDERR\" >&2; fi\n"
     "  exit \"${MUSE_AUTH_PROBE_STATUS:-0}\"\n"
@@ -816,9 +847,8 @@ def _stub_repo(tmp_path, begin, packet, *, answers=(), routine_body=None,
     if trial_enabled is not None:
         manifest["trial_enabled"] = trial_enabled
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
-    # The engine checks every prompt before begin, so the stub repo carries
-    # all three real routines: a run must never take work it cannot ask
-    # about, whatever the job turns out to be.
+    # The engine checks every routine prompt before begin. Reviewer B's
+    # independent prompt is owned by engine/reviewer_b.py.
     (repo / "routines" / "muse-breakdown.md").write_text(
         ROUTINE_BREAKDOWN.read_text()
     )
@@ -837,6 +867,8 @@ def _stub_repo(tmp_path, begin, packet, *, answers=(), routine_body=None,
     (engine / "review_prompts.py").write_text(
         (ROOT / "engine" / "review_prompts.py").read_text())
     (engine / "review.py").write_text((ROOT / "engine" / "review.py").read_text())
+    (engine / "reviewer_b.py").write_text(
+        (ROOT / "engine" / "reviewer_b.py").read_text())
     # engine/review.py reads the evidence markers from the module that writes
     # them (#1812), and that module imports the decline classifier.
     (engine / "implement.py").write_text(
@@ -1617,6 +1649,161 @@ def test_an_approval_is_applied_and_finished_done(tmp_path):
         "--note reviewed PR #7 in owner/repo at {}: approved "
         "--review-result approved\n".format(HEAD)
     )
+
+
+def test_reviewer_b_runs_blind_after_a_and_posts_only_a_nonblocking_note(tmp_path):
+    shadow_state = {
+        "live_used_count": 0,
+        "live_count": 0,
+        "calibration_used_count": 20,
+        "calibration_count": 20,
+        "next_calibration": None,
+        "pairs": [],
+    }
+    answers = _review_answers(
+        _judge_answer(evidence="A_ONLY_SECRET_EVIDENCE"),
+        json.dumps({"verdict": "rejected", "findings": ["edge case found"]}),
+    )
+    live_head = "a" * 40
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), _packet(head_sha=live_head), answers=answers,
+        extra_env={
+            "MUSE_SHADOW_STATE": json.dumps(shadow_state),
+            "MUSE_SHADOW_AUTO_STATE": "1",
+            "MUSE_SHADOW_RESERVE_RESULT": "reserved",
+        })
+
+    assert proc.returncode == 0, proc.stderr
+    assert _muse_calls(repo) == 3
+    b_prompt = (repo / "muse.prompt.3").read_text()
+    assert "break-it approach" in b_prompt
+    assert "A_ONLY_SECRET_EVIDENCE" not in b_prompt
+    assert live_head in b_prompt
+    a_applied = json.loads((repo / "apply.answer").read_text())
+    assert a_applied["verdict"] == "approved"
+    body = (repo / "gh.body").read_text()
+    assert "Reviewer A: `approved`" in body
+    assert "Reviewer B: `rejected`" in body
+    assert "Head SHA: `{}`".format(live_head) in body
+    assert "own-card usage delta" in body
+    assert "1.000 seconds" in body
+    assert "edge case found" in body
+    gh_calls = (repo / "gh.log").read_text().splitlines()
+    assert gh_calls == [next(line for line in gh_calls if "pr comment" in line)]
+    assert "shadow-finish" in _heartbeat(repo)
+
+
+@pytest.mark.parametrize(
+    ("repo_name", "expected_model"),
+    [
+        ("nateprich-projects/command-center", "muse-spark-1.3-contributor"),
+        ("nateprich-projects/career-toolset", "muse-spark-1.3"),
+    ],
+)
+def test_reviewer_b_pins_resolved_model_and_max_effort(
+        tmp_path, repo_name, expected_model):
+    shadow_state = {
+        "live_used_count": 0,
+        "live_count": 0,
+        "calibration_used_count": 20,
+        "calibration_count": 20,
+        "next_calibration": None,
+        "pairs": [],
+    }
+    proc, repo = _stubbed_runner(
+        tmp_path,
+        _begin(work={"pr": PR, "repo": repo_name, "ref": "{}#6".format(repo_name),
+                     "tier": "escalated"}),
+        _packet(repo=repo_name, head_sha="a" * 40),
+        args=("standard", "high"),
+        answers=_review_answers(
+            _judge_answer(evidence="A completed at high"),
+            json.dumps({"verdict": "approved", "findings": []}),
+        ),
+        extra_env={
+            "MUSE_SHADOW_STATE": json.dumps(shadow_state),
+            "MUSE_SHADOW_AUTO_STATE": "1",
+            "MUSE_SHADOW_RESERVE_RESULT": "reserved",
+        })
+
+    assert proc.returncode == 0, proc.stderr
+    assert _muse_calls(repo) == 3
+    a_args = (repo / "muse.args.2").read_text().splitlines()
+    b_args = (repo / "muse.args.3").read_text().splitlines()
+    assert a_args[a_args.index("--reasoning-effort") + 1] == "high"
+    assert b_args[b_args.index("--reasoning-effort") + 1] == "max"
+    assert b_args[b_args.index("--model") + 1] == expected_model
+    assert b_args[b_args.index("--model") + 1] == a_args[a_args.index("--model") + 1]
+
+
+def test_reviewer_b_start_write_failure_does_not_stop_a(tmp_path):
+    shadow_state = {
+        "live_used_count": 0,
+        "live_count": 0,
+        "calibration_used_count": 20,
+        "calibration_count": 20,
+        "next_calibration": None,
+        "pairs": [],
+    }
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), _packet(head_sha="a" * 40),
+        answers=_review_answers(_judge_answer(evidence="A survives B start failure")),
+        extra_env={
+            "MUSE_SHADOW_STATE": json.dumps(shadow_state),
+            "MUSE_SHADOW_RESERVE_RESULT": "reserved",
+            "MUSE_SHADOW_WRITE_STATUS": "1",
+        })
+
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads((repo / "apply.answer").read_text())["verdict"] == "approved"
+    assert _muse_calls(repo) == 2
+    if (repo / "gh.log").exists():
+        assert "pr comment" not in (repo / "gh.log").read_text()
+
+
+def test_reviewer_b_discards_a_moved_head_pair_and_replays_a_then_b(tmp_path):
+    shadow_state = {
+        "live_used_count": 0,
+        "live_count": 0,
+        "calibration_used_count": 20,
+        "calibration_count": 20,
+        "next_calibration": None,
+        "pairs": [],
+    }
+    old_head = "a" * 40
+    new_head = "b" * 40
+    answers = _review_answers(
+        _judge_answer(evidence="old A"),
+        json.dumps({"verdict": "rejected", "findings": ["stale B"]}),
+        _requirements_answer(),
+        _judge_answer(evidence="new A"),
+        json.dumps({"verdict": "approved", "findings": ["fresh B"]}),
+    )
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), _packet(head_sha=old_head), answers=answers,
+        extra_env={
+            "MUSE_SHADOW_STATE": json.dumps(shadow_state),
+            "MUSE_SHADOW_AUTO_STATE": "1",
+            "MUSE_SHADOW_RESERVE_RESULT": "reserved",
+            "MUSE_HEAD_MOVE_AFTER_B": new_head,
+        })
+
+    assert proc.returncode == 0, proc.stderr
+    assert _muse_calls(repo) == 6
+    assert old_head in (repo / "muse.prompt.3").read_text()
+    assert new_head in (repo / "muse.prompt.6").read_text()
+    applied = json.loads((repo / "apply.answer").read_text())
+    assert applied["requirements"][0]["evidence"] == "new A"
+    assert "--head {}".format(new_head) in _apply_calls(repo)[0]
+    body = (repo / "gh.body").read_text()
+    assert body.count("Reviewer B shadow note") == 1
+    assert "Head SHA: `{}`".format(new_head) in body
+    assert "stale B" not in body
+    finishes = [line for line in _heartbeat(repo).splitlines()
+                if line.startswith("shadow-finish ")]
+    assert len(finishes) == 2
+    assert "--stable no" in finishes[0]
+    assert "--stable yes" in finishes[1]
 
 
 def test_a_cited_nate_override_stays_not_met_and_does_not_block(tmp_path):
@@ -2835,7 +3022,8 @@ def test_a_shape_is_applied_and_finished_done(tmp_path):
     decider and the auditor, merged in code and applied once."""
     proc, repo = _stubbed_runner(
         tmp_path, _issue_begin("shape"), _issue_packet("shape"),
-        answers=(_framer_answer(),))
+        answers=(_framer_answer(
+            failure_modes=["cache timeout is reported"]),))
 
     assert proc.returncode == 0, proc.stderr
     assert _muse_calls(repo) == 4
@@ -2846,6 +3034,7 @@ def test_a_shape_is_applied_and_finished_done(tmp_path):
     prompt = (repo / "muse.prompt.1").read_text()
     assert prompt.startswith("This call is the shape framer")
     assert "What is the plan, what is settled" in prompt
+    assert "failure_modes" in prompt
     assert "PACKET_JSON" not in prompt
     assert "rotate the api-key monthly" in prompt
     packet_calls = (repo / "packet.calls").read_text().splitlines()
@@ -2859,6 +3048,7 @@ def test_a_shape_is_applied_and_finished_done(tmp_path):
     assert "--agent muse" in calls[0]
     assert (repo / "applied.marker").exists()
     applied = json.loads((repo / "apply.answer").read_text())
+    assert applied["failure_modes"] == ["cache timeout is reported"]
     assert applied["decided_by_agent"] == [
         {"decision": "settle which day the key rotates",
          "alternative": "leave it open",
@@ -2871,6 +3061,25 @@ def test_a_shape_is_applied_and_finished_done(tmp_path):
         "--note shaped {}: Ready (self-approved: agent idea, finite "
         "class, no open questions) --shape-status Ready\n".format(SHAPE_REF)
     )
+
+
+def test_shape_runner_flag_omits_review_focus_end_to_end(tmp_path):
+    mode = "cache timeout is reported"
+    proc, repo = _stubbed_runner(
+        tmp_path, _issue_begin("shape"), _issue_packet("shape"),
+        args=("standard", "--omit-failure-modes"),
+        answers=(_framer_answer(failure_modes=[mode]),))
+
+    assert proc.returncode == 0, proc.stderr
+    prompt = (repo / "muse.prompt.1").read_text()
+    header = prompt.split("The text after this paragraph", 1)[0]
+    answer_shape = header.split(
+        "Answer with exactly one JSON object and nothing else:", 1)[1]
+    assert "`--omit-failure-modes` fallback is active" in header
+    assert '"failure_modes"' not in answer_shape
+    assert "--omit-failure-modes" in (repo / "apply.calls").read_text()
+    applied = json.loads((repo / "apply.answer").read_text())
+    assert applied["failure_modes"] == []
 
 
 def test_a_stale_shape_is_recorded_without_shape_status(tmp_path):

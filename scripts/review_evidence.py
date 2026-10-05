@@ -316,9 +316,10 @@ def _unittest_module_exists(root: pathlib.Path,
 
 
 def _rerun_unittest_on_base(base_root: pathlib.Path,
-                            node_ids: Sequence[str]) -> Tuple[dict,
-                                                               Optional[dict]]:
-    """Re-run failing unittest ids on main; return result and uncertainty."""
+                            node_ids: Sequence[str],
+                            command_prefix: Sequence[str]) -> Tuple[dict,
+                                                                    Optional[dict]]:
+    """Re-run failing unittest ids on main with the merge interpreter."""
     record = {"command": None, "result": None, "ran": [], "absent": [],
               "already_failing": []}
     for node_id in node_ids:
@@ -333,7 +334,7 @@ def _rerun_unittest_on_base(base_root: pathlib.Path,
             record["absent"].append(node_id)
     if not record["ran"]:
         return record, None
-    argv = ["python", "-m", "unittest", *record["ran"]]
+    argv = [*command_prefix, *record["ran"]]
     record["command"] = shlex.join(argv)
     try:
         passed, output, timed_out = _run_one(base_root, argv)
@@ -623,8 +624,19 @@ def _merge_and_run(worktree, head_sha: str, base_sha: str) -> dict:
             }
             record["blocking"] = True
             break
+        unittest_prefix = _unittest_prefix(argv)
+        if unittest_prefix is None:
+            record["unknown_result"] = {
+                "stage": "base",
+                "output_excerpt": (
+                    "Cannot reuse the unittest command prefix for "
+                    "origin/main comparison.\n"
+                    + _unittest_output_excerpt(output)),
+            }
+            record["blocking"] = True
+            break
         rerun, unknown = _rerun_unittest_on_base(
-            worktree("base", base_sha), unittest_ids)
+            worktree("base", base_sha), unittest_ids, unittest_prefix)
         record["base_rerun"] = rerun
         if unknown is not None:
             record["unknown_result"] = unknown

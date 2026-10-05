@@ -349,8 +349,9 @@ MAKE_PYPROJECT = '[tool.command-center]\ntest = "make test"\n'
 
 def test_a_unittest_failure_on_the_merge_is_named_and_base_compared(
         tmp_path, log):
-    # Reproduction: unittest writes FAIL: test_three (tests.test_calc.CalcTests),
-    # but the merged-suite parser currently only reads pytest summary lines.
+    # Origin/main reproduction: unittest writes FAIL: test_three
+    # (tests.test_calc.CalcTests), but the merged-suite parser only reads
+    # pytest summary lines.
     repo, base_sha, _ = make_repo(
         tmp_path,
         ancestor={
@@ -411,6 +412,81 @@ def test_a_unittest_failure_already_on_base_does_not_block(
     assert record["base_rerun"]["already_failing"] == [failure]
     assert record["new_failures"] == []
     assert record["blocking"] is False
+
+
+def test_a_unittest_base_rerun_reuses_the_merge_command_prefix(
+        tmp_path, monkeypatch, log):
+    repo, base_sha, _ = make_repo(
+        tmp_path,
+        ancestor={
+            "pyproject.toml": (
+                '[tool.command-center]\n'
+                'test = "python3 -m unittest discover"\n'),
+            "calc.py": "def double(x):\n    return 0\n",
+            "tests/__init__.py": "",
+            "tests/test_calc.py": (
+                "import unittest\n"
+                "from calc import double\n\n\n"
+                "class CalcTests(unittest.TestCase):\n"
+                "    def test_three(self):\n"
+                "        self.assertEqual(double(3), 6)\n"),
+        },
+        base={},
+        head={"head.txt": "unrelated change\n"},
+    )
+    calls = []
+
+    def run_one(root, argv, capture_timeout_output=False):
+        calls.append(list(argv))
+        return (False,
+                "FAIL: test_three (tests.test_calc.CalcTests)\n"
+                "Ran 1 test in 0.01s\nFAILED (failures=1)\n", False)
+
+    monkeypatch.setattr(review_evidence, "_run_one", run_one)
+    record = evidence(repo, base_sha, tmp_path)
+
+    assert calls[0][:3] == ["python3", "-m", "unittest"]
+    assert calls[1][:3] == calls[0][:3]
+    assert record["base_rerun"]["already_failing"] == [
+        "tests.test_calc.CalcTests.test_three"]
+    assert record["new_failures"] == []
+    assert record["blocking"] is False
+
+
+def test_wrapped_unittest_without_a_reusable_prefix_is_unknown(
+        tmp_path, monkeypatch, log):
+    repo, base_sha, _ = make_repo(
+        tmp_path,
+        ancestor={
+            "pyproject.toml": MAKE_PYPROJECT,
+            "calc.py": "def double(x):\n    return 0\n",
+            "tests/__init__.py": "",
+            "tests/test_calc.py": (
+                "import unittest\n"
+                "from calc import double\n\n\n"
+                "class CalcTests(unittest.TestCase):\n"
+                "    def test_three(self):\n"
+                "        self.assertEqual(double(3), 6)\n"),
+        },
+        base={},
+        head={"head.txt": "unrelated change\n"},
+    )
+    output = (
+        "FAIL: test_three (tests.test_calc.CalcTests)\n"
+        "Ran 1 test in 0.01s\nFAILED (failures=1)\n")
+    monkeypatch.setattr(
+        review_evidence, "_run_one",
+        lambda root, argv, capture_timeout_output=False:
+            (False, output, False))
+
+    record = evidence(repo, base_sha, tmp_path)
+
+    assert record["blocking"] is True
+    assert record["unknown_result"]["stage"] == "base"
+    assert "Cannot reuse the unittest command" in record["unknown_result"][
+        "output_excerpt"]
+    assert "FAIL: test_three (tests.test_calc.CalcTests)" in record[
+        "unknown_result"]["output_excerpt"]
 
 
 @pytest.mark.parametrize(("heading", "expected"), (

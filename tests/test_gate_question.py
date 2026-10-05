@@ -85,7 +85,7 @@ def ticket(number=31, parent=30, **fields):
 
 def routed(item, *others):
     by_ref = {i.ref: i for i in (item,) + others}
-    return funnel.watch_owns_gate(item, funnel.gate_question(item), by_ref)
+    return funnel.watch_owns_gate(item, by_ref)
 
 
 # -- reproduction: an unread block is not a silent block ------------------
@@ -325,10 +325,23 @@ def test_every_gate_question_literal_appears_once_in_funnel():
 
 def test_the_stage_gates_and_watch_questions_read_the_one_map():
     questions = set(funnel.GATE_QUESTIONS.values())
+    watch_question_keys = {
+        question_key
+        for question_key, owner in funnel.GATE_OWNER_TABLE.values()
+        if owner == "watch"
+    }
 
     assert set(funnel.GATES.values()) <= questions
-    assert funnel.WATCH_UNBLOCK_QUESTIONS == {
-        "Unblock?", "Unblock or park?", "Block unread — recheck?",
+    assert all(
+        owner in {"Nate", "watch"}
+        for _question_key, owner in funnel.GATE_OWNER_TABLE.values()
+    )
+    assert all(
+        question_key == "recorded" or question_key in funnel.GATE_QUESTIONS
+        for question_key, _owner in funnel.GATE_OWNER_TABLE.values()
+    )
+    assert watch_question_keys == {
+        "unblock", "unblock_or_park", "block_unread", "held_recheck", "plan",
     }
 
 
@@ -337,14 +350,17 @@ def test_the_render_template_names_the_watch_questions_from_the_map():
     question cannot leave the template naming the old literal."""
     template = funnel_render.render_template()
     section = template.split("Then `watch_gates`", 1)[1].split("\n\n", 1)[0]
-    for question in sorted(funnel.WATCH_UNBLOCK_QUESTIONS) + [
-        funnel.GATES["Shaped"],
-        funnel.GATE_QUESTIONS["held_recheck"],
-    ]:
+    watch_question_keys = {
+        question_key
+        for question_key, owner in funnel.GATE_OWNER_TABLE.values()
+        if owner == "watch"
+    }
+    for question in sorted(
+        funnel.GATE_QUESTIONS[key] for key in watch_question_keys
+    ):
         assert "`{}`".format(question) in section, question
     for constant in _string_constants(ROOT / "funnel_render.py"):
         for question in (
-            set(funnel.WATCH_UNBLOCK_QUESTIONS)
-            | {funnel.GATE_QUESTIONS["held_recheck"]}
+            funnel.GATE_QUESTIONS[key] for key in watch_question_keys
         ):
             assert question not in constant, question

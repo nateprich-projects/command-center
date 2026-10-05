@@ -130,7 +130,7 @@ def brief_for(items, capsys):
 
 def routed(item, *others):
     by_ref = {i.ref: i for i in (item,) + others}
-    return funnel.watch_owns_gate(item, funnel.gate_question(item), by_ref)
+    return funnel.watch_owns_gate(item, by_ref)
 
 
 def test_reproduction_unchanged_shaped_hold_is_watch_owned():
@@ -139,7 +139,7 @@ def test_reproduction_unchanged_shaped_hold_is_watch_owned():
     held_question = "Held — recheck?"
 
     assert funnel.gate_question(plan, by_ref) == held_question
-    assert funnel.watch_owns_gate(plan, held_question, by_ref)
+    assert funnel.watch_owns_gate(plan, by_ref)
 
 
 def test_brief_keeps_an_unchanged_hold_in_watch_gates_and_reopens_after_edit(
@@ -210,6 +210,57 @@ def test_needs_decision_ticket_stays_with_nate_when_question_is_unblock():
 
     assert funnel.gate_question(ticket) == "Unblock?"
     assert not routed(ticket)
+
+
+def test_gate_ownership_does_not_depend_on_question_wording(monkeypatch):
+    plan = shaped_plan(needs_lines=("- Scope and priority: include it?",))
+    silent = silent_blocked_ticket()
+    recorded = silent_blocked_ticket(number=32, needs_decision="Unblock?")
+
+    monkeypatch.setitem(funnel.GATE_QUESTIONS, "plan", "Unblock?")
+    monkeypatch.setitem(funnel.GATE_QUESTIONS, "unblock", "Is the plan good?")
+
+    assert funnel.gate_question(plan) == "Unblock?"
+    assert funnel.gate_question(silent) == "Is the plan good?"
+    assert funnel.gate_question(recorded) == "Unblock?"
+    assert routed(plan, silent, recorded)
+    assert routed(silent, plan, recorded)
+    assert not routed(recorded, plan, silent)
+
+
+@pytest.mark.parametrize("needs", [None, "unrecognized"])
+def test_missing_or_unknown_block_needs_fails_closed_to_nate(needs, capsys):
+    project = building_project()
+    ticket = silent_blocked_ticket(needs=needs)
+
+    assert funnel.gate_question(ticket) == "Unblock?"
+    assert not routed(ticket, project)
+
+    brief = brief_for([project, ticket], capsys)
+
+    assert brief["total_needing_nate"] == 1
+    assert [row["ref"] for row in brief["items"]] == [ticket.ref]
+    assert brief["watch_gates"] == []
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("origin", "unknown"), ("risk", None), ("needs", "unknown")],
+)
+def test_unknown_shaped_routing_fields_fail_closed_to_nate(
+    field, value, capsys,
+):
+    plan = shaped_plan(needs_lines=("- Scope and priority: include it?",))
+    setattr(plan, field, value)
+
+    assert funnel.gate_question(plan) == "Is the plan good?"
+    assert not routed(plan)
+
+    brief = brief_for([plan], capsys)
+
+    assert brief["total_needing_nate"] == 1
+    assert [row["ref"] for row in brief["items"]] == [plan.ref]
+    assert brief["watch_gates"] == []
 
 
 def test_a_blocked_ticket_with_needs_decision_goes_to_nate_in_the_brief(capsys):

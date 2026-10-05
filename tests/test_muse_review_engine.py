@@ -9,8 +9,8 @@ checks, deciders and an auditor in parallel, and the runner merges them
 every side effect.
 
 The harness below stubs the funnel, heartbeat, packet, apply, gh, and muse
-binaries; the routine text is the real files, so the prompt-substitution
-and word-count tests pin the artifacts that ship.
+binaries; the routine text and Reviewer B prompt come from the real checkout,
+so prompt-substitution tests pin the artifacts that ship.
 """
 
 from __future__ import annotations
@@ -35,7 +35,6 @@ from engine import review_prompts  # noqa: E402
 
 SCRIPT = ROOT / "scripts" / "muse-review-engine"
 ROUTINE = ROOT / "routines" / "muse-review.md"
-ROUTINE_B = ROOT / "routines" / "muse-review-b.md"
 ROUTINE_BREAKDOWN = ROOT / "routines" / "muse-breakdown.md"
 ROUTINE_SHAPE = ROOT / "routines" / "muse-shape.md"
 
@@ -836,9 +835,6 @@ def _stub_repo(tmp_path, begin, packet, *, answers=(), routine_body=None,
     (repo / "routines" / "muse-review.md").write_text(
         routine_body if routine_body is not None else ROUTINE.read_text()
     )
-    (repo / "routines" / "muse-review-b.md").write_text(
-        ROUTINE_B.read_text()
-    )
     shutil.copytree(
         ROOT / "engine" / "review_variants",
         repo / "engine" / "review_variants",
@@ -851,9 +847,8 @@ def _stub_repo(tmp_path, begin, packet, *, answers=(), routine_body=None,
     if trial_enabled is not None:
         manifest["trial_enabled"] = trial_enabled
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
-    # The engine checks every prompt before begin, so the stub repo carries
-    # all three real routines: a run must never take work it cannot ask
-    # about, whatever the job turns out to be.
+    # The engine checks every routine prompt before begin. Reviewer B's
+    # independent prompt is owned by engine/reviewer_b.py.
     (repo / "routines" / "muse-breakdown.md").write_text(
         ROUTINE_BREAKDOWN.read_text()
     )

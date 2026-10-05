@@ -156,7 +156,6 @@ MUSE_CALL_BIN="${MUSE_CALL_BIN:-$REPO/muse_call.py}"
 GH_BIN="${GH_BIN:-gh}"
 BOUND_SECONDS="${MUSE_REVIEW_ENGINE_BOUND_SECONDS:-1200}"
 ROUTINE_REVIEW="$REPO/routines/muse-review.md"
-ROUTINE_REVIEW_B="$REPO/routines/muse-review-b.md"
 # A replay asks with the routine it was given, under the same template check
 # (#1730).
 if (( REPLAY )); then
@@ -219,7 +218,8 @@ if ! PROMPT_REVIEW_JUDGE_RULES="$(printf '%s' "$REVIEW_PROMPT_JSON" | python3 -c
   echo "muse-review-engine: the active reviewer judge rules are invalid" >&2
   exit 1
 fi
-if ! PROMPT_REVIEW_B="$(check_routine "$ROUTINE_REVIEW_B")"; then
+if ! PROMPT_REVIEW_B="$(python3 "$REPO/engine/reviewer_b.py" prompt-template 2>&1)"; then
+  echo "muse-review-engine: cannot load the reviewer-B prompt: $PROMPT_REVIEW_B" >&2
   exit 1
 fi
 # An explicit path to the canonical routine still means the active variant;

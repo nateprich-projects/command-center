@@ -24,12 +24,12 @@ break nothing the plan, `plan_md` or the repository's rules require?
 - `plan_premises` groups parent-plan entries; an available empty `premises` list is valid, `available: false` unreadable or malformed.
 - `overlap` lists open PRs sharing files; weigh staleness.
 - `protected.touched` requires a ticket asking for each path.
-- `precheck` passed; judge ticket/plan fit, not CI, formatting, or style.
+- `precheck` passed; judge ticket/plan correspondence, not CI, formatting, or style.
 - Only real defects with realistic reproductions, missing or tautological `Accept` tests, and merged-main failures block; other out-of-focus edge cases are notes.
 
 ## The conformance pass
 
-Check requirements in turn against the diff, quoting each. A `met` cites the changed line doing the work. A `Does not break:` passes unless the diff breaks it.
+Walk each requirement one at a time against the diff, quoting it. A `met` cites the changed line doing the work. A `Does not break:` row is met unless a diff line breaks it.
 
 `plan_premises` is context: do not probe premises.
 
@@ -39,11 +39,11 @@ per-path counts in `evidence`; met twice when asked once is `unmet`.
 
 ## The answer
 
-Reply with exactly one JSON object, unfenced:
+Reply with exactly one JSON object and nothing else, unfenced:
 
 {"verdict": "approved" | "rejected", "blocking": [...], "unsure": [...], "requirements": [{"requirement": ..., "status": "met" | "unmet" | "unsure", "evidence": ...}]}
 
-- Approve only when the diff meets requirements and avoids rejected options.
+- Approve only when the diff meets the requirements and avoids rejected options.
 - `blocking` lists each unmet requirement, its file, the input, the path through the diff and the wrong outcome; an approval carries no blocking items.
 - `unsure` lists unresolved items; a non-empty `unsure` is recorded as rejected.
 - `requirements` has one result each; any `unmet` or `unsure` is recorded as rejected.

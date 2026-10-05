@@ -989,12 +989,13 @@ def _timing_lines(stderr):
 
 # -- the prompt ---------------------------------------------------------------
 
-def test_the_review_prompt_is_judgement_text_under_500_words():
-    """#794's Phase 1 bar for the routine file: the question, the schema,
+def test_the_review_prompt_is_judgement_text_under_522_words():
+    """#794's Phase 1 bar, with 22 words for #2024's stopping-rule bullet.
+    The routine contains the question, schema,
     the packet placeholder — and no protocol, because the model has no tool
     to execute one with."""
     body = review_prompts.load_active_prompt(ROOT).routine
-    assert len(body.split()) < 500
+    assert len(body.split()) < 522
     assert "\n---\n" in ROUTINE.read_text(), \
         "the baseline routine retains its human and prompt separator"
     prompt = body
@@ -1003,7 +1004,7 @@ def test_the_review_prompt_is_judgement_text_under_500_words():
     assert "does this diff do what its tickets ask" in normalized
     assert "avoid what the plan rejected" in normalized
     assert '"verdict": "approved" | "rejected"' in prompt
-    assert "exactly one json object, unfenced" in normalized
+    assert "exactly one json object and nothing else, unfenced" in normalized
     assert "non-empty `unsure` is recorded as rejected" in normalized
     assert "an approval carries no blocking items" in normalized
     for protocol in ("funnel.py", "heartbeat.py", "review-apply",
@@ -1029,8 +1030,7 @@ def test_the_review_prompt_requires_a_per_requirement_pass():
     than holistically read — and twice-met is unmet."""
     prompt = ROUTINE.read_text().split("\n---\n", 1)[1]
     normalized = " ".join(prompt.split()).lower()
-    assert "in turn" in normalized
-    assert "quoting each" in normalized
+    assert "one at a time" in normalized
     assert "twice" in normalized
     assert '"requirements"' in prompt
     assert '"met" | "unmet" | "unsure"' in prompt

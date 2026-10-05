@@ -214,6 +214,40 @@ def test_framer_preserves_failure_modes_and_can_omit_them():
     assert omitted["failure_modes"] == []
 
 
+def test_split_framer_and_merge_preserve_packet_bound_hotspot_routing():
+    target = {"repo_path": "engine/shape.py", "function": "collect"}
+    hotspots = [dict(target, broken_fix_count=3, window_days=7)]
+    framer = shape_split.parse_framer(
+        framer_answer(
+            proposed_class="Broken", hotspot_targets=[target],
+            redesign_remainder="Keep the remaining change small."),
+        hotspots=hotspots)
+    decisions = shape_split.parse_decider(
+        {"decisions": decisions_for(framer["decision_points"])},
+        framer["decision_points"])
+    merged = shape_split.merge_shape_answer(
+        framer, [], decisions,
+        shape_split.parse_auditor(audit_answer()), hotspots=hotspots)
+    assert merged["hotspot_targets"] == [target]
+    assert merged["redesign_remainder"] == \
+        "Keep the remaining change small."
+    with pytest.raises(ShapeError, match="not in the packet's hotspot list"):
+        shape_split.parse_framer(
+            framer_answer(
+                proposed_class="Broken", hotspot_targets=[{
+                    "repo_path": "other.py", "function": "run"}],
+                redesign_remainder="Remainder."), hotspots=hotspots)
+
+
+def test_split_fallback_ignores_hotspot_answer_fields():
+    framer = shape_split.parse_framer(
+        framer_answer(hotspot_targets=[{"bad": "ignored"}],
+                      redesign_remainder="ignored"),
+        include_hotspot_routing=False)
+    assert framer["hotspot_targets"] == []
+    assert framer["redesign_remainder"] == ""
+
+
 def test_framer_refuses_empty_decision_points():
     with pytest.raises(ShapeError, match="decision_points"):
         shape_split.parse_framer(framer_answer(decision_points=[]))

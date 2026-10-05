@@ -4961,6 +4961,199 @@ def _fake_python(directory, version):
     return path
 
 
+def _locked_environment_run_spy(monkeypatch, pip_returncode=0):
+    """Build real venvs, but keep package installation and tests offline."""
+    calls = []
+    real_run = implement._run
+
+    def spy(argv, **kwargs):
+        command = list(argv)
+        calls.append(command)
+        if len(command) >= 3 and command[1:3] == ["-m", "venv"]:
+            return real_run(command, **kwargs)
+        if len(command) >= 3 and command[1:3] == ["-m", "pip"]:
+            return subprocess.CompletedProcess(
+                command, pip_returncode, "pip fixture result",
+                "pip fixture failure" if pip_returncode else "")
+        if len(command) >= 2 and command[1] == "export":
+            return subprocess.CompletedProcess(
+                command, 0, "build==1.5.0\n", "")
+        if (len(command) >= 3 and command[1] == "-c" and
+                "sys.version_info" in command[2]):
+            return real_run(command, **kwargs)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(implement, "_run", spy)
+    return calls
+
+
+def test_run_tests_uses_and_records_per_repo_locked_environment(
+        tmp_path, monkeypatch):
+    _, clone = make_clone(tmp_path)
+    python_version = "{}.{}".format(*sys.version_info[:2])
+    (clone / ".python-version").write_text(python_version + "\n")
+    lock = clone / "requirements.lock"
+    lock.write_text("build==1.5.0\nmypy==2.3.1\n")
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    monkeypatch.setattr(heartbeat, "SPOOL_DIR", str(runtime))
+    monkeypatch.setattr(
+        implement, "resolve_checkout_repo",
+        lambda _root, explicit=None: "owner/repo")
+    calls = _locked_environment_run_spy(monkeypatch)
+
+    implement.run_tests(clone, [["python3", "-m", "unittest", "tests"]])
+
+    env = runtime / "finish-envs" / "owner--repo" / python_version
+    assert env.is_dir()
+    assert env.stat().st_mode & 0o777 == 0o700
+    manifest = json.loads((env / "environment.json").read_text())
+    assert manifest["repo"] == "owner/repo"
+    assert manifest["lock_sha256"] == hashlib.sha256(lock.read_bytes()).hexdigest()
+    assert manifest["interpreter"] == sys.executable
+    assert manifest["pip_result"]["exit_code"] == 0
+    assert any(command[1:3] == ["-m", "venv"] for command in calls)
+    assert any(command[1:3] == ["-m", "pip"] for command in calls)
+    test_command = next(
+        command for command in reversed(calls)
+        if "unittest" in command)
+    assert test_command[0] != sys.executable
+
+
+def _make_locked_test_checkout(tmp_path, monkeypatch,
+                               dependency_file="requirements.lock"):
+    _, clone = make_clone(tmp_path)
+    python_version = "{}.{}".format(*sys.version_info[:2])
+    (clone / ".python-version").write_text(python_version + "\n")
+    lock = clone / dependency_file
+    lock.write_text("build==1.5.0\nmypy==2.3.1\n")
+    if dependency_file == "pyproject.toml":
+        lock.write_text(
+            "[build-system]\nrequires = ['setuptools']\n"
+            "build-backend = 'setuptools.build_meta'\n\n"
+            "[project]\nname = 'fixture'\nversion = '0.1.0'\n")
+    if dependency_file == "uv.lock":
+        (clone / "pyproject.toml").write_text(
+            "[project]\nname = 'fixture'\nversion = '0.1.0'\n")
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    monkeypatch.setattr(heartbeat, "SPOOL_DIR", str(runtime))
+    monkeypatch.setattr(
+        implement, "resolve_checkout_repo",
+        lambda _root, explicit=None: "owner/repo")
+    return clone, lock, runtime, python_version
+
+
+def test_run_tests_reuses_locked_environment_when_lock_is_unchanged(
+        tmp_path, monkeypatch):
+    clone, _lock, _runtime, _version = _make_locked_test_checkout(
+        tmp_path, monkeypatch)
+    calls = _locked_environment_run_spy(monkeypatch)
+
+    implement.run_tests(clone, [["python3", "-m", "unittest", "tests"]])
+    implement.run_tests(clone, [["python3", "-m", "unittest", "tests"]])
+
+    assert sum(command[1:3] == ["-m", "venv"] for command in calls) == 1
+    assert sum(command[1:3] == ["-m", "pip"] for command in calls) == 1
+
+
+def test_run_tests_rebuilds_locked_environment_when_lock_changes(
+        tmp_path, monkeypatch):
+    clone, lock, _runtime, _version = _make_locked_test_checkout(
+        tmp_path, monkeypatch)
+    calls = _locked_environment_run_spy(monkeypatch)
+
+    implement.run_tests(clone, [["python3", "-m", "unittest", "tests"]])
+    lock.write_text(lock.read_text() + "ruff==0.12.7\n")
+    implement.run_tests(clone, [["python3", "-m", "unittest", "tests"]])
+
+    assert sum(command[1:3] == ["-m", "venv"] for command in calls) == 2
+    assert sum(command[1:3] == ["-m", "pip"] for command in calls) == 2
+
+
+def test_run_tests_rebuilds_locked_environment_after_activation_failure(
+        tmp_path, monkeypatch):
+    clone, _lock, runtime, _version = _make_locked_test_checkout(
+        tmp_path, monkeypatch)
+    calls = _locked_environment_run_spy(monkeypatch)
+    implement.run_tests(clone, [["python3", "-m", "unittest", "tests"]])
+    real_python_version = implement._python_version
+    failed_once = False
+
+    def fail_one_activation(executable):
+        nonlocal failed_once
+        env_root = str(runtime / "finish-envs") + os.sep
+        if str(executable).startswith(env_root) and not failed_once:
+            failed_once = True
+            return None
+        return real_python_version(executable)
+
+    monkeypatch.setattr(implement, "_python_version", fail_one_activation)
+    implement.run_tests(clone, [["python3", "-m", "unittest", "tests"]])
+
+    assert failed_once
+    assert sum(command[1:3] == ["-m", "venv"] for command in calls) == 2
+
+
+def test_pinned_interpreter_fails_closed_when_locked_install_fails(
+        tmp_path, monkeypatch):
+    clone, lock, runtime, python_version = _make_locked_test_checkout(
+        tmp_path, monkeypatch)
+    calls = _locked_environment_run_spy(monkeypatch, pip_returncode=17)
+
+    with pytest.raises(implement.ImplementError, match="environment") as caught:
+        implement.pinned_interpreter(clone)
+
+    env = runtime / "finish-envs" / "owner--repo" / python_version
+    assert not env.exists()
+    assert hashlib.sha256(lock.read_bytes()).hexdigest() in str(caught.value)
+    assert "17" in str(caught.value)
+    assert caught.value.pip_result["exit_code"] == 17
+    assert sum(command[1:3] == ["-m", "pip"] for command in calls) == 1
+
+
+@pytest.mark.parametrize("dependency_file", [
+    "requirements.txt", "pyproject.toml", "uv.lock",
+])
+def test_pinned_interpreter_adapts_supported_dependency_layouts(
+        tmp_path, monkeypatch, dependency_file):
+    clone, _lock, runtime, python_version = _make_locked_test_checkout(
+        tmp_path, monkeypatch, dependency_file=dependency_file)
+    calls = _locked_environment_run_spy(monkeypatch)
+    if dependency_file == "uv.lock":
+        monkeypatch.setattr(
+            implement.shutil, "which",
+            lambda name: "/usr/bin/uv" if name == "uv" else None)
+
+    implement.pinned_interpreter(clone)
+
+    env = runtime / "finish-envs" / "owner--repo" / python_version
+    assert (env / "environment.json").is_file()
+    pip_commands = [command for command in calls
+                    if command[1:3] == ["-m", "pip"]]
+    assert len(pip_commands) == 1
+    if dependency_file == "requirements.txt":
+        assert pip_commands[0][-2:] == ["-r", str(clone / dependency_file)]
+    elif dependency_file == "pyproject.toml":
+        assert pip_commands[0][-1] == "."
+    else:
+        export = next(command for command in calls
+                      if len(command) >= 2 and command[1] == "export")
+        assert export[export.index("--format") + 1] == "requirements.txt"
+        assert pip_commands[0][-1].endswith("uv-export-requirements.txt")
+
+
+def test_locked_install_failure_is_reported_as_environment_error():
+    failure = implement.EnvironmentSetupError(
+        "a" * 64, "pip install", {"exit_code": 17})
+
+    note = implement._failure_note(failure, repo=REPO)
+
+    assert note.startswith("finish environment error:")
+    assert "tests failed" not in note
+    assert "lock sha256 " + "a" * 64 in note
+
+
 def test_an_unpinned_checkout_runs_under_this_interpreter(tmp_path, monkeypatch):
     """#1024: with no .python-version, #953's choice stands."""
     _, clone = make_clone(tmp_path)

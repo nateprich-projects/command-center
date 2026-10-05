@@ -1003,7 +1003,7 @@ def test_the_review_prompt_is_judgement_text_under_500_words():
     assert "does this diff do what its tickets ask" in normalized
     assert "avoid what the plan rejected" in normalized
     assert '"verdict": "approved" | "rejected"' in prompt
-    assert "exactly one json object and nothing else" in normalized
+    assert "exactly one json object, unfenced" in normalized
     assert "non-empty `unsure` is recorded as rejected" in normalized
     assert "an approval carries no blocking items" in normalized
     for protocol in ("funnel.py", "heartbeat.py", "review-apply",
@@ -1013,13 +1013,24 @@ def test_the_review_prompt_is_judgement_text_under_500_words():
                 protocol))
 
 
+def test_the_review_prompt_limits_blocking_to_the_three_stopping_kinds():
+    prompt = review_prompts.load_active_prompt(ROOT).routine
+    normalized = " ".join(prompt.split()).lower()
+
+    assert "only real defects with realistic reproductions" in normalized
+    assert "missing or tautological `accept` tests" in normalized
+    assert "merged-main failures block" in normalized
+    assert "other out-of-focus edge cases are notes" in normalized
+
+
 def test_the_review_prompt_requires_a_per_requirement_pass():
     """#1187: the model walks each requirement one at a time against the
     diff and records the pass, so plan conformance is enumerated rather
     than holistically read — and twice-met is unmet."""
     prompt = ROUTINE.read_text().split("\n---\n", 1)[1]
     normalized = " ".join(prompt.split()).lower()
-    assert "one at a time" in normalized
+    assert "in turn" in normalized
+    assert "quoting each" in normalized
     assert "twice" in normalized
     assert '"requirements"' in prompt
     assert '"met" | "unmet" | "unsure"' in prompt
@@ -2855,6 +2866,8 @@ def test_the_breakdown_prompt_is_judgement_text_under_500_words():
     assert '"risk": "standard" | "escalated"' in prompt
     assert '"needs": "none" | "human" | "claude-code-environment"' in prompt
     assert "exactly one json object and nothing else" in normalized
+    assert ("for each `## review focus` bullet, put one `accept` test in its "
+            "owning ticket; copy the text verbatim once" in normalized)
     for protocol in ("funnel.py", "heartbeat.py", "breakdown-apply",
                      "breakdown-packet", "gh issue create", "```bash"):
         assert protocol not in prompt, (
@@ -2922,6 +2935,12 @@ def test_the_shape_prompt_is_judgement_text_under_500_words():
             '"measured" | "documented" | "inferred"}]') in prompt
     assert "omit them from `plan_markdown`" in normalized
     assert "exactly one json object and nothing else" in normalized
+    assert '"failure_modes": [...]' in prompt
+    assert '"hotspot_targets": [{"repo_path": ..., "function": ...}]' in prompt
+    assert '"redesign_remainder": ...' in prompt
+    assert "omission equals `[]`" in normalized
+    assert "exact `{repo_path, function}` pairs from packet hotspots" in normalized
+    assert "targets require non-empty markdown `redesign_remainder`" in normalized
     for protocol in ("funnel.py", "heartbeat.py", "shape-apply",
                      "shape-packet", "gh issue", "```bash"):
         assert protocol not in prompt, (

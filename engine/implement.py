@@ -23,6 +23,7 @@ import importlib.util
 import json
 import os
 import pathlib
+import pwd
 import re
 import shlex
 import shutil
@@ -85,6 +86,27 @@ class SupersededRunError(ImplementError):
         self.ref = ref
         self.reason = reason
         super().__init__("superseded {}: {}".format(ref, reason))
+
+
+CODEX_USER_UID = 506
+CODEX_CHECKOUT_RUNS_ROOT = pathlib.Path(
+    "/Users/codex/.claude/command-center-heartbeat/codex-runs"
+)
+
+
+def _checkout_owner_is_allowed(owner_uid: int,
+                              runs_root: pathlib.Path) -> bool:
+    """Allow Nate to remove a Codex-owned checkout only at its fixed root."""
+    if owner_uid == os.getuid():
+        return True
+    try:
+        codex_uid = pwd.getpwnam("codex").pw_uid
+    except KeyError:
+        return False
+    return (
+        owner_uid == CODEX_USER_UID == codex_uid
+        and pathlib.Path(runs_root).resolve() == CODEX_CHECKOUT_RUNS_ROOT
+    )
 
 
 class MergedSuiteError(ImplementError):
@@ -2950,8 +2972,10 @@ def _remove_codex_run_checkout(root: pathlib.Path, number: int,
         return False
     import heartbeat
     runs_root = None
-    for candidate in (pathlib.Path(funnel.CLAUDE_DIR) / "codex-runs",
-                      pathlib.Path(heartbeat.SPOOL_DIR) / "codex-runs"):
+    for candidate in (
+            pathlib.Path(funnel.CLAUDE_DIR) / "codex-runs",
+            pathlib.Path(heartbeat.SPOOL_DIR) / "codex-runs",
+            CODEX_CHECKOUT_RUNS_ROOT):
         if candidate.is_symlink():
             continue
         try:
@@ -2969,9 +2993,15 @@ def _remove_codex_run_checkout(root: pathlib.Path, number: int,
         return False
     try:
         info = checkout.stat()
-        if (not checkout.is_dir() or info.st_uid != os.getuid()
+        if (not checkout.is_dir()
+                or not _checkout_owner_is_allowed(info.st_uid, runs_root)
                 or info.st_mode & 0o077):
             return False
+        if runs_root == CODEX_CHECKOUT_RUNS_ROOT:
+            root_info = runs_root.stat()
+            if (root_info.st_uid != CODEX_USER_UID
+                    or root_info.st_mode & 0o077):
+                return False
         if (checkout / ".git").exists():
             try:
                 top = _run(

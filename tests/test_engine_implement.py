@@ -1640,6 +1640,41 @@ def test_heartbeat_root_cleanup_refuses_another_tickets_checkout(
     assert not checkout.exists()
 
 
+def test_cleanup_accepts_the_codex_owned_runtime_runs_root(
+        tmp_path, monkeypatch):
+    runs_root = (
+        tmp_path / "codex-home" / ".claude" /
+        "command-center-heartbeat" / "codex-runs"
+    )
+    runs_root.mkdir(parents=True, mode=0o700)
+    monkeypatch.setattr(implement, "CODEX_CHECKOUT_RUNS_ROOT", runs_root)
+    monkeypatch.setattr(implement, "CODEX_USER_UID", os.getuid())
+    monkeypatch.setattr(funnel, "CLAUDE_DIR", str(tmp_path / "nate-claude"))
+    monkeypatch.setattr(heartbeat, "SPOOL_DIR", str(tmp_path / "nate-heartbeat"))
+    checkout = runs_root / LIVE_RUN_NAME.format(42)
+    _remote, clone = make_clone(tmp_path, clone_path=checkout)
+    clone.chmod(0o700)
+
+    assert implement._remove_codex_run_checkout(clone, 42, "codex")
+    assert not clone.exists()
+
+
+def test_foreign_checkout_owner_is_allowed_only_for_codex_runtime_root(
+        monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        implement.pwd, "getpwnam",
+        lambda name: SimpleNamespace(pw_uid=506),
+    )
+    root = pathlib.Path("/Users/codex/.claude/command-center-heartbeat/codex-runs")
+    assert implement._checkout_owner_is_allowed(506, root)
+    assert not implement._checkout_owner_is_allowed(507, root)
+    assert not implement._checkout_owner_is_allowed(
+        506, pathlib.Path("/tmp/untrusted/codex-runs")
+    )
+
+
 def test_runtime_generated_macos_checkout_is_removed_on_finish(
         tmp_path, monkeypatch):
     runtime = (ROOT / "routines" / "codex-work.md").read_text(

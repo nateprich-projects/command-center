@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import errno
 import hashlib
 import json
 import os
@@ -731,6 +732,42 @@ def _verify_socket_directory(path: pathlib.Path, owner_uid: int) -> None:
         raise BrokerError("broker socket directory lacks the Codex search ACL")
 
 
+def _clear_stale_socket(path: pathlib.Path, owner_uid: int) -> None:
+    """Remove only this broker's dead socket, never a live or foreign path."""
+    try:
+        before = path.lstat()
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise BrokerError("broker socket path cannot be inspected") from exc
+    if (not stat.S_ISSOCK(before.st_mode) or before.st_uid != owner_uid
+            or stat.S_IMODE(before.st_mode) != 0o600):
+        raise BrokerError("broker socket path is not an owned private socket")
+    probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    probe.settimeout(1)
+    try:
+        try:
+            probe.connect(str(path))
+        except OSError as exc:
+            if exc.errno != errno.ECONNREFUSED:
+                raise BrokerError("broker socket state is uncertain") from exc
+        else:
+            raise BrokerError("broker socket is already listening")
+    finally:
+        probe.close()
+    try:
+        after = path.lstat()
+    except OSError as exc:
+        raise BrokerError("broker socket changed during restart") from exc
+    if (after.st_dev != before.st_dev or after.st_ino != before.st_ino
+            or after.st_mode != before.st_mode or after.st_uid != before.st_uid):
+        raise BrokerError("broker socket changed during restart")
+    try:
+        path.unlink()
+    except OSError as exc:
+        raise BrokerError("could not remove the stale broker socket") from exc
+
+
 def _handle_connection(
     connection: socket.socket,
     *,
@@ -774,8 +811,7 @@ def serve_forever(
         socket_path or os.environ.get("BROKER_SOCKET") or DEFAULT_SOCKET
     )
     _verify_socket_directory(path.parent, owner)
-    if path.exists() or path.is_symlink():
-        raise BrokerError("broker socket path already exists; refusing to replace it")
+    _clear_stale_socket(path, owner)
     server = server_factory(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
         server.bind(str(path))

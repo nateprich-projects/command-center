@@ -99,9 +99,9 @@ def test_hotspots_sort_by_broken_fix_count_descending(monkeypatch, tmp_path):
     hunks = {}
     fix_projects = {}
     fixes = [
+        (201, 50, "beta"), (202, 60, "beta"), (203, 70, "beta"),
         (101, 10, "alpha"), (102, 20, "alpha"),
         (103, 30, "alpha"), (104, 40, "alpha"),
-        (201, 50, "beta"), (202, 60, "beta"), (203, 70, "beta"),
     ]
     for ticket, project, function in fixes:
         sha = str(ticket)

@@ -2031,6 +2031,32 @@ def test_collect_limits_runner_hotspots_to_the_measured_repository(
     assert len(calls) == 1
 
 
+def test_collect_shape_packet_sorts_hotspots_by_broken_fix_count(
+        monkeypatch):
+    current = idea(
+        42, repo=funnel.REPO,
+        url="https://github.com/{}/issues/42".format(funnel.REPO))
+    monkeypatch.setattr(
+        funnel, "recorded_cause_regressions",
+        lambda found, at: {"broken_fix_tickets": []})
+    monkeypatch.setattr(
+        "fix_recurrence.measure",
+        lambda repo, projects, at: {
+            "window_days": 7, "hotspot_threshold": 3,
+            "hotspots": [
+                {"path": "engine/other.py", "function": "run", "count": 3},
+                {"path": "engine/shape.py", "function": "collect", "count": 4},
+            ],
+        })
+
+    found = collected_packet(monkeypatch, current)
+
+    assert [(row["function"], row["broken_fix_count"])
+            for row in found["hotspots"]] == [
+        ("collect", 4), ("run", 3),
+    ]
+
+
 def test_collect_rejects_an_unknown_idea():
     with pytest.raises(funnel.GitHubError):
         shape.collect(REPO, 42, items_loader=lambda: [idea(43)])

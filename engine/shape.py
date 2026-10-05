@@ -1746,6 +1746,7 @@ def measure_shape_hotspots(now: datetime,
                 "repo_path": row["path"], "function": row["function"],
                 "broken_fix_count": row["count"], "window_days": 7,
             })
+    hotspots.sort(key=lambda row: row["broken_fix_count"], reverse=True)
     return hotspots
 
 

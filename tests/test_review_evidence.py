@@ -347,6 +347,131 @@ def test_a_conflict_is_recorded_and_nothing_runs(tmp_path, log):
 MAKE_PYPROJECT = '[tool.command-center]\ntest = "make test"\n'
 
 
+def test_a_unittest_failure_on_the_merge_is_named_and_base_compared(
+        tmp_path, log):
+    # Reproduction: unittest writes FAIL: test_three (tests.test_calc.CalcTests),
+    # but the merged-suite parser currently only reads pytest summary lines.
+    repo, base_sha, _ = make_repo(
+        tmp_path,
+        ancestor={
+            "pyproject.toml": (
+                '[tool.command-center]\n'
+                'test = "python3 -m unittest discover"\n'),
+            "calc.py": "def double(x):\n    return x * 2\n",
+            "tests/__init__.py": "",
+            "tests/test_calc.py": (
+                "import unittest\n"
+                "from calc import double\n\n\n"
+                "class CalcTests(unittest.TestCase):\n"
+                "    def test_three(self):\n"
+                "        self.assertEqual(double(3), 6)\n"),
+        },
+        base={},
+        head={"calc.py": "def double(x):\n    return 0\n"},
+    )
+
+    record = evidence(repo, base_sha, tmp_path)
+
+    failure = "tests.test_calc.CalcTests.test_three"
+    assert record["result"] == "fail"
+    assert record["blocking"] is True
+    assert record["failing"] == [failure]
+    assert record["base_rerun"]["ran"] == [failure]
+    assert record["base_rerun"]["result"] == "pass"
+    assert record["base_rerun"]["already_failing"] == []
+    assert record["new_failures"] == [failure]
+
+
+def test_a_unittest_failure_already_on_base_does_not_block(
+        tmp_path, log):
+    repo, base_sha, _ = make_repo(
+        tmp_path,
+        ancestor={
+            "pyproject.toml": (
+                '[tool.command-center]\n'
+                'test = "python3 -m unittest discover"\n'),
+            "calc.py": "def double(x):\n    return x * 2\n",
+            "tests/__init__.py": "",
+            "tests/test_calc.py": (
+                "import unittest\n"
+                "from calc import double\n\n\n"
+                "class CalcTests(unittest.TestCase):\n"
+                "    def test_three(self):\n"
+                "        self.assertEqual(double(3), 6)\n"),
+        },
+        base={"calc.py": "def double(x):\n    return 0\n"},
+        head={"head.txt": "unrelated change\n"},
+    )
+
+    record = evidence(repo, base_sha, tmp_path)
+
+    failure = "tests.test_calc.CalcTests.test_three"
+    assert record["result"] == "fail"
+    assert record["failing"] == [failure]
+    assert record["base_rerun"]["already_failing"] == [failure]
+    assert record["new_failures"] == []
+    assert record["blocking"] is False
+
+
+@pytest.mark.parametrize(("heading", "expected"), (
+    ("FAIL: test_three (tests.test_calc.CalcTests)",
+     "tests.test_calc.CalcTests.test_three"),
+    ("ERROR: test_three (tests.test_calc.CalcTests.test_three)",
+     "tests.test_calc.CalcTests.test_three"),
+    ("FAIL: tests.test_calc.CalcTests.test_three",
+     "tests.test_calc.CalcTests.test_three"),
+))
+def test_unittest_failure_ids_read_python_runner_variants(heading, expected):
+    output = "{}\n\nRan 1 test in 0.01s\n\nFAILED (failures=1)\n".format(
+        heading)
+
+    assert review_evidence.unittest_failure_ids(
+        output, ["make", "test"]) == [expected]
+
+
+def test_unparseable_unittest_base_output_is_unknown_with_excerpt(
+        tmp_path, monkeypatch, log):
+    repo, base_sha, _ = make_repo(
+        tmp_path,
+        ancestor={
+            "pyproject.toml": (
+                '[tool.command-center]\n'
+                'test = "python3 -m unittest discover"\n'),
+            "calc.py": "def double(x):\n    return x * 2\n",
+            "tests/__init__.py": "",
+            "tests/test_calc.py": (
+                "import unittest\n"
+                "from calc import double\n\n\n"
+                "class CalcTests(unittest.TestCase):\n"
+                "    def test_three(self):\n"
+                "        self.assertEqual(double(3), 6)\n"),
+        },
+        base={},
+        head={"calc.py": "def double(x):\n    return 0\n"},
+    )
+
+    def run_one(root, argv, capture_timeout_output=False):
+        if argv[-1] == "discover":
+            return (False,
+                    "FAIL: test_three (tests.test_calc.CalcTests)\n"
+                    "Ran 1 test in 0.01s\nFAILED (failures=1)\n", False)
+        return (False,
+                "FAIL: test_three (unrecognized runner output)\n"
+                "Ran 1 test in 0.01s\nFAILED (failures=1)\n", False)
+
+    monkeypatch.setattr(review_evidence, "_run_one", run_one)
+    record = evidence(repo, base_sha, tmp_path)
+
+    assert record["blocking"] is True
+    assert record["unknown_result"]["stage"] == "base"
+    assert "unrecognized runner output" in record["unknown_result"][
+        "output_excerpt"]
+    assert "Ran 1 test in 0.01s" in record["unknown_result"][
+        "output_excerpt"]
+    unknown = implement._merged_failure(record)
+    assert isinstance(unknown, implement.MergedSuiteUnknownError)
+
+
 def test_a_make_test_repo_runs_on_the_merge(tmp_path, log):
     # The recipe fails unless both sides' files are there, and records that
     # it ran.

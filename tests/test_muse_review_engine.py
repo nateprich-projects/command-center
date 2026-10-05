@@ -869,6 +869,11 @@ def _stub_repo(tmp_path, begin, packet, *, answers=(), routine_body=None,
     (engine / "review.py").write_text((ROOT / "engine" / "review.py").read_text())
     (engine / "reviewer_b.py").write_text(
         (ROOT / "engine" / "reviewer_b.py").read_text())
+    (engine / "paired_trial.py").write_text(
+        "import os, sys\n"
+        "with open(os.environ['PAIRED_TRIAL_LOG'], 'a') as stream:\n"
+        "    stream.write(' '.join(sys.argv[1:]) + '\\n')\n"
+        "raise SystemExit(int(os.environ.get('PAIRED_TRIAL_STATUS', '0')))\n")
     # engine/review.py reads the evidence markers from the module that writes
     # them (#1812), and that module imports the decline classifier.
     (engine / "implement.py").write_text(
@@ -913,6 +918,7 @@ def _stub_repo(tmp_path, begin, packet, *, answers=(), routine_body=None,
         MUSE_PROMPT=str(repo / "muse.prompt"),
         GH_LOG=str(repo / "gh.log"),
         GH_BODY=str(repo / "gh.body"),
+        PAIRED_TRIAL_LOG=str(repo / "paired-trial.log"),
     )
     for index, answer in enumerate(answers, 1):
         env["MUSE_ANSWER_{}".format(index)] = answer
@@ -1691,6 +1697,36 @@ def test_reviewer_b_runs_blind_after_a_and_posts_only_a_nonblocking_note(tmp_pat
     gh_calls = (repo / "gh.log").read_text().splitlines()
     assert gh_calls == [next(line for line in gh_calls if "pr comment" in line)]
     assert "shadow-finish" in _heartbeat(repo)
+    assert (repo / "paired-trial.log").read_text() == "update --run engine-run\n"
+
+
+def test_paired_table_update_failure_does_not_block_reviewer_a(tmp_path):
+    shadow_state = {
+        "live_used_count": 0,
+        "live_count": 0,
+        "calibration_used_count": 20,
+        "calibration_count": 20,
+        "next_calibration": None,
+        "pairs": [],
+    }
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), _packet(head_sha="a" * 40),
+        answers=_review_answers(
+            _judge_answer(evidence="A remains approved"),
+            json.dumps({"verdict": "rejected", "findings": ["edge case found"]}),
+        ),
+        extra_env={
+            "MUSE_SHADOW_STATE": json.dumps(shadow_state),
+            "MUSE_SHADOW_AUTO_STATE": "1",
+            "MUSE_SHADOW_RESERVE_RESULT": "reserved",
+            "PAIRED_TRIAL_STATUS": "1",
+        })
+
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads((repo / "apply.answer").read_text())["verdict"] == "approved"
+    assert "Reviewer B shadow note" in (repo / "gh.body").read_text()
+    assert (repo / "paired-trial.log").read_text() == "update --run engine-run\n"
+    assert "paired-trial table update failed" in proc.stderr
 
 
 @pytest.mark.parametrize(

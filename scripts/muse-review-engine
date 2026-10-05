@@ -1053,6 +1053,14 @@ reviewer_b_finish_pair() {
       || cat "$RUN_DIR/reviewer-b-comment.err" >&2
     return 1
   fi
+  if ! python3 "$REPO/engine/paired_trial.py" update \
+      --run "$BEGIN_RUN" \
+      >"$RUN_DIR/paired-trial-update.out" \
+      2>"$RUN_DIR/paired-trial-update.err"; then
+    echo "muse-review-engine: paired-trial table update failed; reviewer B note remains posted" >&2
+    [[ ! -s "$RUN_DIR/paired-trial-update.err" ]] \
+      || cat "$RUN_DIR/paired-trial-update.err" >&2
+  fi
   return 0
 }
 

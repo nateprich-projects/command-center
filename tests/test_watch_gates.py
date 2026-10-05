@@ -133,6 +133,120 @@ def routed(item, *others):
     return funnel.watch_owns_gate(item, by_ref)
 
 
+def owner_route_fixture(case):
+    """Build one route from the inventory; expected routing stays in tests."""
+    if case == "held-shaped-condition":
+        item, condition = held_shaped_plan()
+        return item, [item, condition]
+    if case == "blocked-recorded-question":
+        parent = building_project()
+        item = silent_blocked_ticket(
+            needs_decision="Which repository owns the schedule?",
+        )
+        return item, [parent, item]
+    if case == "blocked-breakdown-question":
+        item = building_project()
+        item.labels = ["blocked"]
+        item.needs_decision = "Which repository owns the schedule?"
+        return item, [item]
+    if case == "blocked-unread-watch":
+        parent = building_project()
+        item = silent_blocked_ticket()
+        item.block_comments_error = "could not read comments"
+        return item, [parent, item]
+    if case == "blocked-unread-nate":
+        item = building_project()
+        item.labels = ["blocked"]
+        item.needs = "human"
+        item.block_comments_error = "could not read comments"
+        return item, [item]
+    if case == "blocked-ticket-unblock-watch":
+        parent = building_project()
+        item = silent_blocked_ticket()
+        return item, [parent, item]
+    if case == "blocked-ticket-unblock-nate":
+        parent = building_project()
+        item = silent_blocked_ticket(needs="human")
+        return item, [parent, item]
+    if case == "blocked-lane-decline-unblock-watch":
+        parent = building_project()
+        item = silent_blocked_ticket(needs="human")
+        item.decline_reason = "the prerequisite has not landed"
+        return item, [parent, item]
+    if case == "blocked-project-unblock-watch":
+        item = building_project()
+        item.labels = ["blocked"]
+        return item, [item]
+    if case == "blocked-project-unblock-nate":
+        item = building_project()
+        item.labels = ["blocked"]
+        item.needs = "human"
+        return item, [item]
+    if case == "building-accept":
+        item = building_project()
+        item.klass = "New"
+        item.origin = "Nate"
+        item.children_done = 1
+        return item, [item]
+    if case == "shaped-plan-watch":
+        item = shaped_plan(needs_lines=(
+            "- Scope and priority: include the sibling's fix?",
+        ))
+        return item, [item]
+    if case == "shaped-plan-nate":
+        item = shaped_plan(needs_lines=(
+            "- Preference: which wording should the alert use?",
+        ))
+        return item, [item]
+    raise AssertionError(case)
+
+
+@pytest.mark.parametrize(
+    ("case", "question", "watch_owned"),
+    [
+        ("held-shaped-condition", "Held — recheck?", True),
+        (
+            "blocked-recorded-question",
+            "Which repository owns the schedule?", False,
+        ),
+        (
+            "blocked-breakdown-question",
+            "Answer the breakdown's question?", False,
+        ),
+        ("blocked-unread-watch", "Block unread — recheck?", True),
+        ("blocked-unread-nate", "Block unread — recheck?", False),
+        ("blocked-ticket-unblock-watch", "Unblock?", True),
+        ("blocked-ticket-unblock-nate", "Unblock?", False),
+        ("blocked-lane-decline-unblock-watch", "Unblock?", True),
+        ("blocked-project-unblock-watch", "Unblock or park?", True),
+        ("blocked-project-unblock-nate", "Unblock or park?", False),
+        ("building-accept", "Accept it?", False),
+        ("shaped-plan-watch", "Is the plan good?", True),
+        ("shaped-plan-nate", "Is the plan good?", False),
+    ],
+)
+def test_owner_route_fixtures_pin_question_owner_and_brief_placement(
+    case, question, watch_owned, capsys,
+):
+    item, items = owner_route_fixture(case)
+    by_ref = {row.ref: row for row in items}
+
+    assert funnel.gate_question(item, by_ref) == question
+    assert funnel.watch_owns_gate(item, by_ref) is watch_owned
+
+    brief = brief_for(items, capsys)
+    if watch_owned:
+        assert brief["total_needing_nate"] == 0
+        assert brief["items"] == []
+        assert [row["ref"] for row in brief["watch_gates"]] == [item.ref]
+        assert brief["watch_gates"][0]["question"] == question
+    else:
+        assert brief["total_needing_nate"] == 1
+        assert [row["ref"] for row in brief["items"]] == [item.ref]
+        assert brief["items"][0]["waiting_on"] == question
+        assert brief["watch_gates"] == []
+
+
 def test_reproduction_unchanged_shaped_hold_is_watch_owned():
     plan, condition = held_shaped_plan()
     by_ref = {"nateprich/beta#42": plan, "nateprich/beta#41": condition}

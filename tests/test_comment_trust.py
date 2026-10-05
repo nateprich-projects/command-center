@@ -123,7 +123,7 @@ BODY_READERS: Dict[str, str] = {
     "funnel.py:_acceptance_waiting_reason": _PLAN_BODY,
     "funnel.py:shaped_self_approvable": _PLAN_BODY,
     "funnel.py:_shaped_risk_holds": _PLAN_BODY,
-    "funnel.py:gate_question": _PLAN_BODY,
+    "funnel.py:_gate_route": _PLAN_BODY,
     "funnel.py:cmd_answer_gates": _PLAN_BODY,
     "funnel.py:_decline_route_withholds_startability": _PLAN_BODY,
     "funnel.py:recorded_cause_regressions": _PLAN_BODY,

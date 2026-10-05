@@ -31,6 +31,7 @@ if $DRY; then
   say "would grant nateprich search only on the path to $CODEX_RUNS"
   say "would create $CODEX_RUNS owned by codex mode 0700"
   say "would grant nateprich inherited read, write, and search on $CODEX_RUNS"
+  say "would grant codex inherited traversal and deletion on broker-created checkout descendants"
   exit 0
 fi
 if ! id codex >/dev/null 2>&1 || ! id nateprich >/dev/null 2>&1; then
@@ -72,4 +73,8 @@ done
 /usr/bin/install -d -o codex -g "$CODEX_GROUP" -m 0700 "$CODEX_RUNS"
 /bin/chmod 0700 "$CODEX_RUNS"
 ensure_acl "$CODEX_RUNS" "nateprich allow list,search,add_file,add_subdirectory,delete_child,read,write,readattr,writeattr,readextattr,writeextattr,readsecurity,file_inherit,directory_inherit"
+# The checkout root is Codex-owned, but finish runs as Nate and can create
+# Nate-owned directories below it. Inherit explicit Codex rights into those
+# descendants so the model account can traverse and remove its checkout.
+ensure_acl "$CODEX_RUNS" "codex allow list,search,add_file,add_subdirectory,delete,delete_child,read,write,readattr,writeattr,readextattr,writeextattr,readsecurity,file_inherit,directory_inherit"
 say "installed broker socket and checkout access ACLs"

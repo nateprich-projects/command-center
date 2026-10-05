@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import pathlib
+import shutil
 import subprocess
 import sys
 
@@ -71,6 +72,19 @@ def make_home(path):
         "[user]\n\tname = Fixture\n\temail = fixture@example.test\n",
         encoding="utf-8",
     )
+    return path
+
+
+def make_git_proxy(path):
+    path.mkdir()
+    module = path / "credential_broker.py"
+    module.write_bytes(pathlib.Path(broker.__file__).read_bytes())
+    module.chmod(0o700)
+    (path / "manifest.json").write_text(json.dumps({
+        "version": broker.BROKER_VERSION,
+        "sha256": hashlib.sha256(module.read_bytes()).hexdigest(),
+    }), encoding="utf-8")
+    (path / "git").symlink_to("credential_broker.py")
     return path
 
 
@@ -202,6 +216,7 @@ def test_finish_environment_pins_safe_directory_remote_and_hooks(tmp_path):
         checkout, "owner/repo", 7, hooks,
         home=home, runner_root=tmp_path / "runner",
         remote_url=remote, allowed_protocols="https:file",
+        git_proxy_dir=make_git_proxy(tmp_path / "broker"),
     )
     count = int(env["GIT_CONFIG_COUNT"])
     pairs = [
@@ -227,8 +242,23 @@ def test_finish_environment_pins_safe_directory_remote_and_hooks(tmp_path):
     assert env["GIT_TERMINAL_PROMPT"] == "0"
     assert env["GIT_ALLOW_PROTOCOL"] == "https:file"
     assert env["GIT_CONFIG_GLOBAL"] == "/dev/null"
+    assert env["PATH"].split(":")[0] == str(tmp_path / "broker")
     assert ("user.name", "Fixture") in pairs
     assert ("user.email", "fixture@example.test") in pairs
+
+
+def test_finish_refuses_a_replaced_or_drifted_git_proxy(tmp_path):
+    proxy_dir = make_git_proxy(tmp_path / "broker")
+    proxy = proxy_dir / "git"
+    proxy.unlink()
+    proxy.symlink_to("/usr/bin/git")
+    with pytest.raises(broker.BrokerError, match="trusted Git proxy"):
+        broker.verify_git_proxy(proxy_dir)
+    proxy.unlink()
+    proxy.symlink_to("credential_broker.py")
+    (proxy_dir / "credential_broker.py").write_text("drift\n")
+    with pytest.raises(broker.BrokerError, match="drift detected"):
+        broker.verify_git_proxy(proxy_dir)
 
 
 def test_finish_ignores_hostile_repository_configuration(tmp_path):
@@ -260,7 +290,7 @@ def test_finish_ignores_hostile_repository_configuration(tmp_path):
             cwd=checkout)
     run_git("config", "--local", "--add", "credential.helper",
             "!{}".format(scripts["helper"]), cwd=checkout)
-    run_git("config", "--local", "alias.status",
+    run_git("config", "--local", "alias.foo",
             "!{}".format(scripts["alias"]), cwd=checkout)
     run_git("remote", "set-url", "origin", "ssh://attacker.invalid/repo.git",
             cwd=checkout)
@@ -272,6 +302,8 @@ def test_finish_ignores_hostile_repository_configuration(tmp_path):
     finish.write_text(
         "# fake trusted finish entry point\n"
         "import subprocess\n"
+        "alias = subprocess.run(['git', 'foo'], capture_output=True, text=True)\n"
+        "assert alias.returncode != 0 and 'not a built-in' in alias.stderr\n"
         "subprocess.run(['git', 'status', '--short'], check=True)\n"
         "subprocess.run(['git', '-c', 'user.name=Fixture', "
         "'-c', 'user.email=fixture@example.test', 'commit', '--allow-empty', "
@@ -280,7 +312,11 @@ def test_finish_ignores_hostile_repository_configuration(tmp_path):
         "input='protocol=https\\nhost=github.com\\n\\n', "
         "text=True, capture_output=True, check=False)\n"
         "subprocess.run(['git', 'push', '--set-upstream', 'origin', "
-        "'ticket/7'], check=True)\n",
+        "'ticket/7'], check=True)\n"
+        "from pathlib import Path\n"
+        "nested = Path('broker-created/nested')\n"
+        "nested.mkdir(parents=True)\n"
+        "(nested / 'created-by-finish').write_text('done')\n",
         encoding="utf-8",
     )
 
@@ -299,11 +335,17 @@ def test_finish_ignores_hostile_repository_configuration(tmp_path):
         remote_url=remote.as_uri(),
         credential_helper="!{}".format(safe_helper),
         allowed_protocols="https:file",
+        git_proxy_dir=make_git_proxy(tmp_path / "broker"),
     )
     assert result["ok"] is True, result
     assert run_git("--git-dir", str(remote), "show-ref",
                    "refs/heads/ticket/7", check=False).returncode == 0
     assert not any(path.exists() for path in markers.values())
+    # Same-user simulation of the finish -> checkout removal sequence. The
+    # actual Codex/Nate ACL inheritance still requires #2000's Mac proof.
+    assert (checkout / "broker-created/nested/created-by-finish").exists()
+    shutil.rmtree(checkout)
+    assert not checkout.exists()
 
 
 def test_installed_manifest_detects_drift_and_server_refuses_checkout_copy(tmp_path):
@@ -343,6 +385,8 @@ def test_versioned_installer_repairs_drift_in_a_private_copy(tmp_path):
     installed = home / ".claude" / "command-center-broker"
     module = installed / "credential_broker.py"
     manifest_path = installed / "manifest.json"
+    assert (installed / "git").is_symlink()
+    assert (installed / "git").readlink() == pathlib.Path("credential_broker.py")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert installed.stat().st_mode & 0o777 == 0o700
     assert module.stat().st_mode & 0o777 == 0o700
@@ -377,3 +421,7 @@ def test_broker_access_cutover_has_a_read_only_dry_run():
     assert "/Users/Shared/command-center-broker" in result.stdout
     assert "/Users/codex/.claude/command-center-heartbeat/codex-runs" in result.stdout
     assert "inherited read, write, and search" in result.stdout
+    assert "codex inherited traversal and deletion" in result.stdout
+    source = (ROOT / "scripts" / "install-broker-access.sh").read_text()
+    assert "codex allow list,search,add_file,add_subdirectory,delete,delete_child" in source
+    assert "file_inherit,directory_inherit" in source

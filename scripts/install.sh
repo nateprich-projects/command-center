@@ -83,7 +83,7 @@ done
 BROKER_SOURCE="$REPO/credential_broker.py"
 BROKER_DIR="$CLAUDE/command-center-broker"
 if $DRY; then
-  say "would install and drift-check the credential broker: $BROKER_DIR"
+  say "would install and drift-check the credential broker and trusted Git proxy: $BROKER_DIR"
 else
   python3 - "$BROKER_SOURCE" "$BROKER_DIR" <<'PY'
 import ast
@@ -116,8 +116,13 @@ target.mkdir(mode=0o700, parents=True, exist_ok=True)
 os.chmod(target, 0o700)
 destination = target / "credential_broker.py"
 manifest = target / "manifest.json"
+git_proxy = target / "git"
 if destination.is_symlink() or manifest.is_symlink():
     raise SystemExit("REFUSING: broker install files cannot be symlinks")
+if git_proxy.exists() and not git_proxy.is_symlink():
+    raise SystemExit("REFUSING: trusted Git proxy path is not a symlink")
+if git_proxy.is_symlink() and git_proxy.readlink() != pathlib.Path("credential_broker.py"):
+    raise SystemExit("REFUSING: trusted Git proxy points outside the broker")
 digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
 payload = json.dumps(
     {"version": version, "sha256": digest}, sort_keys=True, indent=2
@@ -140,6 +145,8 @@ def replace_file(path, data, mode):
 
 replace_file(destination, text, 0o700)
 replace_file(manifest, payload, 0o600)
+if not git_proxy.is_symlink():
+    git_proxy.symlink_to("credential_broker.py")
 hooks = target / "hooks-empty"
 if hooks.is_symlink():
     raise SystemExit("REFUSING: empty hooks path cannot be a symlink")

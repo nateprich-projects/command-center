@@ -31,6 +31,7 @@ BROKER_INSTALL_DIR = pathlib.Path(
 BROKER_SOURCE_NAME = "credential_broker.py"
 MANIFEST_NAME = "manifest.json"
 EMPTY_HOOKS_NAME = "hooks-empty"
+GIT_PROXY_NAME = "git"
 DEFAULT_SOCKET = pathlib.Path(
     "/Users/Shared/command-center-broker/broker.sock"
 )
@@ -253,6 +254,17 @@ def _repo_url(repo: str) -> str:
     return "https://github.com/{}.git".format(repo)
 
 
+def verify_git_proxy(directory: pathlib.Path) -> None:
+    """Require a private proxy linked to the drift-checked broker module."""
+    directory = pathlib.Path(directory)
+    module = directory / BROKER_SOURCE_NAME
+    proxy = directory / GIT_PROXY_NAME
+    if (not proxy.is_symlink() or proxy.readlink() != pathlib.Path(BROKER_SOURCE_NAME)
+            or not module.is_file()):
+        raise BrokerError("installed trusted Git proxy is unavailable")
+    verify_installed_copy(module, directory / MANIFEST_NAME)
+
+
 def finish_environment(
     checkout: pathlib.Path,
     repo: str,
@@ -264,6 +276,7 @@ def finish_environment(
     remote_url: Optional[str] = None,
     credential_helper: str = "!gh auth git-credential",
     allowed_protocols: str = "https",
+    git_proxy_dir: Optional[pathlib.Path] = None,
 ) -> Dict[str, str]:
     """Pin Git and GitHub CLI behavior for a hostile model-writable checkout."""
     checkout = pathlib.Path(checkout).resolve()
@@ -271,10 +284,19 @@ def finish_environment(
     url = remote_url or _repo_url(repo)
     trusted_home = pathlib.Path(home or _home_for_runner())
     env = runner_environment(home=trusted_home, runner_root=runner_root)
+    proxy_dir = pathlib.Path(git_proxy_dir or BROKER_INSTALL_DIR)
+    verify_git_proxy(proxy_dir)
     git_name, git_email = trusted_git_identity(trusted_home)
     # Ignore every global safe.directory, alias, and executable setting. The
     # two trusted identity fields are copied below; auth uses the fixed helper.
     env["GIT_CONFIG_GLOBAL"] = "/dev/null"
+    # Git has no environment switch that discards .git/config. Route every
+    # ordinary `git` call from finish-ticket through the installed, verified
+    # broker copy, which admits built-in commands only. Local aliases cannot
+    # become commands even if the model rewrites .git/config during finish.
+    env["PATH"] = "{}:{}".format(
+        proxy_dir, FIXED_PATH
+    )
     env.update({
         "GIT_DIR": str(checkout / ".git"),
         "GIT_WORK_TREE": str(checkout),
@@ -345,6 +367,7 @@ def verify_checkout(
     runner_root: pathlib.Path = RUNNER_ROOT,
     remote_url: Optional[str] = None,
     allowed_protocols: str = "https",
+    git_proxy_dir: Optional[pathlib.Path] = None,
     runner: Callable = subprocess.run,
 ) -> Dict[str, str]:
     """Check the exact ticket checkout and fixed effective remote before finish."""
@@ -369,6 +392,7 @@ def verify_checkout(
         resolved, repo, number, hooks_path,
         home=home, runner_root=runner_root, remote_url=remote_url,
         allowed_protocols=allowed_protocols,
+        git_proxy_dir=git_proxy_dir,
     )
     branch = _git_call(
         ["branch", "--show-current"], resolved, env, runner=runner
@@ -531,6 +555,7 @@ def run_finish(
     remote_url: Optional[str] = None,
     credential_helper: str = "!gh auth git-credential",
     allowed_protocols: str = "https",
+    git_proxy_dir: Optional[pathlib.Path] = None,
     runner: Callable = subprocess.run,
 ) -> Dict[str, object]:
     """Run finish-ticket only for the claim-derived checkout and branch."""
@@ -543,6 +568,7 @@ def run_finish(
         expected_uid=context.get("expected_uid"),
         home=home, runner_root=runner_root, remote_url=remote_url,
         allowed_protocols=allowed_protocols, runner=runner,
+        git_proxy_dir=git_proxy_dir,
     )
     if credential_helper != "!gh auth git-credential":
         env = finish_environment(
@@ -550,6 +576,7 @@ def run_finish(
             home=home, runner_root=runner_root, remote_url=remote_url,
             credential_helper=credential_helper,
             allowed_protocols=allowed_protocols,
+            git_proxy_dir=git_proxy_dir,
         )
     encoded_answer = json.dumps(
         dict(answer), ensure_ascii=False, separators=(",", ":")
@@ -869,8 +896,52 @@ def client_main(argv: Sequence[str]) -> int:
     return 1
 
 
+def _git_subcommand(args: Sequence[str]) -> Optional[str]:
+    """Find the command after the global Git options used by finish/tests."""
+    index = 0
+    while index < len(args):
+        option = args[index]
+        if option in ("-C", "-c", "--git-dir", "--work-tree", "--namespace"):
+            index += 2
+        elif (option.startswith(("-C", "-c", "--git-dir=", "--work-tree=",
+                                 "--namespace=")) and option not in ("-C", "-c")):
+            index += 1
+        elif option in ("--version", "--help"):
+            return option
+        elif option.startswith("-"):
+            return None
+        else:
+            return option
+    return None
+
+
+def trusted_git_main(args: Sequence[str]) -> int:
+    """Execute Git built-ins only; never expand a checkout's local alias."""
+    try:
+        verify_installed_copy()
+        listed = subprocess.run(
+            ["/usr/bin/git", "--list-cmds=builtins"],
+            cwd="/", env={"PATH": FIXED_PATH, "HOME": "/",
+                          "GIT_CONFIG_NOSYSTEM": "1",
+                          "GIT_CONFIG_GLOBAL": "/dev/null"},
+            capture_output=True, text=True, check=True, timeout=10,
+        )
+    except (BrokerError, OSError, subprocess.SubprocessError) as exc:
+        print("credential-broker: trusted Git proxy unavailable: {}".format(exc),
+              file=sys.stderr)
+        return 1
+    command = _git_subcommand(args)
+    if command not in set(listed.stdout.split()) | {"--version", "--help"}:
+        print("credential-broker: Git command is not a built-in", file=sys.stderr)
+        return 1
+    os.execv("/usr/bin/git", ["/usr/bin/git", *args])
+    return 1
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
+    if pathlib.Path(sys.argv[0]).name == GIT_PROXY_NAME:
+        return trusted_git_main(args)
     if args:
         return client_main(args)
     try:

@@ -5154,6 +5154,66 @@ def test_pinned_interpreter_adapts_supported_dependency_layouts(
         assert pip_commands[0][-1].endswith("uv-export-requirements.txt")
 
 
+@pytest.mark.parametrize("pyproject", [
+    (
+        "[project]\nname = 'fixture'\nversion = '0.1.0'\n"
+        "dynamic = ['dependencies']\n"
+    ),
+    (
+        "[tool.poetry]\nname = 'fixture'\nversion = '0.1.0'\n\n"
+        "[tool.poetry.dev-dependencies]\npytest = '^8.0'\n"
+    ),
+])
+def test_pinned_interpreter_installs_dynamic_and_poetry_pyproject_dependencies(
+        tmp_path, monkeypatch, pyproject):
+    clone, _lock, runtime, python_version = _make_locked_test_checkout(
+        tmp_path, monkeypatch, dependency_file="pyproject.toml")
+    (clone / "pyproject.toml").write_text(pyproject)
+    calls = _locked_environment_run_spy(monkeypatch)
+
+    implement.pinned_interpreter(clone)
+
+    env = runtime / "finish-envs" / "owner--repo" / python_version
+    pip_commands = [command for command in calls
+                    if command[1:3] == ["-m", "pip"]]
+    assert (env / "environment.json").is_file()
+    assert len(pip_commands) == 1
+    assert pip_commands[0][-1] == "."
+
+
+def test_pinned_interpreter_fails_closed_for_unreadable_pyproject(
+        tmp_path, monkeypatch):
+    clone, lock, runtime, _python_version = _make_locked_test_checkout(
+        tmp_path, monkeypatch, dependency_file="pyproject.toml")
+    lock.write_bytes(b"\xff")
+    calls = _locked_environment_run_spy(monkeypatch)
+
+    with pytest.raises(implement.EnvironmentSetupError) as caught:
+        implement.pinned_interpreter(clone)
+
+    assert caught.value.step == "read dependency lock"
+    assert not (runtime / "finish-envs").exists()
+    assert not any(command[1:3] == ["-m", "venv"] for command in calls)
+
+
+def test_pinned_interpreter_rebuilds_when_cached_environment_path_is_a_file(
+        tmp_path, monkeypatch):
+    clone, _lock, runtime, python_version = _make_locked_test_checkout(
+        tmp_path, monkeypatch)
+    environment = (
+        runtime / "finish-envs" / "owner--repo" / python_version)
+    environment.parent.mkdir(parents=True)
+    environment.write_text("stale file at the environment path")
+    calls = _locked_environment_run_spy(monkeypatch)
+
+    python = implement.pinned_interpreter(clone)
+
+    assert environment.is_dir()
+    assert pathlib.Path(python).is_file()
+    assert (environment / "environment.json").is_file()
+    assert sum(command[1:3] == ["-m", "venv"] for command in calls) == 1
+
+
 def test_locked_install_failure_is_reported_as_environment_error():
     failure = implement.EnvironmentSetupError(
         "a" * 64, "pip install", {"exit_code": 17})

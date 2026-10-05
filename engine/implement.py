@@ -1066,7 +1066,7 @@ def _dependency_source(root: pathlib.Path):
                 continue
             if kind == "uv-lock" and (root / "pyproject.toml").is_file():
                 content += b"\0" + (root / "pyproject.toml").read_bytes()
-        except OSError:
+        except (OSError, UnicodeError):
             raise EnvironmentSetupError("unreadable", "read dependency lock") \
                 from None
         return path, kind, hashlib.sha256(content).hexdigest()
@@ -1075,9 +1075,16 @@ def _dependency_source(root: pathlib.Path):
 
 def _pyproject_has_dependencies(text: str) -> bool:
     """Ignore tool-only pyprojects; install only declared Python dependencies."""
+    project = re.search(
+        r"(?ims)^\s*\[\s*project\s*\]\s*(.*?)(?=^\s*\[|\Z)", text)
+    if (project and re.search(
+            r"(?im)^[ \t]*dynamic[ \t]*=[ \t]*\[[^\]]*['\"]dependencies['\"]",
+            project.group(1))):
+        return True
     return bool(re.search(
         r"(?im)^\s*\[\s*(?:build-system|dependency-groups|"
         r"project\.optional-dependencies|tool\.poetry\.dependencies|"
+        r"tool\.poetry\.dev-dependencies|"
         r"tool\.poetry\.group\.[^]]+\.dependencies)\s*\]\s*$|"
         r"^\s*(?:dependencies|optional-dependencies|requires|"
         r"dev-dependencies)\s*=",
@@ -1108,8 +1115,10 @@ def _private_directory(path: pathlib.Path) -> None:
 def _remove_environment(path: pathlib.Path) -> None:
     if path.is_symlink():
         path.unlink()
-    elif path.exists():
+    elif path.is_dir():
         shutil.rmtree(path)
+    elif path.exists():
+        path.unlink()
 
 
 def _environment_python(environment: pathlib.Path,

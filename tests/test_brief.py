@@ -29,6 +29,7 @@ def no_resend_network(monkeypatch):
     """Brief fixture tests should not read live heartbeat or outcome branches."""
     import heartbeat
 
+    monkeypatch.setenv("COMMAND_CENTER_MUSE_ESTIMATE_FEED_DISABLED", "1")
     funnel.reset_api_usage()
     monkeypatch.setattr(
         heartbeat, "read_brief", lambda agent, timeout=None: []

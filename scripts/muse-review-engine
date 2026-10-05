@@ -918,13 +918,25 @@ shadow_reserve_pair() {
 
 reviewer_b_model() {
   local packet_path="$1"
+  local model_repo="${2:-$BEGIN_REPO}"
+  local A_MODEL="$MUSE_MODEL"
+  local B_MODEL
+  local MUSE_MODEL
+  local CALL_EFFORT
   local attempt=1
   local model_status
   local parse_err
   local packet_json
-  # Reviewer B is pinned to muse-spark-1.3 at max, using the same model
-  # resolved for this repository so its existing contributor posture holds.
-  local CALL_EFFORT="max"
+  # Bind B to the repository's muse-spark-1.3 id at this call site. The
+  # resolver selects its contributor variant only where the existing posture
+  # allows it; if that no longer matches A's resolved model, skip this pair.
+  B_MODEL="$(resolve_muse_model "$model_repo")"
+  if [[ "$B_MODEL" != "$A_MODEL" ]]; then
+    echo "muse-review-engine: reviewer-B model for $model_repo no longer matches reviewer A; skipping the pair" >&2
+    return 1
+  fi
+  MUSE_MODEL="$B_MODEL"
+  CALL_EFFORT="max"
   local -a MUSE_EXEC=("$MUSE_BIN" exec --model "$MUSE_MODEL" --json)
   local -a MUSE_EXEC_UNBOUND=("$MUSE_BIN" exec --model "$MUSE_MODEL" --json)
   B_VALID=0
@@ -1114,7 +1126,7 @@ run_live_reviewer_b() {
     B_VERDICT="unsure"
     if reviewer_b_start_pair live "$BEGIN_REPO" "$BEGIN_PR" \
         "$pair_head" "" "$a_verdict"; then
-      reviewer_b_model "$pair_packet"
+      reviewer_b_model "$pair_packet" "$BEGIN_REPO"
     else
       echo "muse-review-engine: reviewer B was not called because its start reading is unavailable" >&2
     fi
@@ -1256,7 +1268,7 @@ run_calibration_reviewer_b() {
   B_VERDICT="unsure"
   if reviewer_b_start_pair "$kind" "$repo" "$pr" "$head" \
       "$sample" "$a_verdict"; then
-    reviewer_b_model "$packet"
+    reviewer_b_model "$packet" "$repo"
   else
     echo "muse-review-engine: calibration reviewer B has no heartbeat start; skipping it" >&2
   fi

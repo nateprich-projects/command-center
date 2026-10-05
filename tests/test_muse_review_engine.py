@@ -1693,8 +1693,15 @@ def test_reviewer_b_runs_blind_after_a_and_posts_only_a_nonblocking_note(tmp_pat
     assert "shadow-finish" in _heartbeat(repo)
 
 
-def test_reviewer_b_pins_resolved_model_and_max_effort(tmp_path):
-    repo_name = "nateprich-projects/command-center"
+@pytest.mark.parametrize(
+    ("repo_name", "expected_model"),
+    [
+        ("nateprich-projects/command-center", "muse-spark-1.3-contributor"),
+        ("nateprich-projects/career-toolset", "muse-spark-1.3"),
+    ],
+)
+def test_reviewer_b_pins_resolved_model_and_max_effort(
+        tmp_path, repo_name, expected_model):
     shadow_state = {
         "live_used_count": 0,
         "live_count": 0,
@@ -1725,7 +1732,7 @@ def test_reviewer_b_pins_resolved_model_and_max_effort(tmp_path):
     b_args = (repo / "muse.args.3").read_text().splitlines()
     assert a_args[a_args.index("--reasoning-effort") + 1] == "high"
     assert b_args[b_args.index("--reasoning-effort") + 1] == "max"
-    assert b_args[b_args.index("--model") + 1] == "muse-spark-1.3-contributor"
+    assert b_args[b_args.index("--model") + 1] == expected_model
     assert b_args[b_args.index("--model") + 1] == a_args[a_args.index("--model") + 1]
 
 

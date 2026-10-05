@@ -50,6 +50,8 @@ from engine.shape import (  # noqa: E402
     _validate_depends_on,
     _validate_escalated_risk,
     _validate_failure_modes,
+    _validate_hotspot_routing,
+    _validate_packet_hotspots,
     _validate_investigate_possible_defect,
     _validate_precedent,
     _validate_premises,
@@ -80,7 +82,8 @@ DECISION_KINDS = {
 
 #: The framer's answer keys — ``failure_modes`` is optional.
 FRAMER_KEYS = ("proposed_class", "plan_markdown", "decision_points",
-               "depends_on", "failure_modes")
+               "depends_on", "failure_modes", "hotspot_targets",
+               "redesign_remainder")
 
 #: The auditor's answer keys — exactly these, no extras.
 AUDITOR_KEYS = ("premises", "escalated_risk")
@@ -264,7 +267,9 @@ def _exactly_once(entries: List[Dict], key: str,
 
 
 def parse_framer(answer: object, *,
-                 include_failure_modes: bool = True) -> Dict:
+                 include_failure_modes: bool = True,
+                 hotspots: Optional[Sequence[Dict[str, object]]] = None,
+                 include_hotspot_routing: bool = True) -> Dict:
     """Validate the framer's draft.
 
     ``proposed_class`` is a ladder class, ``plan_markdown`` a non-empty
@@ -278,8 +283,13 @@ def parse_framer(answer: object, *,
         data = dict(data)
         if not include_failure_modes:
             data.pop("failure_modes", None)
+        if not include_hotspot_routing:
+            data.pop("hotspot_targets", None)
+            data.pop("redesign_remainder", None)
         if "failure_modes" not in data:
             data["failure_modes"] = []
+        data.setdefault("hotspot_targets", [])
+        data.setdefault("redesign_remainder", "")
     _check_keys(data, FRAMER_KEYS, "the framer answer")
     proposed = _require_line(data["proposed_class"], "proposed_class")
     if proposed not in funnel.LADDER:
@@ -293,6 +303,10 @@ def parse_framer(answer: object, *,
         raise ShapeError(
             "plan_markdown must not carry a '{}' section; the sibling "
             "checks render it".format(SIBLINGS_HEADING))
+    hotspot_targets, redesign_remainder = _validate_hotspot_routing(
+        data.get("hotspot_targets", []),
+        data.get("redesign_remainder", ""),
+        _validate_packet_hotspots(hotspots or []), proposed)
     return {
         "proposed_class": proposed,
         "plan_markdown": plan_markdown,
@@ -300,6 +314,8 @@ def parse_framer(answer: object, *,
             data["decision_points"], "decision_points"),
         "depends_on": _validate_depends_on(data["depends_on"]),
         "failure_modes": _validate_failure_modes(data["failure_modes"]),
+        "hotspot_targets": hotspot_targets,
+        "redesign_remainder": redesign_remainder,
     }
 
 
@@ -424,7 +440,9 @@ def merge_shape_answer(framer: Dict,
                        siblings: Sequence[Dict[str, str]],
                        decisions: Sequence[Dict[str, str]],
                        audit: Dict, *,
-                       include_failure_modes: bool = True) -> Dict:
+                       include_failure_modes: bool = True,
+                       hotspots: Optional[Sequence[Dict[str, object]]] = None,
+                       include_hotspot_routing: bool = True) -> Dict:
     """Build the shape answer from the parsed parts. Pure: no IO.
 
     Takes ``parse_framer``'s draft, every sibling check's entries and
@@ -496,6 +514,12 @@ def merge_shape_answer(framer: Dict,
         "premises": list(audit["premises"]),
         "failure_modes": (list(framer["failure_modes"])
                            if include_failure_modes else []),
+        "hotspot_targets": (list(framer.get("hotspot_targets", []))
+                            if include_hotspot_routing else []),
+        "redesign_remainder": (framer.get("redesign_remainder", "")
+                                if include_hotspot_routing else ""),
     }
     assert set(merged) == ANSWER_KEYS
-    return validate_answer(merged)
+    return validate_answer(
+        merged, hotspots=hotspots,
+        include_hotspot_routing=include_hotspot_routing)

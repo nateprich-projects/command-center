@@ -3948,6 +3948,21 @@ def finish_main(argv: Optional[Sequence[str]] = None) -> int:
         parser.error(
             "one of --answer/--answer-file and --run are required "
             "without --dry-run")
+    if args.agent == "codex":
+        import broker_route
+        if broker_route.use_broker("codex"):
+            if args.repo or args.note or args.answer == "-":
+                print("finish-ticket: isolated Codex broker accepts only a "
+                      "bound run and JSON answer; direct GitHub fallback is "
+                      "disabled", file=sys.stderr)
+                return 2
+            from credential_broker import client_main
+            request = ["finish", "--run", args.run]
+            if args.answer_file is not None:
+                request.extend(["--answer-file", args.answer_file])
+            else:
+                request.extend(["--answer", args.answer])
+            return client_main(request)
     caller = funnel.graphql_caller_for_run(args.run, args.agent)
     with funnel.graphql_caller(caller):
         return _finish_ticket(args)

@@ -23900,6 +23900,17 @@ def main(argv: Optional[Sequence[str]] = None, *,
     reject.add_argument("--note", default=None, help="what is broken")
     args = parser.parse_args(argv)
 
+    if args.command == "begin" and args.agent == "codex":
+        import broker_route
+        if broker_route.use_broker("codex"):
+            if (args.tier not in TIERS or args.idle or args.breakdown
+                    or args.caller_role not in (None, "implement")):
+                print("begin: isolated Codex broker accepts only an implement "
+                      "tier; direct GitHub fallback is disabled", file=sys.stderr)
+                return 2
+            from credential_broker import client_main
+            return client_main(["begin", "--tier", args.tier])
+
     if args.command == "hold":
         if not args.release and not args.reason:
             parser.error("hold needs --reason unless --release is used")

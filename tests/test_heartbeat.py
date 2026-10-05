@@ -23,6 +23,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 import heartbeat  # noqa: E402
+from engine import reviewer_b  # noqa: E402
 
 spec = importlib.util.spec_from_file_location(
     "watchdog", ROOT / ".github" / "scripts" / "watchdog.py"
@@ -1325,3 +1326,118 @@ def test_budget_exhausted_is_a_named_non_skipped_finish():
 
 def test_heartbeat_retains_about_three_days_of_records():
     assert heartbeat.KEEP == 10000
+
+
+def _reviewer_b_pair(pair_id, *, kind="live", repo="owner/repo", pr=1,
+                     head=None, sample=None, run=None, start=100,
+                     finish=112, start_spent=2.0, finish_spent=2.025,
+                     stable=True, b_verdict="rejected"):
+    head = head or "a" * 40
+    run = run or "run-" + pair_id
+    identity = {
+        "run": run,
+        "agent": "muse",
+        "trial_id": reviewer_b.TRIAL_ID,
+        "pair_id": pair_id,
+        "kind": kind,
+        "repo": repo,
+        "pr": pr,
+        "head_sha": head,
+        "sample_name": sample,
+        "a_verdict": "approved",
+    }
+    return [
+        dict(identity, phase="shadow_pair_start", ts=start,
+             usage={"seven_day": {"resets_at": 500, "spent_dollars": start_spent}}),
+        dict(identity, phase="shadow_pair_finish", ts=finish, stable=stable,
+             b_verdict=b_verdict,
+             usage={"seven_day": {"resets_at": 500, "spent_dollars": finish_spent}}),
+    ]
+
+
+def test_reviewer_b_measurement_uses_paired_heartbeat_usage_and_timestamps():
+    rows = _reviewer_b_pair("pair-1", start=100, finish=112,
+                            start_spent=2.0, finish_spent=2.025)
+
+    pair = reviewer_b.pair_rows(rows)[0]
+    assert pair["cost_dollars"] == 0.025
+    assert pair["latency_seconds"] == 12
+    assert pair["a_verdict"] == "approved"
+    assert pair["b_verdict"] == "rejected"
+
+
+def test_reviewer_b_trial_stops_after_thirty_live_and_twenty_calibration_pairs():
+    records = []
+    for index in range(30):
+        records.extend(_reviewer_b_pair(
+            "live-{}".format(index), pr=index + 1,
+            head="{:040x}".format(index + 1), start=100 + index,
+            finish=110 + index))
+    for index, name in enumerate(reviewer_b.CALIBRATION_NAMES):
+        records.extend(_reviewer_b_pair(
+            "cal-{}".format(index), kind=reviewer_b.CALIBRATION_SIDES[name],
+            repo="nateprich-projects/command-center", pr=1000 + index,
+            head="{:040x}".format(1000 + index), sample=name,
+            start=200 + index, finish=210 + index))
+
+    state = reviewer_b.trial_state(records, now=NOW)
+    assert state["live_count"] == 30
+    assert state["calibration_count"] == 20
+    assert state["next_calibration"] is None
+    assert state["sampling_open"] is False
+    assert reviewer_b.reserve_decision(
+        records, run="next", pair_id="next", kind="live",
+        repo="owner/repo", pr=99, head_sha="b" * 40, now=NOW
+    ) == "closed"
+
+
+def test_reviewer_b_reservations_consume_a_slot_until_the_outer_run_finishes():
+    records = []
+    for index in range(29):
+        records.extend(_reviewer_b_pair(
+            "live-{}".format(index), pr=index + 1,
+            head="{:040x}".format(index + 1), start=100 + index,
+            finish=110 + index))
+    records.append({
+        "run": "active-run", "agent": "muse", "trial_id": reviewer_b.TRIAL_ID,
+        "pair_id": "reservation", "kind": "live", "repo": "owner/repo",
+        "pr": 30, "head_sha": "{:040x}".format(30), "sample_name": None,
+        "phase": "shadow_reservation", "ts": NOW,
+    })
+
+    state = reviewer_b.trial_state(records, now=NOW + 60)
+    assert state["live_count"] == 29
+    assert state["live_reserved"] == 1
+    assert state["live_used_count"] == 30
+    assert reviewer_b.reserve_decision(
+        records, run="next", pair_id="next", kind="live",
+        repo="owner/repo", pr=31, head_sha="{:040x}".format(31),
+        now=NOW + 60
+    ) == "closed"
+
+
+def test_reviewer_b_discards_stale_head_and_invalid_usage_pairs():
+    stale = _reviewer_b_pair("stale", stable=False)
+    bad_usage = _reviewer_b_pair("reset", start_spent=2.0, finish_spent=1.0)
+    bad_usage[1]["usage"]["seven_day"]["resets_at"] = 501
+
+    assert reviewer_b.pair_rows(stale + bad_usage) == []
+
+
+def test_reviewer_b_prompt_answer_and_note_are_notes_only():
+    answer = reviewer_b.validate_answer(
+        '{"verdict":"rejected","findings":["concrete issue"]}')
+    assert answer == {"verdict": "rejected", "findings": ["concrete issue"]}
+    note = reviewer_b.render_note({
+        "pair_id": "pair-1", "kind": "live", "repo": "owner/repo",
+        "pr": 1, "head_sha": "a" * 40, "a_verdict": "approved",
+        "b_verdict": "rejected", "cost_dollars": 0.025,
+        "latency_seconds": 12, "findings": ["<script>text</script>"],
+    })
+    assert "Reviewer A: `approved`" in note
+    assert "Reviewer B: `rejected`" in note
+    assert "Head SHA: `{}".format("a" * 40) in note
+    assert "own-card usage delta" in note
+    assert "12.000 seconds" in note
+    assert "&lt;script&gt;text&lt;/script&gt;" in note
+    assert "does not approve, reject, or block" in note

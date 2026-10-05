@@ -725,6 +725,157 @@ def record_job(agent: str, run: Optional[str], job: str) -> str:
     return kept
 
 
+def _reviewer_b_identity(pair_id: str, run: str, kind: str, repo: str,
+                          pr: int, head_sha: str,
+                          sample_name: Optional[str]) -> Dict:
+    """Validate the small, content-free identity stored for a B pair."""
+    from engine import reviewer_b
+
+    if (not isinstance(pair_id, str) or not pair_id.strip()
+            or not isinstance(run, str) or not run.strip()
+            or kind not in ("live", "bad", "good")
+            or not isinstance(repo, str) or not re.fullmatch(
+                r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo)
+            or isinstance(pr, bool) or not isinstance(pr, int) or pr < 1
+            or not isinstance(head_sha, str)
+            or not re.fullmatch(r"[0-9a-f]{40}", head_sha)):
+        raise HeartbeatError("reviewer-B pair identity is invalid")
+    if kind == "live":
+        if sample_name not in (None, ""):
+            raise HeartbeatError("live reviewer-B pair cannot name a calibration")
+        sample_name = None
+    elif (sample_name not in reviewer_b.CALIBRATION_NAMES
+          or reviewer_b.CALIBRATION_SIDES.get(sample_name) != kind):
+        raise HeartbeatError("reviewer-B calibration identity is invalid")
+    return {
+        "run": run,
+        "trial_id": reviewer_b.TRIAL_ID,
+        "pair_id": pair_id,
+        "kind": kind,
+        "repo": repo,
+        "pr": pr,
+        "head_sha": head_sha,
+        "sample_name": sample_name,
+    }
+
+
+def record_reviewer_b_start(run: str, pair_id: str, kind: str, repo: str,
+                            pr: int, head_sha: str,
+                            sample_name: Optional[str],
+                            a_verdict: str) -> str:
+    """Write B's cost/latency start reading to the GitHub heartbeat branch."""
+    if a_verdict not in ("approved", "rejected"):
+        raise HeartbeatError("reviewer-A verdict is invalid")
+    identity = _reviewer_b_identity(
+        pair_id, run, kind, repo, pr, head_sha, sample_name)
+    usage = usage_snapshot("muse")
+    if _muse_window_reading({"usage": usage}) is None:
+        raise HeartbeatError("Muse own-card usage is unavailable for reviewer B")
+    record = {
+        **identity,
+        "agent": "muse",
+        "phase": "shadow_pair_start",
+        "ts": int(time.time()),
+        "a_verdict": a_verdict,
+        "usage": usage,
+    }
+    kept = append("muse", record)
+    _report(kept)
+    return kept
+
+
+def reserve_reviewer_b_pair(run: str, pair_id: str, kind: str, repo: str,
+                            pr: int, head_sha: str,
+                            sample_name: Optional[str]) -> str:
+    """Atomically reserve one of the 50 trial slots on the heartbeat branch."""
+    from engine import reviewer_b
+
+    identity = _reviewer_b_identity(
+        pair_id, run, kind, repo, pr, head_sha, sample_name)
+    _ensure_branch()
+    last_error = None
+    for attempt in range(len(BACKOFF) + 1):
+        content, sha = _fetch("muse")
+        if content is None:
+            # `_fetch` is best-effort. A strict read distinguishes a missing
+            # heartbeat file from a transient API failure before reserving.
+            records = read_github_strict("muse")
+            content = ""
+        else:
+            records = _parse_records_strict(content)
+        decision = reviewer_b.reserve_decision(
+            records, run=run, pair_id=pair_id, kind=kind, repo=repo,
+            pr=pr, head_sha=head_sha, sample_name=sample_name)
+        if decision != "reserve":
+            return decision
+
+        record = {
+            **identity,
+            "agent": "muse",
+            "phase": "shadow_reservation",
+            "ts": int(time.time()),
+        }
+        lines = [line for line in content.splitlines() if line.strip()]
+        lines.append(json.dumps(record, sort_keys=True))
+        body = ("\n".join(lines[-KEEP:]) + "\n").encode("utf-8")
+        request = {
+            "message": "heartbeat: reserve reviewer-B trial slot",
+            "branch": BRANCH,
+            "content": base64.b64encode(body).decode("ascii"),
+        }
+        if sha:
+            request["sha"] = sha
+        try:
+            gh("api", "-X", "PUT",
+               "repos/{}/contents/{}".format(REPO, _path("muse")),
+               "--input", "-", input=json.dumps(request))
+            return "reserved"
+        except HeartbeatError as exc:
+            last_error = exc
+            if attempt >= len(BACKOFF):
+                break
+            time.sleep(BACKOFF[attempt])
+    raise HeartbeatError(
+        "could not reserve a reviewer-B trial slot: {}".format(last_error))
+
+
+def record_reviewer_b_finish(run: str, pair_id: str, kind: str, repo: str,
+                             pr: int, head_sha: str,
+                             sample_name: Optional[str], a_verdict: str,
+                             b_verdict: str, stable: bool) -> str:
+    """Write B's end reading and independent verdict to the heartbeat branch."""
+    if a_verdict not in ("approved", "rejected"):
+        raise HeartbeatError("reviewer-A verdict is invalid")
+    if b_verdict not in ("approved", "rejected", "unsure"):
+        raise HeartbeatError("reviewer-B verdict is invalid")
+    if not isinstance(stable, bool):
+        raise HeartbeatError("reviewer-B pair stability is invalid")
+    identity = _reviewer_b_identity(
+        pair_id, run, kind, repo, pr, head_sha, sample_name)
+    usage = usage_snapshot("muse")
+    record = {
+        **identity,
+        "agent": "muse",
+        "phase": "shadow_pair_finish",
+        "ts": int(time.time()),
+        "a_verdict": a_verdict,
+        "b_verdict": b_verdict,
+        "stable": stable,
+        "usage": usage,
+    }
+    kept = append("muse", record)
+    _report(kept)
+    return kept
+
+
+def reviewer_b_state() -> Dict:
+    """Read the shadow-trial count strictly from GitHub, never the local spool."""
+    from engine import reviewer_b
+
+    records = read_github_strict("muse", timeout=10)
+    return reviewer_b.trial_state(records)
+
+
 def job_for_run(records: List[Dict], run: Optional[str],
                 agent: str) -> Optional[str]:
     """Return one unambiguous scheduled job recorded for this run.
@@ -2585,6 +2736,56 @@ def main(argv=None) -> int:
         help="record a successful Muse authentication smoke probe",
     )
 
+    shadow_state = sub.add_parser(
+        "shadow-state",
+        help="read reviewer-B trial pairs from the GitHub heartbeat branch",
+    )
+    shadow_state.add_argument("--agent", choices=("muse",), default="muse")
+
+    shadow_start = sub.add_parser(
+        "shadow-start", help="record reviewer-B's paired usage start",
+    )
+    shadow_start.add_argument("--run", required=True)
+    shadow_start.add_argument("--pair", required=True)
+    shadow_start.add_argument("--kind", required=True,
+                              choices=("live", "bad", "good"))
+    shadow_start.add_argument("--repo", required=True)
+    shadow_start.add_argument("--pr", required=True, type=int)
+    shadow_start.add_argument("--head", required=True)
+    shadow_start.add_argument("--sample", default=None)
+    shadow_start.add_argument("--a-verdict", required=True,
+                              choices=("approved", "rejected"))
+
+    shadow_reserve = sub.add_parser(
+        "shadow-reserve", help="atomically reserve one reviewer-B trial slot",
+    )
+    shadow_reserve.add_argument("--run", required=True)
+    shadow_reserve.add_argument("--pair", required=True)
+    shadow_reserve.add_argument("--kind", required=True,
+                                choices=("live", "bad", "good"))
+    shadow_reserve.add_argument("--repo", required=True)
+    shadow_reserve.add_argument("--pr", required=True, type=int)
+    shadow_reserve.add_argument("--head", required=True)
+    shadow_reserve.add_argument("--sample", default=None)
+
+    shadow_finish = sub.add_parser(
+        "shadow-finish", help="record reviewer-B's paired usage end",
+    )
+    shadow_finish.add_argument("--run", required=True)
+    shadow_finish.add_argument("--pair", required=True)
+    shadow_finish.add_argument("--kind", required=True,
+                               choices=("live", "bad", "good"))
+    shadow_finish.add_argument("--repo", required=True)
+    shadow_finish.add_argument("--pr", required=True, type=int)
+    shadow_finish.add_argument("--head", required=True)
+    shadow_finish.add_argument("--sample", default=None)
+    shadow_finish.add_argument("--a-verdict", required=True,
+                               choices=("approved", "rejected"))
+    shadow_finish.add_argument("--b-verdict", required=True,
+                               choices=("approved", "rejected", "unsure"))
+    shadow_finish.add_argument("--stable", required=True,
+                               choices=("yes", "no"))
+
     args = parser.parse_args(argv)
 
     try:
@@ -2613,6 +2814,30 @@ def main(argv=None) -> int:
                 )
                 return 2
             return 0
+
+        if args.command == "shadow-state":
+            print(json.dumps(reviewer_b_state(), sort_keys=True))
+            return 0
+
+        if args.command == "shadow-reserve":
+            result = reserve_reviewer_b_pair(
+                args.run, args.pair, args.kind, args.repo, args.pr,
+                args.head, args.sample)
+            print(result)
+            return 0
+
+        if args.command in ("shadow-start", "shadow-finish"):
+            if args.command == "shadow-start":
+                kept = record_reviewer_b_start(
+                    args.run, args.pair, args.kind, args.repo, args.pr,
+                    args.head, args.sample, args.a_verdict)
+            else:
+                kept = record_reviewer_b_finish(
+                    args.run, args.pair, args.kind, args.repo, args.pr,
+                    args.head, args.sample, args.a_verdict, args.b_verdict,
+                    args.stable == "yes")
+            print(kept)
+            return 0 if kept == "pushed" else 2
 
         if args.command == "start":
             run_id = uuid.uuid4().hex[:12]

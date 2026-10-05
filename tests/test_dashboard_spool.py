@@ -19,10 +19,15 @@ NOW = datetime(2026, 9, 13, 12, 0, tzinfo=timezone.utc)
 
 
 @pytest.fixture(autouse=True)
-def _no_live_claude_sample(monkeypatch):
+def _no_live_claude_sample(monkeypatch, tmp_path):
     import usage
+    import muse_measurements
 
     monkeypatch.setenv("COMMAND_CENTER_MUSE_ESTIMATE_FEED_DISABLED", "1")
+    monkeypatch.setattr(
+        muse_measurements, "runtime_buffer_root",
+        lambda _runtime_root=None: tmp_path / "muse-estimate",
+    )
     monkeypatch.setattr(
         usage, "read_claude_plan_weekly_sample", lambda _now: None
     )

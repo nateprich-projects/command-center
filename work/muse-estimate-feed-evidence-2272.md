@@ -45,3 +45,21 @@ Baseline inspected before implementation: `origin/main` at
   #2125 panel link separate, and requires estimate adjustments from same-window
   own-card meter deltas without changing pricing, pace, lane admission, or
   spending behavior.
+- A read-only check found and validated the 36% source report, then paired it
+  with the own-card meter at report time. That pair belongs to the window ending
+  `2026-10-05T00:00:00Z`; the active window had already rolled over and ends
+  `2026-10-12T00:00:00Z`. The current estimate therefore correctly rejects
+  applying that prior-window point and stays on the local estimate until a
+  current-window calibration is supplied.
+
+## Verification
+
+- `python3 -m pytest tests/test_muse_measurements.py tests/test_dashboard_spool.py tests/test_brief.py -q` passed: 129 tests.
+- `npm test --prefix dashboard` passed: 87 tests, including the rendered-bar checks.
+- The Python test fixtures route the one-slot runtime buffer to per-test
+  temporary directories. The initial run created a synthetic failure buffer at
+  the runtime root; its file and directory were confirmed new in that run and
+  removed. The isolated rerun left no runtime buffer behind.
+- Before handoff, `origin/main` advanced to
+  `b5ac54397204daa40401b264f6449c58285b1db4`; that head was fetched and merged.
+  Its change is limited to paired-trial code and tests.

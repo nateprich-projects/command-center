@@ -25,11 +25,16 @@ FIXTURE = pathlib.Path(__file__).parent / "fixtures" / "project_items.json"
 
 
 @pytest.fixture(autouse=True)
-def no_resend_network(monkeypatch):
+def no_resend_network(monkeypatch, tmp_path):
     """Brief fixture tests should not read live heartbeat or outcome branches."""
     import heartbeat
+    import muse_measurements
 
     monkeypatch.setenv("COMMAND_CENTER_MUSE_ESTIMATE_FEED_DISABLED", "1")
+    monkeypatch.setattr(
+        muse_measurements, "runtime_buffer_root",
+        lambda _runtime_root=None: tmp_path / "muse-estimate",
+    )
     funnel.reset_api_usage()
     monkeypatch.setattr(
         heartbeat, "read_brief", lambda agent, timeout=None: []

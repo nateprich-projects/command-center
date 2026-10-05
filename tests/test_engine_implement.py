@@ -4966,8 +4966,6 @@ _LOCKED_REQUIREMENTS_FIXTURE = "build==1.5.0\nmypy==2.3.1\n"
 _LOCKED_REQUIREMENTS_SHA256 = (
     "884deb7f9a7421ff90e25ed5321abb6431a891acdf85472de2b56e2c2a46a99b"
 )
-
-
 def _locked_environment_run_spy(monkeypatch, pip_returncode=0):
     """Build real venvs, but keep package installation and tests offline."""
     calls = []

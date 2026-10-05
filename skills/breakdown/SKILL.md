@@ -50,9 +50,6 @@ stays one ticket.
 
 **Example:** `Accept: Reproduction: parse_departures, given a body with a Risks: section, returns only its departures.`
 
-For each `## Review focus` bullet, put one `Accept` test in the ticket
-that owns that behavior. Copy the bullet's text verbatim, exactly once.
-
 ### Inferred premises
 
 Before sizing a ticket, check whether its outcome depends on a plan premise

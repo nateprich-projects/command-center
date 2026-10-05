@@ -341,15 +341,16 @@ def test_packet_cli_prints_valid_json(monkeypatch, capsys):
 
 def test_packet_asks_for_seams_a_reproduction_and_sequenced_wide_changes(
         monkeypatch, capsys):
-    """The printed packet, read from the real skill, carries what the
-    implementer routines act on (#1807): named seams and a `Reproduction:`
-    first Accept item. It also carries the expand-migrate-contract and
-    prefactor rules with their brake on small work (#1808), and routes each
-    review-focus bullet into its owning ticket's Accept. Read from the packet,
-    not the skill file: skill text outside the sizing slice never reaches the
-    model."""
+    """The printed packet's sizing standard carries what the implementer
+    routines act on (#1807): named seams and a `Reproduction:` first Accept
+    item. It also carries the expand-migrate-contract and prefactor rules with
+    their brake on small work (#1808), and routes each review-focus bullet
+    into its owning ticket's Accept. Read from the packet, not the skill file:
+    skill text outside the sizing slice never reaches the model."""
     focus = "A timed-out retry keeps the same request identity."
-    body = "# Plan\n\nDo the thing.\n\n## Review focus\n\n- {}".format(focus)
+    followup = "A disabled fallback preserves the prior shaping behavior."
+    body = ("# Plan\n\nDo the thing.\n\n## Review focus\n\n- {}\n- {}"
+            .format(focus, followup))
     monkeypatch.setattr(
         breakdown, "fetch_plan", lambda repo, n: plan(body=body))
     monkeypatch.setattr(breakdown, "fetch_siblings", lambda repo, n: [])

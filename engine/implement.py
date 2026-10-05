@@ -110,12 +110,23 @@ def _checkout_owner_is_allowed(owner_uid: int,
 
 
 class MergedSuiteError(ImplementError):
-    """The suite fails on the merge with origin/main where main does not.
+    """The merged suite blocks finish on new failures or unknown results.
 
-    Its text is shaped like pytest's (``FAILED <id>`` lines and a counts
-    line), so the failure note and ticket comment read it as they read a
-    head-only run (#1804).
+    A concrete regression is shaped like pytest's (``FAILED <id>`` lines
+    and a counts line), so the failure note and ticket comment read it as
+    they read a head-only run (#1804).
     """
+
+
+class MergedSuiteUnknownError(MergedSuiteError):
+    """The merged unittest failure could not be compared with the base."""
+
+    def __init__(self, stage: str, output_excerpt: str):
+        self.stage = stage
+        self.output_excerpt = output_excerpt
+        super().__init__(
+            "merged suite result unknown during {} comparison: {}".format(
+                stage, output_excerpt))
 
 
 class TestCommandStartError(ImplementError):
@@ -1412,13 +1423,18 @@ def _merged_failure(record: dict) -> ImplementError:
 
     It names the command that stopped the plan and the failing ids: those
     main does not share, or every id when the base could not be compared
-    (another runner, or a pytest run that stopped early). The counts line
-    counts only failures main does not share, which is what fails the
-    finish.
+    (another runner, an unparseable unittest result, or a pytest run that
+    stopped early). The counts line counts only failures main does not
+    share, which is what fails the finish.
     """
     if any(entry.get("start_failed") is True
            for entry in record["commands"]):
         return TestCommandStartError()
+    unknown = record.get("unknown_result")
+    if unknown:
+        return MergedSuiteUnknownError(
+            unknown.get("stage", "merge"),
+            unknown.get("output_excerpt") or "No unittest output was captured.")
     timed_out = [entry for entry in record["commands"]
                  if entry.get("timed_out") is True]
     if timed_out:
@@ -3071,6 +3087,14 @@ def _failure_note(exc: ImplementError, kept: str = "", *, repo: str) -> str:
             note += " | " + (
                 kept if _is_public_repo(repo) else _member_kept(kept))
         return note
+    if isinstance(exc, MergedSuiteUnknownError):
+        public = _is_public_repo(repo)
+        note = "merged suite result unknown"
+        if public and exc.output_excerpt:
+            note += ": " + _first_output_line(exc.output_excerpt)
+        if kept:
+            note += " | " + (kept if public else _member_kept(kept))
+        return note
     text = str(exc)
     if text.startswith("tests timed out:"):
         public = _is_public_repo(repo)
@@ -3108,12 +3132,30 @@ def _failure_note(exc: ImplementError, kept: str = "", *, repo: str) -> str:
 def _failure_comment(exc: ImplementError, kept: str = "") -> str:
     """What a member-repo failure note withholds, for its ticket (#1796).
 
-    The failing test ids, pytest's counts line and, when pytest named no
-    test, the first line of the output: what the note carried before. The
-    next run reads it in its packet's issue thread. The branch prints that
-    output, so the free-text lines are made inert (#1798); an id is one
-    ``\\S+`` token, which no marker fits.
+    Failing test ids, pytest's counts line and, when pytest named no test,
+    the first output line go to the issue. An unknown merged unittest result
+    also carries a bounded output excerpt. The branch prints that output,
+    so the free-text lines are made inert (#1798); an id is one ``\\S+``
+    token, which no marker fits.
     """
+    if isinstance(exc, MergedSuiteUnknownError):
+        lines = [
+            "**Merged suite result unknown**",
+            "",
+            "The unittest result could not be compared with `origin/main`; "
+            "the run is recorded as unknown rather than a ticket regression.",
+            "",
+            "Stage: `{}`".format(funnel.inert_comment_text(exc.stage)),
+            "",
+            "Output excerpt:",
+            "",
+            "```text",
+            funnel.inert_comment_text(exc.output_excerpt),
+            "```",
+        ]
+        if kept:
+            lines.extend(["", "Work: {}".format(kept)])
+        return "\n".join(lines).rstrip() + "\n"
     text = str(exc)
     ids = _failed_test_ids(text)
     counts = _pytest_counts(text)

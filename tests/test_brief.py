@@ -1204,7 +1204,7 @@ def test_brief_surfaces_blocked_projects_and_tickets_oldest_first(
     silent_project = funnel.Item(
         repo="nateprich/beta", number=31, title="Silent project",
         url="https://example.invalid/31", state="OPEN", status="Ready",
-        status_since=datetime(2026, 9, 3, tzinfo=timezone.utc),
+        needs="none", status_since=datetime(2026, 9, 3, tzinfo=timezone.utc),
         labels=["blocked"], block_reason="Nate needs to decide.",
     )
     named_ticket = funnel.Item(
@@ -1380,7 +1380,7 @@ def test_brief_keeps_every_other_blocked_project_as_blocked_work(
         block_references=["#70"], block_reason="Wait for #70.",
     )
     silent = _finished_project(
-        61, labels=["blocked"],
+        61, needs="none", labels=["blocked"],
         status_since=datetime(2026, 9, 2, tzinfo=timezone.utc),
         block_reason="Nate needs to decide.",
     )

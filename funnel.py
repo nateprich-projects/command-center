@@ -439,8 +439,8 @@ SELF_APPROVABLE_CLASSES = frozenset(
 DEFECT_CLASSES = frozenset({"Broken", "Bug"})
 
 #: Every question ``gate_question`` can ask, and the only place its wording
-#: lives (#2134). ``GATES``, ``WATCH_UNBLOCK_QUESTIONS`` and the watch-gates
-#: sentence of ``funnel_render.RENDER_TEMPLATE`` read it from here, so a
+#: lives (#2134). ``GATES`` and the watch-gates sentence of
+#: ``funnel_render.RENDER_TEMPLATE`` read it from here, so a
 #: reworded question cannot leave a consumer matching the old literal.
 GATE_QUESTIONS = {
     "plan": "Is the plan good?",
@@ -454,6 +454,27 @@ GATE_QUESTIONS = {
     "block_unread": "Block unread — recheck?",
     "held_recheck": "Held — recheck?",
 }
+
+#: Routes selected from recorded item facts. The question value is a key in
+#: GATE_QUESTIONS, except "recorded" which reads Needs' recorded question.
+#: Ownership is explicit per row and never comes from question wording.
+GATE_OWNER_TABLE = {
+    "held_shaped_condition": ("held_recheck", "watch"),
+    "blocked_recorded_question": ("recorded", "Nate"),
+    "blocked_breakdown_question": ("breakdown", "Nate"),
+    "blocked_unread_watch": ("block_unread", "watch"),
+    "blocked_unread_nate": ("block_unread", "Nate"),
+    "blocked_ticket_unblock_watch": ("unblock", "watch"),
+    "blocked_ticket_unblock_nate": ("unblock", "Nate"),
+    "blocked_project_unblock_watch": ("unblock_or_park", "watch"),
+    "blocked_project_unblock_nate": ("unblock_or_park", "Nate"),
+    "building_accept": ("accept", "Nate"),
+    "shaped_plan_watch": ("plan", "watch"),
+    "shaped_plan_nate": ("plan", "Nate"),
+}
+WATCH_PLAN_CLASSES = frozenset(("Broken", "Bug"))
+#: Needs Nate categories that keep an agent-origin Broken or Bug plan with Nate.
+NATE_ONLY_NEEDS_CATEGORIES = frozenset(("exposure", "preference"))
 
 #: Which stages can wait on a human, and the question each one asks.
 GATES = {
@@ -1155,76 +1176,81 @@ def _shaped_hold_is_unresolved(
     return False
 
 
-def gate_question(
+def _shaped_plan_route(item: Item, by_ref: Optional[Dict[str, Item]]) -> str:
+    """Choose the owner row for a Shaped plan from its recorded facts."""
+    if (
+        item.origin not in ORIGIN_OPTIONS
+        or item.risk not in RISK_OPTIONS
+        or item.needs not in NEEDS_OPTIONS
+        or item.origin != "agent"
+        or effective_class(item, by_ref or {}) not in WATCH_PLAN_CLASSES
+        or not isinstance(item.body, str)
+    ):
+        return "shaped_plan_nate"
+    categories = open_needs_nate_categories(item.body)
+    if categories is None or categories & NATE_ONLY_NEEDS_CATEGORIES:
+        return "shaped_plan_nate"
+    return "shaped_plan_watch"
+
+
+def _blocked_route(item: Item, *, question_key: Optional[str] = None) -> str:
+    """Choose the blocked-question owner row from recorded routing facts."""
+    nate_owns = (
+        item.needs not in NEEDS_OPTIONS
+        or (item.needs == "human" and item.decline_reason is None)
+        or (item.parent is not None and item.needs_decision is not None)
+    )
+    owner = "nate" if nate_owns else "watch"
+    if question_key == "block_unread":
+        return "blocked_unread_{}".format(owner)
+    kind = "ticket" if item.parent else "project"
+    return "blocked_{}_unblock_{}".format(kind, owner)
+
+
+def _gate_route(
     item: Item, by_ref: Optional[Dict[str, Item]] = None,
 ) -> Optional[str]:
-    """The decision this item is waiting on, or None if it waits on no one.
-
-    A current Shaped hold asks the funnel watch to recheck while its named
-    conditions remain open. A changed plan version or fully satisfied hold
-    returns to a fresh Shaped review.
-    """
+    """Return the canonical route row for an item's current recorded facts."""
     if item.state != "OPEN":
         return None
+
     shaped_hold = _current_shaped_hold_record(item)
     if shaped_hold is not None:
         if _shaped_hold_is_unresolved(item, shaped_hold, by_ref):
-            return GATE_QUESTIONS["held_recheck"]
-        # A changed plan version or fully satisfied hold must reach a fresh
-        # Shaped review. The old blocked label describes the held version.
-        return GATES["Shaped"]
+            return "held_shaped_condition"
+        # A changed plan version or cleared condition opens a fresh Shaped
+        # question even when the ordinary field check would not ask one.
+        return _shaped_plan_route(item, by_ref)
+
     if item.is_blocked:
-        # A lane decline still needs an Unblock gate even after its routing
-        # field changes to ``agent``. Ordinary agent-owned blocks stay quiet.
+        # A lane decline still needs an Unblock gate after Needs becomes
+        # agent. An ordinary agent-owned block stays quiet.
         if item.needs == "agent" and item.decline_reason is None:
             return None
-        # A named condition is knowable work for the system, not an unblock
-        # question. A silent block still needs an Unblock question; only a
-        # project can also be parked. Needs ``agent`` owns the work after the
-        # block lifts, and the watch answers a decline unless the item is
-        # waiting on Nate's hands.
-        # A valid date condition is also machine-readable. Both future and
-        # passed dates stay out of the question queue; the begin path clears a
-        # passed condition before selecting work.
-        # A well-formed event spec is also a named condition. Needs:
-        # external-event routes the ticket, but cannot suppress the question
-        # without that condition attached.
-        # A block whose comments could not be read may be any of those, so
-        # it asks for a re-read instead of asking to unblock what may be a
-        # dated or event-conditioned hold (#2134).
         condition = block_condition(item)
         if condition == "unread":
-            return GATE_QUESTIONS["block_unread"]
+            return _blocked_route(item, question_key="block_unread")
         if condition is not None:
             return None
         if item.parent is not None and item.needs_decision:
-            return item.needs_decision
+            return "blocked_recorded_question"
         if item.parent is None and item.needs_decision:
             # An answered Gates question is settled, whatever the comment
-            # thread still says. The marker is consulted before the question
-            # is surfaced so the ask and the read share one predicate; an
-            # absent or malformed marker asks exactly as before.
+            # thread still says. An absent or malformed marker asks as before.
             if parse_gates_answer(item.body) is not None:
                 return None
-            return GATE_QUESTIONS["breakdown"]
-        return (
-            GATE_QUESTIONS["unblock"] if item.parent
-            else GATE_QUESTIONS["unblock_or_park"]
-        )
+            return "blocked_breakdown_question"
+        return _blocked_route(item)
+
     if item.status == "Building":
-        # New work, replacements, and Nate-owned improvements stop for
-        # acceptance. The same class/origin predicate drives the unattended
-        # close path below, so the gate cannot drift from the writer.
-        if not item.children_all_closed:
+        # The same class/origin predicate drives the unattended close path.
+        if not item.children_all_closed or _can_close_itself(item):
             return None
-        if _can_close_itself(item):
-            return None
-        return GATES["Building"]
+        return "building_accept"
+
     if item.status == "Shaped":
-        # The shape runner decides Ready versus Shaped at write time, so an
-        # item at Shaped was held and waits on Nate. This reader must not
-        # re-derive eligibility from plan prose: re-deriving could only hide
-        # an item the writer held.
+        # The shape writer holds on these recorded conditions. Unknown fields
+        # fail closed to Nate, in keeping with the owner-table precedent.
         waits_for_nate = (
             item.origin not in ORIGIN_OPTIONS
             or item.risk not in RISK_OPTIONS
@@ -1233,8 +1259,23 @@ def gate_question(
             or item.risk == "escalated"
             or item.origin == "Nate"
         )
-        return GATES["Shaped"] if waits_for_nate else None
+        if not waits_for_nate:
+            return None
+        return _shaped_plan_route(item, by_ref)
     return None
+
+
+def gate_question(
+    item: Item, by_ref: Optional[Dict[str, Item]] = None,
+) -> Optional[str]:
+    """The decision an item is waiting on, rendered from the owner table."""
+    route = _gate_route(item, by_ref)
+    if route is None:
+        return None
+    question_key, _owner = GATE_OWNER_TABLE[route]
+    if question_key == "recorded":
+        return item.needs_decision
+    return GATE_QUESTIONS[question_key]
 
 
 def _acceptance_waiting_reason(
@@ -1326,71 +1367,12 @@ def awaiting_decision(items: Iterable[Item]) -> List[Item]:
     return sorted((i for i in rows if gate_question(i)), key=key)
 
 
-#: The questions the funnel watch answers itself (Nate, 2026-09-28, #1891):
-#: a silent block, and the plan question on agent-origin Broken and Bug work.
-#: A block whose comments could not be read is routed exactly as a silent
-#: block was before it had its own question (#2134).
-WATCH_UNBLOCK_QUESTIONS = frozenset((
-    GATE_QUESTIONS["unblock"],
-    GATE_QUESTIONS["unblock_or_park"],
-    GATE_QUESTIONS["block_unread"],
-))
-WATCH_PLAN_CLASSES = frozenset(("Broken", "Bug"))
-
-#: Needs Nate categories that keep an agent-origin Broken or Bug plan with
-#: Nate. Scope and gates questions the watch settles itself.
-NATE_ONLY_NEEDS_CATEGORIES = frozenset(("exposure", "preference"))
-
-
 def watch_owns_gate(
-    item: Item, question: Optional[str], by_ref: Dict[str, Item],
+    item: Item, by_ref: Optional[Dict[str, Item]] = None,
 ) -> bool:
-    """Whether the funnel watch, not Nate, answers ``item``'s live question.
-
-    Nate's decision of 2026-09-28 (#1891): the watch answers every silent
-    block (``Unblock?`` and ``Unblock or park?``) except one waiting on his
-    hands (Needs ``human``, which he also sees as a blocked human step), and
-    ``Is the plan good?`` on an agent-origin plan of Class Broken or Bug
-    except one whose Needs Nate section still holds an Exposure or Preference
-    line. A plan body that was not loaded, or a Needs Nate section that
-    cannot be read, stays with Nate. ``Block unread — recheck?`` (#2134)
-    is routed as the two silent-block questions are. ``Held — recheck?`` is
-    watch-owned only while a proved Shaped hold's conditions remain unresolved
-    and its Plan-Version matches the current body.
-
-    This partitions the shared gate question for the brief and queue. A
-    Declined marker distinguishes a legacy lane decline that still carries
-    Needs ``human`` from a hands-on step; new declines use Needs ``agent``.
-    Other readers use the same question predicate.
-    """
-    if question == GATE_QUESTIONS["held_recheck"]:
-        shaped_hold = _current_shaped_hold_record(item)
-        return (
-            shaped_hold is not None
-            and _shaped_hold_is_unresolved(item, shaped_hold, by_ref)
-        )
-    if question in WATCH_UNBLOCK_QUESTIONS:
-        if (
-            item.is_blocked
-            and item.parent is not None
-            and item.needs_decision is not None
-        ):
-            # The ticket's recorded question belongs to Nate even when its
-            # wording happens to match a watch-owned unblock question.
-            return False
-        return item.needs != "human" or item.decline_reason is not None
-    if question != GATES["Shaped"]:
-        return False
-    if item.origin != "agent":
-        return False
-    if effective_class(item, by_ref) not in WATCH_PLAN_CLASSES:
-        return False
-    if not isinstance(item.body, str):
-        return False
-    categories = open_needs_nate_categories(item.body)
-    if categories is None:
-        return False
-    return not (categories & NATE_ONLY_NEEDS_CATEGORIES)
+    """Whether the current recorded-facts route belongs to the funnel watch."""
+    route = _gate_route(item, by_ref)
+    return route is not None and GATE_OWNER_TABLE[route][1] == "watch"
 
 
 def split_decisions(
@@ -1405,7 +1387,7 @@ def split_decisions(
     nate: List[Item] = []
     watch: List[Item] = []
     for item in awaiting_decision(rows):
-        if watch_owns_gate(item, gate_question(item, by_ref), by_ref):
+        if watch_owns_gate(item, by_ref):
             watch.append(item)
         else:
             nate.append(item)

@@ -904,6 +904,22 @@ test("the Muse estimate omits availability and freshness copy without a value", 
   assert.doesNotMatch(row.textContent, /stale|unavailable|sampled|old/i);
 });
 
+test("the Muse estimate bar omits stale and freshness text after publication", () => {
+  const estimate = {
+    source: "Local Muse session journal estimate",
+    captured_at: Date.parse("2026-09-29T20:55:00-07:00") / 1000,
+    spent_dollars: 14.3,
+    cap_dollars: 200,
+    used_percent: 7.15,
+    calls: 42,
+  };
+  const row = usageRow(renderUsageFixture({ muse: estimate },
+    Date.parse("2026-09-29T22:26:00-07:00")), "Muse 7-day spend estimate");
+
+  assert.ok(row.querySelector(".usage-fill"));
+  assert.doesNotMatch(row.textContent, /stale|unavailable|sampled|old/i);
+});
+
 test("Claude weekly usage shows the exact percentage and recomputed sample age", () => {
   const now = Date.parse("2026-10-01T19:00:00Z");
   const sample = new Date(now - 45 * 60 * 1000).toISOString();

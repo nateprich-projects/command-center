@@ -2237,6 +2237,11 @@ the ticket or the plan wherever it states one. Every later judge reads this
 list and nothing else, so a requirement missing here is never checked, and a
 vague one cannot be answered.
 
+Do not list a requirement that this PR pass this independent review, receive
+the current-head review verdict or approval, or be merged. Those are later
+process gates, not facts this review can establish about its own diff. Keep
+the ticket's separate code, test, and evidence obligations as checkable rows.
+
 An explicit Nate override can supersede only the requirement or gate it names.
 Check comments in `ticket.comments`, `tickets[].comments`, each ticket's
 `parent.comments`, and `pr_comments.comments`. A comment qualifies only when
@@ -2359,7 +2364,9 @@ import json
 import sys
 
 sys.path.insert(0, sys.argv[1])
-from engine.review import normalize_plan_premise_requirements
+from engine.review import (ReviewJudgeError,
+                           normalize_plan_premise_requirements,
+                           omit_review_process_requirements)
 
 answer_path, out_path, packet_path = sys.argv[2], sys.argv[3], sys.argv[4]
 
@@ -2401,6 +2408,10 @@ if not requirements:
     malformed("'requirements' must name at least one requirement")
 packet = json.load(open(packet_path))
 requirements = normalize_plan_premise_requirements(packet, requirements)
+try:
+    requirements = omit_review_process_requirements(requirements)
+except ReviewJudgeError as exc:
+    malformed(str(exc))
 if not requirements:
     malformed("'requirements' must name at least one requirement")
 with open(out_path, "w") as handle:

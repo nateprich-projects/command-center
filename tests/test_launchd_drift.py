@@ -36,6 +36,7 @@ RETIRED_IMPLEMENTER_NAMES = [
 ]
 MUSE_SCHEDULE_NAMES = REVIEWER_NAMES
 KEEPER_NAME = "com.nateprich.command-center-run-keeper.plist"
+BROKER_NAME = "com.nateprich.command-center-broker.plist"
 #: The Remote Control listener. Not a schedule; see the carve-out in `AGENTS.md`.
 REMOTE_CONTROL_NAME = "com.nateprich.command-center-remote-control.plist"
 #: The funnel snapshot publisher (#652). A poll loop, not a routine schedule.
@@ -57,11 +58,11 @@ OUTCOMES_NAME = "com.nateprich.command-center-outcomes-derive.plist"
 METRICS_NAME = "com.nateprich.command-center-metrics-derive.plist"
 NIGHTLY_WATCH_NAME = "com.nateprich.command-center-nightly-watch.plist"
 NAMES = MUSE_SCHEDULE_NAMES + [
-    KEEPER_NAME, REMOTE_CONTROL_NAME, PUBLISHER_NAME, DEPLOY_NAME,
+    KEEPER_NAME, BROKER_NAME, REMOTE_CONTROL_NAME, PUBLISHER_NAME, DEPLOY_NAME,
     FF_DEPLOY_NAME, *RUNTIME_DEPLOY_NAMES, OUTCOMES_NAME, METRICS_NAME,
     NIGHTLY_WATCH_NAME]
 INSTALL_NAMES = MUSE_SCHEDULE_NAMES + [
-    KEEPER_NAME, PUBLISHER_NAME, DEPLOY_NAME, FF_DEPLOY_NAME,
+    KEEPER_NAME, BROKER_NAME, PUBLISHER_NAME, DEPLOY_NAME, FF_DEPLOY_NAME,
     *RUNTIME_DEPLOY_NAMES, OUTCOMES_NAME, METRICS_NAME, NIGHTLY_WATCH_NAME]
 
 
@@ -214,6 +215,22 @@ def test_the_installer_copies_all_launchd_plists(tmp_path):
     for name in INSTALL_NAMES:
         installed = tmp_path / "Library" / "LaunchAgents" / name
         assert installed.read_text() == (ROOT / "launchd" / name).read_text()
+
+
+def test_broker_is_a_nate_owned_plain_python_listener():
+    """The source can survive a crash without scheduling a model prompt."""
+    import plistlib
+
+    with (ROOT / "launchd" / BROKER_NAME).open("rb") as handle:
+        plist = plistlib.load(handle)
+    assert plist["ProgramArguments"] == [
+        "/usr/bin/python3",
+        "/Users/nateprich/.claude/command-center-broker/credential_broker.py",
+    ]
+    assert plist["RunAtLoad"] is True
+    assert plist["KeepAlive"] is True
+    assert plist["EnvironmentVariables"]["HOME"] == "/Users/nateprich"
+    assert "UserName" not in plist
 
 
 def test_the_keeper_runs_the_read_only_wrapper():

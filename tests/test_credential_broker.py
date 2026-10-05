@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import hashlib
+import errno
 import json
 import os
 import pathlib
 import pwd
 import shutil
+import stat
 import subprocess
 import sys
+from types import SimpleNamespace
 import uuid
 
 import pytest
@@ -427,6 +430,62 @@ def test_broker_access_cutover_has_a_read_only_dry_run():
     source = (ROOT / "scripts" / "install-broker-access.sh").read_text()
     assert "codex allow list,search,add_file,add_subdirectory,delete,delete_child" in source
     assert "file_inherit,directory_inherit" in source
+
+
+def test_broker_restart_only_removes_an_owned_dead_socket(monkeypatch):
+    class SocketPath:
+        removed = False
+        info = SimpleNamespace(
+            st_mode=stat.S_IFSOCK | 0o600, st_uid=501, st_dev=1, st_ino=2,
+        )
+
+        def lstat(self):
+            return self.info
+
+        def unlink(self):
+            self.removed = True
+
+        def __str__(self):
+            return "/fixture/broker.sock"
+
+    class Probe:
+        error = errno.ECONNREFUSED
+
+        def settimeout(self, value):
+            assert value == 1
+
+        def connect(self, path):
+            assert path == "/fixture/broker.sock"
+            if self.error is not None:
+                raise OSError(self.error, "probe")
+
+        def close(self):
+            pass
+
+    probe = Probe()
+    monkeypatch.setattr(broker.socket, "socket", lambda *args: probe)
+    path = SocketPath()
+    broker._clear_stale_socket(path, 501)
+    assert path.removed
+
+    path.removed = False
+    probe.error = None
+    with pytest.raises(broker.BrokerError, match="already listening"):
+        broker._clear_stale_socket(path, 501)
+    assert not path.removed
+
+    probe.error = errno.EACCES
+    with pytest.raises(broker.BrokerError, match="state is uncertain"):
+        broker._clear_stale_socket(path, 501)
+    assert not path.removed
+
+    probe.error = errno.ECONNREFUSED
+    path.info = SimpleNamespace(
+        st_mode=stat.S_IFSOCK | 0o600, st_uid=506, st_dev=1, st_ino=2,
+    )
+    with pytest.raises(broker.BrokerError, match="not an owned private socket"):
+        broker._clear_stale_socket(path, 501)
+    assert not path.removed
 
 
 def test_actual_codex_uid_can_delete_nate_created_finish_descendants(

@@ -177,6 +177,7 @@ fi
 # claiming that the copied files are loaded.
 LAUNCH_AGENTS="$HOME/Library/LaunchAgents"
 LAUNCHD_PLISTS=(
+  com.nateprich.command-center-broker.plist
   com.nateprich.command-center-muse-review.plist
   com.nateprich.command-center-muse-review-standard.plist
   com.nateprich.command-center-run-keeper.plist

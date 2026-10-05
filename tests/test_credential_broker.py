@@ -6,9 +6,11 @@ import hashlib
 import json
 import os
 import pathlib
+import pwd
 import shutil
 import subprocess
 import sys
+import uuid
 
 import pytest
 
@@ -425,3 +427,66 @@ def test_broker_access_cutover_has_a_read_only_dry_run():
     source = (ROOT / "scripts" / "install-broker-access.sh").read_text()
     assert "codex allow list,search,add_file,add_subdirectory,delete,delete_child" in source
     assert "file_inherit,directory_inherit" in source
+
+
+def test_actual_codex_uid_can_delete_nate_created_finish_descendants(
+        monkeypatch, tmp_path):
+    """Opt-in Mac cutover proof; CI has no cross-user ACL or sudo authority.
+
+    After #1999 applies the versioned access installer, Nate runs this one
+    test with COMMAND_CENTER_TEST_CROSS_USER=1. The checkout is created by
+    the actual codex user under the exact configured routine root; run_finish
+    writes nested content as Nate, then codex deletes that whole checkout.
+    """
+    if os.environ.get("COMMAND_CENTER_TEST_CROSS_USER") != "1":
+        pytest.skip("real Mac cross-user ACL proof is opt-in after cutover")
+    if sys.platform != "darwin":
+        pytest.fail("cross-user ACL proof requires the cutover Mac")
+    assert os.getuid() == pwd.getpwnam("nateprich").pw_uid
+    assert pwd.getpwnam("codex").pw_uid == broker.CODEX_UID
+    root = broker.CODEX_CHECKOUT_ROOT
+    assert root.is_dir() and not root.is_symlink()
+    checkout = root / ("broker-acl-fixture-" + uuid.uuid4().hex)
+
+    def as_codex(code):
+        return subprocess.run(
+            ["/usr/bin/sudo", "-n", "-u", "codex", "/usr/bin/python3",
+             "-c", code, str(checkout)],
+            capture_output=True, text=True, timeout=20, check=False,
+        )
+
+    created = as_codex(
+        "import pathlib,sys; pathlib.Path(sys.argv[1]).mkdir(mode=0o700)")
+    assert created.returncode == 0, created.stderr
+    try:
+        assert checkout.stat().st_uid == broker.CODEX_UID
+        monkeypatch.setattr(
+            broker, "verify_checkout", lambda *args, **kwargs: {"PATH": "/usr/bin"})
+
+        def finish_as_nate(args, **kwargs):
+            nested = checkout / "broker-created" / "nested"
+            nested.mkdir(parents=True, mode=0o700)
+            (nested / "created-by-finish").write_text("Nate-owned output\n")
+            return subprocess.CompletedProcess(args, 0, stdout="done", stderr="")
+
+        result = broker.run_finish(
+            {"run": RUN, "repo": "owner/repo", "number": 7,
+             "checkout": checkout, "expected_uid": broker.CODEX_UID},
+            {"done": True, "summary": "cross-user fixture", "departures": []},
+            hooks_path=tmp_path, runner_root=tmp_path,
+            runner=finish_as_nate,
+        )
+        assert result["ok"] is True
+        assert (checkout / "broker-created/nested/created-by-finish").stat().st_uid == os.getuid()
+        removed = as_codex(
+            "import shutil,sys; shutil.rmtree(sys.argv[1])")
+        assert removed.returncode == 0, removed.stderr
+        assert not checkout.exists()
+    finally:
+        if checkout.exists():
+            try:
+                shutil.rmtree(checkout)
+            except OSError:
+                # The negative result itself may deny Nate traversal; try
+                # the fixture owner and leave the failure visible if both do.
+                as_codex("import shutil,sys; shutil.rmtree(sys.argv[1])")

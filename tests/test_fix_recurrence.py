@@ -94,6 +94,35 @@ def test_hotspots_count_distinct_projects_per_function(repo):
     assert ("app.py", "brief") not in hot
 
 
+def test_hotspots_sort_by_broken_fix_count_descending(monkeypatch, tmp_path):
+    history = []
+    hunks = {}
+    fix_projects = {}
+    fixes = [
+        (101, 10, "alpha"), (102, 20, "alpha"),
+        (103, 30, "alpha"), (104, 40, "alpha"),
+        (201, 50, "beta"), (202, 60, "beta"), (203, 70, "beta"),
+    ]
+    for ticket, project, function in fixes:
+        sha = str(ticket)
+        fix_projects[ticket] = project
+        history.append((sha, NOW - timedelta(days=1), ticket))
+        hunks[sha] = [(function + ".py", 1, 1, 1, 1, function)]
+
+    monkeypatch.setattr(fr, "ticket_commits",
+                        lambda repo, start, end: history)
+    monkeypatch.setattr(fr, "_hunks", lambda repo, sha: hunks[sha])
+    monkeypatch.setattr(fr, "_hunk_touches_function",
+                        lambda *args: True)
+    monkeypatch.setattr(fr, "_blame", lambda *args: [])
+
+    result = fr.measure(tmp_path, fix_projects, NOW)
+
+    assert [(row["function"], row["count"]) for row in result["hotspots"]] == [
+        ("alpha", 4), ("beta", 3),
+    ]
+
+
 def test_window_excludes_older_fixes(repo):
     result = fr.measure(repo, FIXES, NOW + timedelta(days=10))
 

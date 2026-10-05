@@ -84,6 +84,36 @@ def _comments_by_pr(*fixtures):
     return comments
 
 
+def _endpoint_counts():
+    return {
+        "n": 50,
+        "live_n": 30,
+        "live_a_approved": 20,
+        "live_a_rejected": 10,
+        "live_b_approved": 15,
+        "live_b_rejected": 15,
+        "bad_n": 10,
+        "good_n": 10,
+        "bad_a_misses": 6,
+        "bad_b_catches": 4,
+        "bad_overlap": 4,
+        "bad_correlated_misses": 2,
+        "bad_joint_detection": 8,
+        "good_a_false_blocks": 1,
+        "good_b_false_blocks": 2,
+        "good_joint_false_blocks": 2,
+        "cost_dollars_total": "12.345678",
+        "latency_seconds_total": "456.789",
+    }
+
+
+def _built_endpoint_report():
+    return paired_trial.build_trial_report(
+        _endpoint_counts(), bound_closed=True, run="run-2252",
+        at=datetime(2026, 10, 5, tzinfo=timezone.utc),
+    )
+
+
 def test_v2_calibration_refs_match_the_fixed_bad_and_good_sources():
     packets = review_packets.load_packet_set("v2")
 
@@ -131,6 +161,42 @@ def test_calibration_pair_reference_must_match_the_fixed_packet_head():
                 [mismatched], comment_reader=comment_reader)
 
 
+def test_default_pair_note_reader_queries_pull_request_comments(monkeypatch):
+    reference = _reference(
+        "live-pr-note", _head("a"), kind="live", pr=2312,
+        repo="nateprich-projects/command-center")
+    note = _note(
+        "live-pr-note", _head("a"), kind="live", a="approved",
+        b="rejected", cost="0.125000", latency="1.250")
+    calls = []
+
+    def graphql(query, **variables):
+        calls.append((query, variables))
+        assert "pullRequest(number: $number)" in query
+        assert "issue(number: $number)" not in query
+        return {
+            "repository": {
+                "pullRequest": {
+                    "comments": {
+                        "nodes": [{"id": "pr-comment", "body": note}],
+                        "pageInfo": {"hasNextPage": False, "endCursor": None},
+                    },
+                },
+            },
+        }
+
+    monkeypatch.setattr(paired_trial.funnel, "gh_graphql", graphql)
+    result = paired_trial.collect_pair_notes([reference])
+
+    assert len(result) == 1
+    assert result[0]["pair_id"] == "live-pr-note"
+    assert calls[0][1] == {
+        "owner": "nateprich-projects",
+        "name": "command-center",
+        "number": 2312,
+    }
+
+
 def test_aggregator_counts_same_head_notes_and_ignores_a_cross_sha_pair():
     repo = "nateprich-projects/command-center"
     fixtures = [
@@ -172,6 +238,10 @@ def test_aggregator_counts_same_head_notes_and_ignores_a_cross_sha_pair():
     assert result["bad_n"] == 3
     assert result["good_n"] == 1
     assert result["live_n"] == 0
+    assert result["live_a_approved"] == 0
+    assert result["live_a_rejected"] == 0
+    assert result["live_b_approved"] == 0
+    assert result["live_b_rejected"] == 0
     assert result["bad_a_misses"] == 2
     assert result["bad_b_catches"] == 1
     assert result["bad_overlap"] == 1
@@ -185,12 +255,40 @@ def test_aggregator_counts_same_head_notes_and_ignores_a_cross_sha_pair():
     assert "stale-pair" not in {row["pair_id"] for row in result["pairs"]}
 
 
+def test_endpoint_report_includes_fixed_counts_verdicts_and_wilson_intervals():
+    # Static Wilson values were calculated independently from the score
+    # interval equation; keep these expectations separate from the helper.
+    report = _built_endpoint_report()
+
+    assert "30 live pairs plus 10 known-bad and 10 known-good" in report
+    assert "| Trial endpoint | 30 live + 10 bad + 10 good | closed |" in report
+    assert "| Same-head paired observations (N) | 50 | |" in report
+    assert "| Reviewer A verdicts on live pairs | 20 approved / 10 rejected | |" in report
+    assert "| Reviewer B verdicts on live pairs | 15 approved / 15 rejected | |" in report
+    assert "| Reviewer A verdicts on known-bad | 6 approved / 4 rejected | |" in report
+    assert "| Reviewer B verdicts on known-bad | 2 approved / 8 rejected | |" in report
+    assert "| Reviewer A verdicts on known-good | 9 approved / 1 rejected | |" in report
+    assert "| Reviewer B verdicts on known-good | 8 approved / 2 rejected | |" in report
+    assert "4/6 | 66.7%; 95% Wilson score interval 30.0% to 90.3%" in report
+    assert "4/10 | 40.0%; 95% Wilson score interval 16.8% to 68.7%" in report
+    assert "2/10 | 20.0%; 95% Wilson score interval 5.7% to 51.0%" in report
+    assert "8/10 | 80.0%; 95% Wilson score interval 49.0% to 94.3%" in report
+    assert "total $12.345678; mean $0.246914 per pair" in report
+    assert "total 456.789 seconds; mean 9.136 seconds per pair" in report
+
+
+def test_endpoint_report_refuses_an_open_sampling_bound():
+    with pytest.raises(paired_trial.PairedTrialError,
+                       match="sampling bound is still open"):
+        paired_trial.build_trial_report(
+            _endpoint_counts(), bound_closed=False, run="run-2252")
+
+
 def test_parent_table_updater_edits_the_single_rollup_comment_without_local_files(
         tmp_path):
-    counts = paired_trial.aggregate_pairs([])
+    report = _built_endpoint_report()
     calls = []
     old_body = "previous roll-up\n" + paired_trial.TABLE_MARKER
-    at = datetime(2026, 10, 5, tzinfo=timezone.utc)
 
     def graphql(query, **variables):
         calls.append((query, variables))
@@ -212,11 +310,9 @@ def test_parent_table_updater_edits_the_single_rollup_comment_without_local_file
         if "updateIssueComment" in query:
             assert variables["id"] == "rollup-node"
             assert variables["body"].count(paired_trial.TABLE_MARKER) == 1
-            assert "| Same-head paired observations (N) | 0 |" in variables["body"]
-            assert "| Reviewer B cost total | $0.000000 |" in variables["body"]
-            assert "| Reviewer B latency total | 0.000 seconds |" in variables["body"]
-            assert "Wilson" not in variables["body"]
-            assert "96%" not in variables["body"]
+            assert "| Same-head paired observations (N) | 50 | |" in variables["body"]
+            assert "95% Wilson score interval" in variables["body"]
+            assert variables["body"] == report
             return {
                 "updateIssueComment": {
                     "issueComment": {"id": "rollup-node", "body": variables["body"]},
@@ -225,7 +321,7 @@ def test_parent_table_updater_edits_the_single_rollup_comment_without_local_file
         raise AssertionError("unexpected GraphQL request")
 
     result = paired_trial.update_parent_issue_table(
-        counts, run="run-123", at=at, graphql=graphql,
+        report, graphql=graphql,
     )
 
     assert result == {"action": "updated", "comment_id": "rollup-node"}
@@ -234,7 +330,7 @@ def test_parent_table_updater_edits_the_single_rollup_comment_without_local_file
 
 
 def test_parent_table_updater_creates_the_rollup_when_missing():
-    counts = paired_trial.aggregate_pairs([])
+    report = _built_endpoint_report()
     calls = []
 
     def graphql(query, **variables):
@@ -253,7 +349,7 @@ def test_parent_table_updater_creates_the_rollup_when_missing():
             }
         if "addComment" in query:
             assert variables["subjectId"] == "parent-node"
-            assert paired_trial.TABLE_MARKER in variables["body"]
+            assert variables["body"] == report
             return {
                 "addComment": {
                     "commentEdge": {"node": {"id": "new-rollup-node"}},
@@ -262,9 +358,27 @@ def test_parent_table_updater_creates_the_rollup_when_missing():
         raise AssertionError("unexpected GraphQL request")
 
     result = paired_trial.update_parent_issue_table(
-        counts, run="run-456", at=datetime(2026, 10, 5, tzinfo=timezone.utc),
-        graphql=graphql,
+        report, graphql=graphql,
     )
 
     assert result == {"action": "created", "comment_id": "new-rollup-node"}
     assert len(calls) == 2
+
+
+def test_live_report_does_not_read_or_post_before_the_sampling_bound_closes(
+        monkeypatch):
+    monkeypatch.setattr(paired_trial.heartbeat, "reviewer_b_state", lambda: {
+        "trial_id": reviewer_b.TRIAL_ID,
+        "sampling_open": True,
+        "pairs": [],
+    })
+    monkeypatch.setattr(
+        paired_trial, "collect_pair_notes",
+        lambda _references: pytest.fail("open trial must not read PR notes"),
+    )
+    monkeypatch.setattr(
+        paired_trial, "update_parent_issue_table",
+        lambda _report: pytest.fail("open trial must not post a report"),
+    )
+
+    assert paired_trial.refresh_parent_issue_table(run="run-2252") is None

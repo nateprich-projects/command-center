@@ -344,13 +344,19 @@ def test_packet_asks_for_seams_a_reproduction_and_sequenced_wide_changes(
     """The printed packet, read from the real skill, carries what the
     implementer routines act on (#1807): named seams and a `Reproduction:`
     first Accept item. It also carries the expand-migrate-contract and
-    prefactor rules with their brake on small work (#1808). Read from the
-    packet, not the skill file: skill text outside the sizing slice never
-    reaches the model."""
-    monkeypatch.setattr(breakdown, "fetch_plan", lambda repo, n: plan())
+    prefactor rules with their brake on small work (#1808), and routes each
+    review-focus bullet into its owning ticket's Accept. Read from the packet,
+    not the skill file: skill text outside the sizing slice never reaches the
+    model."""
+    focus = "A timed-out retry keeps the same request identity."
+    body = "# Plan\n\nDo the thing.\n\n## Review focus\n\n- {}".format(focus)
+    monkeypatch.setattr(
+        breakdown, "fetch_plan", lambda repo, n: plan(body=body))
     monkeypatch.setattr(breakdown, "fetch_siblings", lambda repo, n: [])
     assert breakdown.packet_main(["owner/repo#1"]) == 0
-    sizing = json.loads(capsys.readouterr().out)["sizing_standard"]
+    found = json.loads(capsys.readouterr().out)
+    assert found["project"]["body"] == body
+    sizing = found["sizing_standard"]
     normalized = " ".join(sizing.replace("**", "").split())
 
     assert ("A ticket's `Accept` names the one to three seams its tests go "
@@ -367,6 +373,9 @@ def test_packet_asks_for_seams_a_reproduction_and_sequenced_wide_changes(
             "own ticket, first" in normalized)
     assert ("Neither is a reason to split small work: what fits one run "
             "stays one ticket" in normalized)
+    assert ("For each `## Review focus` bullet, put one `Accept` test in the "
+            "ticket that owns that behavior. Copy the bullet's text verbatim, "
+            "exactly once." in normalized)
 
 
 def test_breakdown_packet_failure_stops_before_siblings_or_output(

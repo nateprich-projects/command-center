@@ -2625,7 +2625,7 @@ def test_the_breakdown_prompt_is_judgement_text_under_500_words():
     prompt = body.split("\n---\n", 1)[1]
     assert prompt.count("PACKET_JSON") == 1
     normalized = " ".join(prompt.split()).lower()
-    assert "what tickets break this plan" in normalized
+    assert "what tickets does this plan break into" in normalized
     assert "one run ending in one pull request" in normalized
     assert '"tickets"' in prompt
     assert '"needs_decision"' in prompt
@@ -2672,11 +2672,10 @@ def test_the_breakdown_prompt_asks_for_seams_a_reproduction_and_sequencing(
     assert ("a ticket fixing a reported defect makes its first accept item "
             "`reproduction: <the failing test at a named seam>`"
             in normalized)
-    assert ("only wide changes use expand-migrate-contract. a needed refactor "
-            "is its own first ticket; small work stays one ticket"
-            in normalized)
-    assert ("copy each `## review focus` bullet verbatim as one `accept` test "
-            "in its owning ticket; cover each once" in normalized)
+    assert ("sequence expand, migrate, contract only for a genuinely wide "
+            "change" in normalized)
+    assert ("make a needed refactor its own prefactor ticket, first; small "
+            "work stays one ticket" in normalized)
 
 
 def test_the_shape_prompt_is_judgement_text_under_500_words():
@@ -2792,7 +2791,7 @@ def test_a_breakdown_is_applied_and_finished_done(tmp_path):
     assert proc.returncode == 0, proc.stderr
     assert _muse_calls(repo) == 1
     prompt = (repo / "muse.prompt.1").read_text()
-    assert "What tickets break this plan" in prompt
+    assert "What tickets does this plan break into" in prompt
     assert "PACKET_JSON" not in prompt
     assert "one run ending in one pull request" in prompt
     assert BREAKDOWN_REF in prompt

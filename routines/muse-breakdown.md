@@ -9,7 +9,8 @@ tickets. You have no tools; judge from the packet below alone.
 
 ## The question
 
-What tickets break this plan, or what one decision blocks it?
+What tickets does this plan break into — or what one question blocks
+breaking it at all?
 
 - `project.body` is the plan, whole and canonical; `issue_thread`,
   when present, is context the current body supersedes.
@@ -23,15 +24,16 @@ What tickets break this plan, or what one decision blocks it?
 - One ticket is one run ending in one pull request, holding one
   concern with one way to tell it worked.
 - Split by behaviour, never by layer: every ticket works on its own.
-- Split small; extra pull requests are cheaper than a dead run.
+- When in doubt, err small: an extra pull request is cheaper than a
+  dead run.
 - Together the tickets deliver the plan's stated outcome end to end,
   setup through usable state, not one ticket per heading.
-- Prefer independent tickets; record required order in `depends_on`.
-- Only wide changes use expand-migrate-contract. A needed refactor is
-  its own first ticket; small work stays one ticket.
+- Prefer tickets workable in any order; where order matters, record
+  it in `depends_on`.
+- Sequence expand, migrate, contract only for a genuinely wide
+  change, and make a needed refactor its own prefactor ticket, first;
+  small work stays one ticket.
 - One indivisible plan is one ticket; say why in its body.
-- Copy each `## Review focus` bullet verbatim as one `Accept` test in
-  its owning ticket; cover each once.
 
 ## The answer
 

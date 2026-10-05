@@ -125,6 +125,26 @@ class TestCommandStartError(ImplementError):
         super().__init__("test command could not start")
 
 
+class EnvironmentSetupError(ImplementError):
+    """Locked test dependencies could not be prepared safely."""
+
+    def __init__(self, lock_sha256: str, step: str,
+                 result: Optional[dict] = None):
+        self.lock_sha256 = lock_sha256
+        self.step = step
+        self.pip_result = result
+        detail = ""
+        if isinstance(result, dict):
+            if result.get("timed_out") is True:
+                detail = "; {} timed out".format(step)
+            elif isinstance(result.get("exit_code"), int):
+                detail = "; {} exited {}".format(
+                    step, result["exit_code"])
+        super().__init__(
+            "finish environment error: {}{}; lock sha256 {}".format(
+                step, detail, lock_sha256))
+
+
 class MergeConflictError(ImplementError):
     """The ticket's work does not merge with origin/main (#1804)."""
 
@@ -990,15 +1010,25 @@ def _python_minor(executable: str) -> Optional[str]:
     return result.stdout.strip() if result.returncode == 0 else None
 
 
-def pinned_interpreter(root: pathlib.Path) -> str:
-    """The interpreter the checkout's tests should run under.
+def _python_version(executable: str) -> Optional[str]:
+    """The full interpreter version, used to invalidate patched runtimes."""
+    try:
+        result = _run(
+            [executable, "-c",
+             "import sys; print('.'.join(str(v) for v in sys.version_info[:3]))"],
+            cwd=pathlib.Path.cwd(), check=False,
+            timeout=INTERPRETER_PROBE_TIMEOUT_SECONDS,
+        )
+    except CommandTimeoutError:
+        raise
+    except (ImplementError, OSError, subprocess.SubprocessError):
+        return None
+    version = result.stdout.strip() if result.returncode == 0 else ""
+    return version if re.fullmatch(r"\d+\.\d+(?:\.\d+)?", version) else None
 
-    A repo that pins ``.python-version`` (The-League pins 3.12 and its
-    Makefile refuses anything else) gets a matching interpreter even when
-    finish-ticket itself was started by Apple's 3.9 ``python3`` (#1024).
-    Without a pin, or when no matching interpreter exists, this is
-    ``sys.executable``, so the repo's own check still names a mismatch.
-    """
+
+def _base_pinned_interpreter(root: pathlib.Path) -> str:
+    """Resolve the checkout's pinned interpreter, or retain the old fallback."""
     try:
         lines = (root / ".python-version").read_text().splitlines()
     except OSError:
@@ -1017,6 +1047,298 @@ def pinned_interpreter(root: pathlib.Path) -> str:
                 _python_minor(candidate) == wanted:
             return candidate
     return sys.executable
+
+
+def _dependency_source(root: pathlib.Path):
+    """Return the dependency input and its cache key for a Python checkout."""
+    for filename, kind in (
+            ("requirements.lock", "requirements-lock"),
+            ("uv.lock", "uv-lock"),
+            ("requirements.txt", "requirements"),
+            ("pyproject.toml", "pyproject")):
+        path = root / filename
+        if not path.is_file():
+            continue
+        try:
+            content = path.read_bytes()
+            if (kind == "pyproject"
+                    and not _pyproject_has_dependencies(content.decode("utf-8"))):
+                continue
+            if kind == "uv-lock" and (root / "pyproject.toml").is_file():
+                content += b"\0" + (root / "pyproject.toml").read_bytes()
+        except (OSError, UnicodeError):
+            raise EnvironmentSetupError("unreadable", "read dependency lock") \
+                from None
+        return path, kind, hashlib.sha256(content).hexdigest()
+    return None
+
+
+def _pyproject_has_dependencies(text: str) -> bool:
+    """Ignore tool-only pyprojects; install only declared Python dependencies."""
+    project = re.search(
+        r"(?ims)^\s*\[\s*project\s*\]\s*(.*?)(?=^\s*\[|\Z)", text)
+    if (project and re.search(
+            r"(?im)^[ \t]*dynamic[ \t]*=[ \t]*\[[^\]]*['\"]dependencies['\"]",
+            project.group(1))):
+        return True
+    return bool(re.search(
+        r"(?im)^\s*\[\s*(?:build-system|dependency-groups|"
+        r"project\.optional-dependencies|tool\.poetry\.dependencies|"
+        r"tool\.poetry\.dev-dependencies|"
+        r"tool\.poetry\.group\.[^]]+\.dependencies)\s*\]\s*$|"
+        r"^\s*(?:dependencies|optional-dependencies|requires|"
+        r"dev-dependencies)\s*=",
+        text,
+    ))
+
+
+def _process_result(completed: subprocess.CompletedProcess) -> dict:
+    """Keep a useful pip result without persisting its potentially private output."""
+    stdout = completed.stdout or ""
+    stderr = completed.stderr or ""
+    return {
+        "exit_code": completed.returncode,
+        "stdout_sha256": hashlib.sha256(stdout.encode("utf-8")).hexdigest(),
+        "stderr_sha256": hashlib.sha256(stderr.encode("utf-8")).hexdigest(),
+    }
+
+
+def _private_directory(path: pathlib.Path) -> None:
+    if path.is_symlink():
+        raise OSError("runtime environment directory is a symlink")
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if path.is_symlink() or not path.is_dir():
+        raise OSError("runtime environment path is not a directory")
+    os.chmod(path, 0o700)
+
+
+def _remove_environment(path: pathlib.Path) -> None:
+    if path.is_symlink():
+        path.unlink()
+    elif path.is_dir():
+        shutil.rmtree(path)
+    elif path.exists():
+        path.unlink()
+
+
+def _environment_python(environment: pathlib.Path,
+                        interpreter: str) -> pathlib.Path:
+    if os.name == "nt":
+        return environment / "Scripts" / "python.exe"
+    name = os.path.basename(interpreter)
+    if not name.startswith("python"):
+        name = "python"
+    return environment / "bin" / name
+
+
+def _pip_install_command(root: pathlib.Path, python: str, kind: str,
+                         path: pathlib.Path, environment: pathlib.Path,
+                         lock_sha256: str):
+    if kind == "requirements-lock":
+        return [python, "-m", "pip", "install", "--require-hashes",
+                "-r", str(path)]
+    if kind == "requirements":
+        return [python, "-m", "pip", "install", "-r", str(path)]
+    if kind == "pyproject":
+        return [python, "-m", "pip", "install", "."]
+    uv = shutil.which("uv")
+    if not uv:
+        raise EnvironmentSetupError(
+            lock_sha256, "uv export", {"exit_code": 127})
+    try:
+        exported = _run(
+            [uv, "export", "--locked", "--format", "requirements.txt",
+             "--no-emit-project"],
+            cwd=root, check=False, timeout=TEST_COMMAND_TIMEOUT_SECONDS,
+        )
+    except CommandTimeoutError as exc:
+        raise EnvironmentSetupError(lock_sha256, "uv export", {
+            "timed_out": True,
+            "output_sha256": hashlib.sha256(
+                exc.captured_output.encode("utf-8")).hexdigest(),
+        }) from None
+    except (OSError, ImplementError, subprocess.SubprocessError):
+        raise EnvironmentSetupError(
+            lock_sha256, "uv export", {"exit_code": None}) from None
+    if exported.returncode != 0 or not exported.stdout.strip():
+        raise EnvironmentSetupError(
+            lock_sha256, "uv export", _process_result(exported))
+    export_path = environment / "uv-export-requirements.txt"
+    export_path.write_text(exported.stdout)
+    os.chmod(export_path, 0o600)
+    return [python, "-m", "pip", "install", "-r", str(export_path)]
+
+
+def _install_locked_environment(root: pathlib.Path, repo: str, base: str,
+                                version: str, path: pathlib.Path,
+                                kind: str, lock_sha256: str,
+                                environment: pathlib.Path) -> str:
+    result = None
+    step = "venv creation"
+    try:
+        result = _run([base, "-m", "venv", str(environment)], cwd=root,
+                      check=False, timeout=TEST_COMMAND_TIMEOUT_SECONDS)
+        if result.returncode != 0:
+            raise EnvironmentSetupError(
+                lock_sha256, step, _process_result(result))
+        _private_directory(environment)
+        python = _environment_python(environment, base)
+        if not python.is_file():
+            raise EnvironmentSetupError(
+                lock_sha256, "venv activation", {"exit_code": None})
+        step = "pip install"
+        command = _pip_install_command(
+            root, str(python), kind, path, environment, lock_sha256)
+        try:
+            result = _run(command, cwd=root, check=False,
+                          timeout=TEST_COMMAND_TIMEOUT_SECONDS)
+        except CommandTimeoutError as exc:
+            result = {
+                "timed_out": True,
+                "output_sha256": hashlib.sha256(
+                    exc.captured_output.encode("utf-8")).hexdigest(),
+            }
+            raise EnvironmentSetupError(lock_sha256, step, result) from None
+        if result.returncode != 0:
+            raise EnvironmentSetupError(
+                lock_sha256, step, _process_result(result))
+        pip_result = _process_result(result)
+        if _python_version(str(python)) != version:
+            raise EnvironmentSetupError(
+                lock_sha256, "venv activation", pip_result)
+        manifest = {
+            "schema": 1,
+            "repo": repo,
+            "lock_file": path.name,
+            "lock_sha256": lock_sha256,
+            "interpreter": os.path.abspath(base),
+            "python_version": version,
+            "venv_python": str(python),
+            "pip_result": pip_result,
+        }
+        manifest_path = environment / "environment.json"
+        temporary = environment / ".environment.json.tmp"
+        temporary.write_text(json.dumps(manifest, sort_keys=True, indent=2)
+                             + "\n")
+        os.chmod(temporary, 0o600)
+        os.replace(str(temporary), str(manifest_path))
+        if kind == "uv-lock":
+            export_path = environment / "uv-export-requirements.txt"
+            if export_path.exists():
+                export_path.unlink()
+        return str(python)
+    except CommandTimeoutError as exc:
+        _remove_environment(environment)
+        result_record = _process_result(result) if result is not None else {}
+        result_record.update({
+            "timed_out": True,
+            "output_sha256": hashlib.sha256(
+                exc.captured_output.encode("utf-8")).hexdigest(),
+        })
+        raise EnvironmentSetupError(
+            lock_sha256, step, result_record) from None
+    except EnvironmentSetupError:
+        _remove_environment(environment)
+        raise
+    except (ImplementError, OSError, subprocess.SubprocessError):
+        _remove_environment(environment)
+        result_record = _process_result(result) if result is not None else None
+        raise EnvironmentSetupError(
+            lock_sha256, step, result_record) from None
+
+
+def _locked_interpreter(root: pathlib.Path, base: str,
+                        source: tuple) -> str:
+    path, kind, lock_sha256 = source
+    try:
+        version = _python_version(base)
+    except CommandTimeoutError as exc:
+        raise EnvironmentSetupError(lock_sha256, "pinned interpreter probe", {
+            "timed_out": True,
+            "output_sha256": hashlib.sha256(
+                exc.captured_output.encode("utf-8")).hexdigest(),
+        }) from None
+    if not version:
+        raise EnvironmentSetupError(
+            lock_sha256, "pinned interpreter probe", {"exit_code": None})
+    minor = ".".join(version.split(".")[:2])
+    try:
+        repo = resolve_checkout_repo(root, None)
+    except (ImplementError, funnel.GitHubError, OSError,
+            subprocess.SubprocessError):
+        raise EnvironmentSetupError(
+            lock_sha256, "repository identity lookup", {"exit_code": None}) \
+            from None
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo):
+        raise EnvironmentSetupError(
+            lock_sha256, "repository identity lookup", {"exit_code": None})
+    repo_dir_name = repo.replace("/", "--")
+    import heartbeat
+    finish_envs = pathlib.Path(heartbeat.SPOOL_DIR) / "finish-envs"
+    repo_envs = finish_envs / repo_dir_name
+    environment = repo_envs / minor
+    try:
+        _private_directory(finish_envs)
+        _private_directory(repo_envs)
+    except OSError:
+        raise EnvironmentSetupError(
+            lock_sha256, "runtime directory setup", {"exit_code": None}) \
+            from None
+
+    python = _environment_python(environment, base)
+    manifest_path = environment / "environment.json"
+    try:
+        manifest = json.loads(manifest_path.read_text())
+    except (OSError, ValueError, TypeError):
+        manifest = None
+    pip_result = (manifest.get("pip_result")
+                  if isinstance(manifest, dict) else None)
+    if (isinstance(manifest, dict)
+            and manifest.get("schema") == 1
+            and manifest.get("repo") == repo
+            and manifest.get("lock_sha256") == lock_sha256
+            and manifest.get("interpreter") == os.path.abspath(base)
+            and manifest.get("python_version") == version
+            and isinstance(pip_result, dict)
+            and pip_result.get("exit_code") == 0
+            and not environment.is_symlink()
+            and python.is_file()):
+        try:
+            activated = _python_version(str(python))
+        except CommandTimeoutError:
+            activated = None
+        if activated == version:
+            try:
+                os.chmod(environment, 0o700)
+            except OSError:
+                activated = None
+            else:
+                return str(python)
+    try:
+        _remove_environment(environment)
+        return _install_locked_environment(
+            root, repo, base, version, path, kind, lock_sha256,
+            environment)
+    except OSError:
+        _remove_environment(environment)
+        raise EnvironmentSetupError(
+            lock_sha256, "runtime environment setup", {"exit_code": None}) \
+            from None
+
+
+def pinned_interpreter(root: pathlib.Path) -> str:
+    """Return an isolated locked-dependency interpreter when a Python lock exists.
+
+    A repo that pins ``.python-version`` gets a matching interpreter even
+    when finish-ticket itself was started by another Python (#1024). For a
+    locked checkout, its owner-only cached venv installs those dependencies
+    before tests run; install errors never fall back to the bare interpreter.
+    """
+    base = _base_pinned_interpreter(root)
+    source = _dependency_source(root)
+    if source is None:
+        return base
+    return _locked_interpreter(root, base, source)
 
 
 def run_tests(root: pathlib.Path,
@@ -2737,6 +3059,12 @@ def _failure_note(exc: ImplementError, kept: str = "", *, repo: str) -> str:
     line -- go to the ticket in its own repository through
     ``_failure_comment``, where the next run's packet reads them.
     """
+    if isinstance(exc, EnvironmentSetupError):
+        note = str(exc)
+        if kept:
+            note += " | " + (
+                _member_kept(kept) if not _is_public_repo(repo) else kept)
+        return note
     if isinstance(exc, TestCommandStartError):
         note = str(exc)
         if kept:
@@ -3240,11 +3568,15 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
             context["root"], context["number"], context["branch"],
             ref=ref, run=run, agent=agent,
             reason=("merge conflict with origin/main" if conflict else
+                    "test environment setup failed"
+                    if isinstance(exc, EnvironmentSetupError) else
                     "tests failed" if phase == "tests" else
                     "checkpoint retry"),
         )
         posted = None
-        if phase == "tests" and not conflict and not _is_public_repo(resolved):
+        if (phase == "tests" and not conflict
+                and not isinstance(exc, EnvironmentSetupError)
+                and not _is_public_repo(resolved)):
             # The ids leave the public note, so they go to the ticket, and
             # before the release: the run that claims it next reads them in
             # its packet (#1796). A failed post must not strand the run.

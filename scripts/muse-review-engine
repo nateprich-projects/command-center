@@ -919,6 +919,11 @@ reviewer_b_model() {
   local model_status
   local parse_err
   local packet_json
+  # Reviewer B is pinned to muse-spark-1.3 at max, using the same model
+  # resolved for this repository so its existing contributor posture holds.
+  local CALL_EFFORT="max"
+  local -a MUSE_EXEC=("$MUSE_BIN" exec --model "$MUSE_MODEL" --json)
+  local -a MUSE_EXEC_UNBOUND=("$MUSE_BIN" exec --model "$MUSE_MODEL" --json)
   B_VALID=0
   B_VERDICT="unsure"
   B_RAW_ANSWER="$RUN_DIR/reviewer-b-raw.$B_PAIR_ID.json"
@@ -932,7 +937,6 @@ reviewer_b_model() {
     return 1
   fi
   while true; do
-    CALL_EFFORT="$EFFORT"
     call_model_files "$B_PROMPT_PATH" "$B_RAW_ANSWER" "$B_DIAG_PATH"
     model_status=$?
     if (( model_status != 0 )); then

@@ -1693,6 +1693,42 @@ def test_reviewer_b_runs_blind_after_a_and_posts_only_a_nonblocking_note(tmp_pat
     assert "shadow-finish" in _heartbeat(repo)
 
 
+def test_reviewer_b_pins_resolved_model_and_max_effort(tmp_path):
+    repo_name = "nateprich-projects/command-center"
+    shadow_state = {
+        "live_used_count": 0,
+        "live_count": 0,
+        "calibration_used_count": 20,
+        "calibration_count": 20,
+        "next_calibration": None,
+        "pairs": [],
+    }
+    proc, repo = _stubbed_runner(
+        tmp_path,
+        _begin(work={"pr": PR, "repo": repo_name, "ref": "{}#6".format(repo_name),
+                     "tier": "escalated"}),
+        _packet(repo=repo_name, head_sha="a" * 40),
+        args=("standard", "high"),
+        answers=_review_answers(
+            _judge_answer(evidence="A completed at high"),
+            json.dumps({"verdict": "approved", "findings": []}),
+        ),
+        extra_env={
+            "MUSE_SHADOW_STATE": json.dumps(shadow_state),
+            "MUSE_SHADOW_AUTO_STATE": "1",
+            "MUSE_SHADOW_RESERVE_RESULT": "reserved",
+        })
+
+    assert proc.returncode == 0, proc.stderr
+    assert _muse_calls(repo) == 3
+    a_args = (repo / "muse.args.2").read_text().splitlines()
+    b_args = (repo / "muse.args.3").read_text().splitlines()
+    assert a_args[a_args.index("--reasoning-effort") + 1] == "high"
+    assert b_args[b_args.index("--reasoning-effort") + 1] == "max"
+    assert b_args[b_args.index("--model") + 1] == "muse-spark-1.3-contributor"
+    assert b_args[b_args.index("--model") + 1] == a_args[a_args.index("--model") + 1]
+
+
 def test_reviewer_b_start_write_failure_does_not_stop_a(tmp_path):
     shadow_state = {
         "live_used_count": 0,

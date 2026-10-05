@@ -738,6 +738,31 @@ def test_run_preflight_stops_on_missing_budget_before_project_reads(monkeypatch)
     assert out["do"] == "stop"
 
 
+def test_run_preflight_accepts_the_existing_mac_profile_before_project_reads(
+    monkeypatch,
+):
+    """The default Codex path still accepts a verified Mac rollout."""
+    reading = {"source": "codex", "windows": {}}
+    _allow_local_preflight(monkeypatch, reading)
+    _deny_preflight_project_reads(monkeypatch)
+    checked = []
+
+    def mac_settings_check(*args, **kwargs):
+        checked.append((args, kwargs))
+        return {"ok": True,
+                "effective": {"model": "gpt-6-luna", "effort": "max"},
+                "automation": None}
+
+    monkeypatch.setattr(funnel, "_codex_settings_check", mac_settings_check)
+
+    out, result = funnel._begin_preflight(NOW, "codex", False, "standard")
+
+    assert checked == [((), {})]  # No cloud profile or metadata is supplied.
+    assert out["gate"] == "ok"
+    assert out["effective"] == {"model": "gpt-6-luna", "effort": "max"}
+    assert result is reading
+
+
 def test_run_preflight_refuses_partial_cloud_metadata_before_project_reads(
     monkeypatch, codex_settings_match,
 ):

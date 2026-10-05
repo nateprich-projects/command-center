@@ -17,7 +17,7 @@ if str(REPO_ROOT) not in sys.path:
 
 import funnel
 import heartbeat
-from engine import reviewer_b
+from engine import reviewer_b, review_packets
 
 
 TRIAL_ID = reviewer_b.TRIAL_ID
@@ -172,7 +172,9 @@ def parse_shadow_note(body: object, *, repo: str, pr: int
     }
 
 
-def _validated_pair_reference(value: object) -> Dict[str, object]:
+def _validated_pair_reference(
+    value: object, *, calibration_packets: Optional[Dict[str, Dict]] = None,
+) -> Dict[str, object]:
     if not isinstance(value, dict):
         raise PairedTrialError("heartbeat paired-trial reference is malformed")
     pair_id = value.get("pair_id")
@@ -195,6 +197,14 @@ def _validated_pair_reference(value: object) -> Dict[str, object]:
     elif (sample_name not in reviewer_b.CALIBRATION_NAMES
           or reviewer_b.CALIBRATION_SIDES.get(sample_name) != kind):
         raise PairedTrialError("calibration paired-trial reference is malformed")
+    else:
+        packet = (calibration_packets or {}).get(sample_name)
+        if (not isinstance(packet, dict)
+                or repo != packet.get("repo")
+                or pr != packet.get("pr")
+                or head_sha != packet.get("head_sha")):
+            raise PairedTrialError(
+                "calibration paired-trial reference does not match fixed packet")
     return {
         "pair_id": pair_id,
         "repo": repo,
@@ -215,8 +225,18 @@ def collect_pair_notes(
     references: Dict[str, Dict[str, object]] = {}
     conflicting_references = set()
     grouped: Dict[Tuple[str, int], List[Dict[str, object]]] = {}
+    calibration_packets = None
     for raw in pair_references:
-        reference = _validated_pair_reference(raw)
+        if (calibration_packets is None and isinstance(raw, dict)
+                and raw.get("kind") in ("bad", "good")):
+            try:
+                calibration_packets = review_packets.load_packet_set(
+                    reviewer_b.CALIBRATION_VERSION)
+            except review_packets.PacketSetError as exc:
+                raise PairedTrialError(
+                    "fixed calibration packet set is unavailable") from exc
+        reference = _validated_pair_reference(
+            raw, calibration_packets=calibration_packets)
         pair_id = reference["pair_id"]
         previous = references.get(pair_id)
         if previous is not None and previous != reference:

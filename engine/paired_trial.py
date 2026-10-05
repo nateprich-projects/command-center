@@ -1,13 +1,14 @@
-"""Record reviewer-B paired-trial observations on the parent issue."""
+"""Build and post the reviewer-B paired-trial endpoint report."""
 
 from __future__ import annotations
 
 import argparse
-from datetime import datetime, timezone
-from decimal import Decimal, InvalidOperation
 import json
+import math
 import re
 import sys
+from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -58,6 +59,20 @@ _PARENT_COMMENTS_QUERY = """query ParentPairedTrialComments(
   repository(owner: $owner, name: $name) {
     issue(number: $number) {
       id
+      comments(first: 100, after: $cursor) {
+        nodes { id body }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+}"""
+
+_PR_COMMENTS_QUERY = """query PairedTrialPrComments(
+  $owner: String!, $name: String!, $number: Int!, $cursor: String
+) {
+  rateLimit { cost remaining resetAt }
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
       comments(first: 100, after: $cursor) {
         nodes { id body }
         pageInfo { hasNextPage endCursor }
@@ -215,13 +230,60 @@ def _validated_pair_reference(
     }
 
 
+def _read_pr_comments(repo: str, number: int) -> List[Dict[str, object]]:
+    """Read all issue comments attached to one pull request."""
+    if (not isinstance(repo, str) or not _REPOSITORY_RE.fullmatch(repo)
+            or isinstance(number, bool) or not isinstance(number, int)
+            or number < 1):
+        raise PairedTrialError("paired-trial pull request reference is malformed")
+    owner, name = repo.split("/", 1)
+    cursor = None
+    cursors = set()
+    comments = []
+    while True:
+        variables = {"owner": owner, "name": name, "number": number}
+        if cursor is not None:
+            variables["cursor"] = cursor
+        data = funnel.gh_graphql(_PR_COMMENTS_QUERY, **variables)
+        repository = data.get("repository") if isinstance(data, dict) else None
+        pull_request = (repository.get("pullRequest")
+                        if isinstance(repository, dict) else None)
+        connection = (pull_request.get("comments")
+                      if isinstance(pull_request, dict) else None)
+        page_info = (connection.get("pageInfo")
+                     if isinstance(connection, dict) else None)
+        nodes = (connection.get("nodes")
+                 if isinstance(connection, dict) else None)
+        if (not isinstance(nodes, list) or not isinstance(page_info, dict)
+                or not isinstance(page_info.get("hasNextPage"), bool)):
+            raise PairedTrialError(
+                "could not read comments for {} PR #{}".format(repo, number))
+        for row in nodes:
+            if (not isinstance(row, dict) or not isinstance(row.get("id"), str)
+                    or not isinstance(row.get("body"), str)):
+                raise PairedTrialError(
+                    "pull-request comment row is unreadable for {} PR #{}".
+                    format(repo, number))
+            comments.append({"id": row["id"], "body": row["body"]})
+        if not page_info["hasNextPage"]:
+            return comments
+        next_cursor = page_info.get("endCursor")
+        if (not isinstance(next_cursor, str) or not next_cursor
+                or next_cursor in cursors):
+            raise PairedTrialError(
+                "pull-request comment pagination did not advance for {} PR #{}".
+                format(repo, number))
+        cursors.add(next_cursor)
+        cursor = next_cursor
+
+
 def collect_pair_notes(
     pair_references: Iterable[Dict[str, object]],
     *,
     comment_reader: Optional[Callable[[str, int], Sequence[Dict[str, object]]]] = None,
 ) -> List[Dict[str, object]]:
     """Read per-run PR comments for heartbeat-indexed completed pairs."""
-    read_comments = comment_reader or funnel.read_issue_comments
+    read_comments = comment_reader or _read_pr_comments
     references: Dict[str, Dict[str, object]] = {}
     conflicting_references = set()
     grouped: Dict[Tuple[str, int], List[Dict[str, object]]] = {}
@@ -366,6 +428,7 @@ def aggregate_pairs(pairs: Iterable[Dict[str, object]]) -> Dict[str, object]:
         row for pair_id, row in by_id.items() if pair_id not in conflicted_ids
     ]
     accepted.sort(key=lambda row: row["pair_id"])
+    live = [row for row in accepted if row["kind"] == "live"]
     bad = [row for row in accepted if row["kind"] == "bad"]
     good = [row for row in accepted if row["kind"] == "good"]
     costs = sum(
@@ -375,7 +438,11 @@ def aggregate_pairs(pairs: Iterable[Dict[str, object]]) -> Dict[str, object]:
 
     return {
         "n": len(accepted),
-        "live_n": sum(row["kind"] == "live" for row in accepted),
+        "live_n": len(live),
+        "live_a_approved": sum(row["a_verdict"] == "approved" for row in live),
+        "live_a_rejected": sum(row["a_verdict"] == "rejected" for row in live),
+        "live_b_approved": sum(row["b_verdict"] == "approved" for row in live),
+        "live_b_rejected": sum(row["b_verdict"] == "rejected" for row in live),
         "bad_n": len(bad),
         "good_n": len(good),
         "bad_a_misses": sum(row["a_verdict"] == "approved" for row in bad),
@@ -404,21 +471,59 @@ def aggregate_pairs(pairs: Iterable[Dict[str, object]]) -> Dict[str, object]:
     }
 
 
-def render_parent_issue_comment(
+def _wilson_interval(successes: int, trials: int
+                     ) -> Optional[Tuple[float, float]]:
+    """Return a two-sided 95% Wilson score interval, or None for 0 trials."""
+    if (isinstance(successes, bool) or not isinstance(successes, int)
+            or isinstance(trials, bool) or not isinstance(trials, int)
+            or successes < 0 or trials < 0 or successes > trials):
+        raise PairedTrialError("paired-trial interval counts are invalid")
+    if trials == 0:
+        return None
+
+    z = 1.96
+    z_squared = z * z
+    observed = successes / trials
+    denominator = 1 + z_squared / trials
+    center = (observed + z_squared / (2 * trials)) / denominator
+    spread = z * math.sqrt(
+        observed * (1 - observed) / trials
+        + z_squared / (4 * trials * trials)
+    ) / denominator
+    return max(0.0, center - spread), min(1.0, center + spread)
+
+
+def _rate_summary(successes: int, trials: int) -> str:
+    interval = _wilson_interval(successes, trials)
+    if interval is None:
+        return "not estimable (no A misses)"
+    low, high = interval
+    return "{:.1%}; 95% Wilson score interval {:.1%} to {:.1%}".format(
+        successes / trials, low, high)
+
+
+def build_trial_report(
     counts: Dict[str, object],
     *,
+    bound_closed: bool,
     run: str,
     at: Optional[datetime] = None,
 ) -> str:
-    """Render a single editable roll-up without rates or local persistence."""
+    """Build the final endpoint table from raw same-head aggregate counts."""
     if not isinstance(run, str) or not run.strip():
-        raise PairedTrialError("paired-trial roll-up needs its run id")
+        raise PairedTrialError("paired-trial report needs its run id")
+    if not isinstance(bound_closed, bool) or not bound_closed:
+        raise PairedTrialError("paired-trial sampling bound is still open")
     stamp = at or datetime.now(timezone.utc)
     if not isinstance(stamp, datetime) or stamp.tzinfo is None:
-        raise PairedTrialError("paired-trial roll-up timestamp is invalid")
+        raise PairedTrialError("paired-trial report timestamp is invalid")
 
+    if not isinstance(counts, dict):
+        raise PairedTrialError("paired-trial counts are malformed")
     required_counts = (
-        "n", "live_n", "bad_n", "good_n", "bad_a_misses",
+        "n", "live_n", "live_a_approved", "live_a_rejected",
+        "live_b_approved", "live_b_rejected", "bad_n", "good_n",
+        "bad_a_misses",
         "bad_b_catches", "bad_overlap", "bad_correlated_misses",
         "bad_joint_detection", "good_a_false_blocks", "good_b_false_blocks",
         "good_joint_false_blocks",
@@ -427,45 +532,107 @@ def render_parent_issue_comment(
     for name in required_counts:
         value = counts.get(name)
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-            raise PairedTrialError("paired-trial count {} is invalid".format(name))
+            raise PairedTrialError(
+                "paired-trial count {} is invalid".format(name))
         values[name] = value
     cost = _decimal(counts.get("cost_dollars_total"), "cost total")
     latency = _decimal(counts.get("latency_seconds_total"), "latency total")
 
+    live_limit = reviewer_b.LIVE_LIMIT
+    bad_limit = sum(
+        side == "bad" for side in reviewer_b.CALIBRATION_SIDES.values())
+    good_limit = sum(
+        side == "good" for side in reviewer_b.CALIBRATION_SIDES.values())
+    endpoint_n = live_limit + bad_limit + good_limit
+    if (reviewer_b.CALIBRATION_LIMIT != bad_limit + good_limit
+            or values["n"] != endpoint_n
+            or values["live_n"] != live_limit
+            or values["bad_n"] != bad_limit
+            or values["good_n"] != good_limit):
+        raise PairedTrialError(
+            "paired-trial report requires the complete fixed endpoint")
+    if values["n"] != values["live_n"] + values["bad_n"] + values["good_n"]:
+        raise PairedTrialError("paired-trial endpoint counts do not add up")
+
+    bad_n = values["bad_n"]
+    good_n = values["good_n"]
+    live_n = values["live_n"]
+    if (values["live_a_approved"] + values["live_a_rejected"] != live_n
+            or values["live_b_approved"] + values["live_b_rejected"] != live_n):
+        raise PairedTrialError("paired-trial live verdict counts are inconsistent")
+    a_misses = values["bad_a_misses"]
+    b_catches = values["bad_b_catches"]
+    overlap = values["bad_overlap"]
+    correlated_misses = values["bad_correlated_misses"]
+    joint_detection = values["bad_joint_detection"]
+    good_a_false_blocks = values["good_a_false_blocks"]
+    good_b_false_blocks = values["good_b_false_blocks"]
+    good_joint_false_blocks = values["good_joint_false_blocks"]
+    if (a_misses > bad_n or b_catches > a_misses
+            or correlated_misses > a_misses
+            or b_catches + correlated_misses != a_misses
+            or overlap > bad_n - a_misses
+            or joint_detection != bad_n - correlated_misses
+            or good_a_false_blocks > good_n
+            or good_b_false_blocks > good_n
+            or good_joint_false_blocks > good_n
+            or good_joint_false_blocks < max(
+                good_a_false_blocks, good_b_false_blocks)
+            or good_joint_false_blocks > (
+                good_a_false_blocks + good_b_false_blocks)):
+        raise PairedTrialError("paired-trial verdict counts are inconsistent")
+
+    bad_b_rejections = b_catches + overlap
+    good_a_approvals = good_n - good_a_false_blocks
+    good_b_approvals = good_n - good_b_false_blocks
+    mean_cost = cost / Decimal(endpoint_n)
+    mean_latency = latency / Decimal(endpoint_n)
     lines = [
         TABLE_MARKER,
         "",
-        "## Reviewer B paired-trial progress",
+        "## Reviewer B paired-trial endpoint report",
         "",
-        "Counts include only complete same-head pairs. Per-run PR notes retain "
-        "the verdicts, head SHA, cost, and latency used for this roll-up.",
+        "The fixed sampling bound is closed at {} live pairs plus {} known-bad "
+        "and {} known-good calibration pairs (N = {}). Counts include only "
+        "complete same-head pairs; per-run PR notes retain the source verdicts, "
+        "head SHA, cost, and latency.".format(
+            live_limit, bad_limit, good_limit, endpoint_n),
         "",
-        "| Measure | Count / total |",
-        "| --- | ---: |",
-        "| Same-head paired observations (N) | {} |".format(values["n"]),
-        "| Live pairs | {} |".format(values["live_n"]),
-        "| Known-bad calibration pairs | {} |".format(values["bad_n"]),
-        "| Known-good calibration pairs | {} |".format(values["good_n"]),
-        "| A misses on bad (A approved) | {} |".format(values["bad_a_misses"]),
-        "| B catches among A misses on bad | {} |".format(
-            values["bad_b_catches"]),
-        "| Overlap on bad (A and B rejected) | {} |".format(
-            values["bad_overlap"]),
-        "| Correlated misses on bad (A and B approved) | {} |".format(
-            values["bad_correlated_misses"]),
-        "| Joint detection on bad (A or B rejected) | {} |".format(
-            values["bad_joint_detection"]),
-        "| A false blocks on good | {} |".format(
-            values["good_a_false_blocks"]),
-        "| B false blocks on good | {} |".format(
-            values["good_b_false_blocks"]),
-        "| Joint false-blocks on good (A or B rejected) | {} |".format(
-            values["good_joint_false_blocks"]),
-        "| Reviewer B cost total | {}{:.6f} |".format(
-            CURRENCY, cost),
-        "| Reviewer B latency total | {:.3f} seconds |".format(latency),
+        "| Measure | Raw count | Rate or summary |",
+        "| --- | ---: | --- |",
+        "| Trial endpoint | {} live + {} bad + {} good | closed |".format(
+            live_limit, bad_limit, good_limit),
+        "| Same-head paired observations (N) | {} | |".format(values["n"]),
+        "| Reviewer A verdicts on live pairs | {} approved / {} rejected | |".format(
+            values["live_a_approved"], values["live_a_rejected"]),
+        "| Reviewer B verdicts on live pairs | {} approved / {} rejected | |".format(
+            values["live_b_approved"], values["live_b_rejected"]),
+        "| Reviewer A verdicts on known-bad | {} approved / {} rejected | |".format(
+            a_misses, bad_n - a_misses),
+        "| Reviewer B verdicts on known-bad | {} approved / {} rejected | |".format(
+            bad_n - bad_b_rejections, bad_b_rejections),
+        "| Reviewer A verdicts on known-good | {} approved / {} rejected | |".format(
+            good_a_approvals, good_a_false_blocks),
+        "| Reviewer B verdicts on known-good | {} approved / {} rejected | |".format(
+            good_b_approvals, good_b_false_blocks),
+        "| B catches among A misses on known-bad | {}/{} | {} |".format(
+            b_catches, a_misses, _rate_summary(b_catches, a_misses)),
+        "| Overlap on known-bad (A and B reject) | {}/{} | {} |".format(
+            overlap, bad_n, _rate_summary(overlap, bad_n)),
+        "| Correlated misses on known-bad (A and B approve) | {}/{} | {} |".format(
+            correlated_misses, bad_n,
+            _rate_summary(correlated_misses, bad_n)),
+        "| Joint detection on known-bad (A or B reject) | {}/{} | {} |".format(
+            joint_detection, bad_n, _rate_summary(joint_detection, bad_n)),
+        "| Joint false-blocks on known-good (A or B reject) | {}/{} | {} |".format(
+            good_joint_false_blocks, good_n,
+            _rate_summary(good_joint_false_blocks, good_n)),
+        "| Reviewer B cost | total {}{:.6f}; mean {}{:.6f} per pair | |".format(
+            CURRENCY, cost, CURRENCY, mean_cost),
+        "| Reviewer B latency | total {:.3f} seconds; mean {:.3f} seconds per pair | |".format(
+            latency, mean_latency),
         "",
-        "Updated by Muse run {} at {}.".format(run.strip(), stamp.isoformat()),
+        "Built by Muse run {} at {}.".format(run.strip(), stamp.isoformat()),
     ]
     return funnel.append_provenance(
         "\n".join(lines) + "\n", "agent",
@@ -520,32 +687,33 @@ def _parent_comments(
 
 
 def update_parent_issue_table(
-    counts: Dict[str, object],
+    report_body: str,
     *,
-    run: str,
-    at: Optional[datetime] = None,
     graphql: Optional[Callable[..., Dict[str, object]]] = None,
 ) -> Dict[str, str]:
-    """Create or update the one GitHub comment that owns the running table."""
+    """Post a built endpoint table, updating its one marked GitHub comment."""
+    if (not isinstance(report_body, str)
+            or report_body.count(TABLE_MARKER) != 1
+            or report_body.count("## Reviewer B paired-trial endpoint report") != 1):
+        raise PairedTrialError("built paired-trial report is malformed")
     call = graphql or funnel.gh_graphql
     issue_id, comments = _parent_comments(call)
     matches = [row for row in comments if TABLE_MARKER in row["body"]]
     if len(matches) > 1:
         raise PairedTrialError("parent issue has multiple paired-trial roll-ups")
-    body = render_parent_issue_comment(counts, run=run, at=at)
     if matches:
         comment_id = matches[0]["id"]
         data = call(
-            _UPDATE_COMMENT_MUTATION, id=comment_id, body=body)
+            _UPDATE_COMMENT_MUTATION, id=comment_id, body=report_body)
         payload = (data.get("updateIssueComment") or {}).get("issueComment") \
             if isinstance(data, dict) else None
         if (not isinstance(payload, dict) or payload.get("id") != comment_id
-                or payload.get("body") != body):
+                or payload.get("body") != report_body):
             raise PairedTrialError("parent paired-trial roll-up update was not confirmed")
         return {"action": "updated", "comment_id": comment_id}
 
     data = call(
-        _ADD_COMMENT_MUTATION, subjectId=issue_id, body=body)
+        _ADD_COMMENT_MUTATION, subjectId=issue_id, body=report_body)
     payload = (data.get("addComment") or {}).get("commentEdge") \
         if isinstance(data, dict) else None
     node = payload.get("node") if isinstance(payload, dict) else None
@@ -557,15 +725,22 @@ def update_parent_issue_table(
 
 def refresh_parent_issue_table(*, run: str,
                                at: Optional[datetime] = None
-                               ) -> Tuple[Dict[str, object], Dict[str, str]]:
-    """Rebuild the roll-up from GitHub heartbeats and per-run PR notes."""
+                               ) -> Optional[Tuple[Dict[str, object], Dict[str, str]]]:
+    """Post the report only after the fixed paired-trial bound has closed."""
     state = heartbeat.reviewer_b_state()
+    if (not isinstance(state, dict) or state.get("trial_id") != TRIAL_ID
+            or not isinstance(state.get("sampling_open"), bool)):
+        raise PairedTrialError("reviewer-B sampling bound is unreadable")
+    if state["sampling_open"]:
+        return None
     references = state.get("pairs") if isinstance(state, dict) else None
     if not isinstance(references, list):
         raise PairedTrialError("reviewer-B heartbeat pairs are unreadable")
     notes = collect_pair_notes(references)
     counts = aggregate_pairs(notes)
-    result = update_parent_issue_table(counts, run=run, at=at)
+    report_body = build_trial_report(
+        counts, bound_closed=True, run=run, at=at)
+    result = update_parent_issue_table(report_body)
     return counts, result
 
 
@@ -576,10 +751,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     update.add_argument("--run", required=True)
     args = parser.parse_args(argv)
     try:
-        counts, result = refresh_parent_issue_table(run=args.run)
+        refreshed = refresh_parent_issue_table(run=args.run)
     except (PairedTrialError, funnel.GitHubError, heartbeat.HeartbeatError) as exc:
         print("paired-trial-recorder: {}".format(exc), file=sys.stderr)
         return 1
+    if refreshed is None:
+        print(json.dumps({"action": "waiting", "sampling_open": True}))
+        return 0
+    counts, result = refreshed
     print(json.dumps({
         "action": result["action"],
         "comment_id": result["comment_id"],

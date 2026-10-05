@@ -1297,6 +1297,57 @@ def test_stopping_rule_kind_leaves_does_not_break_rows_unclassified():
     ) is None
 
 
+def test_prior_self_review_gate_forces_full_review_and_deduplicates_code(
+        monkeypatch):
+    prior_head = "2" * 40
+    current_head = "3" * 40
+    code = ("requirement unsure: Targeted Mac-pass test exists -- "
+            "the earlier packet did not show one")
+    gate = ("requirement unsure: Prior blocking item addressed "
+            "(missing_requirement_or_accept_test): requirement unsure: "
+            "Passes independent escalated review -- verdict null; "
+            "independent review has not yet approved this head")
+    comments = {"status": "available", "comments": [
+        rejected_review_comment(
+            prior_head, [code, gate, code, gate],
+            "2026-10-05T04:17:47Z"),
+    ]}
+    monkeypatch.setattr(review, "fetch_branch_head",
+                        lambda repo, branch: "9" * 40)
+    monkeypatch.setattr(review, "fetch_scope",
+                        lambda repo, base_sha, head: (
+                            ["f.py"], "same scoped diff", "merge-base"))
+    monkeypatch.setattr(review, "_diff_line_count",
+                        lambda diff, interdiff=False: 0 if interdiff else 100)
+
+    result, _ = review.build_scoped_rereview(
+        REPO, 2308, "main", current_head, comments)
+
+    assert review._stopping_rule_kind(gate) is None
+    assert result["prior_blocking_items"] == [
+        {"kind": "missing_requirement_or_accept_test", "finding": code}]
+    assert result["full_review_fallback"] is True
+    assert result["fallback_reasons"] == ["prior_review_process_gate"]
+
+
+def test_full_review_omits_only_standalone_self_review_gates():
+    assert review.omit_review_process_requirements([
+        "Targeted Mac-pass test at funnel._begin_preflight",
+        "Passes independent escalated review",
+        "The PR is merged.",
+        "Cloud metadata refusal stays fail closed",
+    ]) == [
+        "Targeted Mac-pass test at funnel._begin_preflight",
+        "Cloud metadata refusal stays fail closed",
+    ]
+    with pytest.raises(review.ReviewJudgeError, match="mixed"):
+        review.omit_review_process_requirements([
+            "Targeted Mac-pass test exists and passes independent review"])
+    prompt = (ROOT / "scripts" / "muse-review-engine").read_text()
+    assert "Do not list a requirement that this PR pass this independent review" in prompt
+    assert "omit_review_process_requirements(requirements)" in prompt
+
+
 def test_scoped_rereview_interdiff_excludes_changes_from_merged_main(
         tmp_path, monkeypatch):
     def git(*args):

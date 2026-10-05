@@ -1194,27 +1194,6 @@ run_live_reviewer_b() {
   echo "muse-review-engine: head kept moving during reviewer-B pairing; no shadow pair recorded" >&2
 }
 
-calibration_head_matches() {
-  local repo="$1"
-  local pr="$2"
-  local expected="$3"
-  local output="$RUN_DIR/reviewer-b-calibration-head.json"
-  if ! "$GH_BIN" pr view "$pr" --repo "$repo" --json headRefOid \
-      >"$output" 2>"$RUN_DIR/reviewer-b-calibration-head.err"; then
-    return 1
-  fi
-  python3 - "$output" "$expected" <<'PY'
-import json
-import sys
-
-try:
-    data = json.load(open(sys.argv[1]))
-except (OSError, ValueError):
-    raise SystemExit(1)
-raise SystemExit(0 if data.get("headRefOid") == sys.argv[2] else 1)
-PY
-}
-
 run_calibration_reviewer_b() {
   local state_path="$RUN_DIR/reviewer-b-calibration-state.json"
   local sample
@@ -1255,20 +1234,12 @@ run_calibration_reviewer_b() {
       *) echo "muse-review-engine: calibration packet has no declared side" >&2; return 0 ;;
     esac
   fi
-  if ! calibration_head_matches "$repo" "$pr" "$head"; then
-    echo "muse-review-engine: calibration PR head no longer matches its frozen packet" >&2
-    return 0
-  fi
   if ! shadow_replay_a "$packet" "$answer" \
       "$RUN_DIR/reviewer-b-calibration-a.log"; then
     return 0
   fi
   if ! a_verdict="$(shadow_read_answer_verdict "$answer")"; then
     echo "muse-review-engine: calibration reviewer A answer has no verdict" >&2
-    return 0
-  fi
-  if ! calibration_head_matches "$repo" "$pr" "$head"; then
-    echo "muse-review-engine: calibration PR head moved after reviewer A; discarding it" >&2
     return 0
   fi
   if ! shadow_reserve_pair "$kind" "$repo" "$pr" "$head" "$sample"; then
@@ -1286,7 +1257,7 @@ run_calibration_reviewer_b() {
   local b_valid="$B_VALID"
   local b_verdict="$B_VERDICT"
   local b_answer="$B_NORMALIZED_ANSWER"
-  if (( b_valid )) && calibration_head_matches "$repo" "$pr" "$head"; then
+  if (( b_valid )); then
     B_VALID="$b_valid"
     B_VERDICT="$b_verdict"
     B_NORMALIZED_ANSWER="$b_answer"

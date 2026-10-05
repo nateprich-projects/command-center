@@ -50,6 +50,15 @@ SANDBOX_TYPE = "workspace-write"
 #: the network. A run without it fails later and looks like a GitHub fault.
 NETWORK_ACCESS = True
 
+#: The cloud environment has no verified execution profile yet. Keep the
+#: profile name and its required fact names separate from the Mac rollout
+#: policy so a later, evidence-backed change can add its own exact checks.
+MAC_PROFILE = "mac"
+CLOUD_PROFILE = "cloud"
+CLOUD_PROFILE_FACTS = (
+    "model", "effort", "workspace", "sandbox", "approval", "usage",
+)
+
 HOME = os.path.expanduser("~")
 
 #: Where a run may write, as observed on a 2026-09-18 automation run. The
@@ -294,8 +303,9 @@ def _profile_drift(profile: object) -> Tuple[List[str], set]:
     return drift, automations
 
 
-def drift(settings: Mapping, session_cwd: Optional[str] = None) -> List[str]:
-    """Each way ``settings`` differs from the manifest, one line apiece."""
+def _mac_drift(settings: Mapping,
+               session_cwd: Optional[str] = None) -> List[str]:
+    """Each way the Mac rollout differs from its exact manifest."""
     found: List[str] = []
     if settings.get("model") != MODEL:
         found.append("model: expected {}, found {}".format(
@@ -343,20 +353,79 @@ def drift(settings: Mapping, session_cwd: Optional[str] = None) -> List[str]:
     return found
 
 
+def _known_cloud_fact(value: object) -> bool:
+    """Whether a supplied cloud fact is present rather than unknown."""
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return value.strip().lower() not in {
+            "", "unknown", "unavailable", "unverified", "not verified",
+        }
+    if isinstance(value, (Mapping, list, tuple, set)):
+        return bool(value)
+    return True
+
+
+def _cloud_drift(metadata: object) -> List[str]:
+    """Keep the future cloud profile closed until #2289 proves its facts.
+
+    The metadata shape names only the six facts #2302 requires. There is no
+    accepted cloud value set yet, so even a complete fixture cannot pass as
+    a real profile or stand in for the evidence in #2289.
+    """
+    found: List[str] = []
+    if not isinstance(metadata, Mapping):
+        metadata = {}
+    for fact in CLOUD_PROFILE_FACTS:
+        if not _known_cloud_fact(metadata.get(fact)):
+            found.append("cloud profile {}: value is unknown or missing".format(
+                fact))
+    found.append(
+        "cloud profile disabled until model, effort, workspace, sandbox, "
+        "approval, and usage are verified in #2289"
+    )
+    return found
+
+
+def drift(settings: Mapping, session_cwd: Optional[str] = None, *,
+          profile: str = MAC_PROFILE) -> List[str]:
+    """Evaluate a named profile while keeping the Mac policy exact."""
+    if profile == MAC_PROFILE:
+        return _mac_drift(settings, session_cwd)
+    if profile == CLOUD_PROFILE:
+        return _cloud_drift(settings)
+    return ["execution profile: unknown profile {!r}".format(profile)]
+
+
 def check(cwd: Optional[str] = None, *,
           now: Optional[datetime.datetime] = None,
           root: Optional[str] = None,
-          environ: Optional[Mapping[str, str]] = None) -> Dict:
+          environ: Optional[Mapping[str, str]] = None,
+          profile: str = MAC_PROFILE,
+          metadata: Optional[Mapping] = None) -> Dict:
     """Whether this run is the run the manifest describes.
 
     Returns ``ok``, the ``rollout`` it read, the ``effective`` model and
     effort when they could be read, the run's own ``automation`` directory
     when it passed, each ``drift`` line, and one ``why`` sentence for the
-    refusal.
+    refusal. The cloud profile is a separate fail-closed seam and never
+    borrows the Mac rollout as cloud evidence.
     """
     cwd = cwd or os.getcwd()
     result: Dict = {"ok": False, "rollout": None, "effective": None,
                     "automation": None, "drift": []}
+    if profile != MAC_PROFILE:
+        result["drift"] = drift(metadata or {}, profile=profile)
+        result["ok"] = not result["drift"]
+        if result["ok"]:
+            result["why"] = ""
+        else:
+            label = "cloud" if profile == CLOUD_PROFILE else "unknown"
+            result["why"] = (
+                "this {} Codex profile cannot be verified ({}); begin ran "
+                "in {}".format(label, "; ".join(result["drift"]), cwd)
+            )
+        return result
     run = thread_id(environ)
     if run is None:
         result["drift"] = ["no Codex thread id in the environment ({})".format(

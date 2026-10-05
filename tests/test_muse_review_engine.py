@@ -2625,7 +2625,7 @@ def test_the_breakdown_prompt_is_judgement_text_under_500_words():
     prompt = body.split("\n---\n", 1)[1]
     assert prompt.count("PACKET_JSON") == 1
     normalized = " ".join(prompt.split()).lower()
-    assert "what tickets does this plan break into" in normalized
+    assert "what tickets break this plan" in normalized
     assert "one run ending in one pull request" in normalized
     assert '"tickets"' in prompt
     assert '"needs_decision"' in prompt
@@ -2672,10 +2672,11 @@ def test_the_breakdown_prompt_asks_for_seams_a_reproduction_and_sequencing(
     assert ("a ticket fixing a reported defect makes its first accept item "
             "`reproduction: <the failing test at a named seam>`"
             in normalized)
-    assert ("sequence expand, migrate, contract only for a genuinely wide "
-            "change" in normalized)
-    assert ("make a needed refactor its own prefactor ticket, first; small "
-            "work stays one ticket" in normalized)
+    assert ("only wide changes use expand-migrate-contract. a needed refactor "
+            "is its own first ticket; small work stays one ticket"
+            in normalized)
+    assert ("copy each `## review focus` bullet verbatim as one `accept` test "
+            "in its owning ticket; cover each once" in normalized)
 
 
 def test_the_shape_prompt_is_judgement_text_under_500_words():
@@ -2791,7 +2792,7 @@ def test_a_breakdown_is_applied_and_finished_done(tmp_path):
     assert proc.returncode == 0, proc.stderr
     assert _muse_calls(repo) == 1
     prompt = (repo / "muse.prompt.1").read_text()
-    assert "What tickets does this plan break into" in prompt
+    assert "What tickets break this plan" in prompt
     assert "PACKET_JSON" not in prompt
     assert "one run ending in one pull request" in prompt
     assert BREAKDOWN_REF in prompt
@@ -2835,7 +2836,8 @@ def test_a_shape_is_applied_and_finished_done(tmp_path):
     decider and the auditor, merged in code and applied once."""
     proc, repo = _stubbed_runner(
         tmp_path, _issue_begin("shape"), _issue_packet("shape"),
-        answers=(_framer_answer(),))
+        answers=(_framer_answer(
+            failure_modes=["cache timeout is reported"]),))
 
     assert proc.returncode == 0, proc.stderr
     assert _muse_calls(repo) == 4
@@ -2846,6 +2848,7 @@ def test_a_shape_is_applied_and_finished_done(tmp_path):
     prompt = (repo / "muse.prompt.1").read_text()
     assert prompt.startswith("This call is the shape framer")
     assert "What is the plan, what is settled" in prompt
+    assert "failure_modes" in prompt
     assert "PACKET_JSON" not in prompt
     assert "rotate the api-key monthly" in prompt
     packet_calls = (repo / "packet.calls").read_text().splitlines()
@@ -2859,6 +2862,7 @@ def test_a_shape_is_applied_and_finished_done(tmp_path):
     assert "--agent muse" in calls[0]
     assert (repo / "applied.marker").exists()
     applied = json.loads((repo / "apply.answer").read_text())
+    assert applied["failure_modes"] == ["cache timeout is reported"]
     assert applied["decided_by_agent"] == [
         {"decision": "settle which day the key rotates",
          "alternative": "leave it open",
@@ -2871,6 +2875,25 @@ def test_a_shape_is_applied_and_finished_done(tmp_path):
         "--note shaped {}: Ready (self-approved: agent idea, finite "
         "class, no open questions) --shape-status Ready\n".format(SHAPE_REF)
     )
+
+
+def test_shape_runner_flag_omits_review_focus_end_to_end(tmp_path):
+    mode = "cache timeout is reported"
+    proc, repo = _stubbed_runner(
+        tmp_path, _issue_begin("shape"), _issue_packet("shape"),
+        args=("standard", "--omit-failure-modes"),
+        answers=(_framer_answer(failure_modes=[mode]),))
+
+    assert proc.returncode == 0, proc.stderr
+    prompt = (repo / "muse.prompt.1").read_text()
+    header = prompt.split("The text after this paragraph", 1)[0]
+    answer_shape = header.split(
+        "Answer with exactly one JSON object and nothing else:", 1)[1]
+    assert "`--omit-failure-modes` fallback is active" in header
+    assert '"failure_modes"' not in answer_shape
+    assert "--omit-failure-modes" in (repo / "apply.calls").read_text()
+    applied = json.loads((repo / "apply.answer").read_text())
+    assert applied["failure_modes"] == []
 
 
 def test_a_stale_shape_is_recorded_without_shape_status(tmp_path):

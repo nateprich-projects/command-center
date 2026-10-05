@@ -174,6 +174,22 @@ def test_hotspot_routes_reuse_exact_marker_before_title_prefix(monkeypatch):
     }]
 
 
+def test_hotspot_routes_reuse_redesign_by_title_prefix_without_marker():
+    target = {"repo_path": "engine/shape.py", "function": "collect"}
+    measured = [dict(target, broken_fix_count=3, window_days=7)]
+    existing = idea(
+        101, title="Redesign engine/shape.py:collect follow-up",
+        klass="Improve", body="A plan without a Hotspot line.")
+
+    route = shape.prepare_hotspot_routes(
+        [existing], REPO, [target], measured, NOW)
+
+    assert route == [{
+        "repo_path": "engine/shape.py", "function": "collect",
+        "ref": REPO + "#101", "url": existing.url,
+    }]
+
+
 def test_hotspot_routes_capture_missing_redesign_as_improve(monkeypatch):
     target = {"repo_path": "engine/shape.py", "function": "collect"}
     measured = [dict(target, broken_fix_count=4, window_days=7)]
@@ -328,16 +344,36 @@ def test_measure_shape_hotspots_filters_below_the_redesign_threshold(
         return {
             "window_days": 7, "hotspot_threshold": 3,
             "hotspots": [
+                {"path": "engine/shape.py", "function": "collect", "count": 4},
+                {"path": "engine/other.py", "function": "run", "count": 3},
                 {"path": "engine/other.py", "function": "small", "count": 2},
-                {"path": "engine/shape.py", "function": "collect", "count": 3},
             ],
         }
 
     monkeypatch.setattr("fix_recurrence.measure", measure)
     found = shape.measure_shape_hotspots(now, items_loader=lambda: rows)
     assert seen == {"repo": ROOT, "projects": {}, "at": now}
-    assert found == [{"repo_path": "engine/shape.py", "function": "collect",
-                      "broken_fix_count": 3, "window_days": 7}]
+    assert found == [
+        {"repo_path": "engine/shape.py", "function": "collect",
+         "broken_fix_count": 4, "window_days": 7},
+        {"repo_path": "engine/other.py", "function": "run",
+         "broken_fix_count": 3, "window_days": 7},
+    ]
+
+
+def test_measure_shape_hotspots_returns_empty_list_when_none_measured(
+        monkeypatch):
+    monkeypatch.setattr(
+        funnel, "recorded_cause_regressions",
+        lambda found, at: {"broken_fix_tickets": []})
+    monkeypatch.setattr(
+        "fix_recurrence.measure",
+        lambda repo, projects, at: {
+            "window_days": 7, "hotspot_threshold": 3, "hotspots": [],
+        })
+
+    assert shape.measure_shape_hotspots(
+        NOW, items_loader=lambda: [idea(42)]) == []
 
 
 def test_failure_modes_reject_a_fourth_item():
@@ -1866,6 +1902,10 @@ def test_packet_carries_runner_measured_hotspots_only_when_enabled():
                  "broken_fix_count": 3, "window_days": 7}]
     assert "hotspots" not in packet()
     assert packet(hotspots=measured)["hotspots"] == measured
+
+
+def test_packet_carries_an_empty_hotspot_list_when_none_are_measured():
+    assert packet(hotspots=[])["hotspots"] == []
 
 
 def collected_packet(monkeypatch, item):

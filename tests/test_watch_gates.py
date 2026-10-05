@@ -112,12 +112,14 @@ def building_project(number=30):
     )
 
 
-def silent_blocked_ticket(number=31, parent=30, needs="none"):
+def silent_blocked_ticket(number=31, parent=30, needs="none",
+                          needs_decision=None):
     return funnel.Item(
         repo=REPO, number=number, title="Ticket {}".format(number),
         url="https://example.invalid/{}".format(number), state="OPEN",
         parent="{}#{}".format(REPO, parent), risk="standard", needs=needs,
         labels=["blocked"], blocked_since=NOW - timedelta(days=1),
+        needs_decision=needs_decision,
     )
 
 
@@ -192,6 +194,35 @@ def test_a_silently_blocked_ticket_leaves_the_total_for_watch_gates(capsys):
         "question": "Unblock?",
         "waited": funnel.humanise(ticket.waited(NOW)),
     }]
+
+
+def test_a_blocked_ticket_with_needs_decision_asks_nate_the_record_question():
+    question = "Which repository owns the schedule?"
+    ticket = silent_blocked_ticket(needs_decision=question)
+
+    assert ticket.parent is not None
+    assert funnel.gate_question(ticket) == question
+    assert not routed(ticket)
+
+
+def test_needs_decision_ticket_stays_with_nate_when_question_is_unblock():
+    ticket = silent_blocked_ticket(needs_decision="Unblock?")
+
+    assert funnel.gate_question(ticket) == "Unblock?"
+    assert not routed(ticket)
+
+
+def test_a_blocked_ticket_with_needs_decision_goes_to_nate_in_the_brief(capsys):
+    project = building_project()
+    question = "Which repository owns the schedule?"
+    ticket = silent_blocked_ticket(needs_decision=question)
+
+    brief = brief_for([project, ticket], capsys)
+
+    assert brief["total_needing_nate"] == 1
+    assert [row["ref"] for row in brief["items"]] == [ticket.ref]
+    assert brief["items"][0]["waiting_on"] == question
+    assert brief["watch_gates"] == []
 
 
 def test_a_silently_blocked_project_asking_unblock_or_park_is_the_watchs():

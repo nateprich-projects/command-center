@@ -49,6 +49,7 @@ from engine.shape import (  # noqa: E402
     _validate_agent_decisions,
     _validate_depends_on,
     _validate_escalated_risk,
+    _validate_failure_modes,
     _validate_investigate_possible_defect,
     _validate_precedent,
     _validate_premises,
@@ -77,9 +78,9 @@ DECISION_KINDS = {
     "nate": ("category", "question"),
 }
 
-#: The framer's answer keys — exactly these, no extras.
+#: The framer's answer keys — ``failure_modes`` is optional.
 FRAMER_KEYS = ("proposed_class", "plan_markdown", "decision_points",
-               "depends_on")
+               "depends_on", "failure_modes")
 
 #: The auditor's answer keys — exactly these, no extras.
 AUDITOR_KEYS = ("premises", "escalated_risk")
@@ -262,7 +263,8 @@ def _exactly_once(entries: List[Dict], key: str,
     return ordered
 
 
-def parse_framer(answer: object) -> Dict:
+def parse_framer(answer: object, *,
+                 include_failure_modes: bool = True) -> Dict:
     """Validate the framer's draft.
 
     ``proposed_class`` is a ladder class, ``plan_markdown`` a non-empty
@@ -272,6 +274,12 @@ def parse_framer(answer: object) -> Dict:
     Siblings checked section: code renders it from the sibling checks.
     """
     data = _decode(answer, "framer")
+    if isinstance(data, dict):
+        data = dict(data)
+        if not include_failure_modes:
+            data.pop("failure_modes", None)
+        if "failure_modes" not in data:
+            data["failure_modes"] = []
     _check_keys(data, FRAMER_KEYS, "the framer answer")
     proposed = _require_line(data["proposed_class"], "proposed_class")
     if proposed not in funnel.LADDER:
@@ -291,6 +299,7 @@ def parse_framer(answer: object) -> Dict:
         "decision_points": _decision_point_list(
             data["decision_points"], "decision_points"),
         "depends_on": _validate_depends_on(data["depends_on"]),
+        "failure_modes": _validate_failure_modes(data["failure_modes"]),
     }
 
 
@@ -414,7 +423,8 @@ def siblings_section(siblings: Sequence[Dict[str, str]]) -> str:
 def merge_shape_answer(framer: Dict,
                        siblings: Sequence[Dict[str, str]],
                        decisions: Sequence[Dict[str, str]],
-                       audit: Dict) -> Dict:
+                       audit: Dict, *,
+                       include_failure_modes: bool = True) -> Dict:
     """Build the shape answer from the parsed parts. Pure: no IO.
 
     Takes ``parse_framer``'s draft, every sibling check's entries and
@@ -484,6 +494,8 @@ def merge_shape_answer(framer: Dict,
         "escalated_risk": list(audit["escalated_risk"]),
         "depends_on": list(dict.fromkeys(depends_on)),
         "premises": list(audit["premises"]),
+        "failure_modes": (list(framer["failure_modes"])
+                           if include_failure_modes else []),
     }
     assert set(merged) == ANSWER_KEYS
     return validate_answer(merged)

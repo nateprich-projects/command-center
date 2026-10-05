@@ -1197,6 +1197,8 @@ def gate_question(
             return GATE_QUESTIONS["block_unread"]
         if condition is not None:
             return None
+        if item.parent is not None and item.needs_decision:
+            return item.needs_decision
         if item.parent is None and item.needs_decision:
             # An answered Gates question is settled, whatever the comment
             # thread still says. The marker is consulted before the question
@@ -1368,6 +1370,14 @@ def watch_owns_gate(
             and _shaped_hold_is_unresolved(item, shaped_hold, by_ref)
         )
     if question in WATCH_UNBLOCK_QUESTIONS:
+        if (
+            item.is_blocked
+            and item.parent is not None
+            and item.needs_decision is not None
+        ):
+            # The ticket's recorded question belongs to Nate even when its
+            # wording happens to match a watch-owned unblock question.
+            return False
         return item.needs != "human" or item.decline_reason is not None
     if question != GATES["Shaped"]:
         return False
@@ -4980,13 +4990,19 @@ def _visible_comment(body: str) -> str:
 
 
 def _latest_verdict_for_reviewed_head(comments: object) -> Optional[Dict]:
-    """Resolve the latest trusted verdict sequence, keeping same-head rejects."""
+    """Resolve the latest trusted verdict sequence for each reviewed head.
+
+    Same-head rejections remain sticky, except an unsure-only rejection stops
+    covering after later trusted evidence, so a subsequent approval can replace
+    it under the same rule used to re-offer that head for review.
+    """
     if not isinstance(comments, list):
         return None
 
     selected: Optional[Dict] = None
     selected_head: Optional[str] = None
-    for row in comments:
+    selected_position: Optional[int] = None
+    for position, row in enumerate(comments):
         if not isinstance(row, dict):
             continue
         found = _verdict_from_comment(row)
@@ -4999,6 +5015,7 @@ def _latest_verdict_for_reviewed_head(comments: object) -> Optional[Dict]:
             # still requires this verdict to match the PR's current head.
             selected = found
             selected_head = head_key
+            selected_position = position
             continue
 
         if (
@@ -5006,8 +5023,22 @@ def _latest_verdict_for_reviewed_head(comments: object) -> Optional[Dict]:
             or selected.get("verdict") != "rejected"
         ):
             # A later rejection on this head updates the recorded rejection;
-            # an approval on that same head cannot clear it.
+            # same-head approvals are considered by the trusted-evidence rule.
             selected = found
+            selected_position = position
+        elif (
+            found.get("verdict") == "approved"
+            and selected_position is not None
+            and not verdict_covers_head(
+                selected, selected_head,
+                comments[selected_position + 1:position],
+            )
+        ):
+            # Do not count the approval itself as new evidence. Only a trusted
+            # comment that landed after the rejection and before this approval
+            # can reopen an unsure-only rejection for the merge gate.
+            selected = found
+            selected_position = position
 
     return selected
 
@@ -5016,10 +5047,12 @@ def latest_verdict(repo: str, pr) -> Optional[Dict]:
     """The latest trusted decision for the most recently reviewed head.
 
     The fresh-read boundary is a head change: a review on a new SHA starts a
-    new decision sequence, while a trusted rejection stays authoritative on
-    its SHA despite any later approval there. The merge gate separately checks
-    that the selected verdict covers the PR's current head. ``--json comments``
-    rows carry ``author.login`` for the trusted-author check (#1787).
+    new decision sequence. Same-head rejections stay authoritative unless an
+    unsure-only rejection no longer covers its head after later trusted
+    evidence and a subsequent approval supersedes it. The merge gate separately
+    checks that the selected verdict covers the PR's current head.
+    ``--json comments`` rows carry ``author.login`` for the trusted-author
+    check (#1787).
 
     A failed or malformed comment read raises ``GitHubError`` rather than
     reading as no verdict (#2194): a review packet built on it judged a head

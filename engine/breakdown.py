@@ -175,6 +175,23 @@ def fetch_plan(repo: str, number: int) -> dict:
     return data
 
 
+def fetch_plan_body(repo: str, number: int) -> str:
+    """Read the live plan body for answer constraints without loading its thread."""
+    data = funnel._gh_json(
+        "gh", "issue", "view", str(number), "--repo", repo,
+        "--json", "body")
+    if not isinstance(data, dict) or not isinstance(data.get("body"), str):
+        raise funnel.GitHubError(
+            "could not read the body of project {}#{}".format(repo, number))
+    return data["body"]
+
+
+def has_one_ticket_containment(body: object) -> bool:
+    """Whether the plan carries the exact runner-owned containment line."""
+    return (isinstance(body, str)
+            and "Containment: one ticket" in body.splitlines())
+
+
 def fetch_siblings(repo: str, number: int) -> List[dict]:
     """The project's existing sub-issues, so the model does not re-plan them.
 
@@ -371,7 +388,8 @@ def _find_cycle(edges: Dict[int, List[int]]) -> Optional[List[int]]:
     return None
 
 
-def validate_answer(answer: object, issue_state: Callable[[str], Optional[str]]
+def validate_answer(answer: object, issue_state: Callable[[str], Optional[str]], *,
+                    max_tickets: Optional[int] = None
                     ) -> Tuple[List[str], Optional[dict]]:
     """Validate one breakdown answer against the ticket schema.
 
@@ -389,6 +407,11 @@ def validate_answer(answer: object, issue_state: Callable[[str], Optional[str]]
     raw_tickets = answer.get("tickets", [])
     if not isinstance(raw_tickets, list):
         return ["tickets must be a list of ticket objects"], None
+    if max_tickets is not None and len(raw_tickets) > max_tickets:
+        count = "one" if max_tickets == 1 else str(max_tickets)
+        suffix = "" if max_tickets == 1 else "s"
+        return ["the plan allows at most {} ticket{}".format(
+            count, suffix)], None
     for index, raw in enumerate(raw_tickets):
         if not isinstance(raw, dict):
             return ["ticket {} must be an object with title, body, risk, "
@@ -933,6 +956,10 @@ def apply(repo: str, number: int, normalized: dict, *,
     """Perform one validated answer's effects. Reads, then writes, in order."""
     project_ref = "{}#{}".format(repo, number)
     plan = fetch_plan(repo, number)
+    if (has_one_ticket_containment(plan.get("body"))
+            and len(normalized.get("tickets", [])) > 1):
+        raise BreakdownError(
+            "the plan allows at most one ticket (Containment: one ticket)")
     if str(plan.get("state") or "").upper() != "OPEN":
         raise funnel.GitHubError(
             "project {} is {}; a closed project takes no breakdown".format(
@@ -1032,7 +1059,14 @@ def apply_main(argv: Optional[Sequence[str]] = None) -> int:
         print("breakdown-apply: {}".format(exc), file=sys.stderr)
         return validation_exit(args.attempt)
     try:
-        errors, normalized = validate_answer(answer, fetch_issue_state)
+        max_tickets = None
+        tickets = answer.get("tickets") if isinstance(answer, dict) else None
+        if isinstance(tickets, list) and len(tickets) > 1:
+            plan_body = fetch_plan_body(repo, number)
+            if has_one_ticket_containment(plan_body):
+                max_tickets = 1
+        errors, normalized = validate_answer(
+            answer, fetch_issue_state, max_tickets=max_tickets)
     except funnel.GitHubError as exc:
         print("breakdown-apply: {}".format(exc), file=sys.stderr)
         return 1

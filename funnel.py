@@ -18379,7 +18379,9 @@ def cmd_capture(items: List[Item], now: datetime, title: str, note: Optional[str
                 klass: Optional[str] = None,
                 caused_by: Optional[Sequence[str]] = None,
                 voice: str = "agent",
-                observed: Optional[str] = None) -> int:
+                observed: Optional[str] = None,
+                created_urls: Optional[List[str]] = None,
+                quiet: bool = False) -> int:
     """Capture an idea. Unbounded and guilt-free, by design."""
     if origin not in ORIGIN_VOICES:
         raise GitHubError(
@@ -18456,7 +18458,10 @@ def cmd_capture(items: List[Item], now: datetime, title: str, note: Optional[str
         write_project_select(
             item_id, "Risk", required_tier(title, note or ""), url)
         write_project_select(item_id, "Needs", "none", url)
-        print("{}  → Ideas (needs-shaping) in {}".format(url, repo))
+        if created_urls is not None:
+            created_urls.append(url)
+        if not quiet:
+            print("{}  → Ideas (needs-shaping) in {}".format(url, repo))
     else:
         raise GitHubError(_capture_item_add_error(add))
     return 0

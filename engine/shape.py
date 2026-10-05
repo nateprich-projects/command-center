@@ -115,10 +115,14 @@ ANSWER_KEYS = frozenset({
     "depends_on",
     "premises",
     "failure_modes",
+    "hotspot_targets",
+    "redesign_remainder",
 })
 
 #: Optional answer fields. Omission is normalized before exact-key validation.
-OPTIONAL_ANSWER_KEYS = frozenset({"failure_modes"})
+OPTIONAL_ANSWER_KEYS = frozenset({
+    "failure_modes", "hotspot_targets", "redesign_remainder",
+})
 
 #: The confidence vocabulary shared with LEARNINGS.md (#1422).
 PREMISE_LABELS = ("measured", "documented", "inferred")
@@ -455,7 +459,87 @@ def _validate_failure_modes(entries: object) -> List[str]:
     ]
 
 
-def validate_answer(data: object, *, include_failure_modes: bool = True) -> Dict:
+def _validate_packet_hotspots(hotspots: object) -> List[Dict[str, object]]:
+    """Validate the runner-owned hotspot list the answer may select from."""
+    if not isinstance(hotspots, (list, tuple)):
+        raise ShapeError("the packet's hotspots must be a list")
+    validated = []
+    for index, row in enumerate(hotspots):
+        where = "packet hotspots[{}]".format(index)
+        if not isinstance(row, dict) or set(row) != {
+                "repo_path", "function", "broken_fix_count", "window_days"}:
+            raise ShapeError(
+                "{} must contain repo_path, function, broken_fix_count, "
+                "and window_days".format(where))
+        path = _require_line(row["repo_path"], where + ".repo_path")
+        function = _require_line(row["function"], where + ".function")
+        count = row["broken_fix_count"]
+        window_days = row["window_days"]
+        if (not isinstance(count, int) or isinstance(count, bool)
+                or count < 3):
+            raise ShapeError(
+                "{}.broken_fix_count must be at least 3".format(where))
+        if (not isinstance(window_days, int) or isinstance(window_days, bool)
+                or window_days != 7):
+            raise ShapeError("{}.window_days must be 7".format(where))
+        validated.append({
+            "repo_path": path,
+            "function": function,
+            "broken_fix_count": count,
+            "window_days": window_days,
+        })
+    return validated
+
+
+def _validate_hotspot_routing(
+        entries: object, remainder: object,
+        hotspots: Sequence[Dict[str, object]], proposed_class: str
+        ) -> Tuple[List[Dict[str, str]], str]:
+    """Keep planned targets inside the packet's measured hotspot list."""
+    if not isinstance(entries, list):
+        raise ShapeError("hotspot_targets must be a list")
+    allowed = {
+        (row["repo_path"], row["function"]) for row in hotspots
+    }
+    targets = []
+    seen = set()
+    for index, entry in enumerate(entries):
+        where = "hotspot_targets[{}]".format(index)
+        if (not isinstance(entry, dict)
+                or set(entry) != {"repo_path", "function"}):
+            raise ShapeError(
+                "{} must contain only repo_path and function".format(where))
+        target = {
+            "repo_path": _require_line(
+                entry["repo_path"], where + ".repo_path"),
+            "function": _require_line(
+                entry["function"], where + ".function"),
+        }
+        key = (target["repo_path"], target["function"])
+        if key not in allowed:
+            raise ShapeError(
+                "{} is not in the packet's hotspot list".format(
+                    target["repo_path"] + ":" + target["function"]))
+        if key in seen:
+            raise ShapeError("{} duplicates a hotspot target".format(where))
+        seen.add(key)
+        targets.append(target)
+
+    if targets:
+        if proposed_class != "Broken":
+            raise ShapeError(
+                "hotspot routing requires proposed_class Broken")
+        return targets, _require_text(remainder, "redesign_remainder")
+    if not isinstance(remainder, str) or remainder.strip():
+        raise ShapeError(
+            "redesign_remainder requires at least one hotspot target")
+    return [], ""
+
+
+def validate_answer(
+        data: object, *, include_failure_modes: bool = True,
+        hotspots: Optional[Sequence[Dict[str, object]]] = None,
+        include_hotspot_routing: bool = True) -> Dict:
     """Validate a shape answer against the plan schema.
 
     Returns a normalized copy: surrounding whitespace stripped, inner
@@ -463,14 +547,19 @@ def validate_answer(data: object, *, include_failure_modes: bool = True) -> Dict
     ``ShapeError`` before any write, so a confused model cannot leave a
     half-shaped idea behind. ``failure_modes`` is optional and omission is
     equivalent to an empty list. The runner can omit it for a safe fallback.
+    ``hotspot_targets`` is restricted to the packet's measured list, and a
+    non-empty target list requires a ``redesign_remainder``.
     """
     if isinstance(data, dict):
         data = dict(data)
         if not include_failure_modes:
-            for key in OPTIONAL_ANSWER_KEYS:
-                data.pop(key, None)
+            data.pop("failure_modes", None)
+        if not include_hotspot_routing:
+            data.pop("hotspot_targets", None)
+            data.pop("redesign_remainder", None)
         for key in OPTIONAL_ANSWER_KEYS:
-            data.setdefault(key, [])
+            data.setdefault(
+                key, "" if key == "redesign_remainder" else [])
     _check_keys(data, sorted(ANSWER_KEYS), "the answer")
     assert isinstance(data, dict)
     proposed = _require_line(data["proposed_class"], "proposed_class")
@@ -478,6 +567,11 @@ def validate_answer(data: object, *, include_failure_modes: bool = True) -> Dict
         raise ShapeError(
             "proposed_class {!r} is not a ladder class; choose one of "
             "{}".format(proposed, ", ".join(funnel.LADDER)))
+    allowed_hotspots = _validate_packet_hotspots(
+        hotspots if include_hotspot_routing and hotspots is not None else [])
+    hotspot_targets, redesign_remainder = _validate_hotspot_routing(
+        data["hotspot_targets"], data["redesign_remainder"],
+        allowed_hotspots, proposed)
     decided_from_precedent = _validate_precedent(
         data["decided_from_precedent"])
     decided_by_agent = _validate_agent_decisions(
@@ -497,6 +591,8 @@ def validate_answer(data: object, *, include_failure_modes: bool = True) -> Dict
         "depends_on": _validate_depends_on(data["depends_on"]),
         "premises": _validate_premises(data["premises"]),
         "failure_modes": _validate_failure_modes(data["failure_modes"]),
+        "hotspot_targets": hotspot_targets,
+        "redesign_remainder": redesign_remainder,
     }
 
 
@@ -516,7 +612,8 @@ def _without_proposed_class_lines(plan_markdown: str) -> str:
     )
 
 
-def render_plan(answer: Dict) -> str:
+def render_plan(answer: Dict, *,
+                hotspot_routes: Sequence[Dict[str, str]] = ()) -> str:
     """Render the issue body from validated answer fields.
 
     The plan narrative is followed by its evidence-backed premises and
@@ -584,6 +681,14 @@ def render_plan(answer: Dict) -> str:
         lines.extend(["", "## Needs Nate", ""])
         for category, questions in open_questions:
             lines.append("- {}: {}".format(category, "; ".join(questions)))
+    if hotspot_routes:
+        lines.extend(["", "## Hotspot routing", ""])
+        for route in hotspot_routes:
+            target = "{}:{}".format(
+                route["repo_path"], route["function"])
+            lines.append("- `{}` → [{}]({})".format(
+                target, route["ref"], route["url"]))
+        lines.extend(["", "Containment: one ticket"])
     lines.append("")
     # Only model text can hold the marker: no runner line above writes it.
     # ``&lt;!--`` renders as ``<!--`` on GitHub, as in
@@ -1060,7 +1165,9 @@ class ShapeDecision:
     risk_record: str
 
 
-def decision_record(items: Sequence, item, answer: Dict) -> ShapeDecision:
+def decision_record(
+        items: Sequence, item, answer: Dict, *,
+        hotspot_routes: Sequence[Dict[str, str]] = ()) -> ShapeDecision:
     """Build one validated answer's decision record (#2137).
 
     The inputs come from ``shape_inputs`` (#2136): the effective class with
@@ -1086,7 +1193,7 @@ def decision_record(items: Sequence, item, answer: Dict) -> ShapeDecision:
         escalation_matches=matches,
         state=inputs.state,
     )
-    rendered = render_plan(answer)
+    rendered = render_plan(answer, hotspot_routes=hotspot_routes)
     return ShapeDecision(
         answer=answer,
         inputs=inputs,
@@ -1137,8 +1244,12 @@ def report_output_review(rejected: Sequence[str]) -> None:
             "; ".join(rejected)), file=sys.stderr)
 
 
-def shape_decision(items: Sequence, item, answer_data: object
-                   ) -> ShapeDecision:
+def shape_decision(
+        items: Sequence, item, answer_data: object, *,
+        hotspots: Optional[Sequence[Dict[str, object]]] = None,
+        hotspot_routes: Sequence[Dict[str, str]] = (),
+        include_failure_modes: bool = True,
+        include_hotspot_routing: bool = True) -> ShapeDecision:
     """Validate, review and record one answer (#2137).
 
     The steps ``apply_main --validate-only`` and the live ``apply_shape``
@@ -1146,11 +1257,15 @@ def shape_decision(items: Sequence, item, answer_data: object
     the live path writes. Raises ``ShapeError`` on a malformed answer
     before anything is reported.
     """
-    answer = validate_answer(answer_data)
+    answer = validate_answer(
+        answer_data, hotspots=hotspots,
+        include_failure_modes=include_failure_modes,
+        include_hotspot_routing=include_hotspot_routing)
     reviewed, rejected_signals = review_shape_output_for_item(
         items, item, answer)
     report_output_review(rejected_signals)
-    return decision_record(items, item, reviewed)
+    return decision_record(items, item, reviewed,
+                           hotspot_routes=hotspot_routes)
 
 
 def carried_override_blocks(original_body: str,
@@ -1245,6 +1360,105 @@ def issue_url(ref: str) -> str:
         raise ShapeError("not an owner/repo#n ref: {!r}".format(ref))
     return "https://github.com/{}/{}/issues/{}".format(
         match.group("owner"), match.group("repo"), match.group("number"))
+
+
+def hotspot_redesign_candidate(items: Sequence, repo: str,
+                               target: Dict[str, str]):
+    """Find the most specific open Improve plan already owning a hotspot."""
+    marker = "Hotspot: {}:{}".format(
+        target["repo_path"], target["function"])
+    prefix = "Redesign {}:{}".format(
+        target["repo_path"], target["function"])
+    candidates = []
+    for item in items:
+        if (item.repo != repo or str(item.state).upper() != "OPEN"
+                or item.klass != "Improve"):
+            continue
+        body_match = marker in (item.body or "").splitlines()
+        title_match = (isinstance(item.title, str)
+                       and item.title.startswith(prefix))
+        if body_match or title_match:
+            candidates.append((not body_match, item.number, item))
+    return min(candidates, default=(None, None, None),
+               key=lambda row: (row[0], row[1]))[2]
+
+
+def prepare_hotspot_routes(items: list, repo: str,
+                           targets: Sequence[Dict[str, str]],
+                           hotspots: Sequence[Dict[str, object]],
+                           now: datetime) -> List[Dict[str, str]]:
+    """Reuse or capture one open Improve project for each selected hotspot."""
+    measured = {
+        (row["repo_path"], row["function"]): row
+        for row in hotspots
+    }
+    routes = []
+    for target in targets:
+        row = measured[(target["repo_path"], target["function"])]
+        item = hotspot_redesign_candidate(items, repo, target)
+        if item is None:
+            title = "Redesign {}:{}: {} Broken fixes in seven days".format(
+                target["repo_path"], target["function"],
+                row["broken_fix_count"])
+            note = (
+                "Redesign this measured recurring defect hotspot.\n\n"
+                "Hotspot: {}:{}"
+            ).format(target["repo_path"], target["function"])
+            urls: List[str] = []
+            funnel.cmd_capture(
+                items, now, title, note, repo=repo, origin="agent",
+                klass="Improve", voice="agent", created_urls=urls,
+                quiet=True)
+            if len(urls) != 1:
+                raise funnel.GitHubError(
+                    "captured hotspot redesign has no confirmed issue URL")
+            match = re.search(r"/issues/(\d+)$", urls[0])
+            if match is None:
+                raise funnel.GitHubError(
+                    "captured hotspot redesign has an invalid issue URL")
+            ref = "{}#{}".format(repo, match.group(1))
+            url = urls[0]
+        else:
+            ref = item.ref
+            url = item.url or issue_url(ref)
+        routes.append({
+            "repo_path": target["repo_path"],
+            "function": target["function"],
+            "ref": ref,
+            "url": url,
+        })
+    return routes
+
+
+def post_hotspot_remainders(routes: Sequence[Dict[str, str]],
+                            remainder: str, broken_item, now: datetime, *,
+                            run: Optional[str],
+                            agent: Optional[str]) -> None:
+    """Post the same scoped remainder once per redesign, linked to its plan."""
+    grouped: Dict[str, List[str]] = {}
+    for route in routes:
+        grouped.setdefault(route["ref"], []).append(
+            "{}:{}".format(route["repo_path"], route["function"]))
+    for ref, targets in grouped.items():
+        match = REF_RE.match(ref)
+        if match is None:
+            raise ShapeError("not an owner/repo#n ref: {!r}".format(ref))
+        text = (
+            "Hotspot(s): {}\n\n{}\n\nBroken plan: [{}]({})"
+        ).format(
+            ", ".join("`{}`".format(value) for value in targets),
+            remainder.strip(), broken_item.ref, broken_item.url)
+        body = funnel.append_provenance(
+            text, "agent", at=now, run=run, agent=agent)
+        result = funnel._run_gh(
+            ["gh", "issue", "comment", match.group("number"),
+             "--repo", "{}/{}".format(
+                 match.group("owner"), match.group("repo")),
+             "--body", body], capture_output=True, text=True)
+        if result.returncode != 0:
+            raise funnel.GitHubError(
+                result.stderr.strip() or
+                "could not post the redesign remainder for {}".format(ref))
 
 
 def blocked_by_values(depends_on: Sequence[str], repo: str) -> List[str]:
@@ -1430,6 +1644,7 @@ def build_packet(*, repo: str, idea: Dict,
                  agents_md: str, agents_md_missing: bool,
                  siblings: Sequence[Dict],
                  collected_at: str,
+                 hotspots: Optional[Sequence[Dict[str, object]]] = None,
                  issue_comments: Optional[Sequence[Dict]] = None) -> Dict:
     """Assemble the packet from already-fetched pieces. Pure: no IO.
 
@@ -1453,6 +1668,8 @@ def build_packet(*, repo: str, idea: Dict,
         "sibling_plans": [dict(row) for row in siblings],
         "collected_at": collected_at,
     }
+    if hotspots is not None:
+        packet["hotspots"] = [dict(row) for row in hotspots]
     issue_thread = issue_thread_section(
         issue_comments if issue_comments is not None else [])
     if issue_thread is not None:
@@ -1485,8 +1702,57 @@ def load_packet_bodies(items: list, idea_item) -> None:
                 "could not read the body of {}".format(row.ref))
 
 
+def measure_shape_hotspots(now: datetime,
+                           items_loader: Optional[Callable[[], list]] = None
+                           ) -> List[Dict[str, object]]:
+    """Measure runner-owned Broken-fix hotspots for the shape packet."""
+    import fix_recurrence
+
+    try:
+        items = (items_loader() if items_loader is not None
+                 else funnel.load_items(include_details=False))
+        snapshot = {
+            "recorded_cause_regressions":
+                funnel.recorded_cause_regressions(items, now)
+        }
+        projects = fix_recurrence.fix_projects_from_snapshot(snapshot)
+        measured = fix_recurrence.measure(
+            pathlib.Path(__file__).resolve().parent.parent, projects, now)
+    except (funnel.GitHubError, fix_recurrence.RecurrenceError,
+            OSError, ValueError) as exc:
+        raise funnel.GitHubError(
+            "shape hotspots could not be measured: {}".format(exc)) from exc
+
+    if (measured.get("window_days") != 7
+            or measured.get("hotspot_threshold") != 3
+            or not isinstance(measured.get("hotspots"), list)):
+        raise funnel.GitHubError(
+            "shape hotspots returned an unexpected measurement")
+    rows = measured["hotspots"]
+    hotspots = []
+    for index, row in enumerate(rows):
+        if (not isinstance(row, dict)
+                or not isinstance(row.get("path"), str)
+                or not row["path"].strip()
+                or not isinstance(row.get("function"), str)
+                or not row["function"].strip()
+                or not isinstance(row.get("count"), int)
+                or isinstance(row.get("count"), bool)
+                or row["count"] < 2):
+            raise funnel.GitHubError(
+                "shape hotspot row {} is malformed".format(index))
+        if row["count"] >= 3:
+            hotspots.append({
+                "repo_path": row["path"], "function": row["function"],
+                "broken_fix_count": row["count"], "window_days": 7,
+            })
+    hotspots.sort(key=lambda row: row["broken_fix_count"], reverse=True)
+    return hotspots
+
+
 def collect(repo: Optional[str], idea_number: int, *,
             items_loader: Optional[Callable[[], list]] = None,
+            include_hotspot_routing: bool = True,
             now: Optional[datetime] = None) -> Dict:
     """Fetch every piece and build the packet. Reads only, no writes."""
     resolved = funnel.resolve_repo(repo)
@@ -1526,6 +1792,18 @@ def collect(repo: Optional[str], idea_number: int, *,
     inputs = shape_inputs(items, idea_item)
     plan_md, plan_md_missing = fetch_repo_text(resolved, "plan.md")
     agents_md, agents_md_missing = fetch_repo_text(resolved, "AGENTS.md")
+    measured_at = now or datetime.now(timezone.utc)
+    collected_at = measured_at.isoformat()
+    if include_hotspot_routing and resolved == funnel.REPO:
+        hotspots = measure_shape_hotspots(
+            measured_at,
+            items_loader=(lambda: items) if items_loader is not None else None)
+    elif include_hotspot_routing:
+        # The recorded Broken-fix join and its git history belong to this
+        # repository; carrying those names into another repo would misroute.
+        hotspots = []
+    else:
+        hotspots = None
     return build_packet(
         repo=resolved,
         idea=_idea_packet(idea_item),
@@ -1538,7 +1816,8 @@ def collect(repo: Optional[str], idea_number: int, *,
         agents_md_missing=agents_md_missing,
         siblings=[_sibling_packet(row)
                   for row in sibling_plan_items(items, idea_item)],
-        collected_at=(now or datetime.now(timezone.utc)).isoformat(),
+        collected_at=collected_at,
+        hotspots=hotspots,
         issue_comments=issue_comments,
     )
 
@@ -1550,9 +1829,13 @@ def packet_main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("idea", type=int, help="idea issue number")
     parser.add_argument("--repo", default=None,
                         help="owner/name; required when ambiguous")
+    parser.add_argument("--no-hotspot-routing", action="store_true",
+                        help="omit runner-owned hotspot routing data")
     args = parser.parse_args(argv)
     try:
-        packet = collect(args.repo, args.idea)
+        packet = collect(args.repo, args.idea,
+                         include_hotspot_routing=
+                         not args.no_hotspot_routing)
     except funnel.GitHubError as exc:
         print("shape-packet: {}".format(exc), file=sys.stderr)
         return 1
@@ -1564,7 +1847,10 @@ def apply_shape(items: list, now: datetime, ref: str,
                 answer_data: object,
                 run: Optional[str] = None,
                 agent: Optional[str] = None,
-                voice: str = "agent") -> int:
+                voice: str = "agent", *,
+                hotspots: Optional[Sequence[Dict[str, object]]] = None,
+                include_failure_modes: bool = True,
+                include_hotspot_routing: bool = True) -> int:
     """Validate one shape answer and record the plan it carries.
 
     Renders the issue body from the answer fields, applies the
@@ -1591,8 +1877,32 @@ def apply_shape(items: list, now: datetime, ref: str,
     # Validated, reviewed and decided once, before the body write below
     # replaces item.body (#2136), by the steps --validate-only runs; every
     # write below reads this record and nothing else decides (#2137).
-    decision = shape_decision(items, item, answer_data)
+    decision = shape_decision(
+        items, item, answer_data, hotspots=hotspots,
+        include_failure_modes=include_failure_modes,
+        include_hotspot_routing=include_hotspot_routing)
     answer = decision.answer
+    hotspot_routes: List[Dict[str, str]] = []
+    if answer["hotspot_targets"]:
+        # Routing may capture a missing Improve plan, so confirm the source
+        # idea is still shapeable before the first route write.
+        fresh_state, fresh_status, fresh_children = _read_fresh_shape_facts(item)
+        stale_reason = funnel.unshapeable_reason(
+            fresh_state, fresh_status, fresh_children)
+        if stale_reason is not None:
+            status_label = fresh_status if fresh_status is not None else "missing"
+            print("{} ref={} reason={} fresh Status={} children={} "
+                  "state={}".format(
+                      SKIPPED_STALE_SHAPE_OUTCOME, item.ref, stale_reason,
+                      status_label, fresh_children, fresh_state))
+            return 0
+        route_items = funnel.load_items(include_details=False)
+        hotspot_routes = prepare_hotspot_routes(
+            route_items, item.repo, answer["hotspot_targets"],
+            _validate_packet_hotspots(hotspots or []), now)
+        # Rebuild the rendered record with runner-resolved issue references.
+        decision = decision_record(
+            items, item, answer, hotspot_routes=hotspot_routes)
     status, reason = decision.status, decision.reason
     scan_only = decision.scan_only
     authority_signals = decision.authority_signals
@@ -1671,6 +1981,11 @@ def apply_shape(items: list, now: datetime, ref: str,
     # The session keeps this object after the issue-body write. Keep its
     # body aligned with GitHub before a same-session reader evaluates it.
     item.body = body
+
+    if hotspot_routes:
+        post_hotspot_remainders(
+            hotspot_routes, answer["redesign_remainder"], item, now,
+            run=run, agent=agent)
 
     if not item.item_id:
         raise funnel.GitHubError("{} is not in the Project".format(item.ref))
@@ -1792,6 +2107,8 @@ def apply_main(argv: Optional[Sequence[str]] = None) -> int:
                         help="owner/name; required when ambiguous")
     parser.add_argument("--answer", required=True,
                         help="answer JSON file, or - for stdin")
+    parser.add_argument("--packet", default=None,
+                        help="the shape packet used to validate hotspot targets")
     parser.add_argument("--run", default=None,
                         help="run id recorded in provenance blocks")
     parser.add_argument("--agent", default=None,
@@ -1806,6 +2123,8 @@ def apply_main(argv: Optional[Sequence[str]] = None) -> int:
                              "later. Without --attempt, exit 1.")
     parser.add_argument("--omit-failure-modes", action="store_true",
                         help="omit Review focus from the rendered plan")
+    parser.add_argument("--no-hotspot-routing", action="store_true",
+                        help="ignore hotspot fields and omit routing")
     parser.add_argument("--validate-only", action="store_true",
                         help="validate and decide without writing anything; "
                              "print the status, reason, and answer as JSON")
@@ -1832,12 +2151,31 @@ def apply_main(argv: Optional[Sequence[str]] = None) -> int:
         print("shape-apply: the answer is not valid JSON: {}".format(exc),
               file=sys.stderr)
         return validation_exit(args.attempt)
+    packet_hotspots: Sequence[Dict[str, object]] = []
+    if args.packet and not args.no_hotspot_routing:
+        try:
+            packet_data = json.loads(pathlib.Path(args.packet).read_text())
+        except (OSError, json.JSONDecodeError) as exc:
+            print("shape-apply: cannot read the shape packet: {}".format(exc),
+                  file=sys.stderr)
+            return 1
+        if not isinstance(packet_data, dict):
+            print("shape-apply: the shape packet must be a JSON object",
+                  file=sys.stderr)
+            return 1
+        packet_hotspots = packet_data.get("hotspots", [])
+        if not isinstance(packet_hotspots, list):
+            print("shape-apply: packet hotspots must be a list",
+                  file=sys.stderr)
+            return 1
     try:
         # Only the exit code is decided here, before any read: a malformed
         # answer is retryable on the runner protocol. Both paths then run
         # ``shape_decision`` on the same data (#2137).
         data = validate_answer(
-            data, include_failure_modes=not args.omit_failure_modes)
+            data, include_failure_modes=not args.omit_failure_modes,
+            hotspots=packet_hotspots,
+            include_hotspot_routing=not args.no_hotspot_routing)
     except ShapeError as exc:
         print("shape-apply: {}".format(exc), file=sys.stderr)
         return validation_exit(args.attempt)
@@ -1864,7 +2202,11 @@ def apply_main(argv: Optional[Sequence[str]] = None) -> int:
                     items.extend(parent_items)
         if args.validate_only:
             # The live path's own steps on the same answer data (#2137).
-            decision = shape_decision(items, funnel.find(items, ref), data)
+            decision = shape_decision(
+                items, funnel.find(items, ref), data,
+                hotspots=packet_hotspots,
+                include_failure_modes=not args.omit_failure_modes,
+                include_hotspot_routing=not args.no_hotspot_routing)
             print(json.dumps({"status": decision.status,
                               "reason": decision.reason,
                               "answer": decision.answer},
@@ -1872,7 +2214,10 @@ def apply_main(argv: Optional[Sequence[str]] = None) -> int:
             return 0
         return apply_shape(
             items, datetime.now(timezone.utc), ref, data,
-            run=args.run, agent=args.agent, voice=args.voice)
+            run=args.run, agent=args.agent, voice=args.voice,
+            hotspots=packet_hotspots,
+            include_failure_modes=not args.omit_failure_modes,
+            include_hotspot_routing=not args.no_hotspot_routing)
     except (ShapeError, funnel.GitHubError) as exc:
         print("shape-apply: {}".format(exc), file=sys.stderr)
         return 1

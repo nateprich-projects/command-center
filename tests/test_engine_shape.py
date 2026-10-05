@@ -157,6 +157,98 @@ def gh_calls(calls, *prefix):
             if call[0] == "run" and call[1][:len(prefix)] == prefix]
 
 
+def test_hotspot_routes_reuse_exact_marker_before_title_prefix(monkeypatch):
+    target = {"repo_path": "engine/shape.py", "function": "collect"}
+    measured = [dict(target, broken_fix_count=3, window_days=7)]
+    title_only = idea(
+        101, title="Redesign engine/shape.py:collect follow-up",
+        klass="Improve")
+    marker_match = idea(
+        102, title="Different title", klass="Improve",
+        body="A plan.\nHotspot: engine/shape.py:collect\n")
+    route = shape.prepare_hotspot_routes(
+        [title_only, marker_match], REPO, [target], measured, NOW)
+    assert route == [{
+        "repo_path": "engine/shape.py", "function": "collect",
+        "ref": REPO + "#102", "url": marker_match.url,
+    }]
+
+
+def test_hotspot_routes_reuse_redesign_by_title_prefix_without_marker():
+    target = {"repo_path": "engine/shape.py", "function": "collect"}
+    measured = [dict(target, broken_fix_count=3, window_days=7)]
+    existing = idea(
+        101, title="Redesign engine/shape.py:collect follow-up",
+        klass="Improve", body="A plan without a Hotspot line.")
+
+    route = shape.prepare_hotspot_routes(
+        [existing], REPO, [target], measured, NOW)
+
+    assert route == [{
+        "repo_path": "engine/shape.py", "function": "collect",
+        "ref": REPO + "#101", "url": existing.url,
+    }]
+
+
+def test_hotspot_routes_capture_missing_redesign_as_improve(monkeypatch):
+    target = {"repo_path": "engine/shape.py", "function": "collect"}
+    measured = [dict(target, broken_fix_count=4, window_days=7)]
+    seen = {}
+
+    def capture(items, now, title, note, **kwargs):
+        seen.update(title=title, note=note, now=now, kwargs=kwargs)
+        kwargs["created_urls"].append(
+            "https://github.com/owner/repo/issues/105")
+
+    monkeypatch.setattr(funnel, "cmd_capture", capture)
+    route = shape.prepare_hotspot_routes(
+        [], REPO, [target], measured, NOW)
+    assert seen["title"] == (
+        "Redesign engine/shape.py:collect: 4 Broken fixes in seven days")
+    assert "Hotspot: engine/shape.py:collect" in seen["note"].splitlines()
+    assert seen["kwargs"]["repo"] == REPO
+    assert seen["kwargs"]["origin"] == "agent"
+    assert seen["kwargs"]["klass"] == "Improve"
+    assert route[0]["ref"] == REPO + "#105"
+
+
+def test_hotspot_remainder_comment_links_broken_plan_and_uses_agent_voice(
+        monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        funnel, "_run_gh",
+        lambda args, **kwargs: calls.append(args)
+        or SimpleNamespace(returncode=0, stdout="", stderr=""))
+    item = idea(42)
+    routes = [{"repo_path": "engine/shape.py", "function": "collect",
+               "ref": REPO + "#105",
+               "url": "https://github.com/owner/repo/issues/105"}]
+    shape.post_hotspot_remainders(
+        routes, "Keep the remaining change small.", item, NOW,
+        run="run-1", agent="codex")
+    assert calls[0][:6] == ["gh", "issue", "comment", "105", "--repo", REPO]
+    body = calls[0][calls[0].index("--body") + 1]
+    assert "Keep the remaining change small." in body
+    assert item.url in body
+    assert "agent" in body
+
+
+def test_hotspot_routing_section_carries_links_and_containment_line():
+    target = {"repo_path": "engine/shape.py", "function": "collect"}
+    validated = shape.validate_answer(
+        answer(proposed_class="Broken", hotspot_targets=[target],
+               redesign_remainder="One scoped remainder."),
+        hotspots=[dict(target, broken_fix_count=3, window_days=7)])
+    rendered = shape.render_plan(validated, hotspot_routes=[{
+        **target, "ref": REPO + "#105",
+        "url": "https://github.com/owner/repo/issues/105",
+    }])
+    assert "## Hotspot routing" in rendered
+    assert "`engine/shape.py:collect`" in rendered
+    assert "[owner/repo#105](https://github.com/owner/repo/issues/105)" in rendered
+    assert "Containment: one ticket" in rendered.splitlines()
+
+
 def blocked_by_payload(refs):
     nodes = []
     for ref in refs:
@@ -201,6 +293,87 @@ def test_failure_modes_round_trip_zero_through_three(modes):
 def test_omitted_failure_modes_equal_an_empty_list():
     assert "failure_modes" not in answer()
     assert shape.validate_answer(answer())["failure_modes"] == []
+
+
+def test_hotspot_targets_must_come_from_the_packet_and_include_a_remainder():
+    measured = [{"repo_path": "engine/shape.py", "function": "collect",
+                 "broken_fix_count": 3, "window_days": 7}]
+    target = {"repo_path": "engine/shape.py", "function": "collect"}
+    found = shape.validate_answer(
+        answer(proposed_class="Broken", hotspot_targets=[target],
+               redesign_remainder="Keep the rollout bounded."),
+        hotspots=measured)
+    assert found["hotspot_targets"] == [target]
+    assert found["redesign_remainder"] == "Keep the rollout bounded."
+    with pytest.raises(shape.ShapeError,
+                       match="not in the packet's hotspot list"):
+        shape.validate_answer(
+            answer(proposed_class="Broken", hotspot_targets=[{
+                "repo_path": "engine/other.py", "function": "run"}],
+                   redesign_remainder="Remainder."), hotspots=measured)
+    with pytest.raises(shape.ShapeError, match="proposed_class Broken"):
+        shape.validate_answer(
+            answer(hotspot_targets=[target],
+                   redesign_remainder="Remainder."), hotspots=measured)
+    with pytest.raises(shape.ShapeError,
+                       match="requires at least one hotspot"):
+        shape.validate_answer(
+            answer(redesign_remainder="Remainder."), hotspots=measured)
+
+
+def test_no_hotspot_routing_ignores_answer_fields():
+    found = shape.validate_answer(
+        answer(hotspot_targets=[{"unexpected": "field"}],
+               redesign_remainder="ignored"),
+        include_hotspot_routing=False)
+    assert found["hotspot_targets"] == []
+    assert found["redesign_remainder"] == ""
+
+
+def test_measure_shape_hotspots_filters_below_the_redesign_threshold(
+        monkeypatch):
+    rows = [idea(42)]
+    now = NOW
+    monkeypatch.setattr(
+        funnel, "recorded_cause_regressions",
+        lambda found, at: {"broken_fix_tickets": []})
+    seen = {}
+
+    def measure(repo, projects, at):
+        seen.update(repo=repo, projects=projects, at=at)
+        return {
+            "window_days": 7, "hotspot_threshold": 3,
+            "hotspots": [
+                {"path": "engine/shape.py", "function": "collect", "count": 4},
+                {"path": "engine/other.py", "function": "run", "count": 3},
+                {"path": "engine/other.py", "function": "small", "count": 2},
+            ],
+        }
+
+    monkeypatch.setattr("fix_recurrence.measure", measure)
+    found = shape.measure_shape_hotspots(now, items_loader=lambda: rows)
+    assert seen == {"repo": ROOT, "projects": {}, "at": now}
+    assert found == [
+        {"repo_path": "engine/shape.py", "function": "collect",
+         "broken_fix_count": 4, "window_days": 7},
+        {"repo_path": "engine/other.py", "function": "run",
+         "broken_fix_count": 3, "window_days": 7},
+    ]
+
+
+def test_measure_shape_hotspots_returns_empty_list_when_none_measured(
+        monkeypatch):
+    monkeypatch.setattr(
+        funnel, "recorded_cause_regressions",
+        lambda found, at: {"broken_fix_tickets": []})
+    monkeypatch.setattr(
+        "fix_recurrence.measure",
+        lambda repo, projects, at: {
+            "window_days": 7, "hotspot_threshold": 3, "hotspots": [],
+        })
+
+    assert shape.measure_shape_hotspots(
+        NOW, items_loader=lambda: [idea(42)]) == []
 
 
 def test_failure_modes_reject_a_fourth_item():
@@ -1724,6 +1897,17 @@ def test_packet_carries_every_field():
     json.dumps(found)  # the packet is JSON by contract
 
 
+def test_packet_carries_runner_measured_hotspots_only_when_enabled():
+    measured = [{"repo_path": "engine/shape.py", "function": "collect",
+                 "broken_fix_count": 3, "window_days": 7}]
+    assert "hotspots" not in packet()
+    assert packet(hotspots=measured)["hotspots"] == measured
+
+
+def test_packet_carries_an_empty_hotspot_list_when_none_are_measured():
+    assert packet(hotspots=[])["hotspots"] == []
+
+
 def collected_packet(monkeypatch, item):
     """The packet ``collect`` builds for one idea, offline."""
     monkeypatch.setattr(
@@ -1817,6 +2001,60 @@ def test_collect_reads_the_idea_and_its_siblings(monkeypatch):
     assert [row["ref"] for row in found["sibling_plans"]] == \
         [REPO + "#89"]
     assert found["collected_at"] == NOW.isoformat()
+
+
+def test_collect_limits_runner_hotspots_to_the_measured_repository(
+        monkeypatch):
+    current = idea(
+        42, repo=funnel.REPO,
+        url="https://github.com/{}/issues/42".format(funnel.REPO))
+    monkeypatch.setattr(
+        shape, "fetch_repo_text",
+        lambda repo, path: ("{} text".format(path), False))
+    measured = [{"repo_path": "engine/shape.py", "function": "collect",
+                 "broken_fix_count": 3, "window_days": 7}]
+    calls = []
+    monkeypatch.setattr(
+        shape, "measure_shape_hotspots",
+        lambda now, items_loader=None: calls.append((now, items_loader))
+        or measured)
+    found = shape.collect(
+        funnel.REPO, 42, items_loader=lambda: [current], now=NOW)
+    assert found["hotspots"] == measured
+    assert calls[0][0] == NOW
+
+    other = idea(43, repo="other/repo",
+                 url="https://github.com/other/repo/issues/43")
+    found = shape.collect(
+        "other/repo", 43, items_loader=lambda: [other], now=NOW)
+    assert found["hotspots"] == []
+    assert len(calls) == 1
+
+
+def test_collect_shape_packet_sorts_hotspots_by_broken_fix_count(
+        monkeypatch):
+    current = idea(
+        42, repo=funnel.REPO,
+        url="https://github.com/{}/issues/42".format(funnel.REPO))
+    monkeypatch.setattr(
+        funnel, "recorded_cause_regressions",
+        lambda found, at: {"broken_fix_tickets": []})
+    monkeypatch.setattr(
+        "fix_recurrence.measure",
+        lambda repo, projects, at: {
+            "window_days": 7, "hotspot_threshold": 3,
+            "hotspots": [
+                {"path": "engine/other.py", "function": "run", "count": 3},
+                {"path": "engine/shape.py", "function": "collect", "count": 4},
+            ],
+        })
+
+    found = collected_packet(monkeypatch, current)
+
+    assert [(row["function"], row["broken_fix_count"])
+            for row in found["hotspots"]] == [
+        ("collect", 4), ("run", 3),
+    ]
 
 
 def test_collect_rejects_an_unknown_idea():
@@ -2115,6 +2353,46 @@ def test_apply_advances_an_all_clear_agent_plan_to_ready(
     output = capsys.readouterr().out
     assert "owner/repo#42 → Ready" in output
     assert "advanced to Ready: needs_nate all null" in output
+
+
+def test_apply_captures_and_links_a_selected_hotspot_redesign(
+        monkeypatch, capsys):
+    item = idea(42, klass="Broken")
+    calls = stub_gh(monkeypatch, item)
+    monkeypatch.setattr(funnel, "load_items", lambda **kwargs: [])
+    captured = {}
+
+    def capture(items, now, title, note, **kwargs):
+        captured.update(title=title, note=note, kwargs=kwargs)
+        kwargs["created_urls"].append(
+            "https://github.com/owner/repo/issues/105")
+
+    monkeypatch.setattr(funnel, "cmd_capture", capture)
+    target = {"repo_path": "engine/shape.py", "function": "collect"}
+    hotspots = [dict(target, broken_fix_count=3, window_days=7)]
+    assert shape.apply_shape(
+        [item], NOW, item.ref,
+        answer(proposed_class="Broken", hotspot_targets=[target],
+               redesign_remainder="Keep the remainder bounded."),
+        run="shape-run", agent="muse", hotspots=hotspots) == 0
+    body = gh_calls(calls, "gh", "issue", "edit")[0][1][-1]
+    assert "## Hotspot routing" in body
+    assert "[owner/repo#105](https://github.com/owner/repo/issues/105)" in body
+    assert "Containment: one ticket" in body.splitlines()
+    assert captured["title"] == (
+        "Redesign engine/shape.py:collect: 3 Broken fixes in seven days")
+    assert captured["kwargs"]["origin"] == "agent"
+    assert captured["kwargs"]["klass"] == "Improve"
+    route_comments = [call[1][-1] for call in
+                      gh_calls(calls, "gh", "issue", "comment")
+                      if "Hotspot(s):" in call[1][-1]]
+    assert len(route_comments) == 1
+    assert "Keep the remainder bounded." in route_comments[0]
+    assert item.url in route_comments[0]
+    assert funnel.parse_provenance(route_comments[0]) == {
+        "agent": "muse", "at": NOW.isoformat(), "run": "shape-run",
+        "voice": "agent"}
+    capsys.readouterr()
 
 
 def test_apply_can_stamp_nate_relayed_provenance(monkeypatch):
@@ -3184,6 +3462,20 @@ def test_packet_cli_prints_valid_json_with_every_field(
     assert "issue_thread" not in found
 
 
+def test_packet_cli_no_hotspot_flag_omits_measurement(monkeypatch, capsys):
+    seen = {}
+
+    def collect(repo, number, **kwargs):
+        seen.update(repo=repo, number=number, **kwargs)
+        return {"repo": repo, "idea": {"number": number}}
+
+    monkeypatch.setattr(shape, "collect", collect)
+    assert shape.packet_main([
+        "42", "--repo", REPO, "--no-hotspot-routing"]) == 0
+    assert seen["include_hotspot_routing"] is False
+    assert "hotspots" not in capsys.readouterr().out
+
+
 def test_packet_cli_reports_an_unknown_idea(monkeypatch, capsys):
     monkeypatch.setattr(
         funnel, "load_items", lambda **kwargs: [idea(43)])
@@ -3364,6 +3656,30 @@ def test_apply_cli_omit_failure_modes_falls_back_without_review_focus(
     found = json.loads(capsys.readouterr().out)
     assert found["answer"]["failure_modes"] == []
     assert item.status == "Ideas"
+
+
+def test_apply_cli_no_hotspot_routing_ignores_answer_fields(
+        monkeypatch, capsys):
+    item = idea(42)
+    stub_project_ref_load(monkeypatch, item)
+    monkeypatch.setattr(funnel, "load_items", lambda **kwargs: [item])
+    monkeypatch.setattr(
+        funnel, "gh_graphql",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("validate-only must not write")))
+    monkeypatch.setattr(funnel.subprocess, "run",
+                        lambda *args, **kwargs: (_ for _ in ()).throw(
+                            AssertionError("validate-only must not write")))
+    model_answer = answer(
+        hotspot_targets=[{"not": "the accepted target schema"}],
+        redesign_remainder="ignored by the fallback")
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(model_answer)))
+    assert shape.apply_main([
+        "42", "--repo", REPO, "--answer", "-", "--validate-only",
+        "--no-hotspot-routing"]) == 0
+    found = json.loads(capsys.readouterr().out)
+    assert found["answer"]["hotspot_targets"] == []
+    assert found["answer"]["redesign_remainder"] == ""
 
 
 def test_apply_cli_validate_only_previews_a_shaped_decision(

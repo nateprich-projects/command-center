@@ -3,10 +3,11 @@
 # then stop. Muse answers both standard and escalated tiers; the standard-tier
 # bridge retired at 2026-09-27 06:00 PDT (#1987).
 #
-# Usage: muse-review-engine [tier] [reasoning-effort] [--omit-failure-modes]
+# Usage: muse-review-engine [tier] [reasoning-effort] [--omit-failure-modes] [--no-hotspot-routing]
 #   tier   -- escalated (default) or standard; substituted into begin
 #   effort -- max (default) or high
 #   --omit-failure-modes -- shape without Review focus as a safe fallback
+#   --no-hotspot-routing -- shape without measured hotspot routing
 #
 # review-replay runs the same review on a given packet and records nothing,
 # through the MUSE_REVIEW_ENGINE_REPLAY_* variables (#1730; below).
@@ -41,10 +42,12 @@ set -uo pipefail
 TIER="escalated"
 EFFORT="max"
 OMIT_FAILURE_MODES=0
+NO_HOTSPOT_ROUTING=0
 SEEN=0
 for arg in "$@"; do
   case "$arg" in
     --omit-failure-modes) OMIT_FAILURE_MODES=1 ;;
+    --no-hotspot-routing) NO_HOTSPOT_ROUTING=1 ;;
     --*) echo "muse-review-engine: unknown flag '$arg'" >&2; exit 1 ;;
     *)
       SEEN=$((SEEN + 1))
@@ -1433,8 +1436,13 @@ fetch_issue_packet() {
     python3 "$REPO/breakdown-packet" "$BEGIN_REF" \
       >"$PACKET_FILE" 2>"$DIAG_FILE"
   else
-    python3 "$REPO/shape-packet" "$SUBJECT_NUM" --repo "$SUBJECT_REPO" \
-      >"$PACKET_FILE" 2>"$DIAG_FILE"
+    if (( NO_HOTSPOT_ROUTING )); then
+      python3 "$REPO/shape-packet" "$SUBJECT_NUM" --repo "$SUBJECT_REPO" \
+        --no-hotspot-routing >"$PACKET_FILE" 2>"$DIAG_FILE"
+    else
+      python3 "$REPO/shape-packet" "$SUBJECT_NUM" --repo "$SUBJECT_REPO" \
+        >"$PACKET_FILE" 2>"$DIAG_FILE"
+    fi
   fi
 }
 
@@ -1445,17 +1453,27 @@ collect_issue_packet() {
 # One issue-job apply invocation; --run/--agent stamp the runner comments.
 run_issue_apply() {
   local attempt="$1"
+  local -a shape_options=()
   shift
   if [[ "$JOB" == "breakdown" ]]; then
     python3 "$REPO/breakdown-apply" "$BEGIN_REF" --answer "$ANSWER_FILE" \
       --attempt "$attempt" "$@" --run "$BEGIN_RUN" --agent "$AGENT"
   elif (( OMIT_FAILURE_MODES )); then
+    shape_options+=(--omit-failure-modes)
+    if (( NO_HOTSPOT_ROUTING )); then
+      shape_options+=(--no-hotspot-routing)
+    fi
     python3 "$REPO/shape-apply" "$SUBJECT_NUM" --repo "$SUBJECT_REPO" \
-      --answer "$ANSWER_FILE" --attempt "$attempt" "$@" \
-      --omit-failure-modes --run "$BEGIN_RUN" --agent "$AGENT"
+      --answer "$ANSWER_FILE" --packet "$PACKET_FILE" --attempt "$attempt" \
+      "${shape_options[@]+"${shape_options[@]}"}" "$@" \
+      --run "$BEGIN_RUN" --agent "$AGENT"
   else
+    if (( NO_HOTSPOT_ROUTING )); then
+      shape_options+=(--no-hotspot-routing)
+    fi
     python3 "$REPO/shape-apply" "$SUBJECT_NUM" --repo "$SUBJECT_REPO" \
-      --answer "$ANSWER_FILE" --attempt "$attempt" "$@" \
+      --answer "$ANSWER_FILE" --packet "$PACKET_FILE" --attempt "$attempt" \
+      "${shape_options[@]+"${shape_options[@]}"}" "$@" \
       --run "$BEGIN_RUN" --agent "$AGENT"
   fi
 }
@@ -1561,9 +1579,10 @@ from engine import shape_split
 from engine.shape import ShapeError
 
 command, args = sys.argv[2], sys.argv[3:]
-omit_failure_modes = bool(args and args[-1] == "--omit-failure-modes")
-if omit_failure_modes:
-    args = args[:-1]
+omit_failure_modes = "--omit-failure-modes" in args
+no_hotspot_routing = "--no-hotspot-routing" in args
+args = [arg for arg in args if arg not in
+        ("--omit-failure-modes", "--no-hotspot-routing")]
 
 
 def load(path):
@@ -1617,12 +1636,15 @@ try:
         dump(names, os.path.join(run_dir, "shape-parts.json"))
         print("\n".join(names))
     elif command == "parse":
-        kind, call_dir = args
+        kind, call_dir, packet_path = args
         with open(os.path.join(call_dir, "answer.json")) as handle:
             raw = handle.read()
         if kind == "framer":
+            packet = load(packet_path)
             parsed = shape_split.parse_framer(
-                raw, include_failure_modes=not omit_failure_modes)
+                raw, include_failure_modes=not omit_failure_modes,
+                hotspots=packet.get("hotspots", []),
+                include_hotspot_routing=not no_hotspot_routing)
         elif kind == "sibling":
             parsed = shape_split.parse_siblings(
                 raw, load(os.path.join(call_dir, "assigned.json")))
@@ -1635,7 +1657,8 @@ try:
             raise SystemExit("unknown shape part {!r}".format(kind))
         dump(parsed, os.path.join(call_dir, "result.json"))
     elif command == "merge":
-        run_dir, out = args
+        run_dir, out, packet_path = args
+        packet = load(packet_path)
         names = load(os.path.join(run_dir, "shape-parts.json"))
         siblings, decisions = [], []
         for name in names:
@@ -1646,7 +1669,9 @@ try:
         dump(shape_split.merge_shape_answer(
             result(run_dir, "framer"), siblings, decisions,
             result(run_dir, "auditor"),
-            include_failure_modes=not omit_failure_modes), out)
+            include_failure_modes=not omit_failure_modes,
+            hotspots=packet.get("hotspots", []),
+            include_hotspot_routing=not no_hotspot_routing), out)
     else:
         raise SystemExit("unknown shape_split command {!r}".format(command))
 except ShapeError as exc:
@@ -1834,6 +1859,7 @@ shape_part_calls() {
   local muse_status
   local parse_status
   local parse_err
+  local -a shape_parse_options=()
   local note
   local retried=""
   local idle_retries
@@ -1873,12 +1899,13 @@ shape_part_calls() {
       return 1
     fi
     # Read the status directly, for the same reason the judging loop does.
-    if (( OMIT_FAILURE_MODES )); then
-      shape_split parse "$kind" "$call_dir" --omit-failure-modes \
-        2>"$call_dir/parse.txt"
-    else
-      shape_split parse "$kind" "$call_dir" 2>"$call_dir/parse.txt"
-    fi
+    (( OMIT_FAILURE_MODES )) && \
+      shape_parse_options+=(--omit-failure-modes)
+    (( NO_HOTSPOT_ROUTING )) && \
+      shape_parse_options+=(--no-hotspot-routing)
+    shape_split parse "$kind" "$call_dir" "$PACKET_FILE" \
+      "${shape_parse_options[@]+"${shape_parse_options[@]}"}" \
+      2>"$call_dir/parse.txt"
     parse_status=$?
     if (( parse_status == 0 )); then
       answered=1
@@ -1983,12 +2010,14 @@ run_shape_split() {
     exit 1
   fi
 
-  if (( OMIT_FAILURE_MODES )); then
-    shape_split merge "$RUN_DIR" "$ANSWER_FILE" --omit-failure-modes \
-      2>"$DIAG_FILE"
-  else
-    shape_split merge "$RUN_DIR" "$ANSWER_FILE" 2>"$DIAG_FILE"
-  fi
+  local -a shape_merge_options=()
+  (( OMIT_FAILURE_MODES )) && \
+    shape_merge_options+=(--omit-failure-modes)
+  (( NO_HOTSPOT_ROUTING )) && \
+    shape_merge_options+=(--no-hotspot-routing)
+  shape_split merge "$RUN_DIR" "$ANSWER_FILE" "$PACKET_FILE" \
+    "${shape_merge_options[@]+"${shape_merge_options[@]}"}" \
+    2>"$DIAG_FILE"
   if (( $? != 0 )); then
     split_err="$(cat "$DIAG_FILE")"
     echo "muse-review-engine: could not merge the shape parts: $split_err" >&2

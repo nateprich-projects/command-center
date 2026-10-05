@@ -598,9 +598,9 @@ def test_both_paths_validate_review_and_record_once(monkeypatch, capsys):
     steps = []
     real_steps = getattr(shape, "shape_decision", None)
 
-    def spy_steps(items, target, answer_data):
+    def spy_steps(items, target, answer_data, **kwargs):
         steps.append(target.ref)
-        return real_steps(items, target, answer_data)
+        return real_steps(items, target, answer_data, **kwargs)
 
     monkeypatch.setattr(shape, "shape_decision", spy_steps, raising=False)
     scans = []

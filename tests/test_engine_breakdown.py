@@ -454,6 +454,33 @@ def test_non_list_tickets_are_rejected():
     assert any("must be a list" in error for error in errors)
 
 
+def test_exact_containment_line_limits_breakdown_to_one_ticket():
+    body = "# Plan\n\n## Hotspot routing\n\nContainment: one ticket\n"
+    assert breakdown.has_one_ticket_containment(body)
+    assert not breakdown.has_one_ticket_containment(
+        "Containment: one ticket may be useful")
+    errors, normalized = breakdown.validate_answer(
+        {"tickets": [raw_ticket(), raw_ticket(title="second")]},
+        lambda ref: None, max_tickets=1)
+    assert normalized is None
+    assert errors == ["the plan allows at most one ticket"]
+
+
+def test_apply_rechecks_containment_before_project_writes(monkeypatch):
+    monkeypatch.setattr(
+        breakdown, "fetch_plan",
+        lambda repo, number: {
+            "state": "OPEN", "body": "Containment: one ticket"})
+    monkeypatch.setattr(
+        breakdown, "fetch_project_risk",
+        lambda ref: (_ for _ in ()).throw(
+            AssertionError("containment must be checked before Project reads")))
+    with pytest.raises(breakdown.BreakdownError, match="at most one ticket"):
+        breakdown.apply(
+            "owner/repo", 1,
+            {"tickets": [{}, {}], "needs_decision": None})
+
+
 def test_a_non_object_ticket_is_rejected():
     errors, normalized, _ = validate({"tickets": ["do it"]})
     assert normalized is None
@@ -1731,6 +1758,23 @@ def test_apply_main_rejects_an_invalid_answer_with_exit_2(
     assert breakdown.apply_main(
         ["owner/repo#1", "--answer", str(answer)]) == 2
     assert "risk 'wild'" in capsys.readouterr().err
+
+
+def test_apply_main_reads_containment_before_accepting_multiple_tickets(
+        monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(
+        breakdown, "fetch_plan_body",
+        lambda repo, number: "Containment: one ticket\n")
+    monkeypatch.setattr(
+        breakdown, "fetch_issue_state",
+        lambda ref: (_ for _ in ()).throw(
+            AssertionError("ticket count should fail before dependency reads")))
+    answer = tmp_path / "answer.json"
+    answer.write_text(json.dumps({"tickets": [
+        raw_ticket(), raw_ticket(title="second")]}))
+    assert breakdown.apply_main(
+        ["owner/repo#1", "--answer", str(answer)]) == 2
+    assert "at most one ticket" in capsys.readouterr().err
 
 
 def test_apply_main_rejects_unparsable_json_with_exit_2(

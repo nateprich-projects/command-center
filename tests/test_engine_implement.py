@@ -4961,6 +4961,13 @@ def _fake_python(directory, version):
     return path
 
 
+_LOCKED_REQUIREMENTS_FIXTURE = "build==1.5.0\nmypy==2.3.1\n"
+# Independently computed with shasum -a 256 over the fixture bytes.
+_LOCKED_REQUIREMENTS_SHA256 = (
+    "884deb7f9a7421ff90e25ed5321abb6431a891acdf85472de2b56e2c2a46a99b"
+)
+
+
 def _locked_environment_run_spy(monkeypatch, pip_returncode=0):
     """Build real venvs, but keep package installation and tests offline."""
     calls = []
@@ -4993,7 +5000,7 @@ def test_run_tests_uses_and_records_per_repo_locked_environment(
     python_version = "{}.{}".format(*sys.version_info[:2])
     (clone / ".python-version").write_text(python_version + "\n")
     lock = clone / "requirements.lock"
-    lock.write_text("build==1.5.0\nmypy==2.3.1\n")
+    lock.write_text(_LOCKED_REQUIREMENTS_FIXTURE)
     runtime = tmp_path / "runtime"
     runtime.mkdir()
     monkeypatch.setattr(heartbeat, "SPOOL_DIR", str(runtime))
@@ -5009,11 +5016,17 @@ def test_run_tests_uses_and_records_per_repo_locked_environment(
     assert env.stat().st_mode & 0o777 == 0o700
     manifest = json.loads((env / "environment.json").read_text())
     assert manifest["repo"] == "owner/repo"
-    assert manifest["lock_sha256"] == hashlib.sha256(lock.read_bytes()).hexdigest()
+    assert manifest["lock_sha256"] == _LOCKED_REQUIREMENTS_SHA256
     assert manifest["interpreter"] == sys.executable
     assert manifest["pip_result"]["exit_code"] == 0
     assert any(command[1:3] == ["-m", "venv"] for command in calls)
     assert any(command[1:3] == ["-m", "pip"] for command in calls)
+    pip_install = next(
+        command for command in calls
+        if command[1:3] == ["-m", "pip"])
+    assert pip_install[3:] == [
+        "install", "--require-hashes", "-r", str(lock)
+    ]
     test_command = next(
         command for command in reversed(calls)
         if "unittest" in command)
@@ -5026,7 +5039,7 @@ def _make_locked_test_checkout(tmp_path, monkeypatch,
     python_version = "{}.{}".format(*sys.version_info[:2])
     (clone / ".python-version").write_text(python_version + "\n")
     lock = clone / dependency_file
-    lock.write_text("build==1.5.0\nmypy==2.3.1\n")
+    lock.write_text(_LOCKED_REQUIREMENTS_FIXTURE)
     if dependency_file == "pyproject.toml":
         lock.write_text(
             "[build-system]\nrequires = ['setuptools']\n"
@@ -5106,7 +5119,7 @@ def test_pinned_interpreter_fails_closed_when_locked_install_fails(
 
     env = runtime / "finish-envs" / "owner--repo" / python_version
     assert not env.exists()
-    assert hashlib.sha256(lock.read_bytes()).hexdigest() in str(caught.value)
+    assert _LOCKED_REQUIREMENTS_SHA256 in str(caught.value)
     assert "17" in str(caught.value)
     assert caught.value.pip_result["exit_code"] == 17
     assert sum(command[1:3] == ["-m", "pip"] for command in calls) == 1

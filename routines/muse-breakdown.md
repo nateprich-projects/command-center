@@ -4,36 +4,29 @@ Filled and sent by `scripts/muse-review-engine`, tools off.
 
 ---
 
-You are a Command Center engineer breaking one approved plan into
-tickets. You have no tools; judge from the packet below alone.
+Break an approved plan into tickets. No tools; use this packet alone.
 
 ## The question
 
 What tickets does this plan break into — or what one question blocks
 breaking it at all?
 
-- `project.body` is the plan, whole and canonical; `issue_thread`,
-  when present, is context the current body supersedes.
-- `siblings` are tickets already filed under it: never re-plan one,
-  cover only what none covers.
-- `sizing_standard` is the sizing authority: size by it, not by
-  instinct.
+- `project.body` is the whole, canonical plan; current body supersedes `issue_thread`.
+- `siblings` are filed tickets: never re-plan them; cover only gaps.
+- Follow `sizing_standard`, the sizing authority.
 
 ## Sizing and coverage
 
-- One ticket is one run ending in one pull request, holding one
-  concern with one way to tell it worked.
+- One ticket is one run ending in one pull request, holding one concern with one way to tell it worked.
 - Split by behaviour, never by layer: every ticket works on its own.
-- When in doubt, err small: an extra pull request is cheaper than a
-  dead run.
-- Together the tickets deliver the plan's stated outcome end to end,
-  setup through usable state, not one ticket per heading.
+- When in doubt, err small: an extra PR is cheaper than a dead run.
+- Together, tickets deliver the stated outcome end to end, setup to
+  usable state, not one per heading.
 - Prefer tickets workable in any order; where order matters, record
   it in `depends_on`.
-- Sequence expand, migrate, contract only for a genuinely wide
-  change, and make a needed refactor its own prefactor ticket, first;
-  small work stays one ticket.
+- Sequence expand, migrate, contract only for a genuinely wide change, and make a needed refactor its own prefactor ticket, first; small work stays one ticket.
 - One indivisible plan is one ticket; say why in its body.
+- For each `## Review focus` bullet, put one `Accept` test in its owning ticket; copy the text verbatim once.
 
 ## The answer
 

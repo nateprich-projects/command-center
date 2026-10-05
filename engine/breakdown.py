@@ -73,6 +73,13 @@ SIZING_SKILL_PATH = os.path.join("skills", "breakdown", "SKILL.md")
 SIZING_START = "## The unit"
 SIZING_END = "## Ordering and independence"
 
+# A plan's Review focus is optional, so add its breakdown rule only when the
+# rendered plan carries one or more focus bullets.
+REVIEW_FOCUS_ACCEPT_RULE = (
+    "For each `## Review focus` bullet, put one `Accept` test in the ticket "
+    "that owns that behavior. Copy the bullet's text verbatim, exactly once."
+)
+
 #: An external dependency: owner/repo#n, the only string shape accepted.
 REF_RE = re.compile(
     r"\A(?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+)"
@@ -234,12 +241,36 @@ def fetch_project_risk(ref: str) -> Optional[str]:
     return risk
 
 
+def _has_review_focus_bullets(plan_body: object) -> bool:
+    """Whether a rendered plan has a populated Review focus section."""
+    if not isinstance(plan_body, str):
+        return False
+    lines = plan_body.splitlines()
+    for index, line in enumerate(lines):
+        if line.strip() != "## Review focus":
+            continue
+        for section_line in lines[index + 1:]:
+            stripped = section_line.strip()
+            if stripped.startswith("#"):
+                break
+            if stripped.startswith("- ") and stripped[2:].strip():
+                return True
+        return False
+    return False
+
+
 def build_packet(*, repo: str, number: int, plan: dict,
                  siblings: Sequence[dict], sizing: str,
                  collected_at: str,
                  issue_comments: Optional[Sequence[Dict]] = None) -> Dict:
-    """Assemble the packet from already-fetched pieces. Pure: no IO."""
+    """Assemble the packet from already-fetched pieces. Pure: no IO.
+
+    A populated Review focus section adds its one-per-bullet Accept rule to
+    the sizing instructions sent with this plan.
+    """
     plan = plan or {}
+    if _has_review_focus_bullets(plan.get("body")):
+        sizing = sizing.rstrip() + "\n\n" + REVIEW_FOCUS_ACCEPT_RULE + "\n"
     packet = {
         "project": {
             "ref": "{}#{}".format(repo, number),

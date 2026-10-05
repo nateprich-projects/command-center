@@ -3015,7 +3015,8 @@ def test_a_shape_is_applied_and_finished_done(tmp_path):
     decider and the auditor, merged in code and applied once."""
     proc, repo = _stubbed_runner(
         tmp_path, _issue_begin("shape"), _issue_packet("shape"),
-        answers=(_framer_answer(),))
+        answers=(_framer_answer(
+            failure_modes=["cache timeout is reported"]),))
 
     assert proc.returncode == 0, proc.stderr
     assert _muse_calls(repo) == 4
@@ -3026,6 +3027,7 @@ def test_a_shape_is_applied_and_finished_done(tmp_path):
     prompt = (repo / "muse.prompt.1").read_text()
     assert prompt.startswith("This call is the shape framer")
     assert "What is the plan, what is settled" in prompt
+    assert "failure_modes" in prompt
     assert "PACKET_JSON" not in prompt
     assert "rotate the api-key monthly" in prompt
     packet_calls = (repo / "packet.calls").read_text().splitlines()
@@ -3039,6 +3041,7 @@ def test_a_shape_is_applied_and_finished_done(tmp_path):
     assert "--agent muse" in calls[0]
     assert (repo / "applied.marker").exists()
     applied = json.loads((repo / "apply.answer").read_text())
+    assert applied["failure_modes"] == ["cache timeout is reported"]
     assert applied["decided_by_agent"] == [
         {"decision": "settle which day the key rotates",
          "alternative": "leave it open",
@@ -3051,6 +3054,25 @@ def test_a_shape_is_applied_and_finished_done(tmp_path):
         "--note shaped {}: Ready (self-approved: agent idea, finite "
         "class, no open questions) --shape-status Ready\n".format(SHAPE_REF)
     )
+
+
+def test_shape_runner_flag_omits_review_focus_end_to_end(tmp_path):
+    mode = "cache timeout is reported"
+    proc, repo = _stubbed_runner(
+        tmp_path, _issue_begin("shape"), _issue_packet("shape"),
+        args=("standard", "--omit-failure-modes"),
+        answers=(_framer_answer(failure_modes=[mode]),))
+
+    assert proc.returncode == 0, proc.stderr
+    prompt = (repo / "muse.prompt.1").read_text()
+    header = prompt.split("The text after this paragraph", 1)[0]
+    answer_shape = header.split(
+        "Answer with exactly one JSON object and nothing else:", 1)[1]
+    assert "`--omit-failure-modes` fallback is active" in header
+    assert '"failure_modes"' not in answer_shape
+    assert "--omit-failure-modes" in (repo / "apply.calls").read_text()
+    applied = json.loads((repo / "apply.answer").read_text())
+    assert applied["failure_modes"] == []
 
 
 def test_a_stale_shape_is_recorded_without_shape_status(tmp_path):

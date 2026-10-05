@@ -3,9 +3,10 @@
 # then stop. Muse answers both standard and escalated tiers; the standard-tier
 # bridge retired at 2026-09-27 06:00 PDT (#1987).
 #
-# Usage: muse-review-engine [tier] [reasoning-effort]
+# Usage: muse-review-engine [tier] [reasoning-effort] [--omit-failure-modes]
 #   tier   -- escalated (default) or standard; substituted into begin
 #   effort -- max (default) or high
+#   --omit-failure-modes -- shape without Review focus as a safe fallback
 #
 # review-replay runs the same review on a given packet and records nothing,
 # through the MUSE_REVIEW_ENGINE_REPLAY_* variables (#1730; below).
@@ -39,9 +40,11 @@ set -uo pipefail
 
 TIER="escalated"
 EFFORT="max"
+OMIT_FAILURE_MODES=0
 SEEN=0
 for arg in "$@"; do
   case "$arg" in
+    --omit-failure-modes) OMIT_FAILURE_MODES=1 ;;
     --*) echo "muse-review-engine: unknown flag '$arg'" >&2; exit 1 ;;
     *)
       SEEN=$((SEEN + 1))
@@ -1434,6 +1437,10 @@ run_issue_apply() {
   if [[ "$JOB" == "breakdown" ]]; then
     python3 "$REPO/breakdown-apply" "$BEGIN_REF" --answer "$ANSWER_FILE" \
       --attempt "$attempt" "$@" --run "$BEGIN_RUN" --agent "$AGENT"
+  elif (( OMIT_FAILURE_MODES )); then
+    python3 "$REPO/shape-apply" "$SUBJECT_NUM" --repo "$SUBJECT_REPO" \
+      --answer "$ANSWER_FILE" --attempt "$attempt" "$@" \
+      --omit-failure-modes --run "$BEGIN_RUN" --agent "$AGENT"
   else
     python3 "$REPO/shape-apply" "$SUBJECT_NUM" --repo "$SUBJECT_REPO" \
       --answer "$ANSWER_FILE" --attempt "$attempt" "$@" \
@@ -1542,6 +1549,9 @@ from engine import shape_split
 from engine.shape import ShapeError
 
 command, args = sys.argv[2], sys.argv[3:]
+omit_failure_modes = bool(args and args[-1] == "--omit-failure-modes")
+if omit_failure_modes:
+    args = args[:-1]
 
 
 def load(path):
@@ -1599,7 +1609,8 @@ try:
         with open(os.path.join(call_dir, "answer.json")) as handle:
             raw = handle.read()
         if kind == "framer":
-            parsed = shape_split.parse_framer(raw)
+            parsed = shape_split.parse_framer(
+                raw, include_failure_modes=not omit_failure_modes)
         elif kind == "sibling":
             parsed = shape_split.parse_siblings(
                 raw, load(os.path.join(call_dir, "assigned.json")))
@@ -1622,7 +1633,8 @@ try:
                 decisions.extend(result(run_dir, name))
         dump(shape_split.merge_shape_answer(
             result(run_dir, "framer"), siblings, decisions,
-            result(run_dir, "auditor")), out)
+            result(run_dir, "auditor"),
+            include_failure_modes=not omit_failure_modes), out)
     else:
         raise SystemExit("unknown shape_split command {!r}".format(command))
 except ShapeError as exc:
@@ -1653,10 +1665,23 @@ escalated risk. So:
   plan waits on nothing.
 - `proposed_class` names one ladder class: Investigate, Broken, Maintenance,
   Improve, New, Replace, or Bug.
+- Optional `failure_modes` is an array of zero to three non-empty strings.
 
 Answer with exactly one JSON object and nothing else:
 
+HEADER
+  if (( OMIT_FAILURE_MODES )); then
+    cat <<'HEADER'
+The runner's `--omit-failure-modes` fallback is active; omit that field.
+
 {"proposed_class": "Improve", "plan_markdown": "the plan", "decision_points": ["one open decision"], "depends_on": ["owner/repo#n"]}
+HEADER
+  else
+    cat <<'HEADER'
+{"proposed_class": "Improve", "plan_markdown": "the plan", "decision_points": ["one open decision"], "depends_on": ["owner/repo#n"], "failure_modes": []}
+HEADER
+  fi
+  cat <<'HEADER'
 
 The text after this paragraph is the shaping question, included for the
 rules and the packet it carries. Read its packet and follow its rules for the
@@ -1836,7 +1861,12 @@ shape_part_calls() {
       return 1
     fi
     # Read the status directly, for the same reason the judging loop does.
-    shape_split parse "$kind" "$call_dir" 2>"$call_dir/parse.txt"
+    if (( OMIT_FAILURE_MODES )); then
+      shape_split parse "$kind" "$call_dir" --omit-failure-modes \
+        2>"$call_dir/parse.txt"
+    else
+      shape_split parse "$kind" "$call_dir" 2>"$call_dir/parse.txt"
+    fi
     parse_status=$?
     if (( parse_status == 0 )); then
       answered=1
@@ -1941,7 +1971,13 @@ run_shape_split() {
     exit 1
   fi
 
-  if ! shape_split merge "$RUN_DIR" "$ANSWER_FILE" 2>"$DIAG_FILE"; then
+  if (( OMIT_FAILURE_MODES )); then
+    shape_split merge "$RUN_DIR" "$ANSWER_FILE" --omit-failure-modes \
+      2>"$DIAG_FILE"
+  else
+    shape_split merge "$RUN_DIR" "$ANSWER_FILE" 2>"$DIAG_FILE"
+  fi
+  if (( $? != 0 )); then
     split_err="$(cat "$DIAG_FILE")"
     echo "muse-review-engine: could not merge the shape parts: $split_err" >&2
     failure "could not merge the shape parts for $BEGIN_REF: $split_err" || true

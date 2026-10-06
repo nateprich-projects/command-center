@@ -207,6 +207,155 @@ def pytest_prefix(argv: Sequence[str]) -> Optional[List[str]]:
     return None
 
 
+# -- unittest output -------------------------------------------------------
+
+_UNITTEST_RAN_RE = re.compile(
+    r"^Ran (\d+) tests? in (?:\d+(?:\.\d+)?|\.\d+)s$")
+_UNITTEST_FAILURE_RE = re.compile(r"^(?:FAIL|ERROR):\s*(.*\S)\s*$")
+_UNITTEST_DOTTED_ID_RE = re.compile(r"^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+$")
+
+
+def _unittest_prefix(argv: Sequence[str]) -> Optional[List[str]]:
+    """The direct ``python -m unittest`` prefix, or None for another runner."""
+    words = list(argv)
+    for index in range(len(words) - 1):
+        if words[index:index + 2] == ["-m", "unittest"]:
+            return words[:index + 2]
+    return None
+
+
+def _unittest_failure_id(text: str) -> Optional[str]:
+    """Read the dotted test id from common unittest failure headings.
+
+    CPython has printed both ``test_name (module.Case)`` and
+    ``test_name (module.Case.test_name)``. The former needs the method name
+    appended; the latter already contains the runnable id. Some runners
+    print the dotted id alone after ``FAIL:`` or ``ERROR:``.
+    """
+    match = re.fullmatch(r"([A-Za-z_]\w*)\s+\(([^()]*)\)", text.strip())
+    if match:
+        method, scope = match.groups()
+        scope = scope.strip()
+        if not _UNITTEST_DOTTED_ID_RE.fullmatch(scope):
+            return None
+        return scope if scope.endswith("." + method) else scope + "." + method
+    text = text.strip()
+    return text if _UNITTEST_DOTTED_ID_RE.fullmatch(text) else None
+
+
+def _unittest_run_count(output: str) -> Optional[int]:
+    """The ``Ran N test(s)`` count, or None when unittest did not report it."""
+    counts = [_UNITTEST_RAN_RE.fullmatch(line.strip())
+              for line in output.splitlines()]
+    matches = [match for match in counts if match]
+    return int(matches[0].group(1)) if len(matches) == 1 else None
+
+
+def unittest_failure_ids(
+        output: str, command: Sequence[str] = ()) -> Optional[List[str]]:
+    """Return unittest's failed ids, an empty list for unknown unittest output,
+    or None when the failed command does not look like unittest.
+
+    A non-pytest command is not assumed to be unittest just because one of
+    its tests printed a ``FAIL:`` line. Direct unittest commands are known by
+    argv; wrapped commands are recognized by unittest's own run-count line
+    together with its ``FAILED (...)`` footer.
+    """
+    lines = [line.strip() for line in output.splitlines()]
+    direct = _unittest_prefix(command) is not None
+    has_run_count = any(_UNITTEST_RAN_RE.fullmatch(line) for line in lines)
+    has_failed_footer = any(re.fullmatch(r"FAILED(?:\s+\(.*\))?", line)
+                            for line in lines)
+    has_pytest_footer = any(_SUMMARY_HEADER_RE.fullmatch(line)
+                            for line in lines)
+    if not direct and not (has_run_count and has_failed_footer
+                           and not has_pytest_footer):
+        return None
+    ids = []
+    for line in lines:
+        if not line.startswith(("FAIL:", "ERROR:")):
+            continue
+        match = _UNITTEST_FAILURE_RE.fullmatch(line)
+        node_id = (_unittest_failure_id(match.group(1)) if match else None)
+        if node_id is None:
+            return []
+        if node_id not in ids:
+            ids.append(node_id)
+    return ids
+
+
+def _unittest_output_excerpt(output: str) -> str:
+    """A bounded excerpt containing unittest headings and summary lines."""
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    relevant = [line for line in lines
+                if line.startswith(("FAIL:", "ERROR:"))
+                or _UNITTEST_RAN_RE.fullmatch(line)
+                or re.fullmatch(r"FAILED(?:\s+\(.*\))?", line)]
+    excerpt = "\n".join((relevant or lines)[:8])[:2048]
+    return excerpt or "No unittest output was captured."
+
+
+def _unittest_module_exists(root: pathlib.Path,
+                            node_id: str) -> Optional[bool]:
+    """Whether a dotted unittest id maps to a module file in this checkout.
+
+    None means the id cannot be mapped safely, as with ``__main__``.
+    """
+    parts = node_id.split(".")
+    if len(parts) < 3 or parts[0] == "__main__":
+        return None
+    # Test classes can be nested. Find the longest prefix that is an actual
+    # Python module/package; the remaining dotted components identify class
+    # and method names.
+    for end in range(len(parts) - 2, 0, -1):
+        module = root.joinpath(*parts[:end])
+        if (module.with_suffix(".py").is_file()
+                or (module / "__init__.py").is_file()):
+            return True
+    return False
+
+
+def _rerun_unittest_on_base(base_root: pathlib.Path,
+                            node_ids: Sequence[str],
+                            command_prefix: Sequence[str]) -> Tuple[dict,
+                                                                    Optional[dict]]:
+    """Re-run failing unittest ids on main with the merge interpreter."""
+    record = {"command": None, "result": None, "ran": [], "absent": [],
+              "already_failing": []}
+    for node_id in node_ids:
+        module_exists = _unittest_module_exists(base_root, node_id)
+        if module_exists is None:
+            return record, {"stage": "base", "output_excerpt":
+                            "Cannot map unittest id to an origin/main module: "
+                            + node_id}
+        if module_exists:
+            record["ran"].append(node_id)
+        else:
+            record["absent"].append(node_id)
+    if not record["ran"]:
+        return record, None
+    argv = [*command_prefix, *record["ran"]]
+    record["command"] = shlex.join(argv)
+    try:
+        passed, output, timed_out = _run_one(base_root, argv)
+    except implement.TestCommandStartError:
+        record["result"] = "fail"
+        return record, {"stage": "base", "output_excerpt":
+                        "The unittest base-comparison command could not start."}
+    record["result"] = "pass" if passed else "fail"
+    if passed:
+        return record, None
+    base_ids = unittest_failure_ids(output, argv)
+    run_count = _unittest_run_count(output)
+    if (timed_out or not base_ids or run_count != len(record["ran"])
+            or any(node_id not in record["ran"] for node_id in base_ids)):
+        return record, {"stage": "base", "output_excerpt":
+                        _unittest_output_excerpt(output)}
+    record["already_failing"] = [node_id for node_id in record["ran"]
+                                  if node_id in base_ids]
+    return record, None
+
+
 # -- runs ------------------------------------------------------------------
 
 _TIMEOUT_OUTPUT_LIMIT_BYTES = 2048
@@ -437,27 +586,70 @@ def _merge_and_run(worktree, head_sha: str, base_sha: str) -> dict:
             entry["output"] = _timeout_output_excerpt(output)
         record["result"] = "fail"
         prefix = pytest_prefix(argv)
-        failing = failing_node_ids(output) if prefix and not timed_out else []
-        if not failing or stopped_early(output):
-            # Another runner, pytest ids that cannot be read, or a pytest
-            # run that stopped before the rest of the suite ran: nothing
-            # shows the base shares it, so it counts, and the rest of the
-            # plan would not have run on the finish either.
+        if prefix:
+            failing = failing_node_ids(output) if not timed_out else []
+            if not failing or stopped_early(output):
+                # Pytest ids that cannot be read, or a run that stopped
+                # before the rest of the suite ran, still block unchanged.
+                record["failing"] = failing
+                record["blocking"] = True
+                break
+            # One pytest command at most: default_test_plan has one test slot.
+            rerun = rerun_on_base(worktree("base", base_sha), prefix, failing)
             record["failing"] = failing
+            record["base_rerun"] = rerun
+            record["new_failures"] = [
+                node_id for node_id in failing
+                if node_id not in rerun["already_failing"]]
+            if record["new_failures"]:
+                record["blocking"] = True
+                break
+            # Every failure is already on the base: the head did not cause
+            # it, so the rest of the plan still runs.
+            continue
+
+        if timed_out:
             record["blocking"] = True
             break
-        # One pytest command at most: default_test_plan has one test slot.
-        rerun = rerun_on_base(worktree("base", base_sha), prefix, failing)
-        record["failing"] = failing
+        unittest_ids = unittest_failure_ids(output, argv)
+        if unittest_ids is None:
+            # Other test runners have no supported base comparison here.
+            record["blocking"] = True
+            break
+        record["failing"] = unittest_ids
+        if not unittest_ids:
+            record["unknown_result"] = {
+                "stage": "merge",
+                "output_excerpt": _unittest_output_excerpt(output),
+            }
+            record["blocking"] = True
+            break
+        unittest_prefix = _unittest_prefix(argv)
+        if unittest_prefix is None:
+            record["unknown_result"] = {
+                "stage": "base",
+                "output_excerpt": (
+                    "Cannot reuse the unittest command prefix for "
+                    "origin/main comparison.\n"
+                    + _unittest_output_excerpt(output)),
+            }
+            record["blocking"] = True
+            break
+        rerun, unknown = _rerun_unittest_on_base(
+            worktree("base", base_sha), unittest_ids, unittest_prefix)
         record["base_rerun"] = rerun
+        if unknown is not None:
+            record["unknown_result"] = unknown
+            record["blocking"] = True
+            break
         record["new_failures"] = [
-            node_id for node_id in failing
+            node_id for node_id in unittest_ids
             if node_id not in rerun["already_failing"]]
         if record["new_failures"]:
             record["blocking"] = True
             break
-        # Every failure is already on the base: the head did not cause it,
-        # so the rest of the plan still runs.
+        # Every unittest failure is already on the base, so continue the
+        # plan just as the pytest path does for a shared failure.
     return record
 
 

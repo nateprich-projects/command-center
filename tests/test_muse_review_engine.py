@@ -1711,6 +1711,65 @@ def test_reviewer_b_runs_blind_after_a_and_posts_only_a_nonblocking_note(tmp_pat
     assert (repo / "paired-trial.log").read_text() == "update --run engine-run\n"
 
 
+def test_calibration_pair_runs_when_its_pr_head_moved_after_freezing(tmp_path):
+    """#2333: the fixed packet's frozen head is the calibration identity.
+
+    The stub gh answers no live headRefOid, as when the sampled PR was
+    pushed again after its packet froze (The-League#237 for must_reject).
+    """
+    shadow_state = {
+        "live_used_count": 30,
+        "live_count": 30,
+        "calibration_used_count": 0,
+        "calibration_count": 0,
+        "next_calibration": "must_reject",
+        "pairs": [],
+    }
+    answers = _review_answers(_judge_answer(evidence="live A")) + (
+        _requirements_answer(),
+        _judge_answer(evidence="calibration A"),
+        json.dumps({"verdict": "rejected", "findings": ["calibration B"]}),
+    )
+    # B runs on A's model only, so the live review is in a repo that
+    # resolves to the same Muse model as the calibration packet's.
+    live_repo = "nateprich-projects/command-center"
+    begin = _begin()
+    begin["work"]["repo"] = live_repo
+    repo, env = _stub_repo(
+        tmp_path, begin, _packet(repo=live_repo, head_sha="a" * 40),
+        answers=answers,
+        extra_env={
+            "MUSE_SHADOW_STATE": json.dumps(shadow_state),
+            "MUSE_SHADOW_AUTO_STATE": "1",
+            "MUSE_SHADOW_RESERVE_RESULT": "reserved",
+        })
+    (repo / "engine" / "review_packets.py").write_text(
+        (ROOT / "engine" / "review_packets.py").read_text())
+    shutil.copytree(ROOT / "data" / "review_packets",
+                    repo / "data" / "review_packets")
+    from engine import review_packets
+    frozen = review_packets.load_packet("must_reject", "v2")["head_sha"]
+    proc = subprocess.run(
+        ["/bin/bash", str(SCRIPT)], env=env, stdin=subprocess.DEVNULL,
+        capture_output=True, text=True, timeout=60)
+
+    assert proc.returncode == 0, proc.stderr
+    assert "no longer matches its frozen packet" not in proc.stderr
+    assert "calibration pair was stale or unavailable" not in proc.stderr
+    heartbeat = _heartbeat(repo).splitlines()
+    reserves = [line for line in heartbeat if line.startswith("shadow-reserve ")]
+    starts = [line for line in heartbeat if line.startswith("shadow-start ")]
+    finishes = [line for line in heartbeat if line.startswith("shadow-finish ")]
+    assert len(reserves) == len(starts) == len(finishes) == 1
+    for line in reserves + starts + finishes:
+        assert "--sample must_reject" in line
+        assert "--head {}".format(frozen) in line
+    assert "--stable yes" in finishes[0]
+    b_prompt = (repo / "muse.prompt.{}".format(_muse_calls(repo))).read_text()
+    assert "break-it approach" in b_prompt
+    assert frozen in b_prompt
+
+
 def test_paired_table_update_failure_does_not_block_reviewer_a(tmp_path):
     shadow_state = {
         "live_used_count": 0,

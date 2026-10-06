@@ -2099,6 +2099,44 @@ def test_a_member_note_drops_the_git_error_from_work_not_kept():
     assert note == "tests failed: 1 failed, 4 passed, 1 error | work NOT kept"
 
 
+def test_merged_failure_keeps_pytest_test_ids_and_counts():
+    node_id = "tests/test_widgets.py::test_new"
+    error = implement._merged_failure({
+        "base": "0123456789abcdef",
+        "commands": [{"command": "python3 -m pytest -q", "result": "fail"}],
+        "failing": [node_id],
+        "new_failures": [node_id],
+    })
+
+    assert isinstance(error, implement.MergedSuiteError)
+    assert str(error) == (
+        "python3 -m pytest -q failed on the merge with origin/main "
+        "0123456789ab\nFAILED {}\n1 failed".format(node_id))
+    assert implement._failure_note(error, repo=PUBLIC_REPO) == (
+        "tests failed: {} | 1 failed".format(node_id))
+
+
+def test_merged_failure_marks_unparseable_unittest_output_unknown():
+    excerpt = "Ran 1 test in 0.01s\nFAILED (failures=1)"
+    error = implement._merged_failure({
+        "base": "0123456789abcdef",
+        "commands": [{"command": "make test", "result": "fail"}],
+        "failing": [],
+        "new_failures": [],
+        "unknown_result": {"stage": "base", "output_excerpt": excerpt},
+    })
+
+    assert isinstance(error, implement.MergedSuiteUnknownError)
+    assert implement._failure_note(error, repo=REPO) == (
+        "merged suite result unknown")
+    comment = implement._failure_comment(error)
+    assert "Merged suite result unknown" in comment
+    assert "unknown rather than a ticket regression" in comment
+    assert "Output excerpt:" in comment
+    assert "Ran 1 test in 0.01s" in comment
+    assert "FAILED (failures=1)" in comment
+
+
 @pytest.mark.parametrize(("output", "error_class"), (
     ("could not derive a test command from this checkout", "unclassified"),
     ("python3 -m pytest -q failed: fatal: unable to access "

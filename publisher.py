@@ -4,8 +4,9 @@ Ticket #652, step 3 of the #643 dashboard plan. A launchd job runs one tick
 every minute on the Mac that holds the only Cloudflare credential:
 
 1. Push the newest spool entry to the ``snapshot`` KV key when it is not
-   already published there. The Worker in ``dashboard/worker.js`` reads that
-   key; this script is its only writer.
+   already published there, overlaying only the signed-in Claude weekly sample
+   at ``usage.claude``. The Worker in ``dashboard/worker.js`` reads that key;
+   this script is its only writer.
 2. Render ``metrics.py series`` and publish the result to the separate
    ``metrics`` KV key when it changes. The series is a rendering of the
    heartbeat branch's append-only ``metrics.jsonl`` facts.
@@ -17,8 +18,9 @@ every minute on the Mac that holds the only Cloudflare credential:
    attempt in the flag value so repeated unpublishable briefs wait one cadence.
 
 Spool contract (shared with the #650 writer): ``COMMAND_CENTER_DASHBOARD_SPOOL``
-holds one JSON object per brief with at least ``generated_at`` (ISO-8601);
-the whole entry is pushed byte-for-byte, so extra keys ride along untouched.
+holds one JSON object per brief with at least ``generated_at`` (ISO-8601).
+Other snapshot keys pass through unchanged; the publisher adds or removes only
+``usage.claude`` from the current app sample before writing the KV snapshot.
 
 Configuration, in precedence order (flag, environment, file, default):
 
@@ -56,6 +58,7 @@ from __future__ import annotations
 import argparse
 import errno
 import json
+import math
 import os
 import re
 import subprocess
@@ -88,6 +91,7 @@ SCHEDULED_AFTER_SECONDS = 1800
 KV_TIMEOUT_SECONDS = 30.0
 DEFAULT_BRIEF_TIMEOUT_SECONDS = 600.0
 DEFAULT_METRICS_TIMEOUT_SECONDS = 120.0
+CLAUDE_SAMPLE_TIMEOUT_SECONDS = 5.0
 DEFAULT_API_BASE = "https://api.cloudflare.com/client/v4"
 TOKEN_ENV = "CLOUDFLARE_API_TOKEN"
 ACCOUNT_ENV = "CLOUDFLARE_ACCOUNT_ID"
@@ -374,6 +378,112 @@ def newest_spool_entry(
         if best is None or (epoch, name) > (best.epoch, best.name):
             best = SpoolEntry(name=name, epoch=epoch, data=data)
     return best, warnings
+
+
+def _read_claude_weekly_sample(now: float) -> Optional[Dict]:
+    """Read only the raw weekly fields through usage.py's org selection."""
+    usage_py = Path(__file__).with_name("usage.py")
+    try:
+        result = subprocess.run(
+            [sys.executable, str(usage_py), "claude-plan-sample"],
+            capture_output=True,
+            text=True,
+            timeout=CLAUDE_SAMPLE_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        log("warning: Claude weekly sample unavailable; omitting usage.claude")
+        return None
+    if result.returncode != 0:
+        log("warning: Claude weekly sample unavailable; omitting usage.claude")
+        return None
+    try:
+        sample = json.loads(result.stdout)
+    except (TypeError, ValueError):
+        log("warning: Claude weekly sample malformed; omitting usage.claude")
+        return None
+    if not isinstance(sample, dict):
+        return None
+
+    sample_usage = sample.get("u")
+    stamp_ms = sample.get("t")
+    weekly = sample_usage.get("sd") if isinstance(sample_usage, dict) else None
+    if (
+        isinstance(weekly, bool)
+        or not isinstance(weekly, (int, float))
+        or isinstance(stamp_ms, bool)
+        or not isinstance(stamp_ms, (int, float))
+    ):
+        log("warning: Claude weekly sample malformed; omitting usage.claude")
+        return None
+    try:
+        weekly_number = float(weekly)
+        stamp_number = float(stamp_ms)
+    except (OverflowError, TypeError, ValueError):
+        log("warning: Claude weekly sample malformed; omitting usage.claude")
+        return None
+    if (
+        not math.isfinite(weekly_number)
+        or not 0.0 <= weekly_number <= 100.0
+        or not math.isfinite(stamp_number)
+        or stamp_number < 0
+        or now - stamp_number / 1000.0 < -60
+    ):
+        log("warning: Claude weekly sample malformed; omitting usage.claude")
+        return None
+    return {"u": {"sd": weekly}, "t": stamp_ms}
+
+
+def _with_claude_usage(data: bytes,
+                       sample: Optional[Dict]) -> bytes:
+    """Add or remove just usage.claude in a spooled snapshot."""
+    try:
+        payload = json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return data
+    if not isinstance(payload, dict):
+        return data
+
+    usage = payload.get("usage")
+    if sample is None:
+        if not isinstance(usage, dict) or "claude" not in usage:
+            return data
+        usage = dict(usage)
+        del usage["claude"]
+    else:
+        if usage is None:
+            usage = {}
+        elif isinstance(usage, dict):
+            usage = dict(usage)
+        else:
+            return data
+        if usage.get("claude") == sample:
+            return data
+        usage["claude"] = sample
+
+    payload["usage"] = usage
+    return (json.dumps(payload, indent=2) + "\n").encode("utf-8")
+
+
+def _same_snapshot_except_claude_usage(left: bytes, right: bytes) -> bool:
+    """Compare equal-age snapshots while ignoring only usage.claude."""
+    def core(data: bytes):
+        try:
+            payload = json.loads(data.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        payload = dict(payload)
+        usage = payload.pop("usage", None)
+        if usage is None:
+            usage = {}
+        elif isinstance(usage, dict):
+            usage = dict(usage)
+            usage.pop("claude", None)
+        return payload, usage
+
+    left_core = core(left)
+    return left_core is not None and left_core == core(right)
 
 
 def _snip(body: bytes, limit: int = 200) -> str:
@@ -681,22 +791,33 @@ def tick(spool_dir: Path, env_file: Path, wrangler_toml: Path,
     if entry is None:
         log("no spool entries yet; nothing to publish")
     else:
+        snapshot_data = _with_claude_usage(
+            entry.data, _read_claude_weekly_sample(now))
         remote = kv.get(SNAPSHOT_KEY)
-        if remote is not None and remote == entry.data:
+        if remote is not None and remote == snapshot_data:
             log("snapshot {} is already published".format(entry.name))
         else:
             remote_epoch = _remote_epoch(remote) if remote is not None else None
             if (remote is not None and remote_epoch is not None
-                    and remote_epoch >= entry.epoch):
+                    and remote_epoch > entry.epoch):
                 log("warning: remote snapshot is newer than {}; "
                     "leaving it".format(entry.name))
+            elif (
+                remote is not None
+                and remote_epoch == entry.epoch
+                and not _same_snapshot_except_claude_usage(
+                    remote, snapshot_data)
+            ):
+                log("warning: remote snapshot has the same generated_at as "
+                    "{} but differs outside usage.claude; leaving it"
+                    .format(entry.name))
             else:
                 if remote is not None and remote_epoch is None:
                     log("warning: remote snapshot has no parseable "
                         "generated_at; overwriting it")
-                kv.put(SNAPSHOT_KEY, entry.data)
+                kv.put(SNAPSHOT_KEY, snapshot_data)
                 log("published {} ({} bytes)".format(
-                    entry.name, len(entry.data)))
+                    entry.name, len(snapshot_data)))
 
     publish_metrics_series(kv, metrics_py)
 

@@ -203,6 +203,7 @@ else
 fi
 
 cleanup() {
+  [[ "${BASHPID:-$$}" == "$$" ]] || return 0
   python3 "$REPO/funnel.py" session-stop >/dev/null 2>&1 || true
   if [[ -n "$MUSE_STDERR_FILE" && -f "$MUSE_STDERR_FILE" ]]; then
     cat -- "$MUSE_STDERR_FILE" >&2 || true
@@ -496,6 +497,7 @@ killed_marker="$(mktemp "${TMPDIR:-/tmp}/muse-implement-killed.XXXXXX")"
 rm -f "$killed_marker"
 
 (
+  trap - EXIT
   sleep "$BOUND_SECONDS" &
   sleep_pid=$!
   trap 'kill "$sleep_pid" 2>/dev/null; exit 0' TERM

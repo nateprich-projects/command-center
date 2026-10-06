@@ -48,6 +48,7 @@ def packet(siblings=(), **kw):
               "status": "Ideas", "klass": "Improve"},
         origin_voice="agent",
         override_target=None,
+        output_review=True,
         plan_md="# plan.md rules",
         plan_md_missing=False,
         agents_md="# AGENTS.md rules",
@@ -199,6 +200,52 @@ def test_framer_answer_validates_and_accepts_raw_json():
         depends_on=[" owner/repo#9 "])))
     assert parsed["depends_on"] == ["owner/repo#9"]
     assert parsed["decision_points"][0] == "Which file holds it"
+    assert parsed["failure_modes"] == []
+
+
+def test_framer_preserves_failure_modes_and_can_omit_them():
+    modes = ["cache timeout is reported", "retry keeps request identity"]
+    parsed = shape_split.parse_framer(framer_answer(failure_modes=modes))
+    assert parsed["failure_modes"] == modes
+
+    omitted = shape_split.parse_framer(
+        framer_answer(failure_modes=["ignored", "when", "disabled", "extra"]),
+        include_failure_modes=False)
+    assert omitted["failure_modes"] == []
+
+
+def test_split_framer_and_merge_preserve_packet_bound_hotspot_routing():
+    target = {"repo_path": "engine/shape.py", "function": "collect"}
+    hotspots = [dict(target, broken_fix_count=3, window_days=7)]
+    framer = shape_split.parse_framer(
+        framer_answer(
+            proposed_class="Broken", hotspot_targets=[target],
+            redesign_remainder="Keep the remaining change small."),
+        hotspots=hotspots)
+    decisions = shape_split.parse_decider(
+        {"decisions": decisions_for(framer["decision_points"])},
+        framer["decision_points"])
+    merged = shape_split.merge_shape_answer(
+        framer, [], decisions,
+        shape_split.parse_auditor(audit_answer()), hotspots=hotspots)
+    assert merged["hotspot_targets"] == [target]
+    assert merged["redesign_remainder"] == \
+        "Keep the remaining change small."
+    with pytest.raises(ShapeError, match="not in the packet's hotspot list"):
+        shape_split.parse_framer(
+            framer_answer(
+                proposed_class="Broken", hotspot_targets=[{
+                    "repo_path": "other.py", "function": "run"}],
+                redesign_remainder="Remainder."), hotspots=hotspots)
+
+
+def test_split_fallback_ignores_hotspot_answer_fields():
+    framer = shape_split.parse_framer(
+        framer_answer(hotspot_targets=[{"bad": "ignored"}],
+                      redesign_remainder="ignored"),
+        include_hotspot_routing=False)
+    assert framer["hotspot_targets"] == []
+    assert framer["redesign_remainder"] == ""
 
 
 def test_framer_refuses_empty_decision_points():
@@ -345,6 +392,22 @@ def test_merged_answer_passes_shape_validation_with_exactly_answer_keys():
         "exposure": ["May the output name private repositories?"],
         "gates": None, "scope": None, "preference": None}
     assert shape.render_plan(answer)
+
+
+def test_merge_emits_failure_modes_for_validation_or_omits_them_on_fallback():
+    modes = ["cache timeout is reported", "retry keeps request identity"]
+    framer = draft(failure_modes=modes)
+    siblings = []
+    decisions = shape_split.parse_decider(
+        {"decisions": decisions_for(framer["decision_points"])},
+        framer["decision_points"])
+    audit = shape_split.parse_auditor(audit_answer())
+
+    answer = shape_split.merge_shape_answer(framer, siblings, decisions, audit)
+    assert answer["failure_modes"] == modes
+    fallback = shape_split.merge_shape_answer(
+        framer, siblings, decisions, audit, include_failure_modes=False)
+    assert fallback["failure_modes"] == []
 
 
 def test_merge_orders_decisions_by_framer_points_whatever_the_call_order():

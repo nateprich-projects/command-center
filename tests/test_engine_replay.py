@@ -138,6 +138,118 @@ def test_budget_gate_reserves_one_session_per_engine_run(monkeypatch):
     assert "policy" not in reading["windows"]["seven_day"]
 
 
+def test_evaluation_budget_admits_recorded_40_run_batch_at_p90(monkeypatch):
+    reading = {"windows": {"seven_day": {
+        "used_percent": 38.75,
+        "cap_dollars": 109.0,
+        "rolling": True,
+        "policy": {"weekly_reserve": 4.13},
+    }}}
+    observed = {}
+
+    monkeypatch.setattr(replay.agent_health, "quota_hold_until", lambda: None)
+    monkeypatch.setattr(replay.usage, "read_agent",
+                        lambda _agent, _now: reading)
+
+    def pace(found, now, provider):
+        observed["weekly_reserve"] = found["windows"]["seven_day"][
+            "policy"]["weekly_reserve"]
+        return {"known": True, "over_pace": False, "band": "ok"}
+
+    def trial(spent_dollars, now, *, reserve_dollars):
+        observed["trial"] = (spent_dollars, now, reserve_dollars)
+        return {"known": True, "stop": False}
+
+    monkeypatch.setattr(replay.usage, "pace", pace)
+    monkeypatch.setattr(replay.usage, "muse_trial_counter_read", trial)
+
+    replay.check_budget(
+        40, now=100.0, replay_run_p90_dollars=0.00619,
+        trial_spent_dollars=0.0,
+    )
+
+    assert observed["weekly_reserve"] == pytest.approx(0.227156)
+    assert observed["trial"][:2] == (0.0, 100.0)
+    assert observed["trial"][2] == pytest.approx(0.2476)
+
+
+@pytest.mark.parametrize("trial_spent_dollars", [None, 20.0, float("nan")])
+def test_evaluation_budget_refuses_exhausted_or_unreadable_trial_total(
+        monkeypatch, trial_spent_dollars):
+    monkeypatch.setattr(replay.agent_health, "quota_hold_until", lambda: None)
+    monkeypatch.setattr(replay.usage, "read_agent", lambda _agent, _now: {
+        "windows": {"seven_day": {
+            "used_percent": 38.75,
+            "cap_dollars": 109.0,
+            "rolling": True,
+            "policy": {"weekly_reserve": 4.13},
+        }},
+    })
+    monkeypatch.setattr(
+        replay.usage, "pace",
+        lambda *_args, **_kwargs: pytest.fail(
+            "weekly pace was read after the trial cap had already refused"),
+    )
+
+    with pytest.raises(replay.ReplayError):
+        replay.check_budget(
+            40, now=100.0, replay_run_p90_dollars=0.00619,
+            trial_spent_dollars=trial_spent_dollars,
+        )
+
+
+def test_evaluation_budget_refuses_when_trial_cap_read_is_missing(monkeypatch):
+    monkeypatch.setattr(replay.agent_health, "quota_hold_until", lambda: None)
+    monkeypatch.setattr(replay.usage, "MUSE_TRIAL_TOTAL_CAP_DOLLARS", None)
+    monkeypatch.setattr(replay.usage, "read_agent", lambda _agent, _now: {
+        "windows": {"seven_day": {
+            "used_percent": 38.75,
+            "cap_dollars": 109.0,
+            "rolling": True,
+            "policy": {"weekly_reserve": 4.13},
+        }},
+    })
+    monkeypatch.setattr(
+        replay.usage, "pace",
+        lambda *_args, **_kwargs: pytest.fail(
+            "weekly pace was read after the trial-cap configuration was missing"),
+    )
+
+    with pytest.raises(replay.ReplayError):
+        replay.check_budget(
+            40, now=100.0, replay_run_p90_dollars=0.00619,
+            trial_spent_dollars=0.0,
+        )
+
+
+def test_evaluation_budget_keeps_weekly_over_budget_refusal(monkeypatch):
+    observed = {}
+    monkeypatch.setattr(replay.agent_health, "quota_hold_until", lambda: None)
+    monkeypatch.setattr(replay.usage, "read_agent", lambda _agent, _now: {
+        "windows": {"seven_day": {
+            "used_percent": 99.9,
+            "cap_dollars": 109.0,
+            "rolling": True,
+            "policy": {"weekly_reserve": 4.13},
+        }},
+    })
+
+    def pace(reading, _now, provider):
+        observed["reserve"] = reading["windows"]["seven_day"][
+            "policy"]["weekly_reserve"]
+        return {"known": True, "over_pace": True, "band": "over"}
+
+    monkeypatch.setattr(replay.usage, "pace", pace)
+
+    with pytest.raises(replay.ReplayError):
+        replay.check_budget(
+            40, now=100.0, replay_run_p90_dollars=0.00619,
+            trial_spent_dollars=0.0,
+        )
+
+    assert observed["reserve"] == pytest.approx(0.227156)
+
+
 @pytest.mark.parametrize(
     "result",
     [
@@ -286,6 +398,19 @@ def test_the_engine_runs_from_this_checkout_on_the_given_inputs(
     assert run["argv"] == ["escalated", "max"]
     assert run["packet"] == str(packet.resolve())
     assert run["routine"] == str(routine_path.resolve())
+
+
+def test_the_default_replay_leaves_prompt_selection_to_the_active_adapter(
+        tmp_path, stub_engine):
+    packet = private_packet(tmp_path)
+
+    result = replay.replay(packet, runs=1, expected="approved",
+                           runtime_root=tmp_path)
+
+    assert result["pass"] is True
+    calls = stub_engine()
+    assert len(calls) == 1
+    assert calls[0]["routine"] is None
 
 
 def test_the_default_engine_is_this_checkouts_runner():
@@ -700,3 +825,246 @@ def test_cli_entry_point_exists_and_is_executable():
 
     assert entry.exists()
     assert entry.stat().st_mode & stat.S_IXUSR
+
+
+def test_replay_cli_forwards_evaluation_budget_readings(monkeypatch, capsys):
+    observed = {}
+
+    def replay_fn(packet, routine=None, **kwargs):
+        observed.update(packet=packet, routine=routine, **kwargs)
+        return {"expected": "approved", "verdicts": ["approved"],
+                "failed_parts": [[]], "pass": True}
+
+    monkeypatch.setattr(replay, "replay", replay_fn)
+
+    assert replay.main([
+        "packet.json", "--runs", "40", "--expected-verdict", "approved",
+        "--replay-run-p90-dollars", "0.00619",
+        "--trial-spent-dollars", "0.0",
+    ]) == 0
+
+    assert observed["replay_run_p90_dollars"] == 0.00619
+    assert observed["trial_spent_dollars"] == 0.0
+    assert json.loads(capsys.readouterr().out)["pass"] is True
+
+
+def test_checkout_replay_passes_evaluation_budget_readings(
+        tmp_path, monkeypatch):
+    checkout = tmp_path / "checkout"
+    entry = checkout / "engine" / "replay.py"
+    entry.parent.mkdir(parents=True)
+    entry.write_text("# replay entry")
+    packet = tmp_path / "packet.json"
+    packet.write_text("{}")
+    observed = {}
+
+    def run(command, **_kwargs):
+        observed["command"] = command
+        return subprocess.CompletedProcess(
+            command, 0,
+            json.dumps({"expected": "approved", "verdicts": [],
+                        "failed_parts": []}), "")
+
+    monkeypatch.setattr(replay.subprocess, "run", run)
+
+    replay._run_checkout_replay(
+        checkout, packet, 40, "approved", tmp_path,
+        replay_run_p90_dollars=0.00619, trial_spent_dollars=0.0,
+    )
+
+    command = observed["command"]
+    assert command[command.index("--replay-run-p90-dollars") + 1] == "0.00619"
+    assert command[command.index("--trial-spent-dollars") + 1] == "0.0"
+
+
+def _replay_pool_fixture():
+    path = ROOT / "tests" / "fixtures" / "replay_pool_v1.json"
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _replay_pool_context(tmp_path, monkeypatch, fixture):
+    head = tmp_path / "head"
+    main = tmp_path / "main"
+    head.mkdir()
+    main.mkdir()
+    runtime_root = tmp_path / "runtime"
+    runtime_root.mkdir(mode=0o700)
+    revisions = {
+        "head": fixture["head_commit_sha"],
+        "main": fixture["main_commit_sha"],
+    }
+    calls = []
+
+    def checkout_revision(path):
+        path = pathlib.Path(path)
+        return path, revisions[path.name]
+
+    def run_checkout(checkout, _packet_path, runs, expected, _runtime_root):
+        calls.append((checkout.name, runs, expected))
+        summary = next(
+            value for value in fixture["packet_results"].values()
+            if value["expected"] == expected
+        )
+        return {
+            **summary,
+            "verdicts": summary["verdicts"][:runs],
+            "failed_parts": summary["failed_parts"][:runs],
+        }
+
+    monkeypatch.setattr(replay, "_checkout_revision", checkout_revision)
+    monkeypatch.setattr(replay, "_run_checkout_replay", run_checkout)
+    return head, main, runtime_root, revisions, calls
+
+
+@pytest.mark.parametrize(
+    "packet_name,expected",
+    [("must_reject", "rejected"), ("must_approve", "approved")],
+)
+def test_replay_packet_runs_each_v1_packet_on_head_and_main(
+        tmp_path, monkeypatch, packet_name, expected):
+    fixture = _replay_pool_fixture()
+    head, main, runtime_root, _revisions, calls = _replay_pool_context(
+        tmp_path, monkeypatch, fixture)
+
+    result = replay.replay_packet(
+        packet_name, head, main, runs=2, runtime_root=runtime_root)
+
+    assert [call[0] for call in calls] == ["head", "main"]
+    assert [call[2] for call in calls] == [expected, expected]
+    assert result["head"]["commit_sha"] == fixture["head_commit_sha"]
+    assert result["main"]["commit_sha"] == fixture["main_commit_sha"]
+    assert [run["verdict"] for run in result["head"]["runs"]] == [
+        expected, expected]
+    assert [run["verdict"] for run in result["main"]["runs"]] == [
+        expected, expected]
+    assert all(run["main_commit_sha"] == fixture["main_commit_sha"]
+               for run in result["main"]["runs"])
+
+
+def test_replay_packet_reuses_same_sha_pool_with_identical_output(
+        tmp_path, monkeypatch):
+    fixture = _replay_pool_fixture()
+    head, main, runtime_root, _revisions, calls = _replay_pool_context(
+        tmp_path, monkeypatch, fixture)
+
+    assert replay.load_main_pool(
+        fixture["main_commit_sha"], runtime_root=runtime_root)["packets"] == {}
+    first = replay.replay_packet(
+        "must_reject", head, main, runs=2, runtime_root=runtime_root)
+    second = replay.replay_packet(
+        "must_reject", head, main, runs=2, runtime_root=runtime_root)
+
+    pool = replay.load_main_pool(
+        fixture["main_commit_sha"], runtime_root=runtime_root)
+    [records] = pool["packets"].values()
+    pool_path = runtime_root / "eval-replay" / "main-pool.json"
+    assert first == second
+    assert [call[0] for call in calls] == ["head", "main", "head"]
+    assert len(records) == 2
+    assert pool_path == runtime_root / replay.MAIN_POOL_RELATIVE_PATH
+    assert pool_path.is_file()
+    assert all(record["main_commit_sha"] == fixture["main_commit_sha"]
+               for record in records)
+
+
+def test_eval_replay_pool_path_is_ignored_by_git():
+    result = subprocess.run(
+        ["git", "-C", str(ROOT), "check-ignore", "--quiet",
+         "eval-replay/main-pool.json"],
+        capture_output=True, text=True, check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_replay_packet_reuses_prior_head_samples_for_the_next_batch(
+        tmp_path, monkeypatch):
+    fixture = _replay_pool_fixture()
+    head, main, runtime_root, _revisions, calls = _replay_pool_context(
+        tmp_path, monkeypatch, fixture)
+
+    first = replay.replay_packet(
+        "must_reject", head, main, runs=2, runtime_root=runtime_root)
+    second = replay.replay_packet(
+        "must_reject", head, main, runs=4, runtime_root=runtime_root,
+        head_runs=first["head"]["runs"])
+
+    assert [call[0] for call in calls] == ["head", "main", "head", "main"]
+    assert [call[1] for call in calls] == [2, 2, 2, 2]
+    assert len(second["head"]["runs"]) == 4
+    assert len(second["main"]["runs"]) == 4
+    assert second["head"]["runs"][:2] == first["head"]["runs"]
+
+
+def test_replay_packet_misses_and_replaces_pool_when_main_sha_changes(
+        tmp_path, monkeypatch):
+    fixture = _replay_pool_fixture()
+    head, main, runtime_root, revisions, calls = _replay_pool_context(
+        tmp_path, monkeypatch, fixture)
+
+    replay.replay_packet(
+        "must_reject", head, main, runs=2, runtime_root=runtime_root)
+    revisions["main"] = fixture["next_main_commit_sha"]
+    after_advance = replay.replay_packet(
+        "must_reject", head, main, runs=2, runtime_root=runtime_root)
+
+    assert [call[0] for call in calls] == ["head", "main", "head", "main"]
+    assert after_advance["main"]["commit_sha"] == fixture[
+        "next_main_commit_sha"]
+    assert all(run["main_commit_sha"] == fixture["next_main_commit_sha"]
+               for run in after_advance["main"]["runs"])
+    assert replay.load_main_pool(
+        fixture["main_commit_sha"], runtime_root=runtime_root)["packets"] == {}
+    advanced_pool = replay.load_main_pool(
+        fixture["next_main_commit_sha"], runtime_root=runtime_root)
+    [records] = advanced_pool["packets"].values()
+    assert len(records) == 2
+    assert all(record["main_commit_sha"] == fixture[
+        "next_main_commit_sha"] for record in records)
+
+
+def test_checkout_revision_records_the_full_git_commit_sha(tmp_path):
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    subprocess.run(["git", "init", "--quiet", str(checkout)], check=True)
+    subprocess.run(["git", "-C", str(checkout), "config", "user.name",
+                    "Replay Fixture"], check=True)
+    subprocess.run(["git", "-C", str(checkout), "config", "user.email",
+                    "replay-fixture@example.invalid"], check=True)
+    (checkout / "README.md").write_text("fixture\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(checkout), "add", "README.md"],
+                   check=True)
+    subprocess.run(["git", "-C", str(checkout), "commit", "--quiet", "-m",
+                    "fixture"], check=True)
+    expected = subprocess.run(
+        ["git", "-C", str(checkout), "rev-parse", "HEAD"],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+
+    assert replay._checkout_revision(checkout) == (checkout.resolve(), expected)
+    assert re.fullmatch(r"[0-9a-f]{40}", expected)
+
+
+def test_checkout_replay_invokes_the_selected_replay_entry(tmp_path):
+    checkout = tmp_path / "selected-checkout"
+    engine_dir = checkout / "engine"
+    engine_dir.mkdir(parents=True)
+    entry = engine_dir / "replay.py"
+    entry.write_text(
+        "import json\n"
+        "print(json.dumps({'expected': 'rejected', 'verdicts': ['rejected'], "
+        "'failed_parts': [[]], 'pass': True}))\n",
+        encoding="utf-8",
+    )
+    packet_path = tmp_path / "packet.json"
+    packet_path.write_text("{}", encoding="utf-8")
+
+    summary = replay._run_checkout_replay(
+        checkout, packet_path, 1, "rejected", tmp_path)
+
+    assert summary == {
+        "expected": "rejected",
+        "verdicts": ["rejected"],
+        "failed_parts": [[]],
+        "pass": True,
+    }

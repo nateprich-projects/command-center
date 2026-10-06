@@ -5,7 +5,9 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
+import os
 import pathlib
+import re
 import shlex
 import signal
 import stat
@@ -492,7 +494,8 @@ def test_the_ticket_pr_is_created_rather_than_a_foreign_one_edited(
     monkeypatch.setattr(funnel, "_run_gh", fake_run)
 
     pr = implement.create_or_update_pr(
-        REPO, {"branch": "ticket/42", "root": tmp_path},
+        REPO, {"branch": "ticket/42", "head_sha": "new-head",
+               "root": tmp_path},
         {"title": "Do it", "number": 42}, "body")
 
     assert pr == {"number": 95, "url": "https://github.com/owner/repo/pull/95"}
@@ -500,6 +503,51 @@ def test_the_ticket_pr_is_created_rather_than_a_foreign_one_edited(
     fields = asked[0][asked[0].index("--json") + 1].split(",")
     assert {"isCrossRepository", "headRepository", "headRepositoryOwner",
             "author"} <= set(fields)
+
+
+def test_a_merged_pr_on_the_pushed_head_is_returned_without_creating_another(
+        monkeypatch, tmp_path):
+    """Source check: implement.py:1798-1803 lists with --repo, --state open,
+    and --head before the gh pr create fallback at lines 1818-1822.
+    """
+    asked = []
+    runs = []
+    merged = {
+        "number": 94,
+        "url": "https://github.com/owner/repo/pull/94",
+        "headRefOid": "same-head",
+        "isCrossRepository": False,
+        "author": {"login": "nateprich"},
+    }
+
+    def fake_json(*args):
+        asked.append(args)
+        state = args[args.index("--state") + 1]
+        if state == "open":
+            return []
+        if state == "merged":
+            return [{**FOREIGN_PRS[0], "headRefOid": "same-head"}, merged]
+        raise AssertionError(args)
+
+    def fake_run(argv, **kwargs):
+        runs.append(list(argv))
+        return type("R", (), {
+            "returncode": 0, "stderr": "",
+            "stdout": "https://github.com/owner/repo/pull/95\n",
+        })()
+
+    monkeypatch.setattr(funnel, "_gh_json", fake_json)
+    monkeypatch.setattr(funnel, "_run_gh", fake_run)
+
+    pr = implement.create_or_update_pr(
+        REPO, {"branch": "ticket/42", "head_sha": "same-head",
+               "root": tmp_path},
+        {"title": "Do it", "number": 42}, "body")
+
+    assert pr == {"number": 94, "url": merged["url"], "merged": True}
+    assert [args[args.index("--state") + 1] for args in asked] == [
+        "open", "merged"]
+    assert [argv[:3] for argv in runs] == []
 
 
 def test_the_owners_open_ticket_pr_is_still_updated(monkeypatch, tmp_path):
@@ -730,6 +778,44 @@ def test_no_diff_with_verified_evidence_closes_and_finishes(
     )["note"]
     for url in evidence:
         assert url in effects["finished"][0][3]
+
+
+def test_no_diff_finish_removes_a_clean_pushed_run_checkout(
+        tmp_path, monkeypatch):
+    # Reproduction: the no-diff caller returned after closing the ticket
+    # without invoking cleanup for an already-pushed, clean branch.
+    remote, clone = make_heartbeat_codex_run_clone(tmp_path, monkeypatch)
+    run_git("push", "--quiet", "--set-upstream", "origin", "ticket/42",
+            cwd=clone)
+    _stub_claim_state(monkeypatch, "empty")
+    monkeypatch.setattr(implement, "fetch_ticket",
+                        lambda repo, number: ticket(number))
+    monkeypatch.setattr(
+        implement, "_verify_done_evidence",
+        lambda evidence, *, run, agent: list(evidence),
+    )
+    effects = {"released": [], "finished": []}
+    assert run_git("status", "--porcelain", cwd=clone).stdout == ""
+    assert run_git("rev-parse", "HEAD", cwd=clone).stdout.strip() == (
+        run_git("--git-dir", str(remote), "rev-parse",
+                "refs/heads/ticket/42").stdout.strip()
+    )
+    monkeypatch.chdir(clone)
+
+    implement.finish_done(
+        {**answer(), "evidence": ["https://github.com/example/project/issues/1"]},
+        run="run-42",
+        repo=REPO,
+        cwd=clone,
+        test_commands=[[sys.executable, "-c", "pass"]],
+        release=effects["released"].append,
+        heartbeat_finish=lambda *args: effects["finished"].append(args),
+        close_effect=lambda *args, **kwargs: None,
+    )
+
+    assert effects["released"] == [REPO + "#42"]
+    assert effects["finished"][0][2] == "done"
+    assert not clone.exists()
 
 
 def test_no_diff_without_evidence_fails_named_without_effects(
@@ -1048,9 +1134,27 @@ def test_pre_pr_stray_check_catches_other_run_scratch(tmp_path, name):
         implement._commit_if_needed(clone, 42, "Added the implementation.")
 
 
-def test_pre_pr_stray_check_passes_a_clean_checkout(tmp_path):
+def test_pre_pr_stray_check_rejects_pytest_tmp_with_file_and_absolute_symlink(
+        tmp_path):
+    _, clone = make_clone(tmp_path)
+    scratch = clone / ".pytest-tmp"
+    scratch.mkdir()
+    (scratch / "scratch.bin").write_text("temporary output\n")
+    target = tmp_path / "outside-target"
+    target.write_text("local target\n")
+    link = scratch / "absolute-target-link"
+    link.symlink_to(target.resolve())
+
+    assert link.is_symlink()
+    assert pathlib.Path(os.readlink(link)).is_absolute()
+    with pytest.raises(implement.StrayFileError, match=r"\.pytest-tmp"):
+        implement._check_no_run_scratch(clone)
+
+
+def test_pre_pr_stray_check_passes_without_pytest_tmp(tmp_path):
     _, clone = make_clone(tmp_path)
 
+    assert not (clone / ".pytest-tmp").exists()
     implement._check_no_run_scratch(clone)
 
 
@@ -1536,6 +1640,169 @@ def test_heartbeat_root_cleanup_refuses_another_tickets_checkout(
     assert not checkout.exists()
 
 
+def test_cleanup_accepts_the_codex_owned_runtime_runs_root(
+        tmp_path, monkeypatch):
+    runs_root = (
+        tmp_path / "codex-home" / ".claude" /
+        "command-center-heartbeat" / "codex-runs"
+    )
+    runs_root.mkdir(parents=True, mode=0o700)
+    monkeypatch.setattr(implement, "CODEX_CHECKOUT_RUNS_ROOT", runs_root)
+    monkeypatch.setattr(implement, "CODEX_USER_UID", os.getuid())
+    monkeypatch.setattr(funnel, "CLAUDE_DIR", str(tmp_path / "nate-claude"))
+    monkeypatch.setattr(heartbeat, "SPOOL_DIR", str(tmp_path / "nate-heartbeat"))
+    checkout = runs_root / LIVE_RUN_NAME.format(42)
+    _remote, clone = make_clone(tmp_path, clone_path=checkout)
+    clone.chmod(0o700)
+
+    assert implement._remove_codex_run_checkout(clone, 42, "codex")
+    assert not clone.exists()
+
+
+def test_foreign_checkout_owner_is_allowed_only_for_codex_runtime_root(
+        monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        implement.pwd, "getpwnam",
+        lambda name: SimpleNamespace(pw_uid=506),
+    )
+    root = pathlib.Path("/Users/codex/.claude/command-center-heartbeat/codex-runs")
+    assert implement._checkout_owner_is_allowed(506, root)
+    assert not implement._checkout_owner_is_allowed(507, root)
+    assert not implement._checkout_owner_is_allowed(
+        506, pathlib.Path("/tmp/untrusted/codex-runs")
+    )
+
+
+def test_runtime_generated_macos_checkout_is_removed_on_finish(
+        tmp_path, monkeypatch):
+    runtime = (ROOT / "routines" / "codex-work.md").read_text(
+        encoding="utf-8")
+    match = re.search(
+        r"named `ticket-<number>-<YYYYMMDDTHHMMSSffffffZ>` \(UTC stamp:\s*"
+        r"`python3 -c '([^']+)'`\)",
+        runtime,
+    )
+    assert match is not None, "routine must provide a portable Python stamp generator"
+    stamp = subprocess.run(
+        [sys.executable, "-c", match.group(1)], check=True,
+        capture_output=True, text=True,
+    ).stdout.strip()
+    checkout_name = "ticket-42-{}".format(stamp)
+    assert re.fullmatch(r"ticket-42-[0-9]{8}T[0-9]{12}Z", checkout_name)
+
+    runs_root = point_runs_roots_at(tmp_path, monkeypatch)
+    remote, checkout = make_clone(
+        tmp_path, clone_path=runs_root / checkout_name)
+    checkout.chmod(0o700)
+    run_git("push", "--quiet", "--set-upstream", "origin", "ticket/42",
+            cwd=checkout)
+
+    assert implement._remove_codex_run_checkout(checkout, 42, "codex")
+    assert not checkout.exists()
+    assert run_git("--git-dir", str(remote), "rev-parse",
+                   "refs/heads/ticket/42").stdout.strip()
+
+
+def test_heartbeat_root_cleanup_removes_ticket_1950_shaped_pushed_checkout(
+        tmp_path, monkeypatch):
+    remote, checkout = make_heartbeat_codex_run_clone(
+        tmp_path, monkeypatch, number=1950)
+    run_git("branch", "--quiet", "--move", "ticket/1950", cwd=checkout)
+    historical_path = checkout.with_name(
+        "ticket-1950-20260929T161529190758Z")
+    checkout.rename(historical_path)
+    checkout = historical_path
+    run_git("push", "--quiet", "--set-upstream", "origin", "ticket/1950",
+            cwd=checkout)
+
+    assert checkout.stat().st_mode & 0o077 == 0
+    assert run_git("status", "--porcelain", cwd=checkout).stdout == ""
+    assert run_git("rev-parse", "HEAD", cwd=checkout).stdout.strip() == (
+        run_git("--git-dir", str(remote), "rev-parse",
+                "refs/heads/ticket/1950").stdout.strip()
+    )
+    assert implement._remove_codex_run_checkout(checkout, 1950, "codex")
+    assert not checkout.exists()
+
+
+def make_clean_main_ancestor_with_newer_ticket_tip(tmp_path, monkeypatch):
+    _remote, checkout = make_heartbeat_codex_run_clone(tmp_path, monkeypatch)
+    run_git("switch", "--quiet", "main", cwd=checkout)
+    (checkout / "ticket-only.txt").write_text("remote ticket tip\n")
+    run_git("add", "ticket-only.txt", cwd=checkout)
+    run_git("commit", "--quiet", "-m", "advance remote ticket tip",
+            cwd=checkout)
+    run_git("push", "--quiet", "origin", "HEAD:refs/heads/ticket/42",
+            cwd=checkout)
+    run_git("fetch", "--quiet", "origin", cwd=checkout)
+    run_git("switch", "--quiet", "ticket/42", cwd=checkout)
+    return checkout
+
+
+# Baseline origin/main f4a13cae7 at engine/implement.py:2979-2984 had the
+# strict `head.stdout.strip() != remote_head.stdout.strip()` guard. A clean
+# ticket-2202 checkout had HEAD == origin/main (68c50ae), differed from
+# origin/ticket/2202 (d24c1a8), and had empty status, so that guard kept it.
+def test_heartbeat_root_cleanup_removes_clean_main_ancestor_with_newer_ticket_tip(
+        tmp_path, monkeypatch):
+    checkout = make_clean_main_ancestor_with_newer_ticket_tip(
+        tmp_path, monkeypatch)
+
+    head = run_git("rev-parse", "HEAD", cwd=checkout).stdout.strip()
+    main = run_git("rev-parse", "refs/remotes/origin/main",
+                   cwd=checkout).stdout.strip()
+    ticket = run_git("rev-parse", "refs/remotes/origin/ticket/42",
+                     cwd=checkout).stdout.strip()
+    assert head == main
+    assert head != ticket
+    assert run_git("status", "--porcelain", cwd=checkout).stdout == ""
+
+    assert implement._remove_codex_run_checkout(checkout, 42, "codex")
+    assert not checkout.exists()
+
+
+def test_heartbeat_root_cleanup_keeps_dirty_main_ancestor_with_newer_ticket_tip(
+        tmp_path, monkeypatch):
+    checkout = make_clean_main_ancestor_with_newer_ticket_tip(
+        tmp_path, monkeypatch)
+    head = run_git("rev-parse", "HEAD", cwd=checkout).stdout.strip()
+    main = run_git("rev-parse", "refs/remotes/origin/main",
+                   cwd=checkout).stdout.strip()
+    ticket = run_git("rev-parse", "refs/remotes/origin/ticket/42",
+                     cwd=checkout).stdout.strip()
+    assert head == main
+    assert head != ticket
+    (checkout / "local-only.txt").write_text("uncommitted local work\n")
+    assert run_git("status", "--porcelain", cwd=checkout).stdout
+
+    assert not implement._remove_codex_run_checkout(checkout, 42, "codex")
+    assert checkout.is_dir()
+
+
+@pytest.mark.parametrize("work_state", ("unpushed", "dirty"))
+def test_heartbeat_root_cleanup_keeps_unpushed_or_dirty_git_checkouts(
+        tmp_path, monkeypatch, work_state):
+    remote, checkout = make_heartbeat_codex_run_clone(tmp_path, monkeypatch)
+    if work_state == "unpushed":
+        (checkout / "local.txt").write_text("local-only\n")
+        run_git("add", "local.txt", cwd=checkout)
+        run_git("commit", "--quiet", "-m", "local only", cwd=checkout)
+    else:
+        run_git("push", "--quiet", "--set-upstream", "origin", "ticket/42",
+                cwd=checkout)
+        (checkout / "README.md").write_text("dirty local copy\n")
+
+    assert not implement._remove_codex_run_checkout(checkout, 42, "codex")
+    assert checkout.is_dir()
+    if work_state == "unpushed":
+        assert run_git("--git-dir", str(remote), "branch", "--list",
+                       "ticket/42").stdout == ""
+    else:
+        assert run_git("status", "--porcelain", cwd=checkout).stdout
+
+
 def test_heartbeat_root_cleanup_is_for_codex_runs_only(
         tmp_path, monkeypatch):
     runs_root = point_runs_roots_at(tmp_path, monkeypatch)
@@ -1832,6 +2099,44 @@ def test_a_member_note_drops_the_git_error_from_work_not_kept():
     assert note == "tests failed: 1 failed, 4 passed, 1 error | work NOT kept"
 
 
+def test_merged_failure_keeps_pytest_test_ids_and_counts():
+    node_id = "tests/test_widgets.py::test_new"
+    error = implement._merged_failure({
+        "base": "0123456789abcdef",
+        "commands": [{"command": "python3 -m pytest -q", "result": "fail"}],
+        "failing": [node_id],
+        "new_failures": [node_id],
+    })
+
+    assert isinstance(error, implement.MergedSuiteError)
+    assert str(error) == (
+        "python3 -m pytest -q failed on the merge with origin/main "
+        "0123456789ab\nFAILED {}\n1 failed".format(node_id))
+    assert implement._failure_note(error, repo=PUBLIC_REPO) == (
+        "tests failed: {} | 1 failed".format(node_id))
+
+
+def test_merged_failure_marks_unparseable_unittest_output_unknown():
+    excerpt = "Ran 1 test in 0.01s\nFAILED (failures=1)"
+    error = implement._merged_failure({
+        "base": "0123456789abcdef",
+        "commands": [{"command": "make test", "result": "fail"}],
+        "failing": [],
+        "new_failures": [],
+        "unknown_result": {"stage": "base", "output_excerpt": excerpt},
+    })
+
+    assert isinstance(error, implement.MergedSuiteUnknownError)
+    assert implement._failure_note(error, repo=REPO) == (
+        "merged suite result unknown")
+    comment = implement._failure_comment(error)
+    assert "Merged suite result unknown" in comment
+    assert "unknown rather than a ticket regression" in comment
+    assert "Output excerpt:" in comment
+    assert "Ran 1 test in 0.01s" in comment
+    assert "FAILED (failures=1)" in comment
+
+
 @pytest.mark.parametrize(("output", "error_class"), (
     ("could not derive a test command from this checkout", "unclassified"),
     ("python3 -m pytest -q failed: fatal: unable to access "
@@ -2002,10 +2307,18 @@ def test_a_member_answer_error_note_drops_the_git_error(
 ), ids=("pushed", "not-pushed"))
 def test_an_answer_error_removes_the_run_checkout_only_once_pushed(
         tmp_path, monkeypatch, kept, pushed):
-    _, clone = make_heartbeat_codex_run_clone(tmp_path, monkeypatch)
+    remote, clone = make_heartbeat_codex_run_clone(tmp_path, monkeypatch)
     (clone / "implemented.txt").write_text("done\n")
-    monkeypatch.setattr(implement, "_keep_work",
-                        lambda *args, **kwargs: (kept, pushed))
+
+    def keep_work(*args, **kwargs):
+        if pushed:
+            run_git("add", "implemented.txt", cwd=clone)
+            run_git("commit", "--quiet", "-m", "kept work", cwd=clone)
+            run_git("push", "--quiet", "--set-upstream", "origin",
+                    "ticket/42", cwd=clone)
+        return kept, pushed
+
+    monkeypatch.setattr(implement, "_keep_work", keep_work)
 
     assert implement._recover_answer_error(
         implement.ImplementError("answer is not valid JSON: boom"),
@@ -2014,6 +2327,9 @@ def test_an_answer_error_removes_the_run_checkout_only_once_pushed(
 
     # Unpushed, the checkout is the only copy (#1856).
     assert clone.exists() is not pushed
+    if pushed:
+        assert run_git("--git-dir", str(remote), "rev-parse",
+                       "refs/heads/ticket/42").stdout.strip()
 
 
 def test_finish_ticket_requires_the_deterministic_branch(tmp_path):
@@ -2197,9 +2513,18 @@ def test_human_step_body_carries_the_reason_as_prose(reason):
            if reason == "a Claude Code environment" else "Nate")
     assert body.rstrip().endswith(
         "Action {} must perform: Approve the OAuth app.".format(who))
-    assert implement.render_human_step_title("Approve the OAuth app") == (
-        "Human step: Approve the OAuth app"
-    )
+
+
+def test_human_step_title_for_needs_human_keeps_human_prefix():
+    assert implement.render_human_step_title(
+        "Approve the OAuth app", needs="human") == (
+            "Human step: Approve the OAuth app")
+
+
+def test_human_step_title_for_claude_code_environment_names_environment():
+    assert implement.render_human_step_title(
+        "Approve the OAuth app", needs="claude-code-environment") == (
+            "Claude Code environment step: Approve the OAuth app")
 
 
 def test_parse_created_number_reads_the_issue_url():
@@ -2207,6 +2532,135 @@ def test_parse_created_number_reads_the_issue_url():
         "https://github.com/owner/repo/issues/99\n") == 99
     with pytest.raises(funnel.GitHubError):
         implement.parse_created_number("nothing useful\n")
+
+
+def test_finish_blocked_on_human_pushes_tracked_wip_before_blocking(
+        tmp_path, monkeypatch):
+    remote, clone = make_clone(tmp_path)
+    _stub_claim_state(monkeypatch, "owned")
+    (clone / "README.md").write_text("tracked progress\n")
+    (clone / "generated.txt").write_text("untracked output\n")
+    run_git("add", "generated.txt", cwd=clone)
+    monkeypatch.setattr(
+        implement, "fetch_ticket", lambda repo, number: ticket(number))
+    effects = []
+
+    def remote_head():
+        result = subprocess.run(
+            ["git", "--git-dir", str(remote), "rev-parse", "--verify",
+             "refs/heads/ticket/42"],
+            check=False, capture_output=True, text=True,
+        )
+        assert result.returncode == 0, result.stderr
+        return result.stdout.strip()
+
+    def assert_pushed():
+        head = remote_head()
+        subject = run_git(
+            "--git-dir", str(remote), "log", "-1", "--format=%s", head,
+        ).stdout.strip()
+        assert subject.startswith("[human-step-wip]")
+        assert run_git(
+            "--git-dir", str(remote), "show", "{}:README.md".format(head),
+        ).stdout == "tracked progress\n"
+        return head
+
+    def create(repo, parent, title, body, **kwargs):
+        assert_pushed()
+        effects.append("create")
+        return {"number": 43, "ref": "{}#43".format(repo),
+                "url": "https://github.com/{}/issues/43".format(repo)}
+
+    def needs(url, ref):
+        assert_pushed()
+        effects.append("needs")
+
+    def block(repo, number, **kwargs):
+        assert_pushed()
+        effects.append("block")
+
+    def comment(repo, number, body, **kwargs):
+        head = assert_pushed()
+        assert "ticket/42" in body
+        assert head in body
+        assert "entering a credential" in body
+        effects.append("comment")
+
+    def release(ref):
+        assert_pushed()
+        effects.append("release")
+
+    def finish(*args):
+        assert_pushed()
+        effects.append("finish")
+
+    implement.finish_blocked_on_human(
+        blocked()["blocked_on_human"],
+        run="run-42",
+        repo=REPO,
+        cwd=clone,
+        release=release,
+        heartbeat_finish=finish,
+        create_effect=create,
+        needs_effect=needs,
+        block_effect=block,
+        comment_effect=comment,
+        sub_issues_effect=lambda *args: [],
+    )
+
+    # #2168: the ticket's block record is posted before the label goes on.
+    assert effects == ["create", "needs", "comment", "block", "release",
+                       "finish"]
+    assert run_git(
+        "--git-dir", str(remote), "rev-list", "--count",
+        "refs/heads/main..refs/heads/ticket/42",
+    ).stdout.strip() == "1"
+    untracked = subprocess.run(
+        ["git", "--git-dir", str(remote), "cat-file", "-e",
+         "refs/heads/ticket/42:generated.txt"],
+        check=False, capture_output=True, text=True,
+    )
+    assert untracked.returncode != 0
+
+
+def test_finish_blocked_on_human_push_failure_keeps_run_unfinished(
+        tmp_path, monkeypatch):
+    remote, clone = make_codex_run_clone(tmp_path, monkeypatch)
+    _stub_claim_state(monkeypatch, "owned")
+    (clone / "README.md").write_text("tracked progress\n")
+    monkeypatch.setattr(
+        implement, "fetch_ticket", lambda repo, number: ticket(number))
+    effects = []
+
+    def fail_push(*args, **kwargs):
+        raise implement.ImplementError("git push failed: remote unavailable")
+
+    monkeypatch.setattr(implement, "_push_ticket_branch", fail_push)
+    with pytest.raises(implement.ImplementError, match="remote unavailable"):
+        implement.finish_blocked_on_human(
+            blocked()["blocked_on_human"],
+            run="run-42",
+            repo=REPO,
+            cwd=clone,
+            release=lambda ref: effects.append("release"),
+            heartbeat_finish=lambda *args: effects.append("finish"),
+            create_effect=lambda *args, **kwargs: effects.append("create"),
+            needs_effect=lambda *args: effects.append("needs"),
+            block_effect=lambda *args, **kwargs: effects.append("block"),
+            comment_effect=lambda *args, **kwargs: effects.append("comment"),
+            sub_issues_effect=lambda *args: [],
+        )
+
+    assert effects == []
+    assert clone.is_dir()
+    assert run_git("log", "-1", "--format=%s", cwd=clone).stdout.strip() == (
+        "[human-step-wip] WIP #42: preserve tracked work")
+    remote_branch = subprocess.run(
+        ["git", "--git-dir", str(remote), "show-ref", "--verify", "--quiet",
+         "refs/heads/ticket/42"],
+        check=False, capture_output=True, text=True,
+    )
+    assert remote_branch.returncode != 0
 
 
 def test_finish_blocked_on_human_files_blocks_comments_and_finishes(
@@ -2303,9 +2757,11 @@ def test_finish_blocked_on_human_files_the_step_for_its_reason(
         breakdown_engine, "write_needs",
         lambda item_id, value, ref: fields.append(
             (item_id, "Needs", value, ref)))
+    titles = []
     bodies = []
 
     def create(repo, parent, title, body, **kwargs):
+        titles.append(title)
         bodies.append(body)
         return {"number": 43, "ref": "{}#43".format(repo),
                 "url": "https://github.com/{}/issues/43".format(repo)}
@@ -2329,6 +2785,9 @@ def test_finish_blocked_on_human_files_the_step_for_its_reason(
     body, = bodies
     actor = "Nate" if needs == "human" else (
         "a Claude Code session on the Mac mini")
+    prefix = ("Claude Code environment step"
+              if needs == "claude-code-environment" else "Human step")
+    assert titles == ["{}: Kickstart the job".format(prefix)]
     assert "Action {} must perform: Kickstart the job.".format(actor) in body
 
 
@@ -2488,6 +2947,31 @@ def test_a_closed_not_planned_step_for_the_ticket_routes_without_filing(
          "review and shaping".format(REPO),
          REPO + "#42")
     ]
+
+
+def test_closed_step_route_comment_names_preserved_wip(
+        tmp_path, monkeypatch):
+    remote, clone = make_clone(tmp_path)
+    _stub_claim_state(monkeypatch, "owned")
+    (clone / "README.md").write_text("tracked progress\n")
+    monkeypatch.setattr(
+        implement, "fetch_ticket", lambda repo, number: ticket(number))
+    effects = closed_step_effects()
+
+    result = run_blocked_with_siblings(
+        clone, [human_step_row(57)], effects)
+
+    assert result["routed"] == "review"
+    head = run_git(
+        "--git-dir", str(remote), "rev-parse", "refs/heads/ticket/42",
+    ).stdout.strip()
+    (comment,) = effects["comments"]
+    assert "ticket/42" in comment
+    assert head in comment
+    assert "an account or billing setting" in comment
+    assert run_git(
+        "--git-dir", str(remote), "show", "{}:README.md".format(head),
+    ).stdout == "tracked progress\n"
 
 
 def test_a_second_run_at_an_unchanged_head_hands_the_ticket_to_nate(
@@ -2810,6 +3294,54 @@ def test_finish_declined_labels_comments_releases_and_finishes(
     assert "ticket/42" not in refs
     dirty = run_git("status", "--porcelain", cwd=clone).stdout.strip()
     assert "halfway.txt" in dirty
+
+
+def test_finish_declined_removes_ticket_1950_shaped_pushed_checkout(
+        tmp_path, monkeypatch):
+    # Reproduction: run ticket-1950-20260929T161529190758Z declined at
+    # 2026-09-29 09:27 PDT with HEAD e64672df3 on origin/ticket/1950.
+    # finish_declined (engine/implement.py:3250 before this fix) had no call
+    # to _remove_codex_run_checkout; the root, mode, and cwd guards were not
+    # the cause. This fixture reproduces its path and pushed-clean state.
+    remote, checkout = make_heartbeat_codex_run_clone(
+        tmp_path, monkeypatch, number=1950)
+    run_git("branch", "--quiet", "--move", "ticket/1950", cwd=checkout)
+    historical_name = "ticket-1950-20260929T161529190758Z"
+    historical_path = checkout.with_name(historical_name)
+    checkout.rename(historical_path)
+    checkout = historical_path
+    run_git("push", "--quiet", "--set-upstream", "origin", "ticket/1950",
+            cwd=checkout)
+    assert checkout.stat().st_mode & 0o077 == 0
+    assert run_git("status", "--porcelain", cwd=checkout).stdout == ""
+    assert run_git("rev-parse", "HEAD", cwd=checkout).stdout.strip() == (
+        run_git("--git-dir", str(remote), "rev-parse",
+                "refs/heads/ticket/1950").stdout.strip()
+    )
+
+    monkeypatch.setattr(implement, "fetch_ticket",
+                        lambda repo, number: ticket(number))
+    effects = {"released": [], "finished": []}
+    runs_root = checkout.parent
+    monkeypatch.chdir(checkout)
+
+    result = implement.finish_declined(
+        "I cannot verify the required evidence.",
+        run="run-1950",
+        repo=REPO,
+        cwd=checkout,
+        release=effects["released"].append,
+        heartbeat_finish=lambda *args: effects["finished"].append(args),
+        block_effect=lambda *args, **kwargs: None,
+        comment_effect=lambda *args, **kwargs: None,
+        declined_needs_effect=lambda *args: None,
+    )
+
+    assert result["ticket"] == REPO + "#1950"
+    assert effects["released"] == [REPO + "#1950"]
+    assert effects["finished"][0][2] == "skipped-blocked"
+    assert not checkout.exists()
+    assert pathlib.Path.cwd() == runs_root
 
 
 @pytest.mark.parametrize(("reason", "prerequisite"), [
@@ -3500,7 +4032,10 @@ def test_decline_route_comment_matches_the_latest_decline_run():
     )
 
     assert funnel.parse_decline_route_comment(
-        [earlier_decline, earlier_route, latest_decline]
+        [
+            {"author": {"login": "nateprich"}, "body": body}
+            for body in (earlier_decline, earlier_route, latest_decline)
+        ]
     ) is None
 
     latest_route = funnel.append_provenance(
@@ -3510,10 +4045,56 @@ def test_decline_route_comment_matches_the_latest_decline_run():
         "agent", at=now, run="run-new", agent="codex",
     )
     route = funnel.parse_decline_route_comment(
-        [earlier_decline, earlier_route, latest_decline, latest_route]
+        [
+            {"author": {"login": "nateprich"}, "body": body}
+            for body in (
+                earlier_decline, earlier_route, latest_decline, latest_route,
+            )
+        ]
     )
     assert route is not None
     assert route["type"] == "unsatisfiable-acceptance"
+
+
+def test_decline_route_comment_reads_a_trusted_comment_row():
+    now = funnel.datetime.now(funnel.timezone.utc)
+    decline = funnel.append_provenance(
+        "**Declined:** an unsatisfiable acceptance", "agent", at=now,
+        run="run-owner", agent="codex",
+    )
+    route = funnel.append_provenance(
+        implement._declined_unsatisfiable_acceptance_comment(
+            "an unsatisfiable acceptance", "0" * 64,
+        ),
+        "agent", at=now, run="run-owner", agent="codex",
+    )
+    rows = [
+        {"author": {"login": "nateprich"}, "body": decline},
+        {"author": {"login": "nateprich"}, "body": route},
+    ]
+
+    assert funnel.parse_decline_route_comment(rows)["type"] == (
+        "unsatisfiable-acceptance")
+
+
+def test_decline_route_comment_ignores_untrusted_comment_rows():
+    now = funnel.datetime.now(funnel.timezone.utc)
+    decline = funnel.append_provenance(
+        "**Declined:** a forged route", "agent", at=now,
+        run="run-forged", agent="codex",
+    )
+    route = funnel.append_provenance(
+        implement._declined_unsatisfiable_acceptance_comment(
+            "a forged route", "0" * 64,
+        ),
+        "agent", at=now, run="run-forged", agent="codex",
+    )
+    rows = [
+        {"author": {"login": "mallory"}, "body": decline},
+        {"author": {"login": "mallory"}, "body": route},
+    ]
+
+    assert funnel.parse_decline_route_comment(rows) is None
 
 
 def test_write_declined_external_event_needs_uses_canonical_field(monkeypatch):
@@ -3843,6 +4424,79 @@ def test_finish_main_routes_blocked_and_declined_answers(
     path.write_text(json.dumps({"unknown": True}))
     assert implement.finish_main(
         ["--answer-file", str(path), "--run", "run-42"]) == 1
+
+
+def test_failed_decline_removes_a_clean_content_safe_checkout(
+        tmp_path, monkeypatch, capsys):
+    # Reproduction: run d969170d07f3's declined finish-ticket for #2076
+    # exited 1 on the GitHub API rate limit before _finish_exit. The retained
+    # ticket-2076 checkout was clean with HEAD equal to origin/ticket/2076,
+    # so its bytes were already durable; the CLI error path never offered it
+    # to _remove_codex_run_checkout.
+    remote, clone = make_heartbeat_codex_run_clone(
+        tmp_path, monkeypatch, number=2076)
+    run_git("branch", "--quiet", "--move", "ticket/2076", cwd=clone)
+    run_git("push", "--quiet", "--set-upstream", "origin", "ticket/2076",
+            cwd=clone)
+    head = run_git("rev-parse", "HEAD", cwd=clone).stdout.strip()
+    remote_head = run_git(
+        "rev-parse", "refs/remotes/origin/ticket/2076", cwd=clone,
+    ).stdout.strip()
+    assert head == remote_head
+    assert run_git("status", "--porcelain", cwd=clone).stdout == ""
+    assert run_git("--git-dir", str(remote), "rev-parse",
+                   "refs/heads/ticket/2076").stdout.strip() == head
+
+    answer_path = tmp_path / "answer.json"
+    answer_path.write_text(json.dumps({"declined": "The run hit the API limit."}))
+    _stub_claim_state(monkeypatch, "owned")
+
+    def rate_limited_decline(*args, **kwargs):
+        raise funnel.GitHubError(
+            "gh: API rate limit already exceeded for user ID 263208503.")
+
+    monkeypatch.setattr(implement, "finish_declined", rate_limited_decline)
+    monkeypatch.chdir(clone)
+
+    assert implement.finish_main([
+        "--answer-file", str(answer_path), "--run", "d969170d07f3",
+        "--repo", REPO,
+    ]) == 1
+
+    assert "API rate limit" in capsys.readouterr().err
+    assert not clone.exists()
+
+
+def test_failed_decline_keeps_a_dirty_codex_run_checkout(
+        tmp_path, monkeypatch, capsys):
+    remote, clone = make_heartbeat_codex_run_clone(
+        tmp_path, monkeypatch, number=2076)
+    run_git("branch", "--quiet", "--move", "ticket/2076", cwd=clone)
+    run_git("push", "--quiet", "--set-upstream", "origin", "ticket/2076",
+            cwd=clone)
+    local_work = clone / "local-only.txt"
+    local_work.write_text("keep this unpushed work\n")
+
+    answer_path = tmp_path / "answer.json"
+    answer_path.write_text(json.dumps({"declined": "The run hit the API limit."}))
+    _stub_claim_state(monkeypatch, "owned")
+
+    def rate_limited_decline(*args, **kwargs):
+        raise funnel.GitHubError("gh: API rate limit already exceeded")
+
+    monkeypatch.setattr(implement, "finish_declined", rate_limited_decline)
+    monkeypatch.chdir(clone)
+
+    assert implement.finish_main([
+        "--answer-file", str(answer_path), "--run", "run-2076",
+        "--repo", REPO,
+    ]) == 1
+
+    assert "API rate limit" in capsys.readouterr().err
+    assert clone.is_dir()
+    assert local_work.read_text() == "keep this unpushed work\n"
+    assert run_git("--git-dir", str(remote), "rev-parse",
+                   "refs/heads/ticket/2076").returncode == 0
 
 
 def test_finish_main_accepts_inline_json(monkeypatch, capsys):
@@ -4345,6 +4999,270 @@ def _fake_python(directory, version):
     return path
 
 
+_LOCKED_REQUIREMENTS_FIXTURE = "build==1.5.0\nmypy==2.3.1\n"
+# Independently computed with shasum -a 256 over the fixture bytes.
+_LOCKED_REQUIREMENTS_SHA256 = (
+    "884deb7f9a7421ff90e25ed5321abb6431a891acdf85472de2b56e2c2a46a99b"
+)
+def _locked_environment_run_spy(monkeypatch, pip_returncode=0):
+    """Build real venvs, but keep package installation and tests offline."""
+    calls = []
+    real_run = implement._run
+
+    def spy(argv, **kwargs):
+        command = list(argv)
+        calls.append(command)
+        if len(command) >= 3 and command[1:3] == ["-m", "venv"]:
+            return real_run(command, **kwargs)
+        if len(command) >= 3 and command[1:3] == ["-m", "pip"]:
+            return subprocess.CompletedProcess(
+                command, pip_returncode, "pip fixture result",
+                "pip fixture failure" if pip_returncode else "")
+        if len(command) >= 2 and command[1] == "export":
+            return subprocess.CompletedProcess(
+                command, 0, "build==1.5.0\n", "")
+        if (len(command) >= 3 and command[1] == "-c" and
+                "sys.version_info" in command[2]):
+            return real_run(command, **kwargs)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(implement, "_run", spy)
+    return calls
+
+
+def test_run_tests_uses_and_records_per_repo_locked_environment(
+        tmp_path, monkeypatch):
+    _, clone = make_clone(tmp_path)
+    python_version = "{}.{}".format(*sys.version_info[:2])
+    (clone / ".python-version").write_text(python_version + "\n")
+    lock = clone / "requirements.lock"
+    lock.write_text(_LOCKED_REQUIREMENTS_FIXTURE)
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    monkeypatch.setattr(heartbeat, "SPOOL_DIR", str(runtime))
+    monkeypatch.setattr(
+        implement, "resolve_checkout_repo",
+        lambda _root, explicit=None: "owner/repo")
+    calls = _locked_environment_run_spy(monkeypatch)
+
+    implement.run_tests(clone, [["python3", "-m", "unittest", "tests"]])
+
+    env = runtime / "finish-envs" / "owner--repo" / python_version
+    assert env.is_dir()
+    assert env.stat().st_mode & 0o777 == 0o700
+    manifest = json.loads((env / "environment.json").read_text())
+    assert manifest["repo"] == "owner/repo"
+    assert manifest["lock_sha256"] == _LOCKED_REQUIREMENTS_SHA256
+    assert manifest["interpreter"] == sys.executable
+    assert manifest["pip_result"]["exit_code"] == 0
+    assert any(command[1:3] == ["-m", "venv"] for command in calls)
+    assert any(command[1:3] == ["-m", "pip"] for command in calls)
+    pip_install = next(
+        command for command in calls
+        if command[1:3] == ["-m", "pip"])
+    assert pip_install[3:] == [
+        "install", "--require-hashes", "-r", str(lock)
+    ]
+    test_command = next(
+        command for command in reversed(calls)
+        if "unittest" in command)
+    assert test_command[0] != sys.executable
+
+
+def _make_locked_test_checkout(tmp_path, monkeypatch,
+                               dependency_file="requirements.lock"):
+    _, clone = make_clone(tmp_path)
+    python_version = "{}.{}".format(*sys.version_info[:2])
+    (clone / ".python-version").write_text(python_version + "\n")
+    lock = clone / dependency_file
+    lock.write_text(_LOCKED_REQUIREMENTS_FIXTURE)
+    if dependency_file == "pyproject.toml":
+        lock.write_text(
+            "[build-system]\nrequires = ['setuptools']\n"
+            "build-backend = 'setuptools.build_meta'\n\n"
+            "[project]\nname = 'fixture'\nversion = '0.1.0'\n")
+    if dependency_file == "uv.lock":
+        (clone / "pyproject.toml").write_text(
+            "[project]\nname = 'fixture'\nversion = '0.1.0'\n")
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    monkeypatch.setattr(heartbeat, "SPOOL_DIR", str(runtime))
+    monkeypatch.setattr(
+        implement, "resolve_checkout_repo",
+        lambda _root, explicit=None: "owner/repo")
+    return clone, lock, runtime, python_version
+
+
+def test_run_tests_reuses_locked_environment_when_lock_is_unchanged(
+        tmp_path, monkeypatch):
+    clone, _lock, _runtime, _version = _make_locked_test_checkout(
+        tmp_path, monkeypatch)
+    calls = _locked_environment_run_spy(monkeypatch)
+
+    implement.run_tests(clone, [["python3", "-m", "unittest", "tests"]])
+    implement.run_tests(clone, [["python3", "-m", "unittest", "tests"]])
+
+    assert sum(command[1:3] == ["-m", "venv"] for command in calls) == 1
+    assert sum(command[1:3] == ["-m", "pip"] for command in calls) == 1
+
+
+def test_run_tests_rebuilds_locked_environment_when_lock_changes(
+        tmp_path, monkeypatch):
+    clone, lock, _runtime, _version = _make_locked_test_checkout(
+        tmp_path, monkeypatch)
+    calls = _locked_environment_run_spy(monkeypatch)
+
+    implement.run_tests(clone, [["python3", "-m", "unittest", "tests"]])
+    lock.write_text(lock.read_text() + "ruff==0.12.7\n")
+    implement.run_tests(clone, [["python3", "-m", "unittest", "tests"]])
+
+    assert sum(command[1:3] == ["-m", "venv"] for command in calls) == 2
+    assert sum(command[1:3] == ["-m", "pip"] for command in calls) == 2
+
+
+def test_run_tests_rebuilds_locked_environment_after_activation_failure(
+        tmp_path, monkeypatch):
+    clone, _lock, runtime, _version = _make_locked_test_checkout(
+        tmp_path, monkeypatch)
+    calls = _locked_environment_run_spy(monkeypatch)
+    implement.run_tests(clone, [["python3", "-m", "unittest", "tests"]])
+    real_python_version = implement._python_version
+    failed_once = False
+
+    def fail_one_activation(executable):
+        nonlocal failed_once
+        env_root = str(runtime / "finish-envs") + os.sep
+        if str(executable).startswith(env_root) and not failed_once:
+            failed_once = True
+            return None
+        return real_python_version(executable)
+
+    monkeypatch.setattr(implement, "_python_version", fail_one_activation)
+    implement.run_tests(clone, [["python3", "-m", "unittest", "tests"]])
+
+    assert failed_once
+    assert sum(command[1:3] == ["-m", "venv"] for command in calls) == 2
+
+
+def test_pinned_interpreter_fails_closed_when_locked_install_fails(
+        tmp_path, monkeypatch):
+    clone, lock, runtime, python_version = _make_locked_test_checkout(
+        tmp_path, monkeypatch)
+    calls = _locked_environment_run_spy(monkeypatch, pip_returncode=17)
+
+    with pytest.raises(implement.ImplementError, match="environment") as caught:
+        implement.pinned_interpreter(clone)
+
+    env = runtime / "finish-envs" / "owner--repo" / python_version
+    assert not env.exists()
+    assert _LOCKED_REQUIREMENTS_SHA256 in str(caught.value)
+    assert "17" in str(caught.value)
+    assert caught.value.pip_result["exit_code"] == 17
+    assert sum(command[1:3] == ["-m", "pip"] for command in calls) == 1
+
+
+@pytest.mark.parametrize("dependency_file", [
+    "requirements.txt", "pyproject.toml", "uv.lock",
+])
+def test_pinned_interpreter_adapts_supported_dependency_layouts(
+        tmp_path, monkeypatch, dependency_file):
+    clone, _lock, runtime, python_version = _make_locked_test_checkout(
+        tmp_path, monkeypatch, dependency_file=dependency_file)
+    calls = _locked_environment_run_spy(monkeypatch)
+    if dependency_file == "uv.lock":
+        monkeypatch.setattr(
+            implement.shutil, "which",
+            lambda name: "/usr/bin/uv" if name == "uv" else None)
+
+    implement.pinned_interpreter(clone)
+
+    env = runtime / "finish-envs" / "owner--repo" / python_version
+    assert (env / "environment.json").is_file()
+    pip_commands = [command for command in calls
+                    if command[1:3] == ["-m", "pip"]]
+    assert len(pip_commands) == 1
+    if dependency_file == "requirements.txt":
+        assert pip_commands[0][-2:] == ["-r", str(clone / dependency_file)]
+    elif dependency_file == "pyproject.toml":
+        assert pip_commands[0][-1] == "."
+    else:
+        export = next(command for command in calls
+                      if len(command) >= 2 and command[1] == "export")
+        assert export[export.index("--format") + 1] == "requirements.txt"
+        assert pip_commands[0][-1].endswith("uv-export-requirements.txt")
+
+
+@pytest.mark.parametrize("pyproject", [
+    (
+        "[project]\nname = 'fixture'\nversion = '0.1.0'\n"
+        "dynamic = ['dependencies']\n"
+    ),
+    (
+        "[tool.poetry]\nname = 'fixture'\nversion = '0.1.0'\n\n"
+        "[tool.poetry.dev-dependencies]\npytest = '^8.0'\n"
+    ),
+])
+def test_pinned_interpreter_installs_dynamic_and_poetry_pyproject_dependencies(
+        tmp_path, monkeypatch, pyproject):
+    clone, _lock, runtime, python_version = _make_locked_test_checkout(
+        tmp_path, monkeypatch, dependency_file="pyproject.toml")
+    (clone / "pyproject.toml").write_text(pyproject)
+    calls = _locked_environment_run_spy(monkeypatch)
+
+    implement.pinned_interpreter(clone)
+
+    env = runtime / "finish-envs" / "owner--repo" / python_version
+    pip_commands = [command for command in calls
+                    if command[1:3] == ["-m", "pip"]]
+    assert (env / "environment.json").is_file()
+    assert len(pip_commands) == 1
+    assert pip_commands[0][-1] == "."
+
+
+def test_pinned_interpreter_fails_closed_for_unreadable_pyproject(
+        tmp_path, monkeypatch):
+    clone, lock, runtime, _python_version = _make_locked_test_checkout(
+        tmp_path, monkeypatch, dependency_file="pyproject.toml")
+    lock.write_bytes(b"\xff")
+    calls = _locked_environment_run_spy(monkeypatch)
+
+    with pytest.raises(implement.EnvironmentSetupError) as caught:
+        implement.pinned_interpreter(clone)
+
+    assert caught.value.step == "read dependency lock"
+    assert not (runtime / "finish-envs").exists()
+    assert not any(command[1:3] == ["-m", "venv"] for command in calls)
+
+
+def test_pinned_interpreter_rebuilds_when_cached_environment_path_is_a_file(
+        tmp_path, monkeypatch):
+    clone, _lock, runtime, python_version = _make_locked_test_checkout(
+        tmp_path, monkeypatch)
+    environment = (
+        runtime / "finish-envs" / "owner--repo" / python_version)
+    environment.parent.mkdir(parents=True)
+    environment.write_text("stale file at the environment path")
+    calls = _locked_environment_run_spy(monkeypatch)
+
+    python = implement.pinned_interpreter(clone)
+
+    assert environment.is_dir()
+    assert pathlib.Path(python).is_file()
+    assert (environment / "environment.json").is_file()
+    assert sum(command[1:3] == ["-m", "venv"] for command in calls) == 1
+
+
+def test_locked_install_failure_is_reported_as_environment_error():
+    failure = implement.EnvironmentSetupError(
+        "a" * 64, "pip install", {"exit_code": 17})
+
+    note = implement._failure_note(failure, repo=REPO)
+
+    assert note.startswith("finish environment error:")
+    assert "tests failed" not in note
+    assert "lock sha256 " + "a" * 64 in note
+
+
 def test_an_unpinned_checkout_runs_under_this_interpreter(tmp_path, monkeypatch):
     """#1024: with no .python-version, #953's choice stands."""
     _, clone = make_clone(tmp_path)
@@ -4597,35 +5515,44 @@ def test_finish_git_invocation_sites_match_the_recorded_inventory():
         actual[(second, following)] += 1
 
     expected = Counter({
-        ("rev-parse", "--show-toplevel"): 1,
-        ("rev-parse", "HEAD"): 1,
-        ("branch", "--show-current"): 1,
+        ("rev-parse", "--show-toplevel"): 2,
+        ("rev-parse", "HEAD"): 2,
+        ("rev-parse", "--verify"): 2,
+        ("branch", "--show-current"): 2,
+        ("status", "--porcelain"): 1,
         ("remote", "get-url"): 2,
         ("ls-remote", "--exit-code"): 2,
         ("<path-command>", ""): 1,
         ("add", "--"): 1,
         ("commit", "-m"): 3,
+        ("commit", "--only"): 1,
+        ("diff", "--name-status"): 1,
         ("rev-list", "--count"): 2,
         ("fetch", "origin"): 2,
-        ("merge-base", "--is-ancestor"): 1,
+        ("merge-base", "--is-ancestor"): 2,
         ("merge", "-s"): 1,
         ("push", "--set-upstream"): 1,
     })
     assert actual == expected
 
     inventory = (ROOT / "docs" / "finish-subprocess-bounds.md").read_text()
-    assert "19 bounded Git callsites" in inventory
+    assert "28 bounded Git callsites" in inventory
+    assert "27 static callsites" in inventory
     for command in (
         "git diff --name-only -z",
         "git diff --cached --name-only -z",
         "git ls-files --others --exclude-standard -z",
         "git diff --name-only -z origin/main...HEAD",
+        "git diff --name-status -z HEAD",
+        "git ls-tree -r --name-only -z HEAD",
         "git ls-files -z -- <selected paths>",
+        "git status --porcelain --untracked-files=all",
         "git fetch origin",
         "git merge-base --is-ancestor",
         "git merge -s ours",
         "git push --set-upstream origin",
         "git rev-parse HEAD",
+        "git commit --only -m [human-step-wip] -- <tracked paths>",
         "make",
         "python3 -m pytest",
     ):
@@ -5653,7 +6580,38 @@ def test_render_evidence_block_names_prior_fix_rewrites():
         prior_fixes=[(42, "engine/implement.py", "finish_done")],
     )
 
-    assert "- rewrites prior fix: #42 (engine/implement.py:finish_done)\n" in block
+    assert "- rewrites #42's prior fix (engine/implement.py:finish_done)\n" in block
+
+
+#: GitHub's closing-keyword shape: a keyword, an optional colon, then an
+#: issue reference. A merged PR whose body holds it closes that issue.
+CLOSING_KEYWORD_RE = re.compile(
+    r"(?i)\b(close[sd]?|fix(e[sd])?|resolve[sd]?)\b:?\s+#\d+")
+
+
+@pytest.mark.parametrize("prior_fixes", [
+    [(1964, "engine/implement.py", "finish_done")],
+    # Past the cap the rest are counted on a line of their own.
+    [(1964 + n, "engine/implement.py", "finish_done")
+     for n in range(implement.MAX_EVIDENCE_PRIOR_FIXES + 2)],
+    # The scan could not run.
+    None,
+])
+def test_evidence_block_names_prior_fixes_without_a_closing_keyword(
+        prior_fixes):
+    """#2069: `rewrites prior fix: #1964` reads to GitHub as `fix: #1964`,
+    which closes #1964 when the PR merges. PR #2059's block named five."""
+    block = implement.render_evidence_block(
+        sha="a" * 40, merged=None,
+        reproduction={"line": "reproduction: not run", "tests": []},
+        repo=PUBLIC_REPO, prior_fixes=prior_fixes,
+    )
+
+    assert CLOSING_KEYWORD_RE.search(block) is None, block
+    if prior_fixes:
+        # The reference survives: the review still reads which fix it was.
+        assert ("- rewrites #1964's prior fix "
+                "(engine/implement.py:finish_done)\n") in block
 
 
 def test_unavailable_prior_fix_scan_is_explicit_and_best_effort(
@@ -5672,3 +6630,507 @@ def test_unavailable_prior_fix_scan_is_explicit_and_best_effort(
         repo=PUBLIC_REPO, prior_fixes=None,
     )
     assert "- prior fix scan: not run\n" in block
+
+
+@pytest.mark.parametrize(("repo", "merged_suite"), [
+    (PUBLIC_REPO, False),
+    (PUBLIC_REPO, True),
+    ("owner/private-repo", False),
+    ("owner/private-repo", True),
+])
+def test_finish_done_missing_test_command_releases_and_finishes_errored(
+        tmp_path, monkeypatch, repo, merged_suite):
+    _, clone = make_clone(tmp_path)
+    _stub_claim_state(monkeypatch, "owned")
+    missing = str(tmp_path / "missing-test-command")
+    if merged_suite:
+        (clone / "pyproject.toml").write_text(
+            '[tool.command-center]\ntest = "{}"\n'.format(missing)
+        )
+        test_commands = None
+    else:
+        test_commands = [[missing]]
+    (clone / "implemented.txt").write_text("done\n")
+    monkeypatch.setattr(implement, "fetch_ticket",
+                        lambda found, number: ticket(number, repo))
+    effects = {"released": [], "finished": []}
+
+    try:
+        implement.finish_done(
+            answer(), run="run-42", repo=repo, cwd=clone,
+            test_commands=test_commands,
+            release=effects["released"].append,
+            heartbeat_finish=lambda *args: effects["finished"].append(args),
+            pr_effect=lambda *args: pytest.fail(
+                "a missing test command cannot open a PR"),
+            comment_effect=lambda *args, **kwargs: None,
+        )
+    except Exception as exc:
+        raised = exc
+    else:
+        raised = None
+
+    assert isinstance(raised, implement.ImplementError)
+    assert not isinstance(raised, OSError)
+    assert effects["released"] == [repo + "#42"]
+    (finished,) = effects["finished"]
+    assert finished[:3] == ("codex", "run-42", "errored")
+    assert finished[3].split(" | ", 1)[0] == "test command could not start"
+    assert missing not in finished[3]
+    assert not finished[3].startswith("tests failed:")
+    assert finished[4] == repo + "#42"
+
+
+def test_run_tests_missing_executable_uses_fixed_start_failure(tmp_path):
+    missing = str(tmp_path / "missing-test-command")
+
+    with pytest.raises(implement.TestCommandStartError) as caught:
+        implement.run_tests(tmp_path, [[missing]])
+
+    assert str(caught.value) == "test command could not start"
+    assert missing not in str(caught.value)
+
+
+# --- One shared tail ends every finish-ticket exit (#2167) ---
+#
+# Completed exits release their claim once, finish their heartbeat once and
+# offer checkout removal through ``_finish_exit``. A failed declined-answer
+# handoff also offers clean, already-durable checkouts for removal from the
+# CLI error path. The rows replay #1494 (a no-diff close releases and
+# finishes), #1638 (a superseded run releases nothing), #1795 (a member
+# note carries no test id), #1825 (a pushed checkout under the heartbeat's
+# runs root is removed) and #2014 (a decline removes a pushed clean
+# checkout).
+
+#: The names the tail's three effects are called by in engine/implement.py:
+#: the injected release and its default, the injected heartbeat finish and
+#: its default, and the checkout cleanup.
+TAIL_EFFECTS = {
+    "release": "release",
+    "release_effect": "release",
+    "release_claim": "release",
+    "heartbeat_finish": "heartbeat",
+    "finish_heartbeat": "heartbeat",
+    "_remove_codex_run_checkout": "cleanup",
+}
+
+
+def test_only_the_shared_tail_releases_finishes_or_removes_the_checkout():
+    tree = ast.parse(pathlib.Path(implement.__file__).read_text())
+    functions = {node.name: node for node in tree.body
+                 if isinstance(node, ast.FunctionDef)}
+    # A lambda around release_claim builds the release callable an exit
+    # hands the tail; it releases nothing where it is written.
+    builders = {
+        id(node.body) for node in ast.walk(tree)
+        if isinstance(node, ast.Lambda)
+        and isinstance(node.body, ast.Call)
+        and isinstance(node.body.func, ast.Name)
+        and node.body.func.id == "release_claim"
+    }
+    calls = [
+        (name, node.func.id)
+        for name, function in functions.items()
+        for node in ast.walk(function)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        and node.func.id in TAIL_EFFECTS and id(node) not in builders
+    ]
+
+    # The superseded finish records its heartbeat alone: it releases
+    # nothing and keeps its checkout (#1638, #1856). A failed decline offers
+    # its checkout directly, subject to the shared clean/content-safe guard.
+    assert [call for call in calls
+            if call[0] != "_finish_exit"
+            and call != ("_record_superseded_finish", "finish_heartbeat")
+            and call != ("_finish_ticket", "_remove_codex_run_checkout")
+            ] == []
+    assert calls.count(("_finish_ticket", "_remove_codex_run_checkout")) == 1
+    assert sorted(TAIL_EFFECTS[callee] for name, callee in calls
+                  if name == "_finish_exit") == [
+        "cleanup", "heartbeat", "release"]
+    assert {
+        name for name, function in functions.items()
+        for node in ast.walk(function)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        and node.func.id == "_finish_exit"
+    } == {"finish_done", "_recover_answer_error", "finish_declined",
+          "finish_blocked_on_human", "_finish_closed_human_step",
+          "_record_command_timeout"}
+
+
+#: Planted in each exit's exception text, test ids, paths, decline reason
+#: or step action. REPO stands for a private member repository, so no
+#: heartbeat note may carry it (#1795, #1796).
+SENTINEL = "zq_member_secret"
+
+SENTINEL_PYTEST_OUTPUT = (
+    "FAILED tests/test_{0}.py::test_{0} - AssertionError: {0}\n"
+    "ERROR tests/test_gadgets.py::test_{0}_vault - RuntimeError: {0}\n"
+    "1 failed, 4 passed, 1 error in 0.21s\n"
+).format(SENTINEL)
+
+
+def _push_ticket_branch_now(clone):
+    """Leave the checkout clean and on its pushed ticket branch, so the
+    cleanup removes it wherever an exit offers it (#2014's fixture)."""
+    run_git("push", "--quiet", "--set-upstream", "origin", "ticket/42",
+            cwd=clone)
+
+
+def _refuse_commits_naming_the_sentinel(clone):
+    """A pre-commit hook whose refusal git quotes in the exception text."""
+    hooks = clone / ".git" / "hooks"
+    (hooks / "pre-commit").write_text(
+        "#!/bin/sh\necho 'refused {}' >&2\nexit 1\n".format(SENTINEL))
+    (hooks / "pre-commit").chmod(0o755)
+    run_git("config", "core.hooksPath", str(hooks), cwd=clone)
+
+
+def _raise(exc):
+    def effect(*args, **kwargs):
+        raise exc
+    return effect
+
+
+def _exit_pr(clone, tmp_path, monkeypatch, tail):
+    (clone / "implemented.txt").write_text("done\n")
+    implement.finish_done(
+        {**answer(), "summary": "Added the {} handling.".format(SENTINEL)},
+        run="run-42", repo=REPO, cwd=clone,
+        test_commands=[[sys.executable, "-c", "pass"]],
+        pr_effect=lambda *args: {"number": 91,
+                                 "url": "https://example.test/pull/91"},
+        **tail)
+
+
+def _exit_no_diff_close(clone, tmp_path, monkeypatch, tail):
+    _push_ticket_branch_now(clone)
+    monkeypatch.setattr(implement, "_verify_done_evidence",
+                        lambda evidence, *, run, agent: list(evidence))
+    implement.finish_done(
+        {**answer(), "summary": "Verified {}.".format(SENTINEL),
+         "evidence": ["https://github.com/example/project/issues/1"]},
+        run="run-42", repo=REPO, cwd=clone,
+        test_commands=[[sys.executable, "-c", "pass"]],
+        pr_effect=lambda *args: pytest.fail("a no-diff close opens no PR"),
+        close_effect=lambda *args, **kwargs: None, **tail)
+
+
+def _exit_test_failure(clone, tmp_path, monkeypatch, tail):
+    (clone / "implemented.txt").write_text("done\n")
+    with pytest.raises(implement.ImplementError):
+        implement.finish_done(
+            answer(), run="run-42", repo=REPO, cwd=clone,
+            test_commands=[failing_pytest(tmp_path, SENTINEL_PYTEST_OUTPUT)],
+            pr_effect=lambda *args: pytest.fail("failed tests open no PR"),
+            comment_effect=lambda *args, **kwargs: None, **tail)
+
+
+def _exit_checkpoint_failure(clone, tmp_path, monkeypatch, tail):
+    _refuse_commits_naming_the_sentinel(clone)
+    (clone / "{}.txt".format(SENTINEL)).write_text("only copy\n")
+    with pytest.raises(implement.ImplementError, match=SENTINEL):
+        implement.finish_done(
+            answer(), run="run-42", repo=REPO, cwd=clone,
+            test_commands=[[sys.executable, "-c", "pass"]],
+            pr_effect=lambda *args: pytest.fail("a failed commit opens no PR"),
+            **tail)
+
+
+def _exit_conflict(clone, tmp_path, monkeypatch, tail):
+    (clone / "implemented.txt").write_text("done\n")
+    monkeypatch.setattr(implement, "_run_finish_tests", _raise(
+        implement.MergeConflictError(
+            "0123456789abcdef", ["src/{}.py".format(SENTINEL)])))
+    with pytest.raises(implement.MergeConflictError):
+        implement.finish_done(
+            answer(), run="run-42", repo=REPO, cwd=clone,
+            pr_effect=lambda *args: pytest.fail("a conflict opens no PR"),
+            comment_effect=lambda *args, **kwargs: pytest.fail(
+                "a conflict posts nothing to the ticket"),
+            **tail)
+
+
+def _exit_stray_file(clone, tmp_path, monkeypatch, tail):
+    # Scratch already pushed on the branch: the tree is clean and pushed, so
+    # only the caller's choice keeps the checkout (#1856).
+    (clone / "tmp").mkdir()
+    (clone / "tmp" / "{}.txt".format(SENTINEL)).write_text("notes\n")
+    run_git("add", "tmp", cwd=clone)
+    run_git("commit", "--quiet", "-m", "scratch", cwd=clone)
+    _push_ticket_branch_now(clone)
+    with pytest.raises(implement.StrayFileError):
+        implement.finish_done(
+            answer(), run="run-42", repo=REPO, cwd=clone,
+            test_commands=[[sys.executable, "-c", "pass"]],
+            pr_effect=lambda *args: pytest.fail("a stray file opens no PR"),
+            **tail)
+
+
+def _exit_timeout_after_checkpoint(clone, tmp_path, monkeypatch, tail):
+    (clone / "implemented.txt").write_text("done\n")
+    monkeypatch.setattr(funnel, "_gh_api_json",
+                        lambda endpoint: {"visibility": "private"})
+    monkeypatch.setattr(implement, "_run_finish_tests", _raise(
+        implement.CommandTimeoutError(
+            ["./ci/{}.sh".format(SENTINEL)], 7, captured_output=SENTINEL)))
+    with pytest.raises(implement.CommandTimeoutError):
+        implement.finish_done(
+            answer(), run="run-42", repo=REPO, cwd=clone,
+            pr_effect=lambda *args: pytest.fail("a timeout opens no PR"),
+            **tail)
+
+
+def _exit_timeout_before_checkpoint(clone, tmp_path, monkeypatch, tail):
+    (clone / "implemented.txt").write_text("only copy\n")
+    monkeypatch.setattr(funnel, "_gh_api_json",
+                        lambda endpoint: {"visibility": "private"})
+    monkeypatch.setattr(implement, "_checkpoint_work", _raise(
+        implement.CommandTimeoutError(["make", SENTINEL], 9)))
+    with pytest.raises(implement.CommandTimeoutError):
+        implement.finish_done(
+            answer(), run="run-42", repo=REPO, cwd=clone,
+            test_commands=[[sys.executable, "-c", "pass"]],
+            pr_effect=lambda *args: pytest.fail("a timeout opens no PR"),
+            **tail)
+
+
+def _exit_answer_error(clone, tmp_path, monkeypatch, tail):
+    (clone / "{}.txt".format(SENTINEL)).write_text("done\n")
+    assert implement._recover_answer_error(
+        implement.ImplementError("answer is not valid JSON: Expecting value"),
+        run="run-42", repo=REPO, cwd=clone, **tail)
+
+
+def _exit_answer_error_not_kept(clone, tmp_path, monkeypatch, tail):
+    _refuse_commits_naming_the_sentinel(clone)
+    _exit_answer_error(clone, tmp_path, monkeypatch, tail)
+
+
+def _decline(reason, *, facts=None, found=ticket):
+    def run_exit(clone, tmp_path, monkeypatch, tail):
+        _push_ticket_branch_now(clone)
+        monkeypatch.setattr(implement, "fetch_ticket",
+                            lambda repo, number: found(number))
+        implement.finish_declined(
+            reason, run="run-42", repo=REPO, cwd=clone,
+            block_effect=lambda *args, **kwargs: None,
+            comment_effect=lambda *args, **kwargs: None,
+            needs_effect=lambda *args: None,
+            declined_needs_effect=lambda *args: None,
+            external_event_needs_effect=lambda *args: None,
+            prerequisite_facts_effect=lambda ref: facts,
+            clear_block_effect=lambda *args, **kwargs: None,
+            prerequisite_edge_effect=lambda *args, **kwargs: None,
+            defer_note_close_effect=lambda *args, **kwargs: None,
+            **tail)
+    return run_exit
+
+
+def _blocked_on_human(rows):
+    def run_exit(clone, tmp_path, monkeypatch, tail):
+        _push_ticket_branch_now(clone)
+        implement.finish_blocked_on_human(
+            blocked("entering a credential",
+                    "Approve the {} OAuth app".format(SENTINEL)
+                    )["blocked_on_human"],
+            run="run-42", repo=REPO, cwd=clone,
+            create_effect=lambda *args, **kwargs: {
+                "number": 43, "ref": REPO + "#43",
+                "url": "https://github.com/{}/issues/43".format(REPO)},
+            block_effect=lambda *args, **kwargs: None,
+            comment_effect=lambda *args, **kwargs: None,
+            needs_effect=lambda *args: None,
+            sub_issues_effect=lambda *args: list(rows),
+            comments_effect=lambda *args: [],
+            head_effect=lambda *args: CLOSED_STEP_HEAD,
+            route_needs_effect=lambda *args: None,
+            human_needs_effect=lambda *args: None,
+            **tail)
+    return run_exit
+
+
+def _exit_superseded(clone, tmp_path, monkeypatch, tail):
+    # Through the CLI, as every lane runs it: another run holds the claim.
+    _push_ticket_branch_now(clone)
+    answer_path = tmp_path / "answer.json"
+    answer_path.write_text(json.dumps(answer()))
+    _stub_claim_state(monkeypatch, "other")
+    monkeypatch.setattr(implement, "release_claim",
+                        lambda ref, **kwargs: tail["release"](ref))
+    monkeypatch.setattr(implement, "finish_heartbeat",
+                        tail["heartbeat_finish"])
+    monkeypatch.chdir(clone)
+    assert implement.finish_main([
+        "--answer-file", str(answer_path), "--run", "run-42", "--repo", REPO,
+    ]) == 0
+
+
+LANDED_PREREQUISITE = {"number": 165, "state": "CLOSED",
+                       "children_total": 5, "children_completed": 5}
+OPEN_PREREQUISITE = {"number": 165, "state": "OPEN",
+                     "children_total": 0, "children_completed": 0}
+UNLANDED_165 = "Unlanded prerequisite #165 is still open; {} waits on it."
+
+#: Every finish-ticket exit: (run it, releases, heartbeat outcome, whether
+#: the cleanup is offered the checkout). Each fixture leaves the checkout
+#: clean and pushed where the exit offers it, so offered means removed.
+FINISH_EXITS = {
+    "pr": (_exit_pr, 1, "done", True),
+    "no-diff close": (_exit_no_diff_close, 1, "done", True),
+    "test failure": (_exit_test_failure, 1, "errored", True),
+    "checkpoint failure": (_exit_checkpoint_failure, 1, "errored", False),
+    "conflict": (_exit_conflict, 1, "errored", True),
+    "stray file": (_exit_stray_file, 1, "errored", False),
+    "timeout after checkpoint":
+        (_exit_timeout_after_checkpoint, 1, "errored", True),
+    "timeout before checkpoint":
+        (_exit_timeout_before_checkpoint, 1, "errored", False),
+    "answer error": (_exit_answer_error, 1, "errored", True),
+    "answer error, not kept":
+        (_exit_answer_error_not_kept, 1, "errored", False),
+    "decline: unknown": (_decline(
+        "I cannot verify the evidence in {}.py.".format(SENTINEL)),
+        1, "skipped-blocked", True),
+    "decline: open prerequisite": (_decline(
+        UNLANDED_165.format(SENTINEL), facts=OPEN_PREREQUISITE),
+        1, "skipped-blocked", True),
+    "decline: landed prerequisite": (_decline(
+        UNLANDED_165.format(SENTINEL), facts=LANDED_PREREQUISITE),
+        1, "skipped-blocked", True),
+    "decline: accept-body conflict": (_decline(
+        ACCEPT_BODY_CONFLICT_REASON + " It names {}.".format(SENTINEL)),
+        1, "skipped-blocked", True),
+    "decline: unsatisfiable acceptance": (_decline(
+        LIVE_1453_UNSATISFIABLE_ACCEPTANCE + " It names {}.".format(SENTINEL)),
+        1, "skipped-blocked", True),
+    "decline: pending gate answer": (_decline(
+        LIVE_1497_PENDING_GATE_ANSWER + " It names {}.".format(SENTINEL)),
+        1, "skipped-blocked", True),
+    "decline: defer-note proof": (_decline(
+        DEFER_NOTE_REASON + " It names {}.".format(SENTINEL),
+        found=defer_note_proof_ticket), 1, "done", True),
+    "human step": (_blocked_on_human([]), 1, "skipped-human-step", True),
+    "closed step": (_blocked_on_human([human_step_row(57)]),
+                    1, "skipped-blocked", True),
+    "superseded": (_exit_superseded, 0, "errored", False),
+}
+
+
+@pytest.mark.parametrize("name", FINISH_EXITS)
+def test_every_finish_exit_releases_finishes_and_cleans_up_once(
+        tmp_path, monkeypatch, name):
+    run_exit, releases, outcome, offered = FINISH_EXITS[name]
+    _, clone = make_heartbeat_codex_run_clone(tmp_path, monkeypatch)
+    _stub_claim_state(monkeypatch, "owned")
+    monkeypatch.setattr(implement, "fetch_ticket",
+                        lambda repo, number: ticket(number))
+    released, finished, cleanups = [], [], []
+    real_cleanup = implement._remove_codex_run_checkout
+
+    def cleanup(root, number, agent):
+        cleanups.append(number)
+        return real_cleanup(root, number, agent)
+
+    monkeypatch.setattr(implement, "_remove_codex_run_checkout", cleanup)
+
+    run_exit(clone, tmp_path, monkeypatch, {
+        "release": released.append,
+        "heartbeat_finish": lambda *args: finished.append(args),
+    })
+
+    assert released == [REPO + "#42"] * releases
+    (row,) = finished
+    assert row[:3] == ("codex", "run-42", outcome)
+    assert row[4] == REPO + "#42"
+    assert SENTINEL not in row[3]
+    assert cleanups == ([42] if offered else [])
+    assert clone.exists() is not offered
+
+
+def test_a_refused_heartbeat_finish_names_the_pr_and_release_already_done(
+        tmp_path, monkeypatch):
+    # Live 2026-10-02: a same-session re-begin had closed the run's start,
+    # so finish-ticket opened the PR, released the claim and then failed on
+    # "heartbeat finish refused run ...", which named neither.
+    _, clone = make_heartbeat_codex_run_clone(tmp_path, monkeypatch)
+    _stub_claim_state(monkeypatch, "owned")
+    (clone / "implemented.txt").write_text("done\n")
+    monkeypatch.setattr(implement, "fetch_ticket",
+                        lambda repo, number: ticket(number))
+    prs, released = [], []
+
+    with pytest.raises(implement.ImplementError) as raised:
+        implement.finish_done(
+            answer(), run="run-42", repo=REPO, cwd=clone,
+            test_commands=[[sys.executable, "-c", "pass"]],
+            release=released.append,
+            heartbeat_finish=_raise(implement.ImplementError(
+                "heartbeat finish refused run run-42")),
+            pr_effect=lambda *args: prs.append(args) or {
+                "number": 91, "url": "https://example.test/pull/91"},
+        )
+
+    assert str(raised.value) == (
+        "heartbeat finish refused run run-42; already done: PR #91 is open, "
+        "claim released")
+    assert len(prs) == 1
+    assert released == [REPO + "#42"]
+    # The outcome is not recorded, so the checkout stays (#1856).
+    assert clone.is_dir()
+
+
+def test_a_refused_heartbeat_finish_keeps_the_cli_exit_and_output(
+        tmp_path, monkeypatch, capsys):
+    _, clone = make_heartbeat_codex_run_clone(tmp_path, monkeypatch)
+    _stub_claim_state(monkeypatch, "owned")
+    (clone / "implemented.txt").write_text("done\n")
+    answer_path = tmp_path / "answer.json"
+    answer_path.write_text(json.dumps(answer()))
+    monkeypatch.setattr(implement, "fetch_ticket",
+                        lambda repo, number: ticket(number))
+    released = []
+    monkeypatch.setattr(implement, "release_claim",
+                        lambda ref, **kwargs: released.append(ref))
+    real_finish_done = implement.finish_done
+    monkeypatch.setattr(
+        implement, "finish_done",
+        lambda found, **kwargs: real_finish_done(
+            found, test_commands=[[sys.executable, "-c", "pass"]],
+            heartbeat_finish=_raise(implement.ImplementError(
+                "heartbeat finish refused run run-42")),
+            pr_effect=lambda *args: {
+                "number": 91, "url": "https://example.test/pull/91"},
+            **kwargs))
+    monkeypatch.chdir(clone)
+
+    assert implement.finish_main([
+        "--answer-file", str(answer_path), "--run", "run-42", "--repo", REPO,
+    ]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == (
+        "finish-ticket: heartbeat finish refused run run-42; already done: "
+        "PR #91 is open, claim released\n")
+    assert released == [REPO + "#42"]
+
+
+def test_a_timeout_still_releases_before_its_visibility_read(monkeypatch):
+    # The note reads the repository's visibility over gh, unbounded; the
+    # release came first before #2167 so a slow read cannot hold the claim.
+    events = []
+
+    def read_visibility(endpoint):
+        events.append("visibility")
+        return {"visibility": "private"}
+
+    monkeypatch.setattr(funnel, "_gh_api_json", read_visibility)
+    implement._record_command_timeout(
+        implement.CommandTimeoutError(["make", "suite"], 7),
+        run="run-42", agent="codex", ref=REPO + "#42",
+        release=lambda ref: events.append("release"),
+        heartbeat_finish=lambda *args: events.append("finish"),
+    )
+
+    assert events == ["release", "visibility", "finish"]

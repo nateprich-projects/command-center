@@ -6,9 +6,11 @@ board (#272). These tests pin the three things the rewrite can get wrong.
 
 from __future__ import annotations
 
+import json
 import pathlib
 import sys
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 
@@ -107,6 +109,59 @@ def repo_graphql_reads(prs, branches=(), calls=None, refs_has_next=False):
         }
 
     return gh_graphql
+
+
+@pytest.mark.parametrize("diagnostic", [
+    "stream error: stream ID 1; CANCEL; received from peer",
+    "invalid character ' ' in string escape code",
+])
+def test_ticket_pr_scan_retries_diagnosed_cli_response_failures(
+    monkeypatch, diagnostic
+):
+    """Known transport/body failures must not make current PR facts unknown."""
+    funnel.reset_route_state()
+    funnel.reset_api_usage()
+    attempts = []
+    sleeps = []
+
+    def run(args, **kwargs):
+        attempts.append(args)
+        if len(attempts) == 1:
+            return SimpleNamespace(returncode=1, stdout="", stderr=diagnostic)
+
+        query = next(arg[6:] for arg in args if arg.startswith("query="))
+        repository = {
+            "pullRequests": {
+                "nodes": [],
+                "pageInfo": {"hasNextPage": False, "endCursor": None},
+            },
+        }
+        if "refs(refPrefix:" in query:
+            repository["refs"] = {
+                "nodes": [],
+                "pageInfo": {"hasNextPage": False},
+            }
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps({"data": {
+                "rateLimit": {
+                    "cost": 1,
+                    "remaining": 99,
+                    "resetAt": "later",
+                },
+                "repo0": repository,
+            }}),
+            stderr="",
+        )
+
+    monkeypatch.setattr(funnel.subprocess, "run", run)
+    monkeypatch.setattr(funnel.time, "sleep", sleeps.append)
+
+    facts = funnel.ticket_pr_facts([ticket(42)])
+
+    assert facts["nateprich/beta#42"] is None
+    assert len(attempts) == 3  # failed open scan, retry, then history scan
+    assert len(sleeps) == 1
 
 
 def test_one_scan_per_repo_regardless_of_ticket_count(monkeypatch):

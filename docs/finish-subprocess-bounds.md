@@ -18,7 +18,7 @@ git show origin/main:engine/implement.py | rg -n "def _run|subprocess\\.run|time
 
 ## Finish-path command inventory
 
-The AST inventory test pins **19 bounded Git callsites** in `engine/implement.py`:
+The AST inventory test pins **28 bounded Git callsites** in `engine/implement.py`:
 
 | Callsite | Git commands |
 | --- | --- |
@@ -29,10 +29,13 @@ The AST inventory test pins **19 bounded Git callsites** in `engine/implement.py
 | `_stage_explicit_paths` | `git add -- <selected paths>` |
 | `_commit_if_needed` | `git commit -m <summary>`; `git rev-list --count origin/main..HEAD` |
 | `_push_ticket_branch` | `git fetch origin <ticket refspec>`; `git merge-base --is-ancestor origin/<branch> HEAD`; conditional `git merge -s ours`; `git push --set-upstream origin <branch>` |
+| `_tracked_working_tree_paths` | `git ls-tree -r --name-only -z HEAD`; `git diff --name-status -z HEAD` |
+| `_preserve_human_step_work` | `git commit --only -m [human-step-wip] -- <tracked paths>`; `git rev-parse HEAD`; uses `_push_ticket_branch` for the remote update |
 | `_keep_work` | `git commit -m <WIP reason>`; `git rev-list --count origin/main..HEAD` |
 | `_checkpoint_work` | `git commit -m <WIP checkpoint>` |
 | `_run_finish_tests` | `git fetch origin +refs/heads/main:refs/remotes/origin/main` (#1804) |
 | `finish_done` | `git rev-parse HEAD` after the push, the SHA the PR's evidence block is keyed to (#1805) |
+| `_remove_codex_run_checkout` | `git rev-parse --show-toplevel`; `git branch --show-current`; `git status --porcelain --untracked-files=all`; `git rev-parse --verify HEAD`; `git rev-parse --verify refs/remotes/origin/ticket/<n>`; `git merge-base --is-ancestor HEAD origin/main` when the ticket-tip check does not match (#2014, #2225) |
 
 `_git_name_paths` expands to these five distinct command forms; the cached diff
 form is reused by two callers:
@@ -42,6 +45,8 @@ git diff --name-only -z
 git diff --cached --name-only -z
 git ls-files --others --exclude-standard -z
 git diff --name-only -z origin/main...HEAD
+git ls-tree -r --name-only -z HEAD
+git diff --name-status -z HEAD
 git ls-files -z -- <selected paths>
 ```
 
@@ -64,10 +69,12 @@ commands. The Python version probe is a separate bounded subprocess.
 
 ## Measurements and selected bounds
 
-Measurements were taken on this checkout on 2026-09-28. Local Git inventory
-commands each completed within 0.0054 seconds across three runs. In a disposable
-local remote, add, commit, and merge each completed within 0.0216 seconds; push
-completed within 0.0402 seconds. Against GitHub, `ls-remote` took 0.9282 seconds
+Measurements were taken on this checkout on 2026-09-28. Baseline local Git inventory
+commands each completed within 0.0054 seconds across three runs. The five cleanup
+state checks added for #2014 completed within 0.0128 seconds each across three runs
+on 2026-09-30. In a disposable local remote, add, commit, and merge each completed
+within 0.0216 seconds; push completed within 0.0402 seconds. Against GitHub,
+`ls-remote` took 0.9282 seconds
 and fetch took 1.0166 seconds. The syntax compile took at most 0.0800 seconds
 across seven runs, and `compileall` took 0.1176 seconds. The Python version probe
 took at most 0.0160 seconds across seven runs. The latest green CI run
@@ -75,7 +82,7 @@ took at most 0.0160 seconds across seven runs. The latest green CI run
 
 | Command family | Bound | Measurement used |
 | --- | ---: | --- |
-| Local Git | 2 minutes | 0.0054s live inventory maximum; 0.0216s maximum for local add/commit/merge |
+| Local Git | 2 minutes | 0.0054s baseline inventory maximum; 0.0128s cleanup-check maximum; 0.0216s maximum for local add/commit/merge |
 | Remote Git | 10 minutes | 1.0166s GitHub fetch maximum; 0.0402s local push |
 | Test commands (`make`, `pytest`, including shell wrappers) | 45 minutes | 6m54s latest green pytest run |
 | Syntax compile and `compileall` | 2 minutes | 0.0800s syntax compile; 0.1176s `compileall` |
@@ -84,7 +91,7 @@ took at most 0.0160 seconds across seven runs. The latest green CI run
 
 Every bound is below the 2-hour claim TTL. `test_every_subprocess_callsite_has_an_explicit_timeout`
 checks that every `_run` caller supplies one. The Git AST inventory test pins its
-18 static callsites and the dynamic path-list command forms documented above.
+27 static callsites and the dynamic path-list command forms documented above.
 Timeout fixtures assert that a never-returning child is killed without a wait,
 the run finishes `errored` with work not kept, no PR effect occurs, and a slow
 call that finishes under its bound succeeds.

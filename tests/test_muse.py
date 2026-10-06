@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime
+import gzip
 import json
 import os
 import pathlib
@@ -301,10 +302,76 @@ def test_the_flat_ceiling_still_stops_whatever_the_projection(tmp_path, monkeypa
 # early should fail the tests below, not the collection of this module.
 OVERRIDE_RESET = 1791158400.0  # 2026-10-05 00:00 UTC
 IN_OVERRIDE = OVERRIDE_RESET - 3 * 86400.0
+PAIR_AT = datetime.datetime(
+    2026, 9, 30, 3, 55, tzinfo=datetime.timezone.utc).timestamp()
+PAIR_DAYS_LEFT = (OVERRIDE_RESET - PAIR_AT) / 86400.0
+TRIAL_DURING_OVERRIDE = datetime.datetime(
+    2026, 10, 3, 12, tzinfo=datetime.timezone.utc).timestamp()
+TRIAL_AFTER_OVERRIDE = datetime.datetime(
+    2026, 10, 6, 12, tzinfo=datetime.timezone.utc).timestamp()
+
+
+def test_muse_trial_total_fits_both_existing_allowance_caps():
+    """The $20 trial is below the live $109 cap and the $200 base cap."""
+    active = usage.muse_trial_counter_read(0.0, TRIAL_DURING_OVERRIDE)
+    assert active["cap_dollars"] == 20.0
+    assert active["allowance_dollars"] == 109.0
+    assert active["contained"]
+    assert not active["stop"]
+
+    after_override = usage.muse_trial_counter_read(0.0, TRIAL_AFTER_OVERRIDE)
+    assert after_override["allowance_dollars"] == 200.0
+    assert after_override["contained"]
+
+
+def test_muse_trial_counter_increment_adds_observed_spend():
+    updated = usage.muse_trial_counter_increment(
+        3.25, 2.50, TRIAL_DURING_OVERRIDE)
+    assert updated["spent_dollars"] == 5.75
+    assert updated["increment_dollars"] == 2.50
+    assert updated["known"]
+    assert not updated["stop"]
+
+
+def test_muse_trial_counter_stops_when_next_session_could_exceed_total():
+    # The existing $4.50 Muse session reserve is preserved inside the $20 cap.
+    assert not usage.muse_trial_counter_read(
+        15.50, TRIAL_DURING_OVERRIDE)["stop"]
+    assert usage.muse_trial_counter_read(
+        15.51, TRIAL_DURING_OVERRIDE)["stop"]
+
+
+def test_muse_trial_counter_stops_after_recorded_total_exceeds_cap():
+    result = usage.muse_trial_counter_read(20.01, TRIAL_DURING_OVERRIDE)
+    assert result["known"]
+    assert result["spent_dollars"] == 20.01
+    assert result["stop"]
+
+
+def test_muse_trial_counter_stops_when_counter_is_unreadable():
+    result = usage.muse_trial_counter_read(None, TRIAL_DURING_OVERRIDE)
+    assert not result["known"]
+    assert result["stop"]
+
+
+def test_muse_trial_counter_stops_when_increment_is_unreadable():
+    result = usage.muse_trial_counter_increment(
+        1.0, None, TRIAL_DURING_OVERRIDE)
+    assert not result["known"]
+    assert result["stop"]
+
+
+def test_muse_trial_counter_stops_if_allowance_cannot_contain_cap(monkeypatch):
+    monkeypatch.setattr(usage, "MUSE_PACE_OVERRIDE", None)
+    monkeypatch.setattr(usage, "MUSE_WEEKLY_CAP_DOLLARS", 19.0)
+    result = usage.muse_trial_counter_read(0.0, TRIAL_AFTER_OVERRIDE)
+    assert result["allowance_dollars"] == 19.0
+    assert not result["contained"]
+    assert result["stop"]
 
 
 def test_the_override_names_the_window_resetting_sunday_2026_10_04():
-    """#1842: Sunday 17:00 PDT is Monday 00:00 UTC, on the provider's lattice."""
+    """#1995: Sunday 17:00 PDT is Monday 00:00 UTC, on the provider's lattice."""
     assert usage.MUSE_PACE_OVERRIDE["resets_at"] == OVERRIDE_RESET
     reset = datetime.datetime.fromtimestamp(
         OVERRIDE_RESET, datetime.timezone.utc)
@@ -313,36 +380,44 @@ def test_the_override_names_the_window_resetting_sunday_2026_10_04():
 
 
 def test_the_override_prices_the_window_from_the_panel(tmp_path, monkeypatch):
-    """#1842: the panel read 3% while the meter held $42.58, so the same
-    spend reads 3% here, against a $1,419.33 cap. The 72-hour rate
-    recorded with it at 12:45 PDT was $77.28 ($25.76 a day), with 6.18
-    days left. Against the $200 cap that projected 101.21% and stopped
-    every lane."""
+    """The 15% panel / $15.98 own-card pairing supports the selected $109 cap."""
+    cap = usage.MUSE_PACE_OWN_CARD_CAP_V2["cap_dollars"]
+    assert usage.MUSE_PACE_OWN_CARD_CAP_V2["panel_displayed_percent"] == 15.0
+    assert usage.MUSE_PACE_OWN_CARD_CAP_V2["meter_dollars"] == 15.98
+    assert cap == 109.0
+
+    # Four independent same-window measurements from #1994; integer panel
+    # readings represent a one-point interval around each displayed value.
+    for panel_percent, meter_dollars in (
+            (2.0, 2.19), (3.0, 3.25), (12.0, 13.53), (15.0, 15.98)):
+        lower_cap = 100.0 * meter_dollars / (panel_percent + 0.5)
+        upper_cap = 100.0 * meter_dollars / (panel_percent - 0.5)
+        assert lower_cap <= cap <= upper_cap
+
     reading, verdict, _ = _projected(
-        tmp_path, monkeypatch, spent=42.58, trailing=77.28, days_left=6.18,
-        at=IN_OVERRIDE)
+        tmp_path, monkeypatch, spent=15.98, trailing=15.98,
+        days_left=PAIR_DAYS_LEFT, at=PAIR_AT)
     window = reading["windows"]["seven_day"]
-    assert reading["cap_dollars"] == pytest.approx(1419.33)
-    assert window["cap_dollars"] == pytest.approx(1419.33)
-    assert window["used_percent"] == pytest.approx(3.0, abs=0.01)
-    # 3 + 100 * $25.76/day * 6.18 days / $1,419.33 = 14.22.
-    assert window["projected_percent"] == pytest.approx(14.22, abs=0.05)
-    assert window["override"] == {"issue": 1842, "until": OVERRIDE_RESET}
+    assert reading["cap_dollars"] == pytest.approx(109.0)
+    assert window["cap_dollars"] == pytest.approx(109.0)
+    assert window["spent_dollars"] == pytest.approx(15.98)
+    assert window["used_percent"] == pytest.approx(14.66, abs=0.01)
+    assert window["projected_percent"] == pytest.approx(38.30, abs=0.02)
+    assert window["override"] == {"issue": 1995, "until": OVERRIDE_RESET}
 
     weekly = verdict["windows"][0]
     assert verdict["band"] == "ok"
     assert not verdict["over_pace"]
     assert weekly["allowed_percent"] == 100.0
-    # $4.50 of $1,419.33.
-    assert weekly["reserve"] == pytest.approx(0.32)
-    assert weekly["override"]["issue"] == 1842
+    # $4.50 of $109.00.
+    assert weekly["reserve"] == pytest.approx(4.13)
+    assert weekly["override"]["issue"] == 1995
 
 
-@pytest.mark.parametrize("spent, over", [(1414.0, False), (1416.0, True)])
+@pytest.mark.parametrize("spent, over", [(104.49, False), (104.51, True)])
 def test_the_override_stops_at_100_less_one_session(tmp_path, monkeypatch,
                                                      spent, over):
-    """Used plus $4.50 of $1,419.33 (0.32%) against 100, strictly: $1,414
-    reads 99.62% and is admitted, $1,416 reads 99.77% and is not."""
+    """The unchanged reserve rule admits below $104.50 and stops above it."""
     _, verdict, _ = _projected(
         tmp_path, monkeypatch, spent=spent, trailing=spent, days_left=2.0,
         at=IN_OVERRIDE)
@@ -360,6 +435,7 @@ REOPENED_OVERRIDE = {
     "resets_at": REOPENED_RESET,
     "panel_used_percent": 86.0,
     "meter_dollars": 120.91,
+    "cap_dollars": 140.59,
     "ceiling_percent": 100.0,
     "reopened_at": REOPENED,
 }
@@ -554,22 +630,67 @@ def _mixed_window(tmp_path, monkeypatch):
     return usage.read_muse(NOW)
 
 
-def test_the_gated_total_is_the_standard_card_whatever_model_ran(
+def test_the_gated_total_prices_each_model_at_its_own_card(
         tmp_path, monkeypatch):
-    """The $200 ceiling was calibrated in a window where every session was
-    on the standard model. Re-pricing contributor calls cheaply assumes a
-    price-shaped window, which nothing has established; if it is
-    token-shaped the brake never trips and the lanes walk into a refusal.
-    Same card means the brake does not move."""
+    """One standard call ($0.795) plus one contributor call ($0.0416) is
+    $0.8366 at their per-model rates; standard diagnostic remains
+    $1.590."""
     reading = _mixed_window(tmp_path, monkeypatch)
 
-    card = usage.muse_model.RATE_CARDS[STANDARD]
-    one_call = ((200_000 * card["input"]
-                 + 800_000 * card["cached_input"]
-                 + 100_000 * card["output"]) / 1_000_000)
-    assert reading["spent_dollars"] == pytest.approx(2 * one_call)
+    # Literal expected values from the provider's rate card schedule for this
+    # token mix; keeping them independent catches a wrong card or aggregation.
+    assert reading["spent_dollars"] == pytest.approx(0.8366)
     assert reading["windows"]["seven_day"]["spent_dollars"] == \
-        pytest.approx(2 * one_call)
+        pytest.approx(0.8366)
+    assert reading["own_card_dollars"] == pytest.approx(0.8366)
+    assert reading["standard_card_dollars"] == pytest.approx(1.590)
+
+
+def test_reproduction_mixed_model_gate_uses_the_own_card_sum(
+        tmp_path, monkeypatch):
+    """Mixed standard/contributor calls gate against their own-card sum."""
+    reading = _mixed_window(tmp_path, monkeypatch)
+
+    # Independent expected amount for these two calls; standard-card pricing
+    # reads $1.590 for the same fixture and fails this reproduction.
+    assert reading["spent_dollars"] == pytest.approx(0.8366)
+    assert reading["spent_dollars"] == pytest.approx(
+        sum(row["dollars_at_own_card"]
+            for row in reading["by_model"].values()))
+
+
+def test_the_72_hour_projection_uses_own_card_spend(tmp_path, monkeypatch):
+    reading = _mixed_window(tmp_path, monkeypatch)
+
+    window = reading["windows"]["seven_day"]
+    assert window["trailing_72h_dollars"] == pytest.approx(0.8366)
+    assert window["daily_rate_dollars"] == pytest.approx(0.278867)
+
+
+def test_gzipped_muse_journal_matches_the_raw_reader(
+        tmp_path, monkeypatch):
+    records = [
+        _muse_model_record(NOW - 100, "run-1", STANDARD),
+        _muse_record(NOW - 80, input_tokens=1_000_000,
+                     cached_tokens=800_000, output_tokens=100_000,
+                     usage_id="u1", run_id="run-1"),
+    ]
+    _muse_fixture(tmp_path, monkeypatch, records, mtime=NOW)
+    journal = (tmp_path / "2026" / "09" / "18" / "session"
+               / "session.jsonl")
+    raw_reading = usage.read_muse(NOW)
+
+    compressed = journal.with_name("session.jsonl.gz")
+    with journal.open("rb") as source, gzip.open(compressed, "wb") as target:
+        target.write(source.read())
+    journal.unlink()
+    os.utime(compressed, (NOW, NOW))
+
+    compressed_reading = usage.read_muse(NOW)
+    assert compressed_reading == raw_reading
+    # Independent arithmetic: 200k fresh input at $1.25/M, 800k cached at
+    # $0.15/M, and 100k output at $4.25/M totals $0.795.
+    assert compressed_reading["spent_dollars"] == pytest.approx(0.795)
 
 
 def test_the_breakdown_counts_calls_and_dollars_per_model(
@@ -583,7 +704,7 @@ def test_the_breakdown_counts_calls_and_dollars_per_model(
 
 
 def test_each_model_is_priced_both_ways(tmp_path, monkeypatch):
-    """The difference between the two is the size of the open question."""
+    """Per-model diagnostics expose the standard and own-card totals."""
     reading = _mixed_window(tmp_path, monkeypatch)
 
     standard_row = reading["by_model"][STANDARD]
@@ -599,7 +720,11 @@ def test_each_model_is_priced_both_ways(tmp_path, monkeypatch):
     assert reading["own_card_dollars"] == pytest.approx(
         standard_row["dollars_at_own_card"]
         + contributor_row["dollars_at_own_card"])
-    assert reading["own_card_dollars"] < reading["spent_dollars"]
+    assert reading["own_card_dollars"] == pytest.approx(
+        reading["spent_dollars"])
+    assert reading["standard_card_dollars"] == pytest.approx(
+        standard_row["dollars_at_standard"]
+        + contributor_row["dollars_at_standard"])
 
 
 def test_an_unrecognised_model_prices_at_standard_and_is_named(
@@ -678,9 +803,12 @@ def test_the_breakdown_sums_to_the_gated_total(tmp_path, monkeypatch):
     the other — which is how an under-read would look from outside."""
     reading = _mixed_window(tmp_path, monkeypatch)
 
-    assert sum(row["dollars_at_standard"]
+    assert sum(row["dollars_at_own_card"]
                for row in reading["by_model"].values()) == \
         pytest.approx(reading["spent_dollars"])
+    assert sum(row["dollars_at_standard"]
+               for row in reading["by_model"].values()) == \
+        pytest.approx(reading["standard_card_dollars"])
     assert sum(row["calls"] for row in reading["by_model"].values()) == \
         reading["windows"]["seven_day"]["calls"]
 

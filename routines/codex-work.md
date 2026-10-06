@@ -27,10 +27,11 @@ When `do` is `ticket`, the ticket is already claimed. Treat `packet` as the
 implementation evidence: read its ticket, parent plan, current-head verdict,
 blocking list, and prior-run digest. Treat `vendor` as binding.
 
-Clone `packet.repo` into a new owner-only (`0700`) directory under the runtime
-root’s `codex-runs/` subtree, named `ticket-<number>-<YYYYMMDDTHHMMSSffffffZ>`
-(UTC). Work on `ticket/<number>` from `origin/main`. If the remote branch
-exists, establish its contents before continuing or resetting it; never discard
+Clone `packet.repo` into an owner-only (`0700`) directory under runtime root’s
+`codex-runs/` subtree, named `ticket-<number>-<YYYYMMDDTHHMMSSffffffZ>` (UTC stamp:
+`python3 -c 'import datetime;print(datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%S%fZ"))'`).
+Work on `ticket/<number>` from `origin/main`. Inspect existing
+`origin/ticket/<number>` branch before resetting or continuing; never discard
 unknown work. A rejected verdict at the current head requires a new pushed head
 addressing every blocking item. Keep scratch and build files inside this
 checkout. `finish-ticket` removes it; if a push fails, it leaves the directory

@@ -512,6 +512,82 @@ def test_begin_over_the_filtered_view_matches_the_full_board(
     assert scoped["heartbeat"] == full["heartbeat"]
 
 
+def test_session_begin_refreshes_the_scoped_fixture_with_full_output_parity(
+    monkeypatch,
+):
+    _full, expected, _board_used, _view = _both(
+        monkeypatch, **REVIEW)
+
+    board = _board()
+    fakes = _Fakes(board)
+    fakes.install(monkeypatch)
+    full_items = funnel.ScopedItems(board.items, scope="full")
+    begin_rows = scoped_view(board.items)
+    begin_items = funnel.ScopedItems(
+        begin_rows,
+        scope="begin",
+        startable_candidates=funnel._startable_candidate_items(
+            begin_rows, agent="muse"),
+        startable_items=begin_rows,
+        startable_agent="muse",
+    )
+    loaded_scopes = []
+
+    def loader(**kwargs):
+        scope = kwargs.get("scope")
+        loaded_scopes.append(scope)
+        return begin_items if scope == "begin" else full_items
+
+    monkeypatch.setattr(
+        funnel, "_begin_preflight",
+        lambda now, agent, idle, tier=None: (
+            {"agent": agent, "run": "run-under-test", "gate": "ok"}, {}),
+    )
+    monkeypatch.setattr(
+        funnel, "_begin_api_reserve_preflight", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(funnel, "_begin_role_refusal", lambda *args: None)
+
+    def member_repos(after_first_response=None):
+        if after_first_response is not None:
+            after_first_response({"rateLimit": {"cost": 1, "remaining": 5000}})
+        return sorted(MEMBERS)
+
+    monkeypatch.setattr(funnel, "member_repos", member_repos)
+    monkeypatch.setattr(funnel, "repo_readiness_for_items", lambda items: {})
+    monkeypatch.setattr(funnel, "cmd_next_review", lambda items, tier: 0)
+    monkeypatch.setattr(funnel, "hydrate_item_details", lambda *args, **kwargs: None)
+    monkeypatch.setattr(funnel, "report_api_cost", lambda *args, **kwargs: None)
+    monkeypatch.setattr(funnel, "report_graphql_spend", lambda: None)
+
+    session = funnel.FunnelSession(loader=loader)
+    assert session.dispatch(["next-review", "--tier", "standard"])[0] == 0
+    code, output, error = session.dispatch([
+        "begin", "--agent", "muse", "--tier", "escalated", "--role",
+        "review", "--breakdown",
+    ])
+
+    assert code == 0, error
+    assert loaded_scopes == [None, "begin"]
+    assert funnel.items_scope(session.items) == "begin"
+    actual_json = json.loads(output)
+    actual_json.pop("timings", None)
+    expected_json = dict(expected["json"])
+    expected_json.pop("timings", None)
+    assert actual_json == expected_json
+    assert fakes.writes == expected["writes"]
+    # Session dispatch gets its own wall clock for reconciliation writes.
+    actual_heartbeat = [
+        (agent, {key: value for key, value in row.items() if key != "ts"})
+        for agent, row in fakes.heartbeat_writes
+    ]
+    expected_heartbeat = [
+        (agent, {key: value for key, value in row.items() if key != "ts"})
+        for agent, row in expected["heartbeat"]
+    ]
+    assert actual_heartbeat == expected_heartbeat
+
+
 #: Each closed item a begin consumer reads, and a lane whose result it
 #: decides. Dropping it from the filtered view must change what begin does.
 LOAD_BEARING = {

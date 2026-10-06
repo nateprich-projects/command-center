@@ -18,6 +18,15 @@ import funnel  # noqa: E402
 NOW = datetime(2026, 9, 13, 12, 0, tzinfo=timezone.utc)
 
 
+@pytest.fixture(autouse=True)
+def _no_live_claude_sample(monkeypatch):
+    import usage
+
+    monkeypatch.setattr(
+        usage, "read_claude_plan_weekly_sample", lambda _now: None
+    )
+
+
 def _item(number, status, *, repo="nateprich-projects/command-center", **kwargs):
     values = {
         "repo": repo,
@@ -164,6 +173,165 @@ def test_successful_brief_spools_without_changing_stdout(
     }
     assert 7 * 24 * 60 * 60 <= board_item["waited_seconds"] < 7 * 24 * 60 * 60 + 1
     assert snapshot["generated_at"] == json.loads(expected)["generated_at"]
+
+
+def test_pr_scan_timeout_spools_current_sections_with_unknown_pip(
+    monkeypatch, tmp_path, capsys
+):
+    """A PR scan timeout must not keep current brief sections from publishing."""
+    spool = tmp_path / "dashboard-spool"
+    monkeypatch.setenv(funnel.DASHBOARD_SPOOL_ENV, str(spool))
+    project = _item(71, "Building", children_total=1)
+    child = _item(72, None, parent=project.ref)
+    monkeypatch.setattr(funnel, "load_items", lambda: [project, child])
+
+    def timeout(_items):
+        raise TimeoutError("PR scan timed out")
+
+    monkeypatch.setattr(funnel, "ticket_pr_facts", timeout)
+    monkeypatch.setattr(funnel, "_read_outcome_signals", lambda _now: None)
+    monkeypatch.setattr(
+        funnel, "_read_portfolio_metrics", lambda _items, _now: None
+    )
+    monkeypatch.setattr(
+        funnel, "decline_routing_metric",
+        lambda _items, _now: {"status": "available", "declines": 0},
+    )
+    monkeypatch.setattr(funnel, "main_ci_json", lambda: [])
+    monkeypatch.setattr(
+        funnel, "member_issues_without_project_items", lambda _items: {}
+    )
+    monkeypatch.setattr(funnel, "unattended_merges", lambda _now: [])
+    monkeypatch.setattr(funnel, "unattended_approvals", lambda *a, **k: [])
+    monkeypatch.setattr(funnel, "connector_gate_answers", lambda *a, **k: [])
+    monkeypatch.setattr(funnel, "recent_resend_ratio", lambda _now: {})
+    monkeypatch.setattr(funnel, "_dashboard_muse_usage", lambda _now: {})
+
+    assert funnel.main(["brief"]) == 0
+    capsys.readouterr()
+
+    snapshot = _spooled(spool)
+    assert snapshot["brief"]["counts_by_gate"]["Building"] == 1
+    assert snapshot["brief"]["missing"]
+    board_item = next(
+        row for column in snapshot["board"]["columns"]
+        if column["stage"] == "Building"
+        for row in column["items"]
+    )
+    assert board_item["tickets"][0]["pr"] == "unknown"
+    assert "unknown" in board_item["pips"]
+
+
+def test_single_verdict_fetch_failure_keeps_other_pips_current(
+    monkeypatch, tmp_path, capsys
+):
+    """One failed pip read must not discard this run's other dashboard data."""
+    spool = tmp_path / "dashboard-spool"
+    monkeypatch.setenv(funnel.DASHBOARD_SPOOL_ENV, str(spool))
+    project = _item(73, "Building", children_total=2)
+    failed = _item(74, None, parent=project.ref)
+    approved = _item(75, None, parent=project.ref)
+    facts = {
+        failed.ref: {"state": "OPEN", "number": 740},
+        approved.ref: {
+            "state": "OPEN", "number": 750, "headRefOid": "head-750",
+            "verdict": {"verdict": "approved", "head_sha": "head-750"},
+        },
+    }
+    monkeypatch.setattr(funnel, "load_items", lambda: [project, failed, approved])
+    monkeypatch.setattr(funnel, "ticket_pr_facts", lambda _items: facts)
+
+    def fail_one(_repo, number):
+        assert number == 740
+        raise TimeoutError("one pip fetch timed out")
+
+    monkeypatch.setattr(funnel, "latest_verdict", fail_one)
+    monkeypatch.setattr(funnel, "_read_outcome_signals", lambda _now: None)
+    monkeypatch.setattr(
+        funnel, "_read_portfolio_metrics", lambda _items, _now: None
+    )
+    monkeypatch.setattr(
+        funnel, "decline_routing_metric",
+        lambda _items, _now: {"status": "available", "declines": 0},
+    )
+    monkeypatch.setattr(funnel, "main_ci_json", lambda: [])
+    monkeypatch.setattr(
+        funnel, "member_issues_without_project_items", lambda _items: {}
+    )
+    monkeypatch.setattr(funnel, "unattended_merges", lambda _now: [])
+    monkeypatch.setattr(funnel, "unattended_approvals", lambda *a, **k: [])
+    monkeypatch.setattr(funnel, "connector_gate_answers", lambda *a, **k: [])
+    monkeypatch.setattr(funnel, "recent_resend_ratio", lambda _now: {})
+    monkeypatch.setattr(funnel, "_dashboard_authoring_pr_agents", lambda: {})
+    monkeypatch.setattr(funnel, "_dashboard_muse_usage", lambda _now: {})
+
+    assert funnel.main(["brief"]) == 0
+    capsys.readouterr()
+
+    snapshot = _spooled(spool)
+    assert snapshot["brief"]["counts_by_gate"]["Building"] == 1
+    board_item = next(
+        row for column in snapshot["board"]["columns"]
+        if column["stage"] == "Building"
+        for row in column["items"]
+    )
+    by_number = {ticket["number"]: ticket for ticket in board_item["tickets"]}
+    assert by_number[74]["pr"] == "unknown"
+    assert by_number[75]["pr"] == "approved"
+    assert "unknown" in board_item["pips"]
+    assert "approved" in board_item["pips"]
+
+
+def test_brief_carries_prior_pr_facts_into_the_board_snapshot(
+    monkeypatch, tmp_path, capsys
+):
+    spool = tmp_path / "dashboard-spool"
+    spool.mkdir()
+    captured_at = datetime.now(timezone.utc) - timedelta(hours=5)
+    project = _item(
+        7, "Building", children_total=1,
+        status_since=datetime.now(timezone.utc) - timedelta(days=7),
+    )
+    child = _item(8, None, parent=project.ref)
+    prior = {
+        "generated_at": captured_at.isoformat(),
+        "board": {"columns": [{"items": [{"tickets": [{
+            "ref": child.ref,
+            "state": "OPEN",
+            "pr": "approved",
+            "pr_number": 17,
+        }]}]}]},
+    }
+    (spool / "brief-1-aaaaaaaaaaaaaaaa.json").write_text(
+        json.dumps(prior), encoding="utf-8",
+    )
+    monkeypatch.setenv(funnel.DASHBOARD_SPOOL_ENV, str(spool))
+    monkeypatch.setattr(funnel, "load_items", lambda: [project, child])
+    monkeypatch.setattr(funnel, "ticket_pr_facts", lambda _items: {})
+    monkeypatch.setattr(funnel, "_backoff_rows", lambda: [])
+    published_at = datetime.now(timezone.utc)
+    expected = _brief_output(generated_at=published_at.isoformat())
+
+    def fake_cmd_brief(items, now, **kwargs):
+        print(expected)
+        return 0
+
+    monkeypatch.setattr(funnel, "cmd_brief", fake_cmd_brief)
+
+    assert funnel.main(["brief"]) == 0
+    capsys.readouterr()
+
+    snapshots = [json.loads(path.read_text()) for path in spool.glob("*.json")]
+    snapshot = max(snapshots, key=lambda value: value["generated_at"])
+    building = next(
+        column for column in snapshot["board"]["columns"]
+        if column["stage"] == "Building"
+    )
+    ticket_row = building["items"][0]["tickets"][0]
+    assert ticket_row["pr_stale"] is True
+    assert ticket_row["pr_stale_state"] == "approved"
+    assert ticket_row["pr_stale_age"] == "5h"
+    assert building["items"][0]["pips"] == ["stale"]
 
 
 def test_the_spooled_board_shows_the_bug_turns_begin_takes(
@@ -327,10 +495,21 @@ def test_dashboard_muse_usage_maps_the_seven_day_window(monkeypatch):
     monkeypatch.setattr(usage, "read_muse", lambda now: _muse_reading())
 
     assert funnel._dashboard_muse_usage(1_788_000_000.0) == {
+        "source": "Local Muse session journal estimate",
+        "captured_at": 1_788_000_000.0,
         "spent_dollars": 14.30,
         "cap_dollars": 200.0,
         "used_percent": 7.15,
         "calls": 42,
+    }
+
+
+def test_dashboard_muse_panel_usage_records_latest_validated_reading():
+    assert funnel._dashboard_muse_panel_usage() == {
+        "used_percent": 15.0,
+        "sampled_at": "2026-09-29T20:55:00-07:00",
+        "source": "Muse account panel",
+        "source_url": "https://github.com/nateprich-projects/command-center/issues/1673#issuecomment-5903766309",
     }
 
 
@@ -411,6 +590,8 @@ def test_successful_brief_spools_muse_usage(monkeypatch, tmp_path, capsys):
 
     monkeypatch.setattr(funnel, "cmd_brief", fake_cmd_brief)
     row = {
+        "source": "Local Muse session journal estimate",
+        "captured_at": 1_788_000_000.0,
         "spent_dollars": 14.30,
         "cap_dollars": 200.0,
         "used_percent": 7.15,
@@ -422,7 +603,52 @@ def test_successful_brief_spools_muse_usage(monkeypatch, tmp_path, capsys):
 
     assert funnel.main(["brief"]) == 0
     assert capsys.readouterr().out == expected + "\n"
-    assert _spooled(spool)["usage"] == {"muse": row}
+    assert _spooled(spool)["usage"] == {
+        "muse": row,
+        "muse_panel": funnel._dashboard_muse_panel_usage(),
+    }
+
+
+def test_successful_brief_spools_only_claude_weekly_sample_fields(
+    monkeypatch, tmp_path, capsys
+):
+    import usage
+
+    spool = tmp_path / "dashboard-spool"
+    monkeypatch.setenv(funnel.DASHBOARD_SPOOL_ENV, str(spool))
+    expected = _brief_output()
+    monkeypatch.setattr(funnel, "load_items", lambda: [])
+
+    def fake_cmd_brief(items, now, **kwargs):
+        print(expected)
+        return 0
+
+    monkeypatch.setattr(funnel, "cmd_brief", fake_cmd_brief)
+    muse = {"source": "Local Muse session journal estimate",
+            "captured_at": 1_788_000_000.0,
+            "spent_dollars": 14.30, "cap_dollars": 200.0,
+            "used_percent": 7.15, "calls": 42}
+    monkeypatch.setattr(funnel, "_dashboard_muse_usage", lambda _now: muse)
+    sample_t = 1_790_000_000_123
+    monkeypatch.setattr(
+        usage,
+        "read_claude_plan_weekly_sample",
+        lambda _now: {
+            "u": {"sd": 63.25, "fh": 12.5},
+            "t": sample_t,
+            "org": "private-org-id",
+        },
+    )
+
+    assert funnel.main(["brief"]) == 0
+    assert capsys.readouterr().out == expected + "\n"
+    snapshot = _spooled(spool)
+    assert snapshot["usage"] == {
+        "muse": muse,
+        "muse_panel": funnel._dashboard_muse_panel_usage(),
+        "claude": {"u": {"sd": 63.25}, "t": sample_t},
+    }
+    assert "private-org-id" not in next(spool.glob("*.json")).read_text()
 
 
 def test_spool_prune_failure_keeps_the_brief_and_the_snapshot(

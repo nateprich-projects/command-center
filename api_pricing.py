@@ -106,15 +106,32 @@ def _incomplete(reason: str, **details: object) -> Dict[str, object]:
     }
 
 
+def _missing_calls(coverage: Mapping[str, object]) -> Optional[int]:
+    """Count the calls a partial coverage made but did not observe."""
+    made = coverage.get("made_calls")
+    readable = coverage.get("readable_journals")
+    if (
+        isinstance(made, bool) or not isinstance(made, int)
+        or isinstance(readable, bool) or not isinstance(readable, int)
+        or readable < 0 or made < readable
+    ):
+        return None
+    return made - readable
+
+
 def price_run(
     run: Mapping[str, object],
     rate_rows: Sequence[Mapping[str, object]],
 ) -> Dict[str, object]:
     """Price all four token kinds at the rates live when the run started.
 
-    A run is priced only when every token count and every matching rate is
-    known. This prevents a partial count, an unpriced model, or a missing
-    timestamp from becoming an understated total.
+    A run is ``priced`` only when every token count, every recorded call and
+    every matching rate is known. A run whose call coverage is partial, or
+    whose token kinds are partly known, is valued at its observed tokens only
+    and reported ``partial`` with the missing calls or kinds listed (#2178):
+    the missing portion is neither extrapolated nor zero-filled, so the value
+    is what was observed, never the run's total. An unpriced model, a missing
+    timestamp or no observed token at all stays ``incomplete`` with no value.
     """
     validated = _validated_rows(list(rate_rows))
     for name in ("provider", "model"):
@@ -145,6 +162,17 @@ def price_run(
             "missing_token_usage",
             missing_token_kinds=list(session_usage.TOKEN_KINDS),
         )
+    coverage = run.get("token_usage_coverage")
+    partial_coverage = False
+    if coverage is not None:
+        # Only Muse runs carry call coverage; a fault never prices (#2178).
+        coverage_status = (
+            coverage.get("status") if isinstance(coverage, Mapping) else None
+        )
+        if coverage_status == "partial":
+            partial_coverage = True
+        elif coverage_status != "complete":
+            return _incomplete("token_usage_coverage_fault")
     counts: Dict[str, int] = {}
     missing_tokens = []
     for token_kind in session_usage.TOKEN_KINDS:
@@ -153,7 +181,7 @@ def price_run(
             missing_tokens.append(token_kind)
         else:
             counts[token_kind] = value
-    if missing_tokens:
+    if not counts:
         return _incomplete("missing_token_counts", missing_token_kinds=missing_tokens)
 
     effective_rates: Dict[str, Dict[str, object]] = {}
@@ -162,6 +190,9 @@ def price_run(
     provider_key = provider.casefold()
     model_key = model.casefold()
     for token_kind in session_usage.TOKEN_KINDS:
+        if token_kind not in counts:
+            # An unobserved kind is listed below, never priced as zero.
+            continue
         eligible = [
             (row, effective_from, rate)
             for row, effective_from, rate in validated
@@ -189,6 +220,25 @@ def price_run(
             missing_rate_token_kinds=missing_rates,
             effective_rates=effective_rates,
         )
+
+    if partial_coverage or missing_tokens:
+        partial: Dict[str, object] = {
+            "value": float(total),
+            "unit": "USD",
+            "basis": BASIS,
+            "status": "partial",
+            "reason": "observed_tokens_only",
+            "effective_rates": effective_rates,
+        }
+        if missing_tokens:
+            partial["missing_token_kinds"] = missing_tokens
+        if partial_coverage:
+            partial["missing_calls"] = _missing_calls(coverage)
+            reasons = coverage.get("reasons")
+            partial["missing_call_reasons"] = (
+                list(reasons) if isinstance(reasons, list) else []
+            )
+        return partial
 
     return {
         "value": float(total),

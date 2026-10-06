@@ -1,0 +1,166 @@
+[
+  {
+    "name": "quote-across-premises-headings-straight",
+    "source": "PR #2211 review: a straight quote opened in a Premises line and closed in a Decided by the agent line hid the headings between",
+    "body": "Fix the ledger.\n\n## Premises\n\n- Nate wrote \"ship it (label: inferred; evidence: thread)\n\nProposed class: Improve\n\n## Decided from precedent\n\nNone recorded.\n\n## Decided by the agent\n\n- Keep the \"fast path\" as is.\" (rejected: x; y)\n- Backfill the ledger table from the heartbeat branch. (rejected: Leave it empty; dashboards need it)\n",
+    "expected": [
+      {
+        "reason": "data-migration",
+        "line": "- Backfill the ledger table from the heartbeat branch. (rejected: Leave it empty; dashboards need it)"
+      }
+    ]
+  },
+  {
+    "name": "quote-across-premises-headings-curly",
+    "source": "PR #2211 review: the same with curly quotes",
+    "body": "Fix the ledger.\n\n## What it is\n\n- Tidy the ledger reader.\n\n## Premises\n\n- Nate called the ledger “the source of truth (label: inferred; evidence: thread)\n\nProposed class: Improve\n\n## Decided from precedent\n\nNone recorded.\n\n## Decided by the agent\n\n- Keep the ledger as” Nate described it. (rejected: x; y)\n- Backfill the ledger table from the heartbeat branch. (rejected: Leave it empty; dashboards need it)\n",
+    "expected": [
+      {
+        "reason": "data-migration",
+        "line": "- Backfill the ledger table from the heartbeat branch. (rejected: Leave it empty; dashboards need it)"
+      }
+    ]
+  },
+  {
+    "name": "quote-straddles-a-label-list",
+    "source": "#2180 rework: a stray quote in a Rejected item re-paired the quotes after the list",
+    "body": "## What it is\n\nRejected:\n- Keep the \"old path.\n\nThe 6\" pipe stays.\nWe will migrate the production database to the new schema.\nThe 8\" pipe and the \"spare\" stay.\n",
+    "expected": [
+      {
+        "reason": "data-migration",
+        "line": "We will migrate the production database to the new schema."
+      }
+    ]
+  },
+  {
+    "name": "quote-straddles-a-premises-section",
+    "source": "#2180 rework: a stray quote in a Premises line re-paired the quotes after the section",
+    "body": "## Premises\n\n- The 6\" pipe holds (label: measured; evidence: x)\n\n## What it is\n\nThe 8\" pipe stays.\nWe will migrate the production database to the new schema.\nThe \"spare\" and the 9\" stay.\n",
+    "expected": [
+      {
+        "reason": "data-migration",
+        "line": "We will migrate the production database to the new schema."
+      }
+    ]
+  },
+  {
+    "name": "nested-label-then-top-level-item",
+    "source": "PR #2211 review: an indented Rejected label nested in a parent item took the next top-level item",
+    "body": "## What it is\n\n- Ticket 1: tidy the reader.\n  Rejected:\n  - Rewrite it from scratch.\n- We will migrate the production database to the new schema.\n",
+    "expected": [
+      {
+        "reason": "data-migration",
+        "line": "- We will migrate the production database to the new schema."
+      }
+    ]
+  },
+  {
+    "name": "nested-label-then-blank-then-top-level-item",
+    "source": "PR #2211 review: the same across a blank line",
+    "body": "## What it is\n\n- Ticket 1: tidy the reader.\n  Rejected:\n  - Rewrite it from scratch.\n\n- We will migrate the production database to the new schema.\n",
+    "expected": [
+      {
+        "reason": "data-migration",
+        "line": "- We will migrate the production database to the new schema."
+      }
+    ]
+  },
+  {
+    "name": "label-list-then-other-bullet",
+    "source": "PR #2211 review: a * list after a blank line was taken as the Rejected list",
+    "body": "## What it is\n\nRejected:\n- Alt A.\n\n* We will migrate the production database to the new schema.\n",
+    "expected": [
+      {
+        "reason": "data-migration",
+        "line": "* We will migrate the production database to the new schema."
+      }
+    ]
+  },
+  {
+    "name": "label-numbered-list-then-bullets",
+    "source": "PR #2211 review: a bulleted list after a numbered Rejected list",
+    "body": "## What it is\n\nRejected:\n1. Alt A.\n\n- We will migrate the production database to the new schema.\n",
+    "expected": [
+      {
+        "reason": "data-migration",
+        "line": "- We will migrate the production database to the new schema."
+      }
+    ]
+  },
+  {
+    "name": "label-list-then-one-space-paragraph",
+    "source": "PR #2211 review: a one-space-indented paragraph after the Rejected list",
+    "body": "## What it is\n\nRejected:\n- Alt A.\n\n We will migrate the production database to the new schema.\n",
+    "expected": [
+      {
+        "reason": "data-migration",
+        "line": "We will migrate the production database to the new schema."
+      }
+    ]
+  },
+  {
+    "name": "label-list-then-indented-paragraph",
+    "source": "PR #2211 review: an indented paragraph after a blank line ends the Rejected list",
+    "body": "## What it is\n\nRejected:\n- Alt A.\n\n  We will migrate the production database to the new schema.\n",
+    "expected": [
+      {
+        "reason": "data-migration",
+        "line": "We will migrate the production database to the new schema."
+      }
+    ]
+  },
+  {
+    "name": "setext-heading-after-premises",
+    "source": "PR #2211 review: a setext heading after Premises",
+    "body": "Intro.\n\n## Premises\n\n- claim (label: measured; evidence: x)\n\nWhat it is\n----------\n\n- We will migrate the production database to the new schema.\n",
+    "expected": [
+      {
+        "reason": "data-migration",
+        "line": "- We will migrate the production database to the new schema."
+      }
+    ]
+  },
+  {
+    "name": "line-separator-before-premises",
+    "source": "PR #2211 review: U+2028 is a line break to Python and not to Markdown",
+    "body": "Intro\u2028## Premises\u2028We will migrate the production database to the new schema.\n",
+    "expected": [
+      {
+        "reason": "data-migration",
+        "line": "We will migrate the production database to the new schema."
+      }
+    ]
+  },
+  {
+    "name": "premises-and-approach-heading",
+    "source": "PR #2211 review M12: a heading that only starts with Premises is not the section",
+    "body": "## Premises and approach\n\n- We will migrate the production database to the new schema.\n",
+    "expected": [
+      {
+        "reason": "data-migration",
+        "line": "- We will migrate the production database to the new schema."
+      }
+    ]
+  },
+  {
+    "name": "one-line-rejected-and-the-list-after-it",
+    "source": "PR #2211 review M13: Rejected with text on its line is not a label",
+    "body": "## What it is\n\nRejected: run the backfill against the live ledger.\n- Broaden the deploy role's permissions.\n",
+    "expected": [
+      {
+        "reason": "authorisation",
+        "line": "- Broaden the deploy role's permissions."
+      },
+      {
+        "reason": "data-migration",
+        "line": "Rejected: run the backfill against the live ledger."
+      }
+    ]
+  },
+  {
+    "name": "risk-line-inside-premises",
+    "source": "PR #2211 review M7: a Risk line inside Premises declares nothing",
+    "body": "## Premises\n\n- c\n\nRisk: escalated — credentials\n",
+    "expected_declared": []
+  }
+]

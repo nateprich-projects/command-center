@@ -126,6 +126,21 @@ def test_a_refusal_records_the_reset_the_provider_named(tmp_path):
     assert hold_file.read_text().strip() == "2026-09-21T00:00:00Z"
 
 
+def _gh_without_a_heartbeat_file(tmp_path):
+    """PATH with a `gh` that answers as GitHub does for a missing file.
+
+    The quota record reads the paired total strictly (#2175): a GitHub that
+    cannot be read is "could not be read", and only a missing file is an
+    empty history, which leaves the spool as the whole record.
+    """
+    directory = tmp_path / "gh-not-found"
+    directory.mkdir()
+    gh = directory / "gh"
+    gh.write_text("#!/bin/sh\necho 'gh: Not Found (HTTP 404)' >&2\nexit 1\n")
+    gh.chmod(0o755)
+    return "{}{}{}".format(directory, os.pathsep, os.environ.get("PATH", ""))
+
+
 def test_weekly_lattice_hit_records_the_matching_paired_window_total(tmp_path):
     reset = _next_weekly_reset()
     stamp = reset.strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -137,7 +152,8 @@ def test_weekly_lattice_hit_records_the_matching_paired_window_total(tmp_path):
 
     proc, _ = _helper(
         tmp_path, "muse_quota_record {} quota-run".format(capture),
-        env={"COMMAND_CENTER_HEARTBEAT_SPOOL": str(spool)})
+        env={"COMMAND_CENTER_HEARTBEAT_SPOOL": str(spool),
+             "PATH": _gh_without_a_heartbeat_file(tmp_path)})
 
     assert proc.returncode == 0, proc.stderr
     [event] = _quota_events(spool)

@@ -69,6 +69,22 @@ def test_malformed_or_unassigned_judge_results_are_rejected(raw):
         parse_judge_answer(raw, ["first", "second"])
 
 
+def test_two_results_for_three_assigned_stay_unsure_not_approved():
+    requirements = ["Mac-pass test", "cloud refusal", "no new defect"]
+    raw = json.dumps({"requirements": [
+        {"requirement": item, "status": "met", "evidence": "diff line"}
+        for item in requirements[:2]
+    ]})
+    with pytest.raises(ReviewJudgeError, match="2 requirement result.*3 assigned"):
+        parse_judge_answer(raw, requirements)
+    answer = derive_judge_answer(
+        requirements, uncertain_judge_results(
+            requirements, "judge returned 2 requirement results for 3 assigned"))
+    assert answer["verdict"] == "rejected"
+    assert [row["status"] for row in answer["requirements"]] == [
+        "unsure", "unsure", "unsure"]
+
+
 def test_all_met_results_derive_approval_in_code():
     requirements = ["first", "second"]
     results = [

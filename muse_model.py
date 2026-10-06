@@ -30,7 +30,10 @@ CONTRIBUTOR_MODEL = "muse-spark-1.3-contributor"
 STANDARD_MODEL = "muse-spark-1.3"
 
 #: The repositories cleared for the contributor model, by bare name: repo
-#: tiers 1 and 3, never tier 2 (`funnel.REPO_TIERS`).
+#: tiers 1 and 3, never tier 2 (`funnel.REPO_TIERS`). #1987 retires the z.ai
+#: bridge without changing this canonical posture: the listed repos use
+#: ``CONTRIBUTOR_MODEL``; tier 2 and names outside this set use
+#: ``STANDARD_MODEL``.
 #:
 #: Nate, 2026-09-26 (#1570): "So tier 1 and tier 3, but not tier 2." z.ai's
 #: standard tier had used its week in about 46 hours, and Muse cannot carry
@@ -48,7 +51,9 @@ STANDARD_MODEL = "muse-spark-1.3"
 #: Membership is exact. A near-miss spelling is not a member, because the
 #: failure it would otherwise cause cannot be withdrawn.
 CONTRIBUTOR_REPOS = frozenset({
+    # Tier 1 (`funnel.REPO_TIERS`).
     "command-center", "github-runners", "workbench",
+    # Tier 3 (`funnel.HOBBY_TIER`).
     "Fantasy-GM", "The-League", "AFL",
 })
 

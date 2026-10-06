@@ -21,6 +21,7 @@ import shlex
 import stat
 import subprocess
 import sys
+import time
 import uuid
 
 import pytest
@@ -67,7 +68,7 @@ ANSWER = json.dumps({"done": True, "summary": "Did the thing.",
                      "departures": ["Did not do the other thing."]})
 
 FUNNEL_STUB = (
-    "import os, pathlib, sys\n"
+    "import os, pathlib, sys, time\n"
     "root = pathlib.Path(__file__).parent\n"
     "command = sys.argv[1] if len(sys.argv) > 1 else ''\n"
     "with (root / 'funnel.calls').open('a') as fh:\n"
@@ -78,7 +79,11 @@ FUNNEL_STUB = (
     "    (root / 'begin.session_id').write_text(os.environ.get('MUSE_SESSION_ID', ''))\n"
     "    print((root / 'begin.json').read_text(), end='')\n"
     "elif command == 'session-stop':\n"
-    "    pass\n"
+    "    started = os.environ.get('SESSION_STOP_STARTED')\n"
+    "    if started:\n"
+    "        pathlib.Path(started).write_text('started')\n"
+    "        release = pathlib.Path(os.environ['SESSION_STOP_RELEASE'])\n"
+    "        while not release.exists(): time.sleep(0.01)\n"
     "elif command == 'release':\n"
     "    pass\n"
     "else:\n"
@@ -103,13 +108,18 @@ PACKET_STUB = (
 )
 
 FINISH_STUB = (
-    "import os, pathlib, sys\n"
+    "import os, pathlib, sys, time\n"
     "root = pathlib.Path(__file__).parent\n"
     "with (root / 'finish.calls').open('a') as fh:\n"
     "    fh.write(os.getcwd() + ' :: ' + ' '.join(sys.argv[1:]) + '\\n')\n"
     "args = sys.argv[1:]\n"
     "answer = args[args.index('--answer-file') + 1]\n"
     "(root / 'finish.answer').write_text(pathlib.Path(answer).read_text())\n"
+    "block = os.environ.get('FINISH_BLOCK_MARKER')\n"
+    "if block:\n"
+    "    pathlib.Path(block).write_text('entered')\n"
+    "    release = pathlib.Path(os.environ['FINISH_RELEASE_MARKER'])\n"
+    "    while not release.exists(): time.sleep(0.01)\n"
     "if os.environ.get('FINISH_STATUS', '0') != '0':\n"
     "    sys.stderr.write(os.environ.get('FINISH_ERROR', 'finish failed'))\n"
     "    raise SystemExit(1)\n"
@@ -141,6 +151,9 @@ MUSE_STUB = (
     "done\n"
     "test -n \"$workspace\" && test -s \"$prompt_file\"\n"
     "cp \"$prompt_file\" \"$MUSE_PROMPT.$n\"\n"
+    "if [[ -n \"${MUSE_WAIT_FOR_FILE:-}\" ]]; then\n"
+    "  while [[ ! -e \"$MUSE_WAIT_FOR_FILE\" ]]; do /bin/sleep 0.01; done\n"
+    "fi\n"
     "if [[ -n \"${MUSE_SLEEP:-}\" ]]; then exec sleep \"$MUSE_SLEEP\"; fi\n"
     "git -C \"$workspace\" branch --show-current > \"$MUSE_BRANCH.$n\"\n"
     "git -C \"$workspace\" rev-parse --abbrev-ref '@{u}' > \"$MUSE_UPSTREAM.$n\" "
@@ -212,7 +225,7 @@ def _seed_remote(base, *, ticket_branch=False):
 def _stubbed_runner(tmp_path, begin, *, packet=None, bound_seconds=20,
                     gh_status=0, muse_body=None, gh_body=None,
                     routine_body=None, ticket_branch=False, extra_env=None,
-                    muse_model_body=None):
+                    muse_model_body=None, wait=True):
     """Run the implementer against stub funnel/heartbeat/packet/finish/gh/muse.
 
     The fixture remote is real git, so the runner's fetch, branch inspection,
@@ -269,14 +282,25 @@ def _stubbed_runner(tmp_path, begin, *, packet=None, bound_seconds=20,
     )
     if extra_env:
         env.update(extra_env)
-    proc = subprocess.run(
-        ["/bin/bash", str(SCRIPT), "escalated", "max"],
-        env=env,
-        stdin=subprocess.DEVNULL,
-        capture_output=True,
-        text=True,
-        timeout=bound_seconds + 25,
-    )
+    command = ["/bin/bash", str(SCRIPT), "escalated", "max"]
+    if wait:
+        proc = subprocess.run(
+            command,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=bound_seconds + 25,
+        )
+    else:
+        proc = subprocess.Popen(
+            command,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
     return proc, repo
 
 
@@ -648,6 +672,196 @@ def test_the_wall_clock_bound_kills_the_process_group_and_finishes_errored(
     )
     assert "release example/widgets#42" in (repo / "funnel.calls").read_text()
     assert not list((tmp_path / "workspaces").iterdir())
+
+
+@pytest.mark.parametrize(
+    ("script", "indent", "parent_trap"),
+    (
+        ("scripts/muse-implement", "  ", "trap cleanup EXIT"),
+        ("scripts/muse-review-engine", "    ", "trap cleanup EXIT"),
+    ),
+)
+def test_bound_watcher_disarms_exit_before_starting_its_timer(
+        script, indent, parent_trap):
+    source = (ROOT / script).read_text()
+
+    assert parent_trap in source
+    assert "(\n{}trap - EXIT\n{}sleep \"$BOUND_SECONDS\" &".format(
+        indent, indent) in source
+    cleanup_start = source.index("cleanup() {")
+    cleanup_body = source[cleanup_start + len("cleanup() {"):]
+    first_statement = next(
+        line.strip() for line in cleanup_body.splitlines() if line.strip()
+    )
+    assert first_statement == '[[ "${BASHPID:-$$}" == "$$" ]] || return 0'
+
+
+def test_inherited_cleanup_in_watcher_subshell_leaves_parent_artifacts(
+        tmp_path):
+    source = (ROOT / "scripts/muse-implement").read_text()
+    cleanup_start = source.index("cleanup() {")
+    cleanup_end = source.index("\n}", cleanup_start) + 2
+    cleanup = source[cleanup_start:cleanup_end]
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "funnel.py").write_text(
+        "import os, pathlib, sys\n"
+        "if sys.argv[1:] == ['session-stop']:\n"
+        "    with pathlib.Path(os.environ['SESSION_STOP_LOG']).open('a') as f:\n"
+        "        f.write('session-stop\\n')\n"
+    )
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    packet = tmp_path / "packet"
+    prompt = tmp_path / "prompt"
+    diag = tmp_path / "diag"
+    stderr = tmp_path / "stderr"
+    answer = tmp_path / "answer"
+    for path in (packet, prompt, diag, stderr, answer):
+        path.write_text("")
+    session_stop_log = tmp_path / "session-stop.log"
+
+    shell = "\n".join((
+        "set -e",
+        cleanup,
+        "REPO={}".format(shlex.quote(str(repo))),
+        "MUSE_STDERR_FILE={}".format(shlex.quote(str(stderr))),
+        "PACKET_FILE={}".format(shlex.quote(str(packet))),
+        "PROMPT_FILE={}".format(shlex.quote(str(prompt))),
+        "DIAG_FILE={}".format(shlex.quote(str(diag))),
+        "ANSWER_HANDOFF={}".format(shlex.quote(str(answer))),
+        "WORKSPACE={}".format(shlex.quote(str(workspace))),
+        "(",
+        r'    if [[ -z "${BASHPID:-}" ]]; then BASHPID=watcher; fi',
+        "    cleanup",
+        ")",
+        '[[ ! -e "$SESSION_STOP_LOG" ]]',
+        '[[ -d "$WORKSPACE" ]]',
+        '[[ -f "$PACKET_FILE" && -f "$PROMPT_FILE" ',
+        '   && -f "$DIAG_FILE" && -f "$ANSWER_HANDOFF" ]]',
+        "cleanup",
+    ))
+    env = os.environ.copy()
+    env["SESSION_STOP_LOG"] = str(session_stop_log)
+    proc = subprocess.run(
+        ["/bin/bash", "-c", shell],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert proc.returncode == 0, proc.stderr or proc.stdout
+    assert session_stop_log.read_text().splitlines() == ["session-stop"]
+    assert not workspace.exists()
+    assert not any(
+        path.exists() for path in (packet, prompt, diag, stderr, answer)
+    )
+
+
+def test_watcher_killed_after_fake_job_exit_does_not_run_parent_cleanup(
+        tmp_path):
+    """Exercise the real watcher/cleanup blocks across the fork/first-line race.
+
+    The immediate fake-job exit makes the parent kill each watcher as soon as
+    it starts. Bash 5.2 can run the inherited EXIT trap before the watcher's
+    first statement under load; the cleanup owner guard must keep that from
+    touching the live parent's artifacts.
+    """
+    source = (ROOT / "scripts/muse-implement").read_text()
+    cleanup_start = source.index("cleanup() {")
+    cleanup_end = source.index("\n}", cleanup_start) + 2
+    cleanup = source[cleanup_start:cleanup_end]
+    watcher_start = source.index(
+        '\n(\n  trap - EXIT\n  sleep "$BOUND_SECONDS" &',
+        source.index('killed_marker='),
+    )
+    watcher_end = source.index("\n) &", watcher_start) + len("\n) &")
+    watcher = source[watcher_start + 1:watcher_end]
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    session_stop_log = tmp_path / "session-stop.log"
+    (repo / "funnel.py").write_text(
+        "import os, pathlib, sys\n"
+        "if sys.argv[1:] == ['session-stop']:\n"
+        "    with pathlib.Path(os.environ['SESSION_STOP_LOG']).open('a') as f:\n"
+        "        f.write('session-stop\\n')\n"
+    )
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    packet = tmp_path / "packet"
+    prompt = tmp_path / "prompt"
+    diag = tmp_path / "diag"
+    stderr_file = tmp_path / "stderr"
+    answer = tmp_path / "answer"
+    for path in (packet, prompt, diag, stderr_file, answer):
+        path.write_text("")
+
+    shell = "\n".join((
+        "set -u",
+        cleanup,
+        "REPO={}".format(shlex.quote(str(repo))),
+        "MUSE_STDERR_FILE={}".format(shlex.quote(str(stderr_file))),
+        "PACKET_FILE={}".format(shlex.quote(str(packet))),
+        "PROMPT_FILE={}".format(shlex.quote(str(prompt))),
+        "DIAG_FILE={}".format(shlex.quote(str(diag))),
+        "ANSWER_HANDOFF={}".format(shlex.quote(str(answer))),
+        "WORKSPACE={}".format(shlex.quote(str(workspace))),
+        "BOUND_SECONDS=30",
+        "TIER=standard",
+        "BEGIN_RUN=test-run",
+        "killed_marker={}".format(shlex.quote(str(tmp_path / "killed"))),
+        "release_ticket() { :; }",
+        "trap cleanup EXIT",
+        "for iteration in {1..60}; do",
+        "  sleep 0 &",
+        "  muse_pid=$!",
+        watcher,
+        "  bound_pid=$!",
+        '  wait "$muse_pid"',
+        '  kill "$bound_pid" 2>/dev/null || true',
+        '  wait "$bound_pid" 2>/dev/null || true',
+        '  if [[ -e "$SESSION_STOP_LOG" || ! -d "$WORKSPACE" ]]; then',
+        '    echo "watcher ran parent cleanup in iteration $iteration" >&2',
+        "    exit 1",
+        "  fi",
+        "done",
+    ))
+    env = dict(os.environ, SESSION_STOP_LOG=str(session_stop_log))
+    stdout_path = tmp_path / "watcher.stdout"
+    stderr_path = tmp_path / "watcher.stderr"
+
+    loaders = [
+        subprocess.Popen(
+            [sys.executable, "-c", "while True: pass"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        for _ in range(3)
+    ]
+    try:
+        with stdout_path.open("w") as stdout, stderr_path.open("w") as stderr:
+            proc = subprocess.run(
+                ["/bin/bash", "-c", shell],
+                env=env,
+                stdout=stdout,
+                stderr=stderr,
+                timeout=30,
+            )
+    finally:
+        for loader in loaders:
+            loader.terminate()
+        for loader in loaders:
+            loader.wait(timeout=5)
+
+    assert proc.returncode == 0, stderr_path.read_text() or stdout_path.read_text()
+    assert session_stop_log.read_text().splitlines() == ["session-stop"]
+    assert not workspace.exists()
+    assert not any(
+        path.exists() for path in (packet, prompt, diag, stderr_file, answer)
+    )
 
 
 def test_a_fresh_workspace_resolves_uid_and_pushes_over_ssh(tmp_path):

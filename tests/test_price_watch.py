@@ -7,6 +7,9 @@ import json
 import pathlib
 import sys
 from datetime import datetime, timezone
+from decimal import Decimal
+
+import pytest
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -15,6 +18,8 @@ import price_watch  # noqa: E402
 
 
 FIXTURE = ROOT / "tests" / "fixtures" / "price_watch.json"
+META_CAPTURE = ROOT / "tests" / "fixtures" / "meta_pricing_page.html"
+META_PRICE_URL = "https://dev.meta.ai/docs/pricing-rate-limits"
 NOW = datetime(2026, 7, 31, 0, 0, tzinfo=timezone.utc)
 
 
@@ -93,6 +98,53 @@ def test_anthropic_capture_uses_default_five_minute_cache_write_price(tmp_path):
 
     assert result.clean
     assert path.read_bytes() == before
+
+
+def test_meta_current_public_rate_page_parses_rates_for_each_tier():
+    response = {
+        "source_url": META_PRICE_URL,
+        "body": META_CAPTURE.read_text(),
+    }
+
+    catalog = price_watch._parse_catalog(
+        "meta",
+        response,
+        ("muse-spark-1.3", "muse-spark-1.3-contributor"),
+    )
+
+    assert {
+        model: catalog[model]["rates"]
+        for model in ("muse-spark-1.3", "muse-spark-1.3-contributor")
+    } == {
+        "muse-spark-1.3": {
+            "fresh_input_tokens": Decimal("1.25"),
+            "cache_read_input_tokens": Decimal("0.15"),
+            "cache_write_input_tokens": Decimal("1.25"),
+            "output_tokens": Decimal("4.25"),
+        },
+        "muse-spark-1.3-contributor": {
+            "fresh_input_tokens": Decimal("0.10"),
+            "cache_read_input_tokens": Decimal("0.002"),
+            "cache_write_input_tokens": Decimal("0.10"),
+            "output_tokens": Decimal("0.20"),
+        },
+    }
+
+
+def test_meta_pricing_page_with_a_missing_rate_cannot_be_checked():
+    response = {
+        "source_url": META_PRICE_URL,
+        "body": (
+            "<h3>Standard tier</h3>"
+            "<p>Models: <code>muse-spark-1.3</code></p>"
+            "<table><tr><th>Usage</th><th>Price per 1M tokens</th></tr>"
+            "<tr><td>Cached input</td><td>$0.15</td></tr>"
+            "<tr><td>Output</td><td>$4.25</td></tr></table>"
+        ),
+    }
+
+    with pytest.raises(price_watch.CouldNotCheck, match="table is incomplete"):
+        price_watch._parse_catalog("meta", response, ("muse-spark-1.3",))
 
 
 def test_missing_effective_time_keeps_a_changed_rate_unknown(tmp_path):

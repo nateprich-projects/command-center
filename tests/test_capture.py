@@ -301,6 +301,30 @@ def test_capture_always_labels_the_issue_and_reports_it(monkeypatch, capsys):
     )
 
 
+def test_capture_can_return_the_created_url_without_printing(monkeypatch, capsys):
+    url = "https://github.com/owner/repo/issues/123"
+
+    def run(args, capture_output, text=True):
+        if args[1:3] == ["issue", "create"]:
+            return SimpleNamespace(returncode=0, stdout=url + "\n", stderr="")
+        if args[1:3] == ["project", "item-add"]:
+            return SimpleNamespace(
+                returncode=0, stdout=json.dumps({"id": "project-item-123"}),
+                stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(funnel.subprocess, "run", run)
+    monkeypatch.setattr(funnel, "_option_id", lambda field_id, name: name)
+    monkeypatch.setattr(funnel, "gh_graphql", lambda *args, **kwargs: {})
+    urls = []
+    assert funnel.cmd_capture(
+        [], NOW, "An Improve plan", "Hotspot: engine/x.py:run",
+        "owner/repo", origin="agent", klass="Improve",
+        created_urls=urls, quiet=True) == 0
+    assert urls == [url]
+    assert capsys.readouterr().out == ""
+
+
 def test_agent_capture_sets_class_after_project_add(monkeypatch):
     calls = []
 

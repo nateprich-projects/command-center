@@ -8,6 +8,7 @@ None so the default packet passes every row.
 
 from __future__ import annotations
 
+import gzip
 import json
 import pathlib
 import sys
@@ -58,6 +59,7 @@ def pr_view(**kw):
         "mergedAt": None,
         "closedAt": None,
         "mergeable": "MERGEABLE",
+        "mergeStateStatus": "CLEAN",
         "statusCheckRollup": [
             {"name": "tests", "conclusion": "SUCCESS", "status": "COMPLETED"},
         ],
@@ -133,6 +135,7 @@ def packet(**kw):
 def test_pr_open_row_rejects_a_merged_pr_with_its_merge_time():
     view = pr_view(state="CLOSED", mergedAt=MERGED_AT, closedAt=MERGED_AT)
     found = packet(pr_view=view, verdict=None)
+    assert found["standing"] == {"state": "closed", "reason": "PR is CLOSED"}
     assert found["merged_at"] == MERGED_AT
     assert found["precheck"]["reasons"] == [
         "pr_not_open state=CLOSED merged_at={}".format(MERGED_AT)]
@@ -141,6 +144,7 @@ def test_pr_open_row_rejects_a_merged_pr_with_its_merge_time():
 def test_pr_open_row_rejects_a_closed_unmerged_pr_with_its_close_time():
     view = pr_view(state="CLOSED", closedAt=CLOSED_AT)
     found = packet(pr_view=view, verdict=None)
+    assert found["standing"] == {"state": "closed", "reason": "PR is CLOSED"}
     assert found["precheck"]["reasons"] == [
         "pr_not_open state=CLOSED closed_at={}".format(CLOSED_AT)]
 
@@ -184,12 +188,15 @@ def test_ci_row_fails_a_red_rollup_and_names_the_check():
     assert reasons == ["ci: CI not green (state red): lint"]
 
 
-def test_ci_row_fails_while_a_check_is_still_running():
+def test_ci_row_waits_while_a_check_is_still_running():
     view = pr_view(statusCheckRollup=[
         {"name": "slow", "conclusion": None, "status": "IN_PROGRESS"},
     ])
-    reasons = packet(pr_view=view)["precheck"]["reasons"]
-    assert reasons == ["ci: CI not green (state unknown)"]
+
+    found = packet(pr_view=view)
+
+    assert found["precheck"] == {"pass": True, "reasons": []}
+    assert found["standing"]["state"] == "wait"
 
 
 def test_ci_row_passes_a_green_rollup():
@@ -200,6 +207,10 @@ def test_ci_row_passes_a_green_rollup():
 
 def test_verdict_row_fails_when_a_verdict_covers_this_head():
     found = packet(verdict=verdict())
+    assert found["standing"] == {
+        "state": "covered",
+        "reason": "a verdict already covers head {}".format(SHA[:12]),
+    }
     assert found["precheck"]["reasons"] == [
         "verdict: a verdict already covers head {}".format(SHA[:12])]
 
@@ -387,13 +398,27 @@ def test_merged_row_passes_with_no_overlap_and_requests_no_rerun():
     assert found["ci_rerun"] is None
 
 
-def test_merged_row_rejects_when_mergeability_is_unknown():
+def test_merged_row_waits_when_mergeability_is_unknown():
     view = pr_view(mergeable="UNKNOWN")
     rows = [merged(5, NEWER, "funnel.py")]
     found = packet(pr_view=view, merged_prs=rows, ci_runs=[ci_run(COVERING)])
-    assert len(found["precheck"]["reasons"]) == 1
-    assert found["precheck"]["reasons"][0].startswith("merged-overlap:")
-    assert found["ci_rerun"] is None
+
+    assert found["precheck"] == {"pass": True, "reasons": []}
+    assert found["standing"]["state"] == "wait"
+
+
+def test_merged_row_still_blocks_an_explicit_dirty_conflict():
+    view = pr_view(mergeable="UNKNOWN", mergeStateStatus="DIRTY")
+    rows = [merged(5, NEWER, "funnel.py")]
+    found = packet(pr_view=view, merged_prs=rows, ci_runs=[ci_run(COVERING)])
+
+    assert found["standing"] == {
+        "state": "conflict",
+        "reason": "branch 'ticket/9' is conflicting with the base — "
+                  "an engineer rebase is required",
+    }
+    assert found["precheck"]["reasons"] == [
+        "merged-overlap: PR #5 merged at {} touches funnel.py".format(NEWER)]
 
 
 def test_merged_row_waits_when_a_newer_attempt_is_already_in_flight():
@@ -612,6 +637,8 @@ def test_repo_row_fails_without_a_ticket():
 
 TOO_LARGE = "diff too large to review: deliver the ticket in smaller slices"
 DIFF_HEAD = "diff --git a/big.py b/big.py\n"
+DIFF_CAP_EXEMPT_PATH = "dashboard/fixtures/execution_metrics.json"
+DIFF_CAP_BACKTEST = ROOT / "tests" / "fixtures" / "diff_cap_backtest_20261001.json"
 
 
 def diff_of(size, fill="+"):
@@ -625,6 +652,177 @@ def files_diff(text, *omitted):
     diff.omitted_patches = len(omitted)
     diff.omitted_paths = list(omitted)
     return diff
+
+
+def diff_section(path, size):
+    """A synthetic Git diff section with an exact UTF-8 byte length."""
+    header = "diff --git a/{0} b/{0}\n".format(path)
+    header_bytes = len(header.encode("utf-8"))
+    assert size >= header_bytes + 1
+    return header + "+" * (size - header_bytes - 1) + "\n"
+
+
+PR2261_REPRODUCTION = ROOT / "tests" / "fixtures" / "pr_2261_reproduction.json"
+PR2261_NON_FROZEN_DIFF = (
+    ROOT / "tests" / "fixtures" / "pr_2261_non_frozen_sections.diff.gz")
+
+
+def pr_2261_reproduction_diff():
+    """Rebuild PR #2261's measured sections without checking in its 2 MB diff."""
+    source = json.loads(PR2261_REPRODUCTION.read_text(encoding="utf-8"))
+    diff = gzip.decompress(PR2261_NON_FROZEN_DIFF.read_bytes()).decode("utf-8")
+    for row in source["frozen_packets"]:
+        diff += diff_section(row["path"], row["section_bytes"])
+    assert len(diff.encode("utf-8")) == source["diff_bytes"]
+    return source, diff
+
+
+def test_diff_row_accepts_pr_2261_frozen_v2_reproduction():
+    source, diff = pr_2261_reproduction_diff()
+
+    assert source["head_sha"].startswith("7f1989b8")
+    assert len(diff.encode("utf-8")) > review.DIFF_LIMIT_BYTES
+    assert review._diff_bytes_for_cap(diff) == source["non_frozen_bytes"]
+    assert review.precheck_diff({"diff": diff}) == []
+
+
+def test_judges_get_bounded_v2_stubs_without_widening_the_exact_paths():
+    source, diff = pr_2261_reproduction_diff()
+    manifest = {
+        "version": "v2",
+        "packets": {
+            pathlib.Path(row["path"]).stem: {"sha256": row["sha256"]}
+            for row in source["frozen_packets"]
+        },
+    }
+    outside = {
+        "data/review_packets/v2/bad_10.json": diff_section(
+            "data/review_packets/v2/bad_10.json", 300),
+        "data/review_packets/v3/bad_01.json": diff_section(
+            "data/review_packets/v3/bad_01.json", 300),
+        "data/review_packets/v1/must_approve.json": diff_section(
+            "data/review_packets/v1/must_approve.json", 300),
+        "data/review_packets/v1/must_reject.json": diff_section(
+            "data/review_packets/v1/must_reject.json", 300),
+        DIFF_CAP_EXEMPT_PATH: diff_section(DIFF_CAP_EXEMPT_PATH, 300),
+    }
+    malformed = (
+        "diff --git a/data/review_packets/v2/bad_10.json\n"
+        "+malformed header section stays visible\n")
+    diff += "".join(outside.values()) + malformed
+    found = packet(diff=diff, review_packet_manifest=manifest)
+
+    counted_outside = sum(
+        len(section.encode("utf-8")) for path, section in outside.items()
+        if path != DIFF_CAP_EXEMPT_PATH) + len(malformed.encode("utf-8"))
+    assert review._diff_bytes_for_cap(diff) == (
+        source["non_frozen_bytes"] + counted_outside)
+    assert found["precheck"] == {"pass": True, "reasons": []}
+    judged = found["diff"]
+    assert len(judged.encode("utf-8")) < review.DIFF_LIMIT_BYTES
+
+    for row in source["frozen_packets"]:
+        lines = [line for line in judged.splitlines()
+                 if row["path"] in line]
+        assert judged.count(row["path"]) == 1
+        assert len(lines) == 1
+        assert lines[0].startswith("FROZEN PACKET: " + row["path"])
+        assert "added_bytes={}".format(row["section_bytes"]) in lines[0]
+        assert "sha256={}".format(row["sha256"]) in lines[0]
+
+    for path, section in outside.items():
+        assert section in judged
+    assert malformed in judged
+    original = gzip.decompress(
+        PR2261_NON_FROZEN_DIFF.read_bytes()).decode("utf-8")
+    for path in (
+            "data/review_packets/CHANGELOG.md",
+            "data/review_packets/v2/manifest.json",
+            "engine/review_packets.py",
+            "tests/test_engine_review_packets.py"):
+        section = next(
+            "diff --git " + part
+            for part in original.split("diff --git ")[1:]
+            if part.startswith("a/{0} b/{0}\n".format(path)))
+        assert section in judged
+
+    missing = {"version": "v2", "packets": dict(manifest["packets"])}
+    missing["packets"].pop("good_09")
+    not_listed = packet(diff=diff, review_packet_manifest=missing)["diff"]
+    good_09 = next(row for row in source["frozen_packets"]
+                   if row["path"].endswith("good_09.json"))
+    stub = next(line for line in not_listed.splitlines()
+                if good_09["path"] in line)
+    assert "added_bytes={}".format(good_09["section_bytes"]) in stub
+    assert "sha256=not in manifest" in stub
+
+
+@pytest.mark.parametrize(
+    ("pr_number", "fixture_bytes", "reviewable_bytes", "total_bytes"),
+    [
+        # Captured from GitHub `gh pr diff` section bytes on 2026-10-01.
+        (1543, 820310, 19937, 840247),
+        (1544, 244128, 60492, 304620),
+        (1556, 184101, 27627, 211728),
+    ],
+)
+def test_diff_row_passes_fixture_heavy_pr_reproductions(
+        pr_number, fixture_bytes, reviewable_bytes, total_bytes):
+    diff = (diff_section(DIFF_CAP_EXEMPT_PATH, fixture_bytes)
+            + diff_section("dashboard/reviewable.js", reviewable_bytes))
+
+    assert len(diff.encode("utf-8")) == total_bytes
+    assert fixture_bytes + reviewable_bytes == total_bytes
+    assert total_bytes > review.DIFF_LIMIT_BYTES
+    assert review.precheck_diff({"diff": diff}) == []
+
+
+@pytest.mark.parametrize(
+    ("reviewable_bytes", "expected"),
+    [(153600, []), (153601, [TOO_LARGE])],
+)
+def test_diff_row_counts_only_reviewable_bytes_in_a_mixed_diff(
+        reviewable_bytes, expected):
+    diff = (diff_section(DIFF_CAP_EXEMPT_PATH, 200000)
+            + diff_section("dashboard/reviewable.js", reviewable_bytes))
+
+    assert review.precheck_diff({"diff": diff}) == expected
+
+
+def test_diff_row_keeps_other_fixture_paths_in_the_count():
+    diff = diff_section("dashboard/fixtures/other.json", 200000)
+    assert review.precheck_diff({"diff": diff}) == [TOO_LARGE]
+
+
+def test_diff_row_replays_last_589_merged_prs_from_github():
+    backtest = json.loads(DIFF_CAP_BACKTEST.read_text(encoding="utf-8"))
+    assert backtest["window"]["count"] == 589
+    assert len(backtest["prs"]) == 589
+    expected_changed = [1543, 1544, 1556, 1639]
+    assert backtest["changed_prs"] == expected_changed
+
+    changed = []
+    for row in backtest["prs"]:
+        total_bytes = row["total_bytes"]
+        fixture_bytes = row["fixture_bytes"]
+        if fixture_bytes:
+            diff = diff_section(DIFF_CAP_EXEMPT_PATH, fixture_bytes)
+            reviewable_bytes = total_bytes - fixture_bytes
+            if reviewable_bytes:
+                diff += diff_section("dashboard/reviewable.js",
+                                     reviewable_bytes)
+        else:
+            diff = diff_section("dashboard/reviewable.js", total_bytes)
+
+        before = total_bytes > backtest["cap_bytes"]
+        after = TOO_LARGE in review.precheck_diff({"diff": diff})
+        if before != after:
+            changed.append(row["number"])
+
+    assert sorted(changed) == expected_changed
+    assert all(
+        next(row for row in backtest["prs"] if row["number"] == number)
+        ["fixture_bytes"] > 0 for number in changed)
 
 
 def test_diff_row_rejects_a_diff_over_150_kb_and_passes_one_at_it():

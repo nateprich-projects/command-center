@@ -71,6 +71,17 @@ def test_override_parser_reads_only_its_exact_marker():
     assert funnel.parse_provenance(override("nate")) is None
 
 
+def test_origin_override_parser_does_not_read_an_untrusted_comment_row():
+    body = override("agents", "nate-direct")
+
+    assert funnel.parse_origin_override({
+        "author": {"login": "mallory"}, "body": body,
+    }) is None
+    assert funnel.parse_origin_override({
+        "author": {"login": "nateprich"}, "body": body,
+    }) == {"target": "agents"}
+
+
 @pytest.mark.parametrize("target", [None, "agent", "everyone"])
 def test_unknown_override_target_fails_closed(target):
     assert funnel.parse_origin_override(

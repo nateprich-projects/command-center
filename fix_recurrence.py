@@ -21,6 +21,7 @@ Everything is derived from git on each call; nothing is stored.
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import re
 import subprocess
@@ -37,7 +38,9 @@ PRIOR_FIX_BUDGET_SECONDS = 4 * 60
 
 #: The squash subject the merge gate writes: ``Title (#ticket) (#pr)``.
 TICKET_SUBJECT_RE = re.compile(r"\(#(\d+)\) \(#\d+\)\s*$")
-_HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+\d+(?:,\d+)? @@(.*)$")
+_HUNK_RE = re.compile(
+    r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$"
+)
 _FUNCTION_RE = re.compile(
     r"(?:^|\s)(?:async\s+)?(?:def|class|function)\s+([A-Za-z_]\w*)"
 )
@@ -115,8 +118,8 @@ def ticket_commits(repo: Path, since: datetime, until: datetime,
 
 def _hunks(repo: Path, sha: str, *, base: Optional[str] = None,
            timeout: Optional[float] = None
-           ) -> List[Tuple[str, int, int, Optional[str]]]:
-    """``(path, old_start, old_count, function)`` for each code hunk.
+           ) -> List[Tuple[str, int, int, int, int, Optional[str]]]:
+    """``(path, old_start, old_count, new_start, new_count, function)``.
 
     The diff flags pin the output format against user git config (external
     diff drivers, colour, ``diff.noprefix``). A ``---``/``+++`` line is a
@@ -148,11 +151,124 @@ def _hunks(repo: Path, sha: str, *, base: Optional[str] = None,
             in_header = False
         match = _HUNK_RE.match(line)
         if match and old_path and is_code_path(old_path):
-            count = int(match.group(2)) if match.group(2) is not None else 1
-            function = _FUNCTION_RE.search(match.group(3) or "")
-            hunks.append((old_path, int(match.group(1)), count,
+            old_count = int(match.group(2)) if match.group(2) is not None else 1
+            new_count = int(match.group(4)) if match.group(4) is not None else 1
+            function = _FUNCTION_RE.search(match.group(5) or "")
+            hunks.append((old_path, int(match.group(1)), old_count,
+                          int(match.group(3)), new_count,
                           function.group(1) if function else None))
     return hunks
+
+
+def _matching_brace(text: str, opening: int) -> Optional[int]:
+    """The matching closing brace, skipping comments and quoted strings."""
+    depth = 0
+    quote: Optional[str] = None
+    line_comment = block_comment = False
+    index = opening
+    while index < len(text):
+        char = text[index]
+        following = text[index:index + 2]
+        if line_comment:
+            if char == "\n":
+                line_comment = False
+        elif block_comment:
+            if following == "*/":
+                block_comment = False
+                index += 1
+        elif quote:
+            if char == "\\":
+                index += 1
+            elif char == quote:
+                quote = None
+        elif following == "//":
+            line_comment = True
+            index += 1
+        elif following == "/*":
+            block_comment = True
+            index += 1
+        elif char in ("'", '"', "`"):
+            quote = char
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return index
+        index += 1
+    return None
+
+
+def _function_body_spans(source: str, function: str) -> List[Tuple[int, int]]:
+    """Inclusive line spans for bodies named by a diff hunk header.
+
+    Python source is parsed with its AST. For brace-based ``function`` and
+    ``class`` declarations, match the surrounding block while ignoring quoted
+    text and comments. Unknown syntax has no provable body span and earns no
+    hotspot attribution.
+    """
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        tree = None
+    if tree is not None:
+        spans = []
+        for node in ast.walk(tree):
+            if (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                  ast.ClassDef))
+                    and node.name == function and node.body):
+                start = min(child.lineno for child in node.body)
+                end = max(getattr(child, "end_lineno", child.lineno)
+                          for child in node.body)
+                spans.append((start, end))
+        return spans
+
+    declaration = re.compile(
+        r"\b(?:async\s+)?(?:function|class)\s+{}\b".format(
+            re.escape(function)))
+    spans = []
+    for match in declaration.finditer(source):
+        opening = source.find("{", match.end())
+        if opening < 0:
+            continue
+        semicolon = source.find(";", match.end(), opening)
+        if semicolon >= 0:
+            continue
+        closing = _matching_brace(source, opening)
+        if closing is None:
+            continue
+        spans.append((source.count("\n", 0, opening) + 1,
+                      source.count("\n", 0, closing) + 1))
+    return spans
+
+
+def _hunk_touches_function(
+        repo: Path, path: str, function: str,
+        old_revision: str, old_start: int, old_count: int,
+        new_revision: str, new_start: int, new_count: int,
+        source_cache: Dict[Tuple[str, str], Optional[str]]) -> bool:
+    """Whether changed old or new lines fall inside the named function body."""
+    for revision, start, count in (
+            (old_revision, old_start, old_count),
+            (new_revision, new_start, new_count)):
+        if count <= 0:
+            continue
+        key = (revision, path)
+        if key not in source_cache:
+            try:
+                source_cache[key] = _git(
+                    repo, "show", "{}:{}".format(revision, path))
+            except RecurrenceError:
+                source_cache[key] = None
+        source = source_cache[key]
+        if source is None:
+            continue
+        last = start + count - 1
+        if any(start <= body_end and last >= body_start
+               for body_start, body_end in
+               _function_body_spans(source, function)):
+            return True
+    return False
 
 
 def _blame(repo: Path, sha: str, path: str,
@@ -205,16 +321,19 @@ def measure(repo: Path, fix_projects: Mapping[int, int], now: datetime,
     numerator = denominator = 0
     touched: Dict[Tuple[str, str], Set[int]] = {}
     examples: List[Dict[str, object]] = []
+    source_cache: Dict[Tuple[str, str], Optional[str]] = {}
     for sha, when, ticket in history:
         if when < now - window or ticket not in fix_projects:
             continue
         project = fix_projects[ticket]
         hunks = _hunks(repo, sha)
-        for path, _start, _count, function in hunks:
-            if function:
+        for path, old_start, old_count, new_start, new_count, function in hunks:
+            if (function and _hunk_touches_function(
+                    repo, path, function, sha + "^", old_start, old_count,
+                    sha, new_start, new_count, source_cache)):
                 touched.setdefault((path, function), set()).add(project)
         by_path: Dict[str, List[Tuple[int, int]]] = {}
-        for path, start, count, _function in hunks:
+        for path, start, count, _new_start, _new_count, _function in hunks:
             if count > 0:
                 by_path.setdefault(path, []).append((start, count))
         if not by_path:
@@ -329,7 +448,7 @@ def prior_fixes_touched(
         return []
 
     by_hunk: Dict[Tuple[str, Optional[str]], List[Tuple[int, int]]] = {}
-    for path, start, count, function in _hunks(
+    for path, start, count, _new_start, _new_count, function in _hunks(
             repo, head, base=base, timeout=remaining()):
         if count > 0:
             by_hunk.setdefault((path, function), []).append((start, count))

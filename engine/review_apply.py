@@ -260,11 +260,17 @@ def decide(answer: Dict[str, object]) -> Tuple[str, List[str], Optional[str]]:
         verdict = "rejected"
         blocking = blocking + [
             "requirement unmet: {} -- {}".format(
-                entry.get("requirement"), entry.get("evidence"))
+                review.neutralize_closing_reference_line(
+                    str(entry.get("requirement"))),
+                review.neutralize_closing_reference_line(
+                    str(entry.get("evidence"))))
             for entry in unmet]
         blocking = blocking + [
             "requirement unsure: {} -- {}".format(
-                entry.get("requirement"), entry.get("evidence"))
+                review.neutralize_closing_reference_line(
+                    str(entry.get("requirement"))),
+                review.neutralize_closing_reference_line(
+                    str(entry.get("evidence"))))
             for entry in req_unsure]
     return verdict, blocking, "; ".join(notes) or None
 
@@ -317,7 +323,7 @@ def _latest_review_comment(comments: object):
             continue
         verdict = funnel.parse_verdict(body)
         if verdict is not None:
-            return verdict, funnel.parse_provenance(body)
+            return verdict, funnel.parse_provenance(comment)
     return None
 
 

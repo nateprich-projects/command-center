@@ -77,6 +77,95 @@ for skill in "$REPO"/skills/*/; do
   link "${skill%/}" "$CLAUDE/skills/$(basename "$skill")"
 done
 
+# The broker is a private, versioned copy. The model user cannot traverse
+# ~/.claude, so it cannot replace the code that receives its socket requests.
+# The installed manifest detects local drift before the server binds a socket.
+BROKER_SOURCE="$REPO/credential_broker.py"
+BROKER_DIR="$CLAUDE/command-center-broker"
+if $DRY; then
+  say "would install and drift-check the credential broker and trusted Git proxy: $BROKER_DIR"
+else
+  python3 - "$BROKER_SOURCE" "$BROKER_DIR" <<'PY'
+import ast
+import hashlib
+import json
+import os
+import pathlib
+import tempfile
+import sys
+
+source = pathlib.Path(sys.argv[1])
+target = pathlib.Path(sys.argv[2])
+if source.is_symlink() or not source.is_file():
+    raise SystemExit("REFUSING: broker source is not a regular versioned file")
+text = source.read_text(encoding="utf-8")
+tree = ast.parse(text, filename=str(source))
+version = None
+for node in tree.body:
+    if isinstance(node, ast.Assign) and any(
+        isinstance(item, ast.Name) and item.id == "BROKER_VERSION"
+        for item in node.targets
+    ):
+        version = ast.literal_eval(node.value)
+        break
+if not isinstance(version, int) or version < 1:
+    raise SystemExit("REFUSING: broker has no positive version")
+if target.is_symlink() or (target.exists() and not target.is_dir()):
+    raise SystemExit("REFUSING: broker install path is not a real directory")
+target.mkdir(mode=0o700, parents=True, exist_ok=True)
+os.chmod(target, 0o700)
+destination = target / "credential_broker.py"
+manifest = target / "manifest.json"
+git_proxy = target / "git"
+if destination.is_symlink() or manifest.is_symlink():
+    raise SystemExit("REFUSING: broker install files cannot be symlinks")
+if git_proxy.exists() and not git_proxy.is_symlink():
+    raise SystemExit("REFUSING: trusted Git proxy path is not a symlink")
+if git_proxy.is_symlink() and git_proxy.readlink() != pathlib.Path("credential_broker.py"):
+    raise SystemExit("REFUSING: trusted Git proxy points outside the broker")
+digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+payload = json.dumps(
+    {"version": version, "sha256": digest}, sort_keys=True, indent=2
+) + "\n"
+
+def replace_file(path, data, mode):
+    fd, temporary = tempfile.mkstemp(prefix=".broker-install-", dir=str(target))
+    try:
+        os.fchmod(fd, mode)
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+
+replace_file(destination, text, 0o700)
+replace_file(manifest, payload, 0o600)
+if not git_proxy.is_symlink():
+    git_proxy.symlink_to("credential_broker.py")
+hooks = target / "hooks-empty"
+if hooks.is_symlink():
+    raise SystemExit("REFUSING: empty hooks path cannot be a symlink")
+hooks.mkdir(mode=0o700, exist_ok=True)
+if not hooks.is_dir() or any(hooks.iterdir()):
+    raise SystemExit("REFUSING: empty hooks path is not empty")
+os.chmod(hooks, 0o700)
+installed_hash = hashlib.sha256(destination.read_bytes()).hexdigest()
+installed_manifest = json.loads(manifest.read_text(encoding="utf-8"))
+if (
+    installed_hash != digest
+    or installed_manifest.get("version") != version
+    or installed_manifest.get("sha256") != installed_hash
+):
+    raise SystemExit("REFUSING: installed broker failed its drift check")
+print("  installed and drift-checked credential broker v{}".format(version))
+PY
+fi
+
 # launchd rejects symlinked plists, so keep copies of the schedules in the user
 # LaunchAgents directory. Re-running the installer refreshes the keeper and all
 # Muse schedule copies together.
@@ -88,6 +177,7 @@ done
 # claiming that the copied files are loaded.
 LAUNCH_AGENTS="$HOME/Library/LaunchAgents"
 LAUNCHD_PLISTS=(
+  com.nateprich.command-center-broker.plist
   com.nateprich.command-center-muse-review.plist
   com.nateprich.command-center-muse-review-standard.plist
   com.nateprich.command-center-run-keeper.plist
@@ -98,6 +188,7 @@ LAUNCHD_PLISTS=(
   com.nateprich.command-center-career-deploy.plist
   com.nateprich.command-center-outcomes-derive.plist
   com.nateprich.command-center-metrics-derive.plist
+  com.nateprich.command-center-nightly-watch.plist
 )
 for name in "${LAUNCHD_PLISTS[@]}"; do
   src="$REPO/launchd/$name"

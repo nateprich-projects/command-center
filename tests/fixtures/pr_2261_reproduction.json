@@ -1,0 +1,99 @@
+{
+  "source": "gh pr diff 2261 at head 7f1989b8044f6528308ada23088fa2311b3b3089; frozen section byte lengths are from this diff, sha256 values from data/review_packets/v2/manifest.json at that head",
+  "pr": 2261,
+  "head_sha": "7f1989b8044f6528308ada23088fa2311b3b3089",
+  "diff_bytes": 2149937,
+  "non_frozen_bytes": 22188,
+  "frozen_packets": [
+    {
+      "path": "data/review_packets/v2/bad_01.json",
+      "section_bytes": 122650,
+      "sha256": "d823c78e74db074b7ce1d241be8bbed05f6d385f3a56ace09c305ce5ecd14472"
+    },
+    {
+      "path": "data/review_packets/v2/bad_02.json",
+      "section_bytes": 116948,
+      "sha256": "4dd366211b3c312cdc92a28b937db5160ffbcf720b62f12f32b1cb2ba5449291"
+    },
+    {
+      "path": "data/review_packets/v2/bad_03.json",
+      "section_bytes": 137742,
+      "sha256": "f25eb38bedbffbf56f9fc3c70c4957691a7b6e3b1f8e4a924086f47935f73337"
+    },
+    {
+      "path": "data/review_packets/v2/bad_04.json",
+      "section_bytes": 95549,
+      "sha256": "a4893a750f11d73b4d1940ed262e17ed2bd42825531048512aff6d9bbbb6ddd7"
+    },
+    {
+      "path": "data/review_packets/v2/bad_05.json",
+      "section_bytes": 92948,
+      "sha256": "4714d534f3a8ded80d869eaf5ae7b206116192bb90534f7551f9034508b211a7"
+    },
+    {
+      "path": "data/review_packets/v2/bad_06.json",
+      "section_bytes": 108874,
+      "sha256": "6a743eab8113ff32a7515cc8180e5b3050ef01545181ad43d528b2e77cc3e97c"
+    },
+    {
+      "path": "data/review_packets/v2/bad_07.json",
+      "section_bytes": 135049,
+      "sha256": "4fbcf34be57305ab1fbb1fcdce824f140791f4e23a078b84ddb998f3f1587cad"
+    },
+    {
+      "path": "data/review_packets/v2/bad_08.json",
+      "section_bytes": 96916,
+      "sha256": "650b07207106bff8aae9eaaa87f313163b712af09e7138362ebc78efdf60baa4"
+    },
+    {
+      "path": "data/review_packets/v2/bad_09.json",
+      "section_bytes": 107661,
+      "sha256": "cec5fdcf3588e3cdfaf09e1b34c721c6162bf231d83d6e03950a99bc467a8057"
+    },
+    {
+      "path": "data/review_packets/v2/good_01.json",
+      "section_bytes": 88090,
+      "sha256": "ec056a4c382dcf3ebc4bdb71a3cb5afcb9ac0c7b9d499e04c176e5ebf3a628aa"
+    },
+    {
+      "path": "data/review_packets/v2/good_02.json",
+      "section_bytes": 93276,
+      "sha256": "c12992bf6ddb54672b256d1386a632c016991b0aaba57d87b62d3aa13e7b880d"
+    },
+    {
+      "path": "data/review_packets/v2/good_03.json",
+      "section_bytes": 133222,
+      "sha256": "cded7a92e3d13b231f74a200bfa7a5040b6cdba3b86e274fb4d92a4b6aadeb89"
+    },
+    {
+      "path": "data/review_packets/v2/good_04.json",
+      "section_bytes": 104798,
+      "sha256": "c5bdfa421cf85bb5583893c6575378591b97fd679667dea8e658f55cccd9e593"
+    },
+    {
+      "path": "data/review_packets/v2/good_05.json",
+      "section_bytes": 112078,
+      "sha256": "d28fd83f89e8367afa0909d512611748587ec1c2cb6f61577b3cf530165dcf33"
+    },
+    {
+      "path": "data/review_packets/v2/good_06.json",
+      "section_bytes": 144634,
+      "sha256": "01116e0b863286ab5a62a877f71e0ef5033ad2bc089ff336317c59f2569ea815"
+    },
+    {
+      "path": "data/review_packets/v2/good_07.json",
+      "section_bytes": 229007,
+      "sha256": "7881fed5e4a9e4d17259816c510d78f2ba3e02b52536c42fee95d41c9616e031"
+    },
+    {
+      "path": "data/review_packets/v2/good_08.json",
+      "section_bytes": 107092,
+      "sha256": "84e6aab7187afcbbb68801f84d8a50cf97c87bd4bc9a85d02e468b23b0d14376"
+    },
+    {
+      "path": "data/review_packets/v2/good_09.json",
+      "section_bytes": 101215,
+      "sha256": "a409a740661aa8b3edc843e7d80e7b8d02ad63c1396947c8cafc449fe8af53d6"
+    }
+  ]
+}

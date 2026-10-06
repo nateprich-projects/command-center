@@ -1,0 +1,3559 @@
+{
+  "source": "GitHub CLI gh pr list and gh pr diff captured for this test run",
+  "captured_at": "2026-10-01T09:55:44.234366+00:00",
+  "generated_path": "dashboard/fixtures/execution_metrics.json",
+  "cap_bytes": 153600,
+  "window": {
+    "count": 589,
+    "newest": {
+      "number": 2030,
+      "merged_at": "2026-10-01T09:20:31Z"
+    },
+    "oldest": {
+      "number": 469,
+      "merged_at": "2026-09-10T00:21:40Z"
+    }
+  },
+  "changed_prs": [
+    1543,
+    1544,
+    1556,
+    1639
+  ],
+  "prs": [
+    {
+      "number": 2030,
+      "merged_at": "2026-10-01T09:20:31Z",
+      "total_bytes": 348400,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 2059,
+      "merged_at": "2026-10-01T08:16:07Z",
+      "total_bytes": 37658,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 2070,
+      "merged_at": "2026-10-01T06:28:26Z",
+      "total_bytes": 9162,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 2071,
+      "merged_at": "2026-10-01T06:25:32Z",
+      "total_bytes": 5306,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 2042,
+      "merged_at": "2026-10-01T06:12:02Z",
+      "total_bytes": 18185,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 2060,
+      "merged_at": "2026-10-01T05:12:02Z",
+      "total_bytes": 9162,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 2056,
+      "merged_at": "2026-09-30T18:07:11Z",
+      "total_bytes": 9764,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 2046,
+      "merged_at": "2026-09-30T17:11:11Z",
+      "total_bytes": 52127,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 2055,
+      "merged_at": "2026-09-30T16:01:14Z",
+      "total_bytes": 2632,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 2054,
+      "merged_at": "2026-09-30T15:51:02Z",
+      "total_bytes": 919,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 2048,
+      "merged_at": "2026-09-30T15:21:32Z",
+      "total_bytes": 88252,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 2050,
+      "merged_at": "2026-09-30T15:03:30Z",
+      "total_bytes": 5217,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 2051,
+      "merged_at": "2026-09-30T13:56:21Z",
+      "total_bytes": 3511,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 2052,
+      "merged_at": "2026-09-30T13:16:13Z",
+      "total_bytes": 10729,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 2053,
+      "merged_at": "2026-09-30T12:56:41Z",
+      "total_bytes": 1268,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 2049,
+      "merged_at": "2026-09-30T12:22:16Z",
+      "total_bytes": 4962,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 2043,
+      "merged_at": "2026-09-30T11:08:40Z",
+      "total_bytes": 55406,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 2045,
+      "merged_at": "2026-09-30T10:56:24Z",
+      "total_bytes": 8382,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 2039,
+      "merged_at": "2026-09-30T10:21:03Z",
+      "total_bytes": 36891,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 2038,
+      "merged_at": "2026-09-30T09:47:59Z",
+      "total_bytes": 27231,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 2041,
+      "merged_at": "2026-09-30T09:24:55Z",
+      "total_bytes": 6442,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 2025,
+      "merged_at": "2026-09-30T08:41:05Z",
+      "total_bytes": 84353,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 2031,
+      "merged_at": "2026-09-30T08:06:08Z",
+      "total_bytes": 8750,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1779,
+      "merged_at": "2026-09-30T06:16:23Z",
+      "total_bytes": 66856,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1984,
+      "merged_at": "2026-09-30T06:13:30Z",
+      "total_bytes": 3242,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 2011,
+      "merged_at": "2026-09-30T03:53:04Z",
+      "total_bytes": 6217,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1989,
+      "merged_at": "2026-09-29T22:06:47Z",
+      "total_bytes": 15131,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1952,
+      "merged_at": "2026-09-29T21:18:21Z",
+      "total_bytes": 6358,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1971,
+      "merged_at": "2026-09-29T21:17:35Z",
+      "total_bytes": 19905,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1941,
+      "merged_at": "2026-09-29T20:42:06Z",
+      "total_bytes": 13765,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1960,
+      "merged_at": "2026-09-29T19:56:05Z",
+      "total_bytes": 26364,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1982,
+      "merged_at": "2026-09-29T19:37:35Z",
+      "total_bytes": 3561,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1978,
+      "merged_at": "2026-09-29T18:36:45Z",
+      "total_bytes": 15114,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1959,
+      "merged_at": "2026-09-29T18:13:12Z",
+      "total_bytes": 4604,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1979,
+      "merged_at": "2026-09-29T18:13:08Z",
+      "total_bytes": 2359,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1973,
+      "merged_at": "2026-09-29T17:48:04Z",
+      "total_bytes": 9402,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1948,
+      "merged_at": "2026-09-29T16:52:39Z",
+      "total_bytes": 12249,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1969,
+      "merged_at": "2026-09-29T16:22:51Z",
+      "total_bytes": 28558,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1958,
+      "merged_at": "2026-09-29T15:48:53Z",
+      "total_bytes": 20802,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1951,
+      "merged_at": "2026-09-29T15:01:17Z",
+      "total_bytes": 9110,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1954,
+      "merged_at": "2026-09-29T12:24:59Z",
+      "total_bytes": 9256,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1944,
+      "merged_at": "2026-09-29T12:00:54Z",
+      "total_bytes": 3634,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1940,
+      "merged_at": "2026-09-29T11:52:31Z",
+      "total_bytes": 2532,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1939,
+      "merged_at": "2026-09-29T09:22:24Z",
+      "total_bytes": 11282,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1791,
+      "merged_at": "2026-09-29T08:57:37Z",
+      "total_bytes": 38248,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1905,
+      "merged_at": "2026-09-29T08:04:19Z",
+      "total_bytes": 29941,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1881,
+      "merged_at": "2026-09-29T06:30:21Z",
+      "total_bytes": 20587,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1895,
+      "merged_at": "2026-09-29T06:21:03Z",
+      "total_bytes": 26214,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1873,
+      "merged_at": "2026-09-29T06:04:34Z",
+      "total_bytes": 15326,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1875,
+      "merged_at": "2026-09-29T06:01:11Z",
+      "total_bytes": 3597,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1640,
+      "merged_at": "2026-09-29T05:59:33Z",
+      "total_bytes": 22211,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1888,
+      "merged_at": "2026-09-29T05:16:10Z",
+      "total_bytes": 7461,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1882,
+      "merged_at": "2026-09-29T04:35:58Z",
+      "total_bytes": 52852,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1885,
+      "merged_at": "2026-09-29T04:10:08Z",
+      "total_bytes": 11836,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1879,
+      "merged_at": "2026-09-29T03:47:48Z",
+      "total_bytes": 27938,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1880,
+      "merged_at": "2026-09-29T03:05:57Z",
+      "total_bytes": 19338,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1870,
+      "merged_at": "2026-09-29T02:01:15Z",
+      "total_bytes": 21964,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1868,
+      "merged_at": "2026-09-29T01:31:53Z",
+      "total_bytes": 37187,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1867,
+      "merged_at": "2026-09-29T00:43:44Z",
+      "total_bytes": 17409,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1863,
+      "merged_at": "2026-09-29T00:01:50Z",
+      "total_bytes": 26684,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1860,
+      "merged_at": "2026-09-28T23:19:55Z",
+      "total_bytes": 31565,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1857,
+      "merged_at": "2026-09-28T23:15:10Z",
+      "total_bytes": 37532,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1859,
+      "merged_at": "2026-09-28T22:20:32Z",
+      "total_bytes": 10477,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1858,
+      "merged_at": "2026-09-28T22:00:15Z",
+      "total_bytes": 34163,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1780,
+      "merged_at": "2026-09-28T21:23:13Z",
+      "total_bytes": 18234,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1841,
+      "merged_at": "2026-09-28T19:41:10Z",
+      "total_bytes": 32150,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1844,
+      "merged_at": "2026-09-28T19:38:11Z",
+      "total_bytes": 8997,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1835,
+      "merged_at": "2026-09-28T18:50:40Z",
+      "total_bytes": 37659,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1822,
+      "merged_at": "2026-09-28T18:00:12Z",
+      "total_bytes": 319476,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1830,
+      "merged_at": "2026-09-28T17:55:30Z",
+      "total_bytes": 26488,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1829,
+      "merged_at": "2026-09-28T17:43:26Z",
+      "total_bytes": 37118,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1827,
+      "merged_at": "2026-09-28T17:28:08Z",
+      "total_bytes": 27209,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1826,
+      "merged_at": "2026-09-28T16:43:01Z",
+      "total_bytes": 9933,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1828,
+      "merged_at": "2026-09-28T16:36:56Z",
+      "total_bytes": 30159,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1824,
+      "merged_at": "2026-09-28T15:22:54Z",
+      "total_bytes": 39333,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1823,
+      "merged_at": "2026-09-28T15:16:12Z",
+      "total_bytes": 14275,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1821,
+      "merged_at": "2026-09-28T15:06:35Z",
+      "total_bytes": 90747,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1789,
+      "merged_at": "2026-09-28T15:04:09Z",
+      "total_bytes": 27880,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1778,
+      "merged_at": "2026-09-28T15:02:02Z",
+      "total_bytes": 13394,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1817,
+      "merged_at": "2026-09-28T14:14:17Z",
+      "total_bytes": 79800,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1799,
+      "merged_at": "2026-09-28T09:51:22Z",
+      "total_bytes": 44403,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1761,
+      "merged_at": "2026-09-28T08:59:56Z",
+      "total_bytes": 20661,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1792,
+      "merged_at": "2026-09-28T08:55:23Z",
+      "total_bytes": 26618,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1790,
+      "merged_at": "2026-09-28T08:31:28Z",
+      "total_bytes": 38096,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1674,
+      "merged_at": "2026-09-28T07:02:10Z",
+      "total_bytes": 40367,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1771,
+      "merged_at": "2026-09-28T05:40:57Z",
+      "total_bytes": 103674,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1768,
+      "merged_at": "2026-09-28T02:07:24Z",
+      "total_bytes": 79915,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1777,
+      "merged_at": "2026-09-28T01:46:18Z",
+      "total_bytes": 14734,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1743,
+      "merged_at": "2026-09-28T00:57:58Z",
+      "total_bytes": 136472,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1740,
+      "merged_at": "2026-09-28T00:10:53Z",
+      "total_bytes": 92095,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1758,
+      "merged_at": "2026-09-27T23:58:49Z",
+      "total_bytes": 64158,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1759,
+      "merged_at": "2026-09-27T23:42:56Z",
+      "total_bytes": 18380,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1742,
+      "merged_at": "2026-09-27T23:35:49Z",
+      "total_bytes": 18694,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1755,
+      "merged_at": "2026-09-27T23:09:23Z",
+      "total_bytes": 3761,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1760,
+      "merged_at": "2026-09-27T20:26:03Z",
+      "total_bytes": 15788,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1736,
+      "merged_at": "2026-09-27T19:16:02Z",
+      "total_bytes": 74593,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1741,
+      "merged_at": "2026-09-27T19:12:46Z",
+      "total_bytes": 14999,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1735,
+      "merged_at": "2026-09-27T19:02:44Z",
+      "total_bytes": 31517,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1737,
+      "merged_at": "2026-09-27T18:24:44Z",
+      "total_bytes": 18188,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1728,
+      "merged_at": "2026-09-27T18:19:07Z",
+      "total_bytes": 6623,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1738,
+      "merged_at": "2026-09-27T18:10:48Z",
+      "total_bytes": 23512,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1727,
+      "merged_at": "2026-09-27T17:59:20Z",
+      "total_bytes": 4728,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1729,
+      "merged_at": "2026-09-27T17:55:50Z",
+      "total_bytes": 25284,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1734,
+      "merged_at": "2026-09-27T17:28:50Z",
+      "total_bytes": 31267,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1733,
+      "merged_at": "2026-09-27T17:25:27Z",
+      "total_bytes": 24400,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1670,
+      "merged_at": "2026-09-27T16:24:25Z",
+      "total_bytes": 321142,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1702,
+      "merged_at": "2026-09-27T15:50:09Z",
+      "total_bytes": 15023,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1687,
+      "merged_at": "2026-09-27T15:17:04Z",
+      "total_bytes": 38471,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1666,
+      "merged_at": "2026-09-27T14:52:48Z",
+      "total_bytes": 202736,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1667,
+      "merged_at": "2026-09-27T14:32:06Z",
+      "total_bytes": 17224,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1696,
+      "merged_at": "2026-09-27T14:07:38Z",
+      "total_bytes": 17110,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1681,
+      "merged_at": "2026-09-27T12:15:34Z",
+      "total_bytes": 4818,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1690,
+      "merged_at": "2026-09-27T12:10:20Z",
+      "total_bytes": 6318,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1513,
+      "merged_at": "2026-09-27T11:55:16Z",
+      "total_bytes": 28307,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1676,
+      "merged_at": "2026-09-27T11:53:16Z",
+      "total_bytes": 4658,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1686,
+      "merged_at": "2026-09-27T11:37:35Z",
+      "total_bytes": 3410,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1649,
+      "merged_at": "2026-09-27T09:47:35Z",
+      "total_bytes": 41054,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1668,
+      "merged_at": "2026-09-27T08:51:08Z",
+      "total_bytes": 1515,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1672,
+      "merged_at": "2026-09-27T08:42:35Z",
+      "total_bytes": 1532,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1661,
+      "merged_at": "2026-09-27T08:32:25Z",
+      "total_bytes": 117785,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1665,
+      "merged_at": "2026-09-27T07:35:53Z",
+      "total_bytes": 23010,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1664,
+      "merged_at": "2026-09-27T07:28:23Z",
+      "total_bytes": 13074,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1671,
+      "merged_at": "2026-09-27T07:04:41Z",
+      "total_bytes": 40910,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1641,
+      "merged_at": "2026-09-27T05:31:04Z",
+      "total_bytes": 22067,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1648,
+      "merged_at": "2026-09-27T05:27:10Z",
+      "total_bytes": 13450,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1663,
+      "merged_at": "2026-09-27T05:13:33Z",
+      "total_bytes": 19734,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1639,
+      "merged_at": "2026-09-27T03:47:39Z",
+      "total_bytes": 199334,
+      "fixture_bytes": 95283
+    },
+    {
+      "number": 1642,
+      "merged_at": "2026-09-27T03:03:06Z",
+      "total_bytes": 23236,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1572,
+      "merged_at": "2026-09-27T02:37:02Z",
+      "total_bytes": 716769,
+      "fixture_bytes": 382233
+    },
+    {
+      "number": 1636,
+      "merged_at": "2026-09-27T02:00:22Z",
+      "total_bytes": 25356,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1634,
+      "merged_at": "2026-09-27T01:21:59Z",
+      "total_bytes": 27805,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1635,
+      "merged_at": "2026-09-27T01:02:35Z",
+      "total_bytes": 99336,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1631,
+      "merged_at": "2026-09-27T01:02:20Z",
+      "total_bytes": 13891,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1633,
+      "merged_at": "2026-09-27T00:21:44Z",
+      "total_bytes": 53024,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1594,
+      "merged_at": "2026-09-26T23:55:58Z",
+      "total_bytes": 24996,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1630,
+      "merged_at": "2026-09-26T23:45:55Z",
+      "total_bytes": 28335,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1628,
+      "merged_at": "2026-09-26T22:37:05Z",
+      "total_bytes": 1016,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1629,
+      "merged_at": "2026-09-26T22:07:39Z",
+      "total_bytes": 20762,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1627,
+      "merged_at": "2026-09-26T21:59:19Z",
+      "total_bytes": 33962,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1614,
+      "merged_at": "2026-09-26T21:26:41Z",
+      "total_bytes": 4491,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1575,
+      "merged_at": "2026-09-26T20:38:48Z",
+      "total_bytes": 7312,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1612,
+      "merged_at": "2026-09-26T20:33:02Z",
+      "total_bytes": 39056,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1583,
+      "merged_at": "2026-09-26T20:32:50Z",
+      "total_bytes": 14981,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1619,
+      "merged_at": "2026-09-26T19:54:48Z",
+      "total_bytes": 27915,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1615,
+      "merged_at": "2026-09-26T19:07:40Z",
+      "total_bytes": 3785,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1613,
+      "merged_at": "2026-09-26T18:22:02Z",
+      "total_bytes": 6306,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1580,
+      "merged_at": "2026-09-26T18:01:12Z",
+      "total_bytes": 55522,
+      "fixture_bytes": 45058
+    },
+    {
+      "number": 1544,
+      "merged_at": "2026-09-26T17:51:35Z",
+      "total_bytes": 304620,
+      "fixture_bytes": 244128
+    },
+    {
+      "number": 1604,
+      "merged_at": "2026-09-26T17:19:47Z",
+      "total_bytes": 17490,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1589,
+      "merged_at": "2026-09-26T15:57:11Z",
+      "total_bytes": 2800,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1588,
+      "merged_at": "2026-09-26T15:57:00Z",
+      "total_bytes": 1709,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1579,
+      "merged_at": "2026-09-26T12:29:16Z",
+      "total_bytes": 22381,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1573,
+      "merged_at": "2026-09-26T12:05:54Z",
+      "total_bytes": 15509,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1574,
+      "merged_at": "2026-09-26T11:47:05Z",
+      "total_bytes": 116687,
+      "fixture_bytes": 104181
+    },
+    {
+      "number": 1565,
+      "merged_at": "2026-09-26T08:36:46Z",
+      "total_bytes": 11122,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1569,
+      "merged_at": "2026-09-26T08:33:57Z",
+      "total_bytes": 40838,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1568,
+      "merged_at": "2026-09-26T08:21:44Z",
+      "total_bytes": 14142,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1553,
+      "merged_at": "2026-09-26T08:03:22Z",
+      "total_bytes": 8538,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1552,
+      "merged_at": "2026-09-26T07:51:59Z",
+      "total_bytes": 12978,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1567,
+      "merged_at": "2026-09-26T06:59:34Z",
+      "total_bytes": 7322,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1561,
+      "merged_at": "2026-09-26T06:26:11Z",
+      "total_bytes": 4881,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1556,
+      "merged_at": "2026-09-26T05:52:07Z",
+      "total_bytes": 211728,
+      "fixture_bytes": 184101
+    },
+    {
+      "number": 1543,
+      "merged_at": "2026-09-26T05:39:01Z",
+      "total_bytes": 840247,
+      "fixture_bytes": 820310
+    },
+    {
+      "number": 1562,
+      "merged_at": "2026-09-26T04:51:15Z",
+      "total_bytes": 10694,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1564,
+      "merged_at": "2026-09-26T04:35:34Z",
+      "total_bytes": 21957,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1536,
+      "merged_at": "2026-09-26T00:12:35Z",
+      "total_bytes": 14844,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1534,
+      "merged_at": "2026-09-25T23:41:34Z",
+      "total_bytes": 5553,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1528,
+      "merged_at": "2026-09-25T22:49:45Z",
+      "total_bytes": 23930,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1535,
+      "merged_at": "2026-09-25T21:59:28Z",
+      "total_bytes": 3156,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1523,
+      "merged_at": "2026-09-25T20:39:58Z",
+      "total_bytes": 10997,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1520,
+      "merged_at": "2026-09-25T20:27:57Z",
+      "total_bytes": 23571,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1518,
+      "merged_at": "2026-09-25T20:12:37Z",
+      "total_bytes": 50118,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1522,
+      "merged_at": "2026-09-25T19:14:31Z",
+      "total_bytes": 9609,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1512,
+      "merged_at": "2026-09-25T18:58:16Z",
+      "total_bytes": 916,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1500,
+      "merged_at": "2026-09-25T18:05:52Z",
+      "total_bytes": 12765,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1509,
+      "merged_at": "2026-09-25T17:52:18Z",
+      "total_bytes": 10310,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1505,
+      "merged_at": "2026-09-25T17:51:13Z",
+      "total_bytes": 14077,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1501,
+      "merged_at": "2026-09-25T17:11:55Z",
+      "total_bytes": 58559,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1511,
+      "merged_at": "2026-09-25T16:52:51Z",
+      "total_bytes": 1439,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1510,
+      "merged_at": "2026-09-25T16:34:31Z",
+      "total_bytes": 8924,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1491,
+      "merged_at": "2026-09-25T15:18:53Z",
+      "total_bytes": 4084,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1504,
+      "merged_at": "2026-09-25T15:00:44Z",
+      "total_bytes": 10172,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1502,
+      "merged_at": "2026-09-25T14:39:15Z",
+      "total_bytes": 22627,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1495,
+      "merged_at": "2026-09-25T14:09:50Z",
+      "total_bytes": 9116,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1498,
+      "merged_at": "2026-09-25T13:43:25Z",
+      "total_bytes": 26383,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1493,
+      "merged_at": "2026-09-25T13:38:25Z",
+      "total_bytes": 3568,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1499,
+      "merged_at": "2026-09-25T13:21:00Z",
+      "total_bytes": 15892,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1492,
+      "merged_at": "2026-09-25T12:39:21Z",
+      "total_bytes": 15942,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1490,
+      "merged_at": "2026-09-25T12:21:19Z",
+      "total_bytes": 5640,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1462,
+      "merged_at": "2026-09-25T11:40:30Z",
+      "total_bytes": 327091,
+      "fixture_bytes": 71977
+    },
+    {
+      "number": 1489,
+      "merged_at": "2026-09-25T11:23:16Z",
+      "total_bytes": 33429,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1486,
+      "merged_at": "2026-09-25T10:56:36Z",
+      "total_bytes": 45438,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1487,
+      "merged_at": "2026-09-25T10:09:25Z",
+      "total_bytes": 17070,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1484,
+      "merged_at": "2026-09-25T09:35:55Z",
+      "total_bytes": 56723,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1485,
+      "merged_at": "2026-09-25T08:11:20Z",
+      "total_bytes": 7980,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1482,
+      "merged_at": "2026-09-25T07:01:34Z",
+      "total_bytes": 104860,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1473,
+      "merged_at": "2026-09-25T05:51:50Z",
+      "total_bytes": 155476,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1483,
+      "merged_at": "2026-09-25T05:06:21Z",
+      "total_bytes": 8469,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1478,
+      "merged_at": "2026-09-25T04:22:32Z",
+      "total_bytes": 20246,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1477,
+      "merged_at": "2026-09-25T03:12:50Z",
+      "total_bytes": 14505,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1474,
+      "merged_at": "2026-09-25T02:38:22Z",
+      "total_bytes": 27087,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1446,
+      "merged_at": "2026-09-25T01:15:16Z",
+      "total_bytes": 22891,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1469,
+      "merged_at": "2026-09-25T00:35:20Z",
+      "total_bytes": 33003,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1459,
+      "merged_at": "2026-09-25T00:30:58Z",
+      "total_bytes": 127082,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1390,
+      "merged_at": "2026-09-24T23:35:15Z",
+      "total_bytes": 738935,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1461,
+      "merged_at": "2026-09-24T23:12:04Z",
+      "total_bytes": 13198,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1460,
+      "merged_at": "2026-09-24T22:10:47Z",
+      "total_bytes": 35453,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1447,
+      "merged_at": "2026-09-24T21:25:26Z",
+      "total_bytes": 13059,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1443,
+      "merged_at": "2026-09-24T21:12:30Z",
+      "total_bytes": 47089,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1438,
+      "merged_at": "2026-09-24T19:29:59Z",
+      "total_bytes": 17944,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1445,
+      "merged_at": "2026-09-24T19:26:16Z",
+      "total_bytes": 4783,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1434,
+      "merged_at": "2026-09-24T19:01:58Z",
+      "total_bytes": 12707,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1442,
+      "merged_at": "2026-09-24T19:00:15Z",
+      "total_bytes": 16635,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1433,
+      "merged_at": "2026-09-24T18:43:18Z",
+      "total_bytes": 13308,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1429,
+      "merged_at": "2026-09-24T18:30:16Z",
+      "total_bytes": 38872,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1428,
+      "merged_at": "2026-09-24T17:33:25Z",
+      "total_bytes": 5869,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1437,
+      "merged_at": "2026-09-24T17:29:33Z",
+      "total_bytes": 9319,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1431,
+      "merged_at": "2026-09-24T16:38:51Z",
+      "total_bytes": 12971,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1346,
+      "merged_at": "2026-09-24T14:36:50Z",
+      "total_bytes": 340240,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1391,
+      "merged_at": "2026-09-24T11:58:07Z",
+      "total_bytes": 11554,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1398,
+      "merged_at": "2026-09-24T11:55:00Z",
+      "total_bytes": 22036,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1399,
+      "merged_at": "2026-09-24T11:51:34Z",
+      "total_bytes": 12966,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1407,
+      "merged_at": "2026-09-24T11:42:01Z",
+      "total_bytes": 2578,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1408,
+      "merged_at": "2026-09-24T09:45:56Z",
+      "total_bytes": 127611,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1415,
+      "merged_at": "2026-09-24T08:06:38Z",
+      "total_bytes": 50602,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1416,
+      "merged_at": "2026-09-24T07:54:01Z",
+      "total_bytes": 7635,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1412,
+      "merged_at": "2026-09-24T07:34:54Z",
+      "total_bytes": 113696,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1410,
+      "merged_at": "2026-09-24T06:44:14Z",
+      "total_bytes": 8116,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1394,
+      "merged_at": "2026-09-24T05:40:36Z",
+      "total_bytes": 14424,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1392,
+      "merged_at": "2026-09-24T05:38:16Z",
+      "total_bytes": 3756,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1345,
+      "merged_at": "2026-09-24T04:33:07Z",
+      "total_bytes": 17134,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1389,
+      "merged_at": "2026-09-24T04:20:06Z",
+      "total_bytes": 8205,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1400,
+      "merged_at": "2026-09-24T03:43:22Z",
+      "total_bytes": 11970,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1397,
+      "merged_at": "2026-09-24T03:16:16Z",
+      "total_bytes": 3428,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1387,
+      "merged_at": "2026-09-24T02:47:37Z",
+      "total_bytes": 31287,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1388,
+      "merged_at": "2026-09-24T02:22:50Z",
+      "total_bytes": 8876,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1366,
+      "merged_at": "2026-09-23T19:51:39Z",
+      "total_bytes": 182152,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1354,
+      "merged_at": "2026-09-23T19:43:53Z",
+      "total_bytes": 475,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1378,
+      "merged_at": "2026-09-23T19:16:19Z",
+      "total_bytes": 2538,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1374,
+      "merged_at": "2026-09-23T18:18:34Z",
+      "total_bytes": 21115,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1386,
+      "merged_at": "2026-09-23T17:57:14Z",
+      "total_bytes": 5763,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1385,
+      "merged_at": "2026-09-23T17:12:18Z",
+      "total_bytes": 13134,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1375,
+      "merged_at": "2026-09-23T17:02:13Z",
+      "total_bytes": 1955,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1384,
+      "merged_at": "2026-09-23T16:41:40Z",
+      "total_bytes": 11698,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1383,
+      "merged_at": "2026-09-23T16:28:01Z",
+      "total_bytes": 7648,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1373,
+      "merged_at": "2026-09-23T16:06:42Z",
+      "total_bytes": 9215,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1376,
+      "merged_at": "2026-09-23T14:26:40Z",
+      "total_bytes": 10532,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1368,
+      "merged_at": "2026-09-23T14:12:44Z",
+      "total_bytes": 16389,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1372,
+      "merged_at": "2026-09-23T13:32:54Z",
+      "total_bytes": 7406,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1371,
+      "merged_at": "2026-09-23T13:09:03Z",
+      "total_bytes": 5516,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1344,
+      "merged_at": "2026-09-23T11:42:58Z",
+      "total_bytes": 10489,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1348,
+      "merged_at": "2026-09-23T11:40:44Z",
+      "total_bytes": 29811,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1347,
+      "merged_at": "2026-09-23T11:32:22Z",
+      "total_bytes": 12286,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1361,
+      "merged_at": "2026-09-23T11:22:29Z",
+      "total_bytes": 29447,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1353,
+      "merged_at": "2026-09-23T11:04:47Z",
+      "total_bytes": 1112,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1364,
+      "merged_at": "2026-09-23T10:03:07Z",
+      "total_bytes": 7630,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1355,
+      "merged_at": "2026-09-23T09:59:41Z",
+      "total_bytes": 10010,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1352,
+      "merged_at": "2026-09-23T07:11:30Z",
+      "total_bytes": 53833,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1340,
+      "merged_at": "2026-09-23T06:19:31Z",
+      "total_bytes": 14482,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1338,
+      "merged_at": "2026-09-23T05:51:57Z",
+      "total_bytes": 12721,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1336,
+      "merged_at": "2026-09-23T05:35:50Z",
+      "total_bytes": 28176,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1343,
+      "merged_at": "2026-09-23T05:21:02Z",
+      "total_bytes": 18346,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1333,
+      "merged_at": "2026-09-23T03:52:18Z",
+      "total_bytes": 5917,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1337,
+      "merged_at": "2026-09-23T03:29:16Z",
+      "total_bytes": 10438,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1332,
+      "merged_at": "2026-09-23T01:31:40Z",
+      "total_bytes": 29890,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1331,
+      "merged_at": "2026-09-23T00:50:05Z",
+      "total_bytes": 20993,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1330,
+      "merged_at": "2026-09-23T00:38:42Z",
+      "total_bytes": 18570,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1329,
+      "merged_at": "2026-09-23T00:03:40Z",
+      "total_bytes": 30057,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1328,
+      "merged_at": "2026-09-22T23:54:35Z",
+      "total_bytes": 56271,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1314,
+      "merged_at": "2026-09-22T23:35:14Z",
+      "total_bytes": 15334,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1327,
+      "merged_at": "2026-09-22T23:30:02Z",
+      "total_bytes": 28055,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1309,
+      "merged_at": "2026-09-22T20:34:51Z",
+      "total_bytes": 26210,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1311,
+      "merged_at": "2026-09-22T19:21:08Z",
+      "total_bytes": 22929,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1310,
+      "merged_at": "2026-09-22T19:16:58Z",
+      "total_bytes": 24387,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1306,
+      "merged_at": "2026-09-22T18:02:32Z",
+      "total_bytes": 35809,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1305,
+      "merged_at": "2026-09-22T17:38:04Z",
+      "total_bytes": 19291,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1298,
+      "merged_at": "2026-09-22T15:19:13Z",
+      "total_bytes": 7816,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1296,
+      "merged_at": "2026-09-22T12:13:45Z",
+      "total_bytes": 6648,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1295,
+      "merged_at": "2026-09-22T10:46:32Z",
+      "total_bytes": 13498,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1293,
+      "merged_at": "2026-09-22T09:42:28Z",
+      "total_bytes": 11937,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1262,
+      "merged_at": "2026-09-22T05:33:56Z",
+      "total_bytes": 11622,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1271,
+      "merged_at": "2026-09-22T04:34:37Z",
+      "total_bytes": 202136,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1234,
+      "merged_at": "2026-09-22T04:27:37Z",
+      "total_bytes": 104971,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1270,
+      "merged_at": "2026-09-22T03:28:16Z",
+      "total_bytes": 24450,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1259,
+      "merged_at": "2026-09-22T03:01:37Z",
+      "total_bytes": 14749,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1267,
+      "merged_at": "2026-09-22T02:54:38Z",
+      "total_bytes": 9140,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1265,
+      "merged_at": "2026-09-22T02:36:41Z",
+      "total_bytes": 5813,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1264,
+      "merged_at": "2026-09-22T02:07:00Z",
+      "total_bytes": 13978,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1263,
+      "merged_at": "2026-09-22T01:57:16Z",
+      "total_bytes": 9669,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1258,
+      "merged_at": "2026-09-22T01:21:42Z",
+      "total_bytes": 8609,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1260,
+      "merged_at": "2026-09-22T01:21:34Z",
+      "total_bytes": 6836,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1254,
+      "merged_at": "2026-09-22T00:47:31Z",
+      "total_bytes": 7713,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1255,
+      "merged_at": "2026-09-22T00:45:29Z",
+      "total_bytes": 18320,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1253,
+      "merged_at": "2026-09-22T00:20:25Z",
+      "total_bytes": 5406,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1250,
+      "merged_at": "2026-09-22T00:00:20Z",
+      "total_bytes": 13417,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1249,
+      "merged_at": "2026-09-21T23:51:43Z",
+      "total_bytes": 12873,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1248,
+      "merged_at": "2026-09-21T23:44:23Z",
+      "total_bytes": 6854,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1247,
+      "merged_at": "2026-09-21T23:21:11Z",
+      "total_bytes": 2991,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1246,
+      "merged_at": "2026-09-21T23:16:54Z",
+      "total_bytes": 20628,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1245,
+      "merged_at": "2026-09-21T22:54:46Z",
+      "total_bytes": 2962,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1244,
+      "merged_at": "2026-09-21T22:49:41Z",
+      "total_bytes": 5399,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1232,
+      "merged_at": "2026-09-21T22:01:43Z",
+      "total_bytes": 52326,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1229,
+      "merged_at": "2026-09-21T19:20:46Z",
+      "total_bytes": 24138,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1226,
+      "merged_at": "2026-09-21T19:01:55Z",
+      "total_bytes": 18990,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1200,
+      "merged_at": "2026-09-21T18:50:17Z",
+      "total_bytes": 24895,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1224,
+      "merged_at": "2026-09-21T18:30:02Z",
+      "total_bytes": 7583,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1221,
+      "merged_at": "2026-09-21T17:39:22Z",
+      "total_bytes": 69751,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1223,
+      "merged_at": "2026-09-21T17:29:51Z",
+      "total_bytes": 7367,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1218,
+      "merged_at": "2026-09-21T15:48:39Z",
+      "total_bytes": 4521,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1215,
+      "merged_at": "2026-09-21T15:12:21Z",
+      "total_bytes": 4184,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1193,
+      "merged_at": "2026-09-21T11:47:36Z",
+      "total_bytes": 8005,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1192,
+      "merged_at": "2026-09-21T11:43:37Z",
+      "total_bytes": 17115,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1188,
+      "merged_at": "2026-09-21T11:38:33Z",
+      "total_bytes": 28420,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1201,
+      "merged_at": "2026-09-21T10:59:17Z",
+      "total_bytes": 149834,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1197,
+      "merged_at": "2026-09-21T10:02:45Z",
+      "total_bytes": 11492,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1185,
+      "merged_at": "2026-09-21T07:34:10Z",
+      "total_bytes": 13424,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1162,
+      "merged_at": "2026-09-21T00:06:06Z",
+      "total_bytes": 7638,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1156,
+      "merged_at": "2026-09-20T03:10:48Z",
+      "total_bytes": 20633,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1147,
+      "merged_at": "2026-09-19T21:43:10Z",
+      "total_bytes": 7475,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1146,
+      "merged_at": "2026-09-19T20:52:51Z",
+      "total_bytes": 580,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1143,
+      "merged_at": "2026-09-19T20:18:58Z",
+      "total_bytes": 20752,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1134,
+      "merged_at": "2026-09-19T14:40:29Z",
+      "total_bytes": 8820,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1132,
+      "merged_at": "2026-09-19T13:08:16Z",
+      "total_bytes": 9552,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1130,
+      "merged_at": "2026-09-19T12:01:45Z",
+      "total_bytes": 3777,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1128,
+      "merged_at": "2026-09-19T09:08:23Z",
+      "total_bytes": 6728,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1123,
+      "merged_at": "2026-09-19T06:28:55Z",
+      "total_bytes": 6674,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1120,
+      "merged_at": "2026-09-19T04:43:46Z",
+      "total_bytes": 3451,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1119,
+      "merged_at": "2026-09-19T04:08:01Z",
+      "total_bytes": 3373,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1118,
+      "merged_at": "2026-09-19T03:38:15Z",
+      "total_bytes": 5274,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1116,
+      "merged_at": "2026-09-19T01:08:57Z",
+      "total_bytes": 7637,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1115,
+      "merged_at": "2026-09-18T23:33:30Z",
+      "total_bytes": 9236,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1112,
+      "merged_at": "2026-09-18T20:38:26Z",
+      "total_bytes": 13282,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1107,
+      "merged_at": "2026-09-18T19:44:32Z",
+      "total_bytes": 36279,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1103,
+      "merged_at": "2026-09-18T19:06:01Z",
+      "total_bytes": 27326,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1102,
+      "merged_at": "2026-09-18T18:43:24Z",
+      "total_bytes": 4199,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1106,
+      "merged_at": "2026-09-18T18:35:35Z",
+      "total_bytes": 12094,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1094,
+      "merged_at": "2026-09-18T17:07:25Z",
+      "total_bytes": 5592,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1092,
+      "merged_at": "2026-09-18T16:30:36Z",
+      "total_bytes": 20592,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1091,
+      "merged_at": "2026-09-18T16:03:53Z",
+      "total_bytes": 4457,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1087,
+      "merged_at": "2026-09-18T15:17:58Z",
+      "total_bytes": 2186,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1086,
+      "merged_at": "2026-09-18T13:48:57Z",
+      "total_bytes": 4187,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1085,
+      "merged_at": "2026-09-18T13:06:04Z",
+      "total_bytes": 3105,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1084,
+      "merged_at": "2026-09-18T12:38:49Z",
+      "total_bytes": 3107,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1083,
+      "merged_at": "2026-09-18T12:28:41Z",
+      "total_bytes": 4228,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1082,
+      "merged_at": "2026-09-18T10:59:20Z",
+      "total_bytes": 5483,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1081,
+      "merged_at": "2026-09-18T10:44:29Z",
+      "total_bytes": 4499,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1068,
+      "merged_at": "2026-09-18T08:35:40Z",
+      "total_bytes": 17231,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1070,
+      "merged_at": "2026-09-18T07:28:51Z",
+      "total_bytes": 3135,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1063,
+      "merged_at": "2026-09-18T07:23:23Z",
+      "total_bytes": 3955,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1060,
+      "merged_at": "2026-09-18T06:16:18Z",
+      "total_bytes": 478,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1057,
+      "merged_at": "2026-09-18T03:03:24Z",
+      "total_bytes": 31429,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1056,
+      "merged_at": "2026-09-18T02:34:06Z",
+      "total_bytes": 12636,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1052,
+      "merged_at": "2026-09-18T00:07:32Z",
+      "total_bytes": 8289,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1050,
+      "merged_at": "2026-09-17T22:33:37Z",
+      "total_bytes": 23144,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1049,
+      "merged_at": "2026-09-17T21:57:34Z",
+      "total_bytes": 4801,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1018,
+      "merged_at": "2026-09-17T20:53:05Z",
+      "total_bytes": 4161,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1041,
+      "merged_at": "2026-09-17T18:52:26Z",
+      "total_bytes": 7784,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1040,
+      "merged_at": "2026-09-17T18:27:51Z",
+      "total_bytes": 1376,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1038,
+      "merged_at": "2026-09-17T18:15:25Z",
+      "total_bytes": 16124,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1037,
+      "merged_at": "2026-09-17T18:13:11Z",
+      "total_bytes": 10605,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1032,
+      "merged_at": "2026-09-17T15:22:44Z",
+      "total_bytes": 7747,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1031,
+      "merged_at": "2026-09-17T15:02:56Z",
+      "total_bytes": 7516,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1027,
+      "merged_at": "2026-09-17T08:58:04Z",
+      "total_bytes": 3353,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1013,
+      "merged_at": "2026-09-17T08:53:57Z",
+      "total_bytes": 14059,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1025,
+      "merged_at": "2026-09-17T08:52:31Z",
+      "total_bytes": 7812,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1022,
+      "merged_at": "2026-09-17T08:16:43Z",
+      "total_bytes": 44938,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1021,
+      "merged_at": "2026-09-17T08:07:37Z",
+      "total_bytes": 24124,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1020,
+      "merged_at": "2026-09-17T07:52:37Z",
+      "total_bytes": 9445,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1016,
+      "merged_at": "2026-09-17T07:07:41Z",
+      "total_bytes": 2268,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 999,
+      "merged_at": "2026-09-17T06:52:35Z",
+      "total_bytes": 12761,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 993,
+      "merged_at": "2026-09-17T06:47:41Z",
+      "total_bytes": 4236,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1015,
+      "merged_at": "2026-09-17T06:27:59Z",
+      "total_bytes": 10781,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1014,
+      "merged_at": "2026-09-17T06:22:22Z",
+      "total_bytes": 5587,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1012,
+      "merged_at": "2026-09-17T06:07:57Z",
+      "total_bytes": 3908,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1007,
+      "merged_at": "2026-09-17T06:02:19Z",
+      "total_bytes": 10201,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1003,
+      "merged_at": "2026-09-17T05:47:30Z",
+      "total_bytes": 21627,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 1000,
+      "merged_at": "2026-09-17T05:22:25Z",
+      "total_bytes": 3708,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 995,
+      "merged_at": "2026-09-17T05:12:20Z",
+      "total_bytes": 2184,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 992,
+      "merged_at": "2026-09-17T04:42:12Z",
+      "total_bytes": 1993,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 991,
+      "merged_at": "2026-09-17T04:22:28Z",
+      "total_bytes": 2103,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 985,
+      "merged_at": "2026-09-17T03:47:22Z",
+      "total_bytes": 1380,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 983,
+      "merged_at": "2026-09-17T03:41:52Z",
+      "total_bytes": 24912,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 982,
+      "merged_at": "2026-09-17T02:46:56Z",
+      "total_bytes": 23323,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 981,
+      "merged_at": "2026-09-17T02:37:16Z",
+      "total_bytes": 4885,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 978,
+      "merged_at": "2026-09-17T02:32:07Z",
+      "total_bytes": 2498,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 975,
+      "merged_at": "2026-09-17T01:37:45Z",
+      "total_bytes": 1682,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 974,
+      "merged_at": "2026-09-17T01:02:30Z",
+      "total_bytes": 10741,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 973,
+      "merged_at": "2026-09-17T00:36:58Z",
+      "total_bytes": 10090,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 972,
+      "merged_at": "2026-09-17T00:22:20Z",
+      "total_bytes": 17479,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 969,
+      "merged_at": "2026-09-16T23:46:48Z",
+      "total_bytes": 2425,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 967,
+      "merged_at": "2026-09-16T23:27:20Z",
+      "total_bytes": 9694,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 965,
+      "merged_at": "2026-09-16T21:52:29Z",
+      "total_bytes": 77939,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 964,
+      "merged_at": "2026-09-16T21:23:08Z",
+      "total_bytes": 12183,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 962,
+      "merged_at": "2026-09-16T20:39:31Z",
+      "total_bytes": 31602,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 963,
+      "merged_at": "2026-09-16T20:08:05Z",
+      "total_bytes": 22707,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 961,
+      "merged_at": "2026-09-16T19:07:26Z",
+      "total_bytes": 1667,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 958,
+      "merged_at": "2026-09-16T18:34:17Z",
+      "total_bytes": 5234,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 960,
+      "merged_at": "2026-09-16T14:57:56Z",
+      "total_bytes": 3729,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 959,
+      "merged_at": "2026-09-16T14:22:20Z",
+      "total_bytes": 12922,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 957,
+      "merged_at": "2026-09-16T13:06:58Z",
+      "total_bytes": 12524,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 954,
+      "merged_at": "2026-09-16T12:52:12Z",
+      "total_bytes": 3320,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 952,
+      "merged_at": "2026-09-16T11:42:24Z",
+      "total_bytes": 3512,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 950,
+      "merged_at": "2026-09-16T11:31:56Z",
+      "total_bytes": 8012,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 948,
+      "merged_at": "2026-09-16T10:37:13Z",
+      "total_bytes": 4644,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 947,
+      "merged_at": "2026-09-16T10:01:57Z",
+      "total_bytes": 17317,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 940,
+      "merged_at": "2026-09-16T09:02:14Z",
+      "total_bytes": 31889,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 944,
+      "merged_at": "2026-09-16T08:47:06Z",
+      "total_bytes": 1593,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 943,
+      "merged_at": "2026-09-16T08:43:13Z",
+      "total_bytes": 2643,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 939,
+      "merged_at": "2026-09-16T07:52:58Z",
+      "total_bytes": 24938,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 935,
+      "merged_at": "2026-09-16T07:37:25Z",
+      "total_bytes": 7235,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 933,
+      "merged_at": "2026-09-16T07:02:17Z",
+      "total_bytes": 19054,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 924,
+      "merged_at": "2026-09-16T05:37:49Z",
+      "total_bytes": 1484,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 921,
+      "merged_at": "2026-09-16T05:33:35Z",
+      "total_bytes": 2500,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 920,
+      "merged_at": "2026-09-16T05:21:21Z",
+      "total_bytes": 12181,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 919,
+      "merged_at": "2026-09-16T05:11:01Z",
+      "total_bytes": 5033,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 918,
+      "merged_at": "2026-09-16T04:56:07Z",
+      "total_bytes": 16818,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 917,
+      "merged_at": "2026-09-16T04:35:37Z",
+      "total_bytes": 6308,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 915,
+      "merged_at": "2026-09-16T04:18:09Z",
+      "total_bytes": 15346,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 913,
+      "merged_at": "2026-09-16T03:46:42Z",
+      "total_bytes": 4352,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 912,
+      "merged_at": "2026-09-16T03:28:05Z",
+      "total_bytes": 20913,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 911,
+      "merged_at": "2026-09-16T03:16:55Z",
+      "total_bytes": 4283,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 910,
+      "merged_at": "2026-09-16T02:43:06Z",
+      "total_bytes": 9663,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 907,
+      "merged_at": "2026-09-16T00:26:46Z",
+      "total_bytes": 5224,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 906,
+      "merged_at": "2026-09-16T00:12:24Z",
+      "total_bytes": 19644,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 905,
+      "merged_at": "2026-09-16T00:03:37Z",
+      "total_bytes": 18574,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 903,
+      "merged_at": "2026-09-15T23:43:17Z",
+      "total_bytes": 13308,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 904,
+      "merged_at": "2026-09-15T23:41:39Z",
+      "total_bytes": 45551,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 898,
+      "merged_at": "2026-09-15T23:12:31Z",
+      "total_bytes": 9734,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 896,
+      "merged_at": "2026-09-15T22:47:05Z",
+      "total_bytes": 11003,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 894,
+      "merged_at": "2026-09-15T15:27:16Z",
+      "total_bytes": 15998,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 891,
+      "merged_at": "2026-09-15T13:09:38Z",
+      "total_bytes": 6076,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 889,
+      "merged_at": "2026-09-15T12:51:01Z",
+      "total_bytes": 13484,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 885,
+      "merged_at": "2026-09-15T12:38:23Z",
+      "total_bytes": 29603,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 886,
+      "merged_at": "2026-09-15T07:22:02Z",
+      "total_bytes": 7380,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 888,
+      "merged_at": "2026-09-15T06:30:09Z",
+      "total_bytes": 17098,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 887,
+      "merged_at": "2026-09-15T05:54:59Z",
+      "total_bytes": 32003,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 882,
+      "merged_at": "2026-09-15T05:15:38Z",
+      "total_bytes": 100893,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 881,
+      "merged_at": "2026-09-15T04:24:38Z",
+      "total_bytes": 28266,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 879,
+      "merged_at": "2026-09-15T02:27:09Z",
+      "total_bytes": 6252,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 878,
+      "merged_at": "2026-09-15T02:26:17Z",
+      "total_bytes": 5660,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 875,
+      "merged_at": "2026-09-14T23:27:07Z",
+      "total_bytes": 83072,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 874,
+      "merged_at": "2026-09-14T22:35:45Z",
+      "total_bytes": 86677,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 873,
+      "merged_at": "2026-09-14T22:20:47Z",
+      "total_bytes": 1249,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 870,
+      "merged_at": "2026-09-14T21:02:21Z",
+      "total_bytes": 19800,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 869,
+      "merged_at": "2026-09-14T20:24:56Z",
+      "total_bytes": 14209,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 868,
+      "merged_at": "2026-09-14T19:12:04Z",
+      "total_bytes": 7280,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 867,
+      "merged_at": "2026-09-14T19:07:24Z",
+      "total_bytes": 25942,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 865,
+      "merged_at": "2026-09-14T18:42:20Z",
+      "total_bytes": 46498,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 864,
+      "merged_at": "2026-09-14T18:22:29Z",
+      "total_bytes": 58889,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 863,
+      "merged_at": "2026-09-14T17:46:08Z",
+      "total_bytes": 25333,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 857,
+      "merged_at": "2026-09-14T16:54:28Z",
+      "total_bytes": 31865,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 851,
+      "merged_at": "2026-09-14T15:45:49Z",
+      "total_bytes": 69373,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 860,
+      "merged_at": "2026-09-14T14:04:47Z",
+      "total_bytes": 4683,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 862,
+      "merged_at": "2026-09-14T14:01:47Z",
+      "total_bytes": 927,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 854,
+      "merged_at": "2026-09-14T13:46:25Z",
+      "total_bytes": 56166,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 849,
+      "merged_at": "2026-09-14T13:40:16Z",
+      "total_bytes": 20490,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 846,
+      "merged_at": "2026-09-14T13:15:50Z",
+      "total_bytes": 28407,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 858,
+      "merged_at": "2026-09-14T12:00:51Z",
+      "total_bytes": 4471,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 845,
+      "merged_at": "2026-09-14T11:15:50Z",
+      "total_bytes": 34615,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 843,
+      "merged_at": "2026-09-14T09:15:53Z",
+      "total_bytes": 24009,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 853,
+      "merged_at": "2026-09-14T08:00:52Z",
+      "total_bytes": 8067,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 852,
+      "merged_at": "2026-09-14T07:35:49Z",
+      "total_bytes": 3220,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 837,
+      "merged_at": "2026-09-14T07:15:47Z",
+      "total_bytes": 2637,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 842,
+      "merged_at": "2026-09-14T05:20:46Z",
+      "total_bytes": 1920,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 836,
+      "merged_at": "2026-09-14T05:15:46Z",
+      "total_bytes": 27591,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 832,
+      "merged_at": "2026-09-14T03:24:35Z",
+      "total_bytes": 3402,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 783,
+      "merged_at": "2026-09-14T03:10:45Z",
+      "total_bytes": 60805,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 829,
+      "merged_at": "2026-09-14T03:07:43Z",
+      "total_bytes": 2345,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 795,
+      "merged_at": "2026-09-14T01:40:42Z",
+      "total_bytes": 35126,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 793,
+      "merged_at": "2026-09-14T00:00:37Z",
+      "total_bytes": 14780,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 792,
+      "merged_at": "2026-09-13T22:50:37Z",
+      "total_bytes": 15550,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 779,
+      "merged_at": "2026-09-13T22:20:38Z",
+      "total_bytes": 29133,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 790,
+      "merged_at": "2026-09-13T22:00:41Z",
+      "total_bytes": 12042,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 786,
+      "merged_at": "2026-09-13T20:20:37Z",
+      "total_bytes": 3149,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 777,
+      "merged_at": "2026-09-13T17:55:43Z",
+      "total_bytes": 15724,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 776,
+      "merged_at": "2026-09-13T17:22:57Z",
+      "total_bytes": 50125,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 774,
+      "merged_at": "2026-09-13T17:20:38Z",
+      "total_bytes": 17093,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 773,
+      "merged_at": "2026-09-13T16:35:38Z",
+      "total_bytes": 1380,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 771,
+      "merged_at": "2026-09-13T16:20:43Z",
+      "total_bytes": 2924,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 763,
+      "merged_at": "2026-09-13T15:55:45Z",
+      "total_bytes": 22566,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 768,
+      "merged_at": "2026-09-13T14:30:40Z",
+      "total_bytes": 1529,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 765,
+      "merged_at": "2026-09-13T13:40:44Z",
+      "total_bytes": 17880,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 743,
+      "merged_at": "2026-09-13T13:15:42Z",
+      "total_bytes": 87648,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 761,
+      "merged_at": "2026-09-13T12:55:40Z",
+      "total_bytes": 1082,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 760,
+      "merged_at": "2026-09-13T12:40:39Z",
+      "total_bytes": 15643,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 755,
+      "merged_at": "2026-09-13T12:15:42Z",
+      "total_bytes": 7684,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 753,
+      "merged_at": "2026-09-13T12:05:43Z",
+      "total_bytes": 8679,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 752,
+      "merged_at": "2026-09-13T11:50:37Z",
+      "total_bytes": 2150,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 751,
+      "merged_at": "2026-09-13T11:42:27Z",
+      "total_bytes": 9419,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 734,
+      "merged_at": "2026-09-13T11:10:41Z",
+      "total_bytes": 8569,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 744,
+      "merged_at": "2026-09-13T11:00:41Z",
+      "total_bytes": 2272,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 742,
+      "merged_at": "2026-09-13T10:25:38Z",
+      "total_bytes": 1356,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 740,
+      "merged_at": "2026-09-13T09:48:41Z",
+      "total_bytes": 2285,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 728,
+      "merged_at": "2026-09-13T09:01:56Z",
+      "total_bytes": 6347,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 727,
+      "merged_at": "2026-09-13T08:12:44Z",
+      "total_bytes": 2234,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 725,
+      "merged_at": "2026-09-13T07:53:04Z",
+      "total_bytes": 12406,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 723,
+      "merged_at": "2026-09-13T07:40:39Z",
+      "total_bytes": 7822,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 720,
+      "merged_at": "2026-09-13T06:35:34Z",
+      "total_bytes": 1248,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 719,
+      "merged_at": "2026-09-13T06:30:36Z",
+      "total_bytes": 11454,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 715,
+      "merged_at": "2026-09-13T06:00:35Z",
+      "total_bytes": 11677,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 701,
+      "merged_at": "2026-09-13T05:35:35Z",
+      "total_bytes": 2579,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 696,
+      "merged_at": "2026-09-13T05:20:19Z",
+      "total_bytes": 6789,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 694,
+      "merged_at": "2026-09-13T03:58:59Z",
+      "total_bytes": 4202,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 621,
+      "merged_at": "2026-09-13T03:55:33Z",
+      "total_bytes": 17272,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 625,
+      "merged_at": "2026-09-13T03:45:58Z",
+      "total_bytes": 15951,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 688,
+      "merged_at": "2026-09-13T03:18:34Z",
+      "total_bytes": 11897,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 687,
+      "merged_at": "2026-09-13T02:59:56Z",
+      "total_bytes": 10202,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 686,
+      "merged_at": "2026-09-13T02:25:35Z",
+      "total_bytes": 11533,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 683,
+      "merged_at": "2026-09-13T02:00:37Z",
+      "total_bytes": 4617,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 682,
+      "merged_at": "2026-09-13T01:45:34Z",
+      "total_bytes": 14262,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 676,
+      "merged_at": "2026-09-13T00:32:30Z",
+      "total_bytes": 6352,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 672,
+      "merged_at": "2026-09-13T00:28:15Z",
+      "total_bytes": 14621,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 671,
+      "merged_at": "2026-09-13T00:25:31Z",
+      "total_bytes": 9425,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 644,
+      "merged_at": "2026-09-12T22:40:33Z",
+      "total_bytes": 6990,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 637,
+      "merged_at": "2026-09-12T21:42:41Z",
+      "total_bytes": 9383,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 634,
+      "merged_at": "2026-09-12T21:20:29Z",
+      "total_bytes": 13687,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 632,
+      "merged_at": "2026-09-12T21:07:33Z",
+      "total_bytes": 8444,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 628,
+      "merged_at": "2026-09-12T21:05:31Z",
+      "total_bytes": 31882,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 617,
+      "merged_at": "2026-09-11T15:40:33Z",
+      "total_bytes": 7409,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 620,
+      "merged_at": "2026-09-11T07:01:20Z",
+      "total_bytes": 2571,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 619,
+      "merged_at": "2026-09-11T05:33:17Z",
+      "total_bytes": 2487,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 611,
+      "merged_at": "2026-09-11T05:14:27Z",
+      "total_bytes": 39648,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 587,
+      "merged_at": "2026-09-11T04:53:17Z",
+      "total_bytes": 2186,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 605,
+      "merged_at": "2026-09-11T03:13:01Z",
+      "total_bytes": 4474,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 604,
+      "merged_at": "2026-09-11T02:52:21Z",
+      "total_bytes": 8276,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 602,
+      "merged_at": "2026-09-11T02:37:41Z",
+      "total_bytes": 8066,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 593,
+      "merged_at": "2026-09-11T02:07:56Z",
+      "total_bytes": 4794,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 599,
+      "merged_at": "2026-09-11T02:02:34Z",
+      "total_bytes": 8429,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 598,
+      "merged_at": "2026-09-11T01:57:23Z",
+      "total_bytes": 2545,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 594,
+      "merged_at": "2026-09-11T01:53:32Z",
+      "total_bytes": 4770,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 592,
+      "merged_at": "2026-09-11T01:37:49Z",
+      "total_bytes": 2122,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 591,
+      "merged_at": "2026-09-11T01:32:38Z",
+      "total_bytes": 376,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 589,
+      "merged_at": "2026-09-11T01:27:20Z",
+      "total_bytes": 1637,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 588,
+      "merged_at": "2026-09-11T01:24:06Z",
+      "total_bytes": 3014,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 586,
+      "merged_at": "2026-09-11T01:09:20Z",
+      "total_bytes": 5084,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 584,
+      "merged_at": "2026-09-11T00:59:34Z",
+      "total_bytes": 6614,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 583,
+      "merged_at": "2026-09-11T00:54:01Z",
+      "total_bytes": 12324,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 582,
+      "merged_at": "2026-09-11T00:47:21Z",
+      "total_bytes": 11708,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 597,
+      "merged_at": "2026-09-11T00:44:01Z",
+      "total_bytes": 4215,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 581,
+      "merged_at": "2026-09-10T17:18:22Z",
+      "total_bytes": 12518,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 580,
+      "merged_at": "2026-09-10T16:58:28Z",
+      "total_bytes": 12166,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 574,
+      "merged_at": "2026-09-10T15:18:17Z",
+      "total_bytes": 6797,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 571,
+      "merged_at": "2026-09-10T14:58:50Z",
+      "total_bytes": 10537,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 559,
+      "merged_at": "2026-09-10T14:30:43Z",
+      "total_bytes": 37292,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 499,
+      "merged_at": "2026-09-10T13:40:48Z",
+      "total_bytes": 17374,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 555,
+      "merged_at": "2026-09-10T13:10:25Z",
+      "total_bytes": 13057,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 554,
+      "merged_at": "2026-09-10T12:41:44Z",
+      "total_bytes": 14374,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 552,
+      "merged_at": "2026-09-10T12:30:53Z",
+      "total_bytes": 2374,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 550,
+      "merged_at": "2026-09-10T12:20:06Z",
+      "total_bytes": 1484,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 545,
+      "merged_at": "2026-09-10T12:13:40Z",
+      "total_bytes": 851,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 544,
+      "merged_at": "2026-09-10T11:21:10Z",
+      "total_bytes": 5653,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 543,
+      "merged_at": "2026-09-10T11:08:48Z",
+      "total_bytes": 2560,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 542,
+      "merged_at": "2026-09-10T10:55:30Z",
+      "total_bytes": 3125,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 541,
+      "merged_at": "2026-09-10T10:38:42Z",
+      "total_bytes": 3265,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 540,
+      "merged_at": "2026-09-10T10:26:04Z",
+      "total_bytes": 20505,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 539,
+      "merged_at": "2026-09-10T10:08:02Z",
+      "total_bytes": 3914,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 538,
+      "merged_at": "2026-09-10T09:29:19Z",
+      "total_bytes": 2878,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 528,
+      "merged_at": "2026-09-10T08:14:05Z",
+      "total_bytes": 8227,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 527,
+      "merged_at": "2026-09-10T08:12:09Z",
+      "total_bytes": 3277,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 523,
+      "merged_at": "2026-09-10T08:11:35Z",
+      "total_bytes": 6177,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 522,
+      "merged_at": "2026-09-10T08:03:43Z",
+      "total_bytes": 11464,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 520,
+      "merged_at": "2026-09-10T07:56:02Z",
+      "total_bytes": 12490,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 517,
+      "merged_at": "2026-09-10T07:53:18Z",
+      "total_bytes": 16206,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 515,
+      "merged_at": "2026-09-10T07:40:55Z",
+      "total_bytes": 18357,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 511,
+      "merged_at": "2026-09-10T07:29:15Z",
+      "total_bytes": 8406,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 504,
+      "merged_at": "2026-09-10T07:27:58Z",
+      "total_bytes": 21782,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 513,
+      "merged_at": "2026-09-10T07:19:38Z",
+      "total_bytes": 11399,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 512,
+      "merged_at": "2026-09-10T07:18:37Z",
+      "total_bytes": 7349,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 508,
+      "merged_at": "2026-09-10T07:17:04Z",
+      "total_bytes": 8051,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 496,
+      "merged_at": "2026-09-10T06:26:21Z",
+      "total_bytes": 8614,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 423,
+      "merged_at": "2026-09-10T06:16:11Z",
+      "total_bytes": 31590,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 486,
+      "merged_at": "2026-09-10T06:03:03Z",
+      "total_bytes": 17283,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 484,
+      "merged_at": "2026-09-10T05:14:31Z",
+      "total_bytes": 15803,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 426,
+      "merged_at": "2026-09-10T04:48:58Z",
+      "total_bytes": 4155,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 424,
+      "merged_at": "2026-09-10T04:38:55Z",
+      "total_bytes": 13067,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 407,
+      "merged_at": "2026-09-10T04:24:50Z",
+      "total_bytes": 24323,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 406,
+      "merged_at": "2026-09-10T04:12:00Z",
+      "total_bytes": 9055,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 481,
+      "merged_at": "2026-09-10T04:02:26Z",
+      "total_bytes": 1937,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 476,
+      "merged_at": "2026-09-10T03:50:52Z",
+      "total_bytes": 3255,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 385,
+      "merged_at": "2026-09-10T03:39:41Z",
+      "total_bytes": 9030,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 480,
+      "merged_at": "2026-09-10T03:29:05Z",
+      "total_bytes": 5320,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 477,
+      "merged_at": "2026-09-10T03:06:59Z",
+      "total_bytes": 26996,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 478,
+      "merged_at": "2026-09-10T01:45:29Z",
+      "total_bytes": 6594,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 454,
+      "merged_at": "2026-09-10T01:26:31Z",
+      "total_bytes": 16412,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 464,
+      "merged_at": "2026-09-10T01:02:29Z",
+      "total_bytes": 1888,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 475,
+      "merged_at": "2026-09-10T00:49:48Z",
+      "total_bytes": 15985,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 471,
+      "merged_at": "2026-09-10T00:40:29Z",
+      "total_bytes": 13313,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 473,
+      "merged_at": "2026-09-10T00:29:36Z",
+      "total_bytes": 11749,
+      "fixture_bytes": 0
+    },
+    {
+      "number": 469,
+      "merged_at": "2026-09-10T00:21:40Z",
+      "total_bytes": 6378,
+      "fixture_bytes": 0
+    }
+  ]
+}

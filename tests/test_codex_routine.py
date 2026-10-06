@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import pathlib
+import re
+import subprocess
+import sys
+import time
 
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -56,6 +60,32 @@ def test_runtime_uses_an_owner_only_per_run_checkout_and_cleanup():
     assert "ticket-<number>-<YYYYMMDDTHHMMSSffffffZ>" in normalized
     assert "if a push fails, it leaves the directory for diagnosis" in normalized
     assert "Clone `packet.repo` inside the current per-session workspace" not in normalized
+
+
+def test_runtime_generates_unique_portable_utc_microsecond_stamps():
+    runtime = routine().split("\n---\n", 1)[1]
+    match = re.search(
+        r"named `ticket-<number>-<YYYYMMDDTHHMMSSffffffZ>` \(UTC stamp:\s*"
+        r"`python3 -c '([^']+)'`\)",
+        runtime,
+    )
+    assert match is not None, "routine must provide a portable Python stamp generator"
+
+    code = match.group(1)
+    first = subprocess.run(
+        [sys.executable, "-c", code], check=True, capture_output=True,
+        text=True,
+    ).stdout.strip()
+    time.sleep(0.001)
+    second = subprocess.run(
+        [sys.executable, "-c", code], check=True, capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    assert re.fullmatch(r"[0-9]{8}T[0-9]{12}Z", first)
+    assert re.fullmatch(r"[0-9]{8}T[0-9]{12}Z", second)
+    assert first != second
+    assert not first.endswith("6N")
 
 
 def test_runtime_waits_for_the_same_slow_begin_session():

@@ -42,7 +42,8 @@ def _finish(run, agent="codex", ts=200, outcome="done"):
 def spool(monkeypatch):
     """Records the heartbeat would read, and everything it appends."""
     state = {"records": [], "appended": []}
-    monkeypatch.setattr(heartbeat, "read", lambda agent: list(state["records"]))
+    monkeypatch.setattr(heartbeat, "read",
+                        lambda agent, **kwargs: list(state["records"]))
     monkeypatch.setattr(
         heartbeat, "append",
         lambda agent, record: state["appended"].append(record) or "spooled",

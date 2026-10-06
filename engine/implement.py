@@ -23,6 +23,7 @@ import importlib.util
 import json
 import os
 import pathlib
+import pwd
 import re
 import shlex
 import shutil
@@ -31,13 +32,14 @@ import subprocess
 import sys
 from collections import Counter
 from datetime import datetime, timezone
-from typing import Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple, Union
 from urllib.parse import urlsplit
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import funnel  # noqa: E402
 
+import block_record  # noqa: E402
 from decline_classifier import (  # noqa: E402
     DECLINE_REVIEW_ROUTING_MARKER,
     classify_decline_reason,
@@ -86,13 +88,72 @@ class SupersededRunError(ImplementError):
         super().__init__("superseded {}: {}".format(ref, reason))
 
 
-class MergedSuiteError(ImplementError):
-    """The suite fails on the merge with origin/main where main does not.
+CODEX_USER_UID = 506
+CODEX_CHECKOUT_RUNS_ROOT = pathlib.Path(
+    "/Users/codex/.claude/command-center-heartbeat/codex-runs"
+)
 
-    Its text is shaped like pytest's (``FAILED <id>`` lines and a counts
-    line), so the failure note and ticket comment read it as they read a
-    head-only run (#1804).
+
+def _checkout_owner_is_allowed(owner_uid: int,
+                              runs_root: pathlib.Path) -> bool:
+    """Allow Nate to remove a Codex-owned checkout only at its fixed root."""
+    if owner_uid == os.getuid():
+        return True
+    try:
+        codex_uid = pwd.getpwnam("codex").pw_uid
+    except KeyError:
+        return False
+    return (
+        owner_uid == CODEX_USER_UID == codex_uid
+        and pathlib.Path(runs_root).resolve() == CODEX_CHECKOUT_RUNS_ROOT
+    )
+
+
+class MergedSuiteError(ImplementError):
+    """The merged suite blocks finish on new failures or unknown results.
+
+    A concrete regression is shaped like pytest's (``FAILED <id>`` lines
+    and a counts line), so the failure note and ticket comment read it as
+    they read a head-only run (#1804).
     """
+
+
+class MergedSuiteUnknownError(MergedSuiteError):
+    """The merged unittest failure could not be compared with the base."""
+
+    def __init__(self, stage: str, output_excerpt: str):
+        self.stage = stage
+        self.output_excerpt = output_excerpt
+        super().__init__(
+            "merged suite result unknown during {} comparison: {}".format(
+                stage, output_excerpt))
+
+
+class TestCommandStartError(ImplementError):
+    """The resolved test command could not be started."""
+
+    def __init__(self):
+        super().__init__("test command could not start")
+
+
+class EnvironmentSetupError(ImplementError):
+    """Locked test dependencies could not be prepared safely."""
+
+    def __init__(self, lock_sha256: str, step: str,
+                 result: Optional[dict] = None):
+        self.lock_sha256 = lock_sha256
+        self.step = step
+        self.pip_result = result
+        detail = ""
+        if isinstance(result, dict):
+            if result.get("timed_out") is True:
+                detail = "; {} timed out".format(step)
+            elif isinstance(result.get("exit_code"), int):
+                detail = "; {} exited {}".format(
+                    step, result["exit_code"])
+        super().__init__(
+            "finish environment error: {}{}; lock sha256 {}".format(
+                step, detail, lock_sha256))
 
 
 class MergeConflictError(ImplementError):
@@ -960,15 +1021,25 @@ def _python_minor(executable: str) -> Optional[str]:
     return result.stdout.strip() if result.returncode == 0 else None
 
 
-def pinned_interpreter(root: pathlib.Path) -> str:
-    """The interpreter the checkout's tests should run under.
+def _python_version(executable: str) -> Optional[str]:
+    """The full interpreter version, used to invalidate patched runtimes."""
+    try:
+        result = _run(
+            [executable, "-c",
+             "import sys; print('.'.join(str(v) for v in sys.version_info[:3]))"],
+            cwd=pathlib.Path.cwd(), check=False,
+            timeout=INTERPRETER_PROBE_TIMEOUT_SECONDS,
+        )
+    except CommandTimeoutError:
+        raise
+    except (ImplementError, OSError, subprocess.SubprocessError):
+        return None
+    version = result.stdout.strip() if result.returncode == 0 else ""
+    return version if re.fullmatch(r"\d+\.\d+(?:\.\d+)?", version) else None
 
-    A repo that pins ``.python-version`` (The-League pins 3.12 and its
-    Makefile refuses anything else) gets a matching interpreter even when
-    finish-ticket itself was started by Apple's 3.9 ``python3`` (#1024).
-    Without a pin, or when no matching interpreter exists, this is
-    ``sys.executable``, so the repo's own check still names a mismatch.
-    """
+
+def _base_pinned_interpreter(root: pathlib.Path) -> str:
+    """Resolve the checkout's pinned interpreter, or retain the old fallback."""
     try:
         lines = (root / ".python-version").read_text().splitlines()
     except OSError:
@@ -987,6 +1058,298 @@ def pinned_interpreter(root: pathlib.Path) -> str:
                 _python_minor(candidate) == wanted:
             return candidate
     return sys.executable
+
+
+def _dependency_source(root: pathlib.Path):
+    """Return the dependency input and its cache key for a Python checkout."""
+    for filename, kind in (
+            ("requirements.lock", "requirements-lock"),
+            ("uv.lock", "uv-lock"),
+            ("requirements.txt", "requirements"),
+            ("pyproject.toml", "pyproject")):
+        path = root / filename
+        if not path.is_file():
+            continue
+        try:
+            content = path.read_bytes()
+            if (kind == "pyproject"
+                    and not _pyproject_has_dependencies(content.decode("utf-8"))):
+                continue
+            if kind == "uv-lock" and (root / "pyproject.toml").is_file():
+                content += b"\0" + (root / "pyproject.toml").read_bytes()
+        except (OSError, UnicodeError):
+            raise EnvironmentSetupError("unreadable", "read dependency lock") \
+                from None
+        return path, kind, hashlib.sha256(content).hexdigest()
+    return None
+
+
+def _pyproject_has_dependencies(text: str) -> bool:
+    """Ignore tool-only pyprojects; install only declared Python dependencies."""
+    project = re.search(
+        r"(?ims)^\s*\[\s*project\s*\]\s*(.*?)(?=^\s*\[|\Z)", text)
+    if (project and re.search(
+            r"(?im)^[ \t]*dynamic[ \t]*=[ \t]*\[[^\]]*['\"]dependencies['\"]",
+            project.group(1))):
+        return True
+    return bool(re.search(
+        r"(?im)^\s*\[\s*(?:build-system|dependency-groups|"
+        r"project\.optional-dependencies|tool\.poetry\.dependencies|"
+        r"tool\.poetry\.dev-dependencies|"
+        r"tool\.poetry\.group\.[^]]+\.dependencies)\s*\]\s*$|"
+        r"^\s*(?:dependencies|optional-dependencies|requires|"
+        r"dev-dependencies)\s*=",
+        text,
+    ))
+
+
+def _process_result(completed: subprocess.CompletedProcess) -> dict:
+    """Keep a useful pip result without persisting its potentially private output."""
+    stdout = completed.stdout or ""
+    stderr = completed.stderr or ""
+    return {
+        "exit_code": completed.returncode,
+        "stdout_sha256": hashlib.sha256(stdout.encode("utf-8")).hexdigest(),
+        "stderr_sha256": hashlib.sha256(stderr.encode("utf-8")).hexdigest(),
+    }
+
+
+def _private_directory(path: pathlib.Path) -> None:
+    if path.is_symlink():
+        raise OSError("runtime environment directory is a symlink")
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if path.is_symlink() or not path.is_dir():
+        raise OSError("runtime environment path is not a directory")
+    os.chmod(path, 0o700)
+
+
+def _remove_environment(path: pathlib.Path) -> None:
+    if path.is_symlink():
+        path.unlink()
+    elif path.is_dir():
+        shutil.rmtree(path)
+    elif path.exists():
+        path.unlink()
+
+
+def _environment_python(environment: pathlib.Path,
+                        interpreter: str) -> pathlib.Path:
+    if os.name == "nt":
+        return environment / "Scripts" / "python.exe"
+    name = os.path.basename(interpreter)
+    if not name.startswith("python"):
+        name = "python"
+    return environment / "bin" / name
+
+
+def _pip_install_command(root: pathlib.Path, python: str, kind: str,
+                         path: pathlib.Path, environment: pathlib.Path,
+                         lock_sha256: str):
+    if kind == "requirements-lock":
+        return [python, "-m", "pip", "install", "--require-hashes",
+                "-r", str(path)]
+    if kind == "requirements":
+        return [python, "-m", "pip", "install", "-r", str(path)]
+    if kind == "pyproject":
+        return [python, "-m", "pip", "install", "."]
+    uv = shutil.which("uv")
+    if not uv:
+        raise EnvironmentSetupError(
+            lock_sha256, "uv export", {"exit_code": 127})
+    try:
+        exported = _run(
+            [uv, "export", "--locked", "--format", "requirements.txt",
+             "--no-emit-project"],
+            cwd=root, check=False, timeout=TEST_COMMAND_TIMEOUT_SECONDS,
+        )
+    except CommandTimeoutError as exc:
+        raise EnvironmentSetupError(lock_sha256, "uv export", {
+            "timed_out": True,
+            "output_sha256": hashlib.sha256(
+                exc.captured_output.encode("utf-8")).hexdigest(),
+        }) from None
+    except (OSError, ImplementError, subprocess.SubprocessError):
+        raise EnvironmentSetupError(
+            lock_sha256, "uv export", {"exit_code": None}) from None
+    if exported.returncode != 0 or not exported.stdout.strip():
+        raise EnvironmentSetupError(
+            lock_sha256, "uv export", _process_result(exported))
+    export_path = environment / "uv-export-requirements.txt"
+    export_path.write_text(exported.stdout)
+    os.chmod(export_path, 0o600)
+    return [python, "-m", "pip", "install", "-r", str(export_path)]
+
+
+def _install_locked_environment(root: pathlib.Path, repo: str, base: str,
+                                version: str, path: pathlib.Path,
+                                kind: str, lock_sha256: str,
+                                environment: pathlib.Path) -> str:
+    result = None
+    step = "venv creation"
+    try:
+        result = _run([base, "-m", "venv", str(environment)], cwd=root,
+                      check=False, timeout=TEST_COMMAND_TIMEOUT_SECONDS)
+        if result.returncode != 0:
+            raise EnvironmentSetupError(
+                lock_sha256, step, _process_result(result))
+        _private_directory(environment)
+        python = _environment_python(environment, base)
+        if not python.is_file():
+            raise EnvironmentSetupError(
+                lock_sha256, "venv activation", {"exit_code": None})
+        step = "pip install"
+        command = _pip_install_command(
+            root, str(python), kind, path, environment, lock_sha256)
+        try:
+            result = _run(command, cwd=root, check=False,
+                          timeout=TEST_COMMAND_TIMEOUT_SECONDS)
+        except CommandTimeoutError as exc:
+            result = {
+                "timed_out": True,
+                "output_sha256": hashlib.sha256(
+                    exc.captured_output.encode("utf-8")).hexdigest(),
+            }
+            raise EnvironmentSetupError(lock_sha256, step, result) from None
+        if result.returncode != 0:
+            raise EnvironmentSetupError(
+                lock_sha256, step, _process_result(result))
+        pip_result = _process_result(result)
+        if _python_version(str(python)) != version:
+            raise EnvironmentSetupError(
+                lock_sha256, "venv activation", pip_result)
+        manifest = {
+            "schema": 1,
+            "repo": repo,
+            "lock_file": path.name,
+            "lock_sha256": lock_sha256,
+            "interpreter": os.path.abspath(base),
+            "python_version": version,
+            "venv_python": str(python),
+            "pip_result": pip_result,
+        }
+        manifest_path = environment / "environment.json"
+        temporary = environment / ".environment.json.tmp"
+        temporary.write_text(json.dumps(manifest, sort_keys=True, indent=2)
+                             + "\n")
+        os.chmod(temporary, 0o600)
+        os.replace(str(temporary), str(manifest_path))
+        if kind == "uv-lock":
+            export_path = environment / "uv-export-requirements.txt"
+            if export_path.exists():
+                export_path.unlink()
+        return str(python)
+    except CommandTimeoutError as exc:
+        _remove_environment(environment)
+        result_record = _process_result(result) if result is not None else {}
+        result_record.update({
+            "timed_out": True,
+            "output_sha256": hashlib.sha256(
+                exc.captured_output.encode("utf-8")).hexdigest(),
+        })
+        raise EnvironmentSetupError(
+            lock_sha256, step, result_record) from None
+    except EnvironmentSetupError:
+        _remove_environment(environment)
+        raise
+    except (ImplementError, OSError, subprocess.SubprocessError):
+        _remove_environment(environment)
+        result_record = _process_result(result) if result is not None else None
+        raise EnvironmentSetupError(
+            lock_sha256, step, result_record) from None
+
+
+def _locked_interpreter(root: pathlib.Path, base: str,
+                        source: tuple) -> str:
+    path, kind, lock_sha256 = source
+    try:
+        version = _python_version(base)
+    except CommandTimeoutError as exc:
+        raise EnvironmentSetupError(lock_sha256, "pinned interpreter probe", {
+            "timed_out": True,
+            "output_sha256": hashlib.sha256(
+                exc.captured_output.encode("utf-8")).hexdigest(),
+        }) from None
+    if not version:
+        raise EnvironmentSetupError(
+            lock_sha256, "pinned interpreter probe", {"exit_code": None})
+    minor = ".".join(version.split(".")[:2])
+    try:
+        repo = resolve_checkout_repo(root, None)
+    except (ImplementError, funnel.GitHubError, OSError,
+            subprocess.SubprocessError):
+        raise EnvironmentSetupError(
+            lock_sha256, "repository identity lookup", {"exit_code": None}) \
+            from None
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo):
+        raise EnvironmentSetupError(
+            lock_sha256, "repository identity lookup", {"exit_code": None})
+    repo_dir_name = repo.replace("/", "--")
+    import heartbeat
+    finish_envs = pathlib.Path(heartbeat.SPOOL_DIR) / "finish-envs"
+    repo_envs = finish_envs / repo_dir_name
+    environment = repo_envs / minor
+    try:
+        _private_directory(finish_envs)
+        _private_directory(repo_envs)
+    except OSError:
+        raise EnvironmentSetupError(
+            lock_sha256, "runtime directory setup", {"exit_code": None}) \
+            from None
+
+    python = _environment_python(environment, base)
+    manifest_path = environment / "environment.json"
+    try:
+        manifest = json.loads(manifest_path.read_text())
+    except (OSError, ValueError, TypeError):
+        manifest = None
+    pip_result = (manifest.get("pip_result")
+                  if isinstance(manifest, dict) else None)
+    if (isinstance(manifest, dict)
+            and manifest.get("schema") == 1
+            and manifest.get("repo") == repo
+            and manifest.get("lock_sha256") == lock_sha256
+            and manifest.get("interpreter") == os.path.abspath(base)
+            and manifest.get("python_version") == version
+            and isinstance(pip_result, dict)
+            and pip_result.get("exit_code") == 0
+            and not environment.is_symlink()
+            and python.is_file()):
+        try:
+            activated = _python_version(str(python))
+        except CommandTimeoutError:
+            activated = None
+        if activated == version:
+            try:
+                os.chmod(environment, 0o700)
+            except OSError:
+                activated = None
+            else:
+                return str(python)
+    try:
+        _remove_environment(environment)
+        return _install_locked_environment(
+            root, repo, base, version, path, kind, lock_sha256,
+            environment)
+    except OSError:
+        _remove_environment(environment)
+        raise EnvironmentSetupError(
+            lock_sha256, "runtime environment setup", {"exit_code": None}) \
+            from None
+
+
+def pinned_interpreter(root: pathlib.Path) -> str:
+    """Return an isolated locked-dependency interpreter when a Python lock exists.
+
+    A repo that pins ``.python-version`` gets a matching interpreter even
+    when finish-ticket itself was started by another Python (#1024). For a
+    locked checkout, its owner-only cached venv installs those dependencies
+    before tests run; install errors never fall back to the bare interpreter.
+    """
+    base = _base_pinned_interpreter(root)
+    source = _dependency_source(root)
+    if source is None:
+        return base
+    return _locked_interpreter(root, base, source)
 
 
 def run_tests(root: pathlib.Path,
@@ -1028,10 +1391,15 @@ def run_tests(root: pathlib.Path,
         bound = (COMPILE_COMMAND_TIMEOUT_SECONDS
                  if _is_compile_command(argv)
                  else TEST_COMMAND_TIMEOUT_SECONDS)
-        _run(
-            argv, cwd=root, env=env,
-            timeout=bound if timeout is None else min(bound, timeout),
-        )
+        try:
+            _run(
+                argv, cwd=root, env=env,
+                timeout=bound if timeout is None else min(bound, timeout),
+            )
+        except OSError:
+            # The resolved executable can belong to a private repository.
+            # Keep its path out of the public heartbeat note.
+            raise TestCommandStartError() from None
         rendered.append(shlex.join(argv))
     return rendered, source
 
@@ -1050,15 +1418,23 @@ def _review_evidence():
     return module
 
 
-def _merged_failure(record: dict) -> MergedSuiteError:
+def _merged_failure(record: dict) -> ImplementError:
     """The error for a merged run that fails where main does not.
 
     It names the command that stopped the plan and the failing ids: those
     main does not share, or every id when the base could not be compared
-    (another runner, or a pytest run that stopped early). The counts line
-    counts only failures main does not share, which is what fails the
-    finish.
+    (another runner, an unparseable unittest result, or a pytest run that
+    stopped early). The counts line counts only failures main does not
+    share, which is what fails the finish.
     """
+    if any(entry.get("start_failed") is True
+           for entry in record["commands"]):
+        return TestCommandStartError()
+    unknown = record.get("unknown_result")
+    if unknown:
+        return MergedSuiteUnknownError(
+            unknown.get("stage", "merge"),
+            unknown.get("output_excerpt") or "No unittest output was captured.")
     timed_out = [entry for entry in record["commands"]
                  if entry.get("timed_out") is True]
     if timed_out:
@@ -1232,13 +1608,17 @@ def resolve_checkout_repo(root: pathlib.Path, explicit: Optional[str]) -> str:
 #:   - added tests: <n> red, <n> passes-on-base, <n> no signal
 #:   - <outcome>: <node id>    (command-center only, at most
 #:     MAX_EVIDENCE_TEST_IDS, then "- (+<n> more)")
-#:   - rewrites prior fix: #<ticket> (<path>:<function>)
+#:   - rewrites #<ticket>'s prior fix (<path>:<function>)
 #:     (at most MAX_EVIDENCE_PRIOR_FIXES, then "- (+<n> more prior fixes)")
 #:   - prior fix scan: not run    (only when its bounded scan was unavailable)
 #:   <!-- /command-center-evidence -->
 #:
 #: Every other repository's block carries the counts and no node id, as
-#: its notes do (#1796).
+#: its notes do (#1796). No line puts a GitHub closing keyword (close, fix,
+#: resolve and their -s/-d forms, with or without a colon) directly before
+#: a reference: GitHub closes what a merged PR body names that way, and the
+#: old "rewrites prior fix: #<ticket>" line did so to every fix it named
+#: (#2069). Readers still accept that old line from PRs opened before it.
 EVIDENCE_MARKER = "<!-- command-center-evidence -->"
 EVIDENCE_END_MARKER = "<!-- /command-center-evidence -->"
 
@@ -1317,7 +1697,8 @@ def render_evidence_block(*, sha: str, merged: Optional[dict],
                 _strip_evidence_markers(str(path)).split())[:200]
             safe_function = " ".join(
                 _strip_evidence_markers(str(function or "<unknown>")).split())[:120]
-            lines.append("- rewrites prior fix: #{} ({}:{})".format(
+            # The reference comes before "fix", never after it (#2069).
+            lines.append("- rewrites #{}'s prior fix ({}:{})".format(
                 ticket_number, safe_path, safe_function))
         if len(found) > MAX_EVIDENCE_PRIOR_FIXES:
             lines.append("- (+{} more prior fixes)".format(
@@ -1430,7 +1811,9 @@ _RUN_SCRATCH_PREFIXES = (
     "prompt.", "prompt-", "run.", "run-", "scratch.", "scratch-",
 )
 _RUN_SCRATCH_SUFFIXES = (".scratch", ".tmp")
-_RUN_SCRATCH_DIRECTORIES = frozenset({".scratch", "scratch", ".tmp", "tmp"})
+_RUN_SCRATCH_DIRECTORIES = frozenset({
+    ".scratch", "scratch", ".tmp", ".pytest-tmp", "tmp",
+})
 
 
 def _git_name_paths(root: pathlib.Path, command: Sequence[str]) -> List[str]:
@@ -1449,6 +1832,33 @@ def _working_tree_paths(root: pathlib.Path) -> List[str]:
         ("ls-files", "--others", "--exclude-standard", "-z"),
     ):
         paths.update(_git_name_paths(root, command))
+    return sorted(paths)
+
+
+def _tracked_working_tree_paths(root: pathlib.Path) -> List[str]:
+    """List changes to paths already tracked by the ticket branch."""
+    tracked = set(_git_name_paths(
+        root, ("ls-tree", "-r", "--name-only", "-z", "HEAD")))
+    raw = _run(["git", "diff", "--name-status", "-z", "HEAD"], cwd=root,
+               timeout=LOCAL_GIT_TIMEOUT_SECONDS).stdout
+    fields = raw.split("\0")
+    paths = set()
+    index = 0
+    while index < len(fields):
+        status = fields[index]
+        index += 1
+        if not status:
+            continue
+        if status[0] in ("R", "C"):
+            old, new = fields[index:index + 2]
+            index += 2
+            if old in tracked:
+                paths.update((old, new))
+        else:
+            path = fields[index]
+            index += 1
+            if status[0] != "A" and path in tracked:
+                paths.add(path)
     return sorted(paths)
 
 
@@ -1739,11 +2149,12 @@ def close_no_diff_ticket(repo: str, number: int, *,
 
 def create_or_update_pr(repo: str, context: dict, ticket: dict,
                         body: str) -> dict:
-    """Create the ticket PR, or update the one already open for the branch.
+    """Create or update the ticket PR, unless its pushed head already merged.
 
     Only the funnel's own open PR is updated (#1794): ``--head`` also matches
     a fork's PR on a branch of the same name, and editing that would act on
-    a stranger's PR.
+    a stranger's PR. A late finish after the merge gate lands the same head
+    must leave the merged PR in place rather than create a duplicate.
     """
     rows = funnel._gh_json(
         "gh", "pr", "list", "--repo", repo, "--state", "open",
@@ -1765,6 +2176,25 @@ def create_or_update_pr(repo: str, context: dict, ticket: dict,
         if proc.returncode != 0:
             raise funnel.GitHubError((proc.stderr or "could not update PR").strip())
         return pr
+    pushed_head = context.get("head_sha")
+    if not isinstance(pushed_head, str) or not pushed_head:
+        raise ImplementError("could not read the pushed head SHA")
+    merged_rows = funnel._gh_json(
+        "gh", "pr", "list", "--repo", repo, "--state", "merged",
+        "--head", context["branch"],
+        "--json", "number,url,headRefOid," + funnel.PR_TRUST_JSON_FIELDS,
+        "--limit", "10",
+    )
+    if merged_rows is None or not isinstance(merged_rows, list):
+        raise funnel.GitHubError("could not list the branch's merged PRs")
+    for row in merged_rows:
+        if (funnel.is_funnel_pr(repo, row)
+                and row.get("headRefOid") == pushed_head):
+            return {
+                "number": row.get("number"),
+                "url": row.get("url"),
+                "merged": True,
+            }
     proc = funnel._run_gh(
         ["gh", "pr", "create", "--repo", repo, "--base", "main",
          "--head", context["branch"], "--title", title,
@@ -1780,9 +2210,11 @@ def create_or_update_pr(repo: str, context: dict, ticket: dict,
     return {"number": int(match.group(1)), "url": url}
 
 
-def render_human_step_title(action: str) -> str:
-    """Render the human-step sub-issue title from the model's action."""
-    return "Human step: {}".format(action)
+def render_human_step_title(action: str, *, needs: str) -> str:
+    """Render the blocked-step title with its canonical Needs prefix."""
+    prefix = ("Claude Code environment step"
+              if needs == "claude-code-environment" else "Human step")
+    return "{}: {}".format(prefix, action)
 
 
 def render_human_step_body(*, parent_number: int, ticket_number: int,
@@ -1901,7 +2333,14 @@ def write_declined_agent_needs(url: str, ref: str) -> None:
 
 def mark_ticket_blocked(repo: str, number: int, *, blocked_by: Optional[int] = None,
                         cwd: pathlib.Path) -> None:
-    """Label one ticket blocked, with the native edge when one exists."""
+    """Label one ticket blocked, with the native edge when one exists.
+
+    It writes no comment. Its caller posts the ticket's block or decline
+    record before calling it (#2168): ``_load_block_comment`` reads a
+    labelled ticket's newest record as its current block, so a label set
+    before the record would leave an earlier episode's record current, whose
+    condition ``clear_satisfied_blocks`` can then lift.
+    """
     command = ["gh", "issue", "edit", str(number), "--repo", repo]
     if blocked_by is not None:
         command += ["--add-blocked-by", str(blocked_by)]
@@ -2295,11 +2734,11 @@ def close_declined_defer_note_proof(
         cwd: pathlib.Path) -> None:
     """Close an explicitly accepted defer-note proof as completed.
 
-    The reason is the model's words, so it is made inert (#1798).
+    The reason is the model's words, so ``block_record.render_declined``
+    makes it inert (#1798, #2168).
     """
     comment = funnel.append_provenance(
-        "{} {}".format(funnel.DECLINED_PREFIX,
-                       funnel.inert_comment_text(reason)), "agent",
+        block_record.render_declined(reason), "agent",
         at=datetime.now(timezone.utc), run=run, agent=agent,
     )
     proc = funnel._run_gh(
@@ -2429,6 +2868,61 @@ def finish_heartbeat(agent: str, run: str, outcome: str,
         raise ImplementError("heartbeat finish refused run {}".format(run))
 
 
+def _finish_exit(ref: str, *, run: str, agent: str, outcome: str,
+                 note: Union[str, Callable[[], str]],
+                 release: Callable[[str], None],
+                 heartbeat_finish: Callable[[str, str, str, str, str], None],
+                 remove_checkout: Optional[dict] = None,
+                 done: str = "") -> None:
+    """The one tail every finish-ticket exit ends with (#2167).
+
+    It releases this run's claim, then finishes its heartbeat with
+    ``outcome`` and ``note``, each once; nothing else in this module calls
+    either. The caller has already made its own effects (the PR, the close,
+    the comments) and built its note, so the PR still comes before the
+    release; a note that reads GitHub after the release, as a timeout's
+    does, comes as a callable.
+
+    ``remove_checkout`` is the caller's checkout context, passed only where
+    the work is pushed or the checkout may hold nothing unique;
+    ``_remove_codex_run_checkout``'s pushed-and-clean guard still decides.
+    A stray-file refusal or work that was not pushed passes none and keeps
+    the checkout (#1856).
+
+    A superseded run never comes here: ``_record_superseded_finish``
+    records its heartbeat alone, releasing nothing and keeping the checkout.
+
+    A release or heartbeat finish that fails is re-raised naming what the
+    exit had already done (``done``, then the release), so a finish that
+    opened its PR and released its claim before the heartbeat refused the
+    run does not read as though nothing happened. The checkout stays then.
+    """
+    try:
+        release(ref)
+    except SupersededRunError:
+        raise
+    except (funnel.GitHubError, ImplementError, OSError,
+            subprocess.SubprocessError) as exc:
+        if not done:
+            raise
+        raise ImplementError(
+            "{}; already done: {}".format(exc, done)) from exc
+    if callable(note):
+        note = note()
+    try:
+        heartbeat_finish(agent, run, outcome, note, ref)
+    except SupersededRunError:
+        raise
+    except (funnel.GitHubError, ImplementError, OSError,
+            subprocess.SubprocessError) as exc:
+        raise ImplementError("{}; already done: {}".format(
+            exc, ", ".join(part for part in (done, "claim released")
+                           if part))) from exc
+    if remove_checkout is not None:
+        _remove_codex_run_checkout(
+            remove_checkout["root"], remove_checkout["number"], agent)
+
+
 def _bound_work_ref_for_run(run: str, agent: str) -> str:
     """Recover the issued ticket ref when checkout identity lookup timed out."""
     import heartbeat
@@ -2447,30 +2941,41 @@ def _record_command_timeout(
         exc: CommandTimeoutError, *, run: str, agent: str, ref: str,
         release: Callable[[str], None],
         heartbeat_finish: Callable[[str, str, str, str, str], None],
-        work_kept: bool = False) -> None:
-    """Finish a timed-out run without attempting another checkout command."""
+        work_kept: bool = False, context: Optional[dict] = None) -> None:
+    """Finish a timed-out run without attempting another checkout command.
+
+    ``context`` is the checkout, offered for removal once the work was
+    checkpointed (pushed); the CLI's recovery has none to offer.
+    """
     if exc.finish_recorded:
         return
     # Do not repeat either effect if one of them fails part-way through.
     exc.finish_recorded = True
-    release(ref)
     kept_note = "work was checkpointed" if work_kept else "work NOT kept"
-    repo = ref.partition("#")[0]
-    try:
-        repository = funnel._gh_api_json("repos/{}".format(repo))
-    except Exception:
-        # A visibility read that fails is not permission to publish the
-        # command name into the public heartbeat ledger.
-        repository = None
-    command_note = (
-        str(exc)
-        if isinstance(repository, dict)
-        and repository.get("visibility") == "public"
-        else "test command timed out after {:g}s".format(
-            exc.timeout_seconds)
-    )
-    heartbeat_finish(
-        agent, run, "errored", "{}; {}".format(command_note, kept_note), ref,
+
+    def timeout_note() -> str:
+        # Read after the release, as before #2167: a slow visibility read
+        # must not hold the claim.
+        repo = ref.partition("#")[0]
+        try:
+            repository = funnel._gh_api_json("repos/{}".format(repo))
+        except Exception:
+            # A visibility read that fails is not permission to publish the
+            # command name into the public heartbeat ledger.
+            repository = None
+        command_note = (
+            str(exc)
+            if isinstance(repository, dict)
+            and repository.get("visibility") == "public"
+            else "test command timed out after {:g}s".format(
+                exc.timeout_seconds)
+        )
+        return "{}; {}".format(command_note, kept_note)
+
+    _finish_exit(
+        ref, run=run, agent=agent, outcome="errored", note=timeout_note,
+        release=release, heartbeat_finish=heartbeat_finish,
+        remove_checkout=context if work_kept else None,
     )
 
 
@@ -2570,6 +3075,26 @@ def _failure_note(exc: ImplementError, kept: str = "", *, repo: str) -> str:
     line -- go to the ticket in its own repository through
     ``_failure_comment``, where the next run's packet reads them.
     """
+    if isinstance(exc, EnvironmentSetupError):
+        note = str(exc)
+        if kept:
+            note += " | " + (
+                _member_kept(kept) if not _is_public_repo(repo) else kept)
+        return note
+    if isinstance(exc, TestCommandStartError):
+        note = str(exc)
+        if kept:
+            note += " | " + (
+                kept if _is_public_repo(repo) else _member_kept(kept))
+        return note
+    if isinstance(exc, MergedSuiteUnknownError):
+        public = _is_public_repo(repo)
+        note = "merged suite result unknown"
+        if public and exc.output_excerpt:
+            note += ": " + _first_output_line(exc.output_excerpt)
+        if kept:
+            note += " | " + (kept if public else _member_kept(kept))
+        return note
     text = str(exc)
     if text.startswith("tests timed out:"):
         public = _is_public_repo(repo)
@@ -2607,12 +3132,30 @@ def _failure_note(exc: ImplementError, kept: str = "", *, repo: str) -> str:
 def _failure_comment(exc: ImplementError, kept: str = "") -> str:
     """What a member-repo failure note withholds, for its ticket (#1796).
 
-    The failing test ids, pytest's counts line and, when pytest named no
-    test, the first line of the output: what the note carried before. The
-    next run reads it in its packet's issue thread. The branch prints that
-    output, so the free-text lines are made inert (#1798); an id is one
-    ``\\S+`` token, which no marker fits.
+    Failing test ids, pytest's counts line and, when pytest named no test,
+    the first output line go to the issue. An unknown merged unittest result
+    also carries a bounded output excerpt. The branch prints that output,
+    so the free-text lines are made inert (#1798); an id is one ``\\S+``
+    token, which no marker fits.
     """
+    if isinstance(exc, MergedSuiteUnknownError):
+        lines = [
+            "**Merged suite result unknown**",
+            "",
+            "The unittest result could not be compared with `origin/main`; "
+            "the run is recorded as unknown rather than a ticket regression.",
+            "",
+            "Stage: `{}`".format(funnel.inert_comment_text(exc.stage)),
+            "",
+            "Output excerpt:",
+            "",
+            "```text",
+            funnel.inert_comment_text(exc.output_excerpt),
+            "```",
+        ]
+        if kept:
+            lines.extend(["", "Work: {}".format(kept)])
+        return "\n".join(lines).rstrip() + "\n"
     text = str(exc)
     ids = _failed_test_ids(text)
     counts = _pytest_counts(text)
@@ -2731,6 +3274,29 @@ def _push_ticket_branch(root: pathlib.Path, branch: str, *, ref: str,
     _run(["git", "push", "--set-upstream", "origin", branch], cwd=root,
          timeout=REMOTE_GIT_TIMEOUT_SECONDS)
 
+
+def _preserve_human_step_work(
+        root: pathlib.Path, number: int, branch: str, *, ref: str,
+        run: Optional[str], agent: str) -> Optional[str]:
+    """Push a tracked-only WIP checkpoint before a human-step side effect."""
+    paths = _tracked_working_tree_paths(root)
+    if not paths:
+        return None
+    stray = [path for path in paths if _is_run_scratch(path)]
+    if stray:
+        raise StrayFileError(stray)
+    _require_current_claim(ref, run, agent)
+    _run(
+        ["git", "commit", "--only", "-m",
+         "[human-step-wip] WIP #{}: preserve tracked work".format(number),
+         "--", *paths],
+        cwd=root, timeout=LOCAL_GIT_TIMEOUT_SECONDS,
+    )
+    _push_ticket_branch(root, branch, ref=ref, run=run, agent=agent)
+    return _run(["git", "rev-parse", "HEAD"], cwd=root,
+                timeout=LOCAL_GIT_TIMEOUT_SECONDS).stdout.strip()
+
+
 def _remove_codex_run_checkout(root: pathlib.Path, number: int,
                                agent: str) -> bool:
     """Remove only this Codex ticket checkout under a runtime codex-runs/.
@@ -2738,7 +3304,11 @@ def _remove_codex_run_checkout(root: pathlib.Path, number: int,
     The per-run clone is named ``ticket-<number>-<UTC timestamp>`` and is
     owner-only. Restrict removal to that exact direct child; finish-ticket also
     runs from session workspaces and other agents' checkouts, which must remain
-    untouched.
+    untouched. For Git checkouts, remove only when the tree is clean and HEAD
+    is an ancestor of ``origin/main`` or exactly matches
+    ``origin/ticket/<number>``. A non-Git directory retains the prior cleanup
+    behavior; the production finish path obtains its root from a validated Git
+    checkout.
 
     Live runs clone into the heartbeat directory's ``codex-runs/``
     (``heartbeat.SPOOL_DIR``), because that is the Codex sandbox's only
@@ -2750,14 +3320,16 @@ def _remove_codex_run_checkout(root: pathlib.Path, number: int,
     ``review-evidence-*``, so no guard below can match them; they are
     removed by review_evidence itself.
 
-    Call it only once this run has pushed the ticket branch. #1711 also
-    removed the checkout once a finish recorded work not kept, but that
-    checkout can hold the only copy of the work: a stray-file refusal, a
-    ``_keep_work`` failure before its push, a superseded run, a decline or
-    a human step. Those paths never ran live while the root went unmatched,
-    so matching it (#1856) would have started deleting that work. They leave
-    the directory for a later run or Nate to recover: a leaked directory is
-    the safe failure, lost work is not.
+    Completed exits call it through ``_finish_exit`` after the heartbeat has
+    recorded its outcome (#2167). A failed declined-answer path also offers
+    the checkout directly from ``_finish_ticket``; the same clean/content-safe
+    checks retain any work that is not already durable.
+    The branch may have been pushed by this run or an earlier one; a clean
+    tree whose HEAD is already on main or at the remote ticket tip holds no
+    unique Git work. A stray-file refusal, a ``_keep_work`` failure before its
+    push, or a superseded run can still hold the only copy, so those paths do
+    not call this cleanup and the clean/content-safe guard keeps any other
+    unsafe tree.
     """
     if agent != "codex":
         return False
@@ -2770,8 +3342,10 @@ def _remove_codex_run_checkout(root: pathlib.Path, number: int,
         return False
     import heartbeat
     runs_root = None
-    for candidate in (pathlib.Path(funnel.CLAUDE_DIR) / "codex-runs",
-                      pathlib.Path(heartbeat.SPOOL_DIR) / "codex-runs"):
+    for candidate in (
+            pathlib.Path(funnel.CLAUDE_DIR) / "codex-runs",
+            pathlib.Path(heartbeat.SPOOL_DIR) / "codex-runs",
+            CODEX_CHECKOUT_RUNS_ROOT):
         if candidate.is_symlink():
             continue
         try:
@@ -2789,9 +3363,68 @@ def _remove_codex_run_checkout(root: pathlib.Path, number: int,
         return False
     try:
         info = checkout.stat()
-        if (not checkout.is_dir() or info.st_uid != os.getuid()
+        if (not checkout.is_dir()
+                or not _checkout_owner_is_allowed(info.st_uid, runs_root)
                 or info.st_mode & 0o077):
             return False
+        if runs_root == CODEX_CHECKOUT_RUNS_ROOT:
+            root_info = runs_root.stat()
+            if (root_info.st_uid != CODEX_USER_UID
+                    or root_info.st_mode & 0o077):
+                return False
+        if (checkout / ".git").exists():
+            try:
+                top = _run(
+                    ["git", "rev-parse", "--show-toplevel"],
+                    cwd=checkout, check=False,
+                    timeout=LOCAL_GIT_TIMEOUT_SECONDS,
+                )
+                branch = _run(
+                    ["git", "branch", "--show-current"],
+                    cwd=checkout, check=False,
+                    timeout=LOCAL_GIT_TIMEOUT_SECONDS,
+                )
+                status = _run(
+                    ["git", "status", "--porcelain", "--untracked-files=all"],
+                    cwd=checkout, check=False,
+                    timeout=LOCAL_GIT_TIMEOUT_SECONDS,
+                )
+                head = _run(
+                    ["git", "rev-parse", "--verify", "HEAD"],
+                    cwd=checkout, check=False,
+                    timeout=LOCAL_GIT_TIMEOUT_SECONDS,
+                )
+                remote_head = _run(
+                    ["git", "rev-parse", "--verify",
+                     "refs/remotes/origin/ticket/{}".format(number)],
+                    cwd=checkout, check=False,
+                    timeout=LOCAL_GIT_TIMEOUT_SECONDS,
+                )
+            except (ImplementError, OSError, subprocess.SubprocessError):
+                return False
+            if (any(result.returncode != 0 for result in
+                    (top, branch, status, head))
+                    or pathlib.Path(top.stdout.strip()).resolve() != checkout
+                    or branch.stdout.strip() != "ticket/{}".format(number)
+                    or status.stdout.strip()):
+                return False
+            matches_ticket_tip = (
+                remote_head.returncode == 0
+                and head.stdout.strip() == remote_head.stdout.strip()
+            )
+            if not matches_ticket_tip:
+                try:
+                    main_ancestor = _run(
+                        ["git", "merge-base", "--is-ancestor", "HEAD",
+                         "origin/main"],
+                        cwd=checkout, check=False,
+                        timeout=LOCAL_GIT_TIMEOUT_SECONDS,
+                    )
+                except (ImplementError, OSError,
+                        subprocess.SubprocessError):
+                    return False
+                if main_ancestor.returncode != 0:
+                    return False
         current = pathlib.Path.cwd().resolve()
         try:
             current.relative_to(checkout)
@@ -2892,7 +3525,6 @@ def _recover_answer_error(
         context["root"], context["number"], context["branch"],
         ref=ref, run=run, agent=agent, reason="answer unreadable",
     )
-    release_effect(ref)
     first = str(exc).splitlines()[0] if str(exc) else "unknown answer error"
     note = "answer error: {} | {}".format(first[:200], kept)
     if not _is_public_repo(resolved):
@@ -2900,9 +3532,11 @@ def _recover_answer_error(
         # can quote a failed git command over the checkout's paths (#1796).
         note = _with_markers(note, "answer error: {} | {}".format(
             first[:200], _member_kept(kept)))
-    heartbeat_finish(agent, run, "errored", note, ref)
-    if pushed:
-        _remove_codex_run_checkout(context["root"], context["number"], agent)
+    _finish_exit(
+        ref, run=run, agent=agent, outcome="errored", note=note,
+        release=release_effect, heartbeat_finish=heartbeat_finish,
+        remove_checkout=context if pushed else None,
+    )
     return True
 
 
@@ -2949,21 +3583,21 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
     except SupersededRunError:
         raise
     except StrayFileError as exc:
-        release_effect(ref)
-        heartbeat_finish(
-            agent, run, "errored", _stray_note(exc, repo=resolved), ref)
         # The note asks for the scratch to be removed and the work
         # re-staged, and the work may be pushed nowhere: keep the checkout
         # (#1856).
+        _finish_exit(
+            ref, run=run, agent=agent, outcome="errored",
+            note=_stray_note(exc, repo=resolved),
+            release=release_effect, heartbeat_finish=heartbeat_finish,
+        )
         raise
     except CommandTimeoutError as exc:
         _record_command_timeout(
             exc, run=run, agent=agent, ref=ref, release=release_effect,
             heartbeat_finish=heartbeat_finish, work_kept=checkpointed,
+            context=context,
         )
-        if checkpointed:
-            _remove_codex_run_checkout(
-                context["root"], context["number"], agent)
         raise
     except ImplementError as exc:
         # A failed checkpoint or test must not strand the run. Retry saving
@@ -2976,11 +3610,15 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
             context["root"], context["number"], context["branch"],
             ref=ref, run=run, agent=agent,
             reason=("merge conflict with origin/main" if conflict else
+                    "test environment setup failed"
+                    if isinstance(exc, EnvironmentSetupError) else
                     "tests failed" if phase == "tests" else
                     "checkpoint retry"),
         )
         posted = None
-        if phase == "tests" and not conflict and not _is_public_repo(resolved):
+        if (phase == "tests" and not conflict
+                and not isinstance(exc, EnvironmentSetupError)
+                and not _is_public_repo(resolved)):
             # The ids leave the public note, so they go to the ticket, and
             # before the release: the run that claims it next reads them in
             # its packet (#1796). A failed post must not strand the run.
@@ -2992,7 +3630,6 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
                 posted = True
             except (funnel.GitHubError, OSError, subprocess.SubprocessError):
                 posted = False
-        release_effect(ref)
         if conflict:
             note = _conflict_note(exc, kept, repo=resolved)
         elif phase == "tests":
@@ -3005,10 +3642,11 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
             note = _checkpoint_note(exc, kept, repo=resolved)
         if posted is False:
             note += " | failing tests NOT posted to the ticket"
-        heartbeat_finish(agent, run, "errored", note, ref)
-        if pushed:
-            _remove_codex_run_checkout(
-                context["root"], context["number"], agent)
+        _finish_exit(
+            ref, run=run, agent=agent, outcome="errored", note=note,
+            release=release_effect, heartbeat_finish=heartbeat_finish,
+            remove_checkout=context if pushed else None,
+        )
         raise
     try:
         if _working_tree_paths(context["root"]):
@@ -3025,13 +3663,15 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
             close_effect(
                 resolved, context["number"], cwd=context["root"],
             )
-            release_effect(ref)
             note = "no-diff close as completed; verified evidence: {}".format(
                 ", ".join(evidence))
             if extra_note:
                 note += "; " + extra_note.strip()
-            # Nothing was pushed, so the checkout stays (#1856).
-            heartbeat_finish(agent, run, "done", note, ref)
+            _finish_exit(
+                ref, run=run, agent=agent, outcome="done", note=note,
+                release=release_effect, heartbeat_finish=heartbeat_finish,
+                remove_checkout=context, done="ticket closed as completed",
+            )
             return {"number": context["number"], "url": ticket["url"],
                     "closed": True}
         # Re-read immediately before pushing so a ticket branch never carries
@@ -3051,21 +3691,21 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
     except SupersededRunError:
         raise
     except StrayFileError as exc:
-        release_effect(ref)
-        heartbeat_finish(
-            agent, run, "errored", _stray_note(exc, repo=resolved), ref)
         # The note asks for the scratch to be removed and the work
         # re-staged, and the work may be pushed nowhere: keep the checkout
         # (#1856).
+        _finish_exit(
+            ref, run=run, agent=agent, outcome="errored",
+            note=_stray_note(exc, repo=resolved),
+            release=release_effect, heartbeat_finish=heartbeat_finish,
+        )
         raise
     except CommandTimeoutError as exc:
         _record_command_timeout(
             exc, run=run, agent=agent, ref=ref, release=release_effect,
             heartbeat_finish=heartbeat_finish, work_kept=checkpointed,
+            context=context,
         )
-        if checkpointed:
-            _remove_codex_run_checkout(
-                context["root"], context["number"], agent)
         raise
     prior_base = (
         merged.get("base") if isinstance(merged, dict) else "origin/main"
@@ -3077,8 +3717,8 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
         evidence=render_evidence_block(
             sha=pushed, merged=merged, reproduction=reproduced,
             repo=resolved, prior_fixes=prior_fixes))
-    pr = pr_effect(resolved, context, ticket, body)
-    release_effect(ref)
+    pr_context = dict(context, head_sha=pushed)
+    pr = pr_effect(resolved, pr_context, ticket, body)
     note = "PR #{}".format(pr["number"])
     if test_source is not None:
         note += " (tests: {})".format(
@@ -3089,9 +3729,20 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
         note += "; " + tested
     if extra_note:
         note += "; " + extra_note.strip()
-    heartbeat_finish(agent, run, "done", note, ref)
-    _remove_codex_run_checkout(context["root"], context["number"], agent)
+    _finish_exit(
+        ref, run=run, agent=agent, outcome="done", note=note,
+        release=release_effect, heartbeat_finish=heartbeat_finish,
+        remove_checkout=context,
+        done=("PR #{} is already merged" if pr.get("merged") else
+              "PR #{} is open").format(pr["number"]),
+    )
     return pr
+
+
+def _human_step_wip_note(branch: str, sha: str, reason: str) -> str:
+    return ("\n\nPreserved tracked work on `{}` in WIP commit `{}`. "
+            "Human-block reason: `{}`.").format(branch, sha, reason)
+
 
 def finish_blocked_on_human(
         blocked: dict, *, run: str, agent: str = "codex",
@@ -3117,13 +3768,18 @@ def finish_blocked_on_human(
         extra_note: Optional[str] = None) -> dict:
     """File the human step, block the ticket, release, and finish. No PR.
 
-    No test run, commit, or push happens here: the finish records the
-    implementation as not kept and leaves this run's Codex checkout, which
-    may hold the only copy of it (#1856; #1711 removed it).
+    No test run or PR happens here. A Codex run first pushes tracked dirty
+    work in a marked WIP commit; failure aborts before the human-step effects.
+    After recording the finish, guarded cleanup removes a checkout only if its
+    clean Git head matches the ticket's remote branch; other work stays (#1856).
     A failure after the sub-issue exists names it, so the retry starts
     from GitHub's truth rather than filing a second one. The step's Needs
     follows its reason: ``session_needs_effect`` for a step a Claude Code
     session can do, ``needs_effect`` for Nate's (#1901).
+
+    The ticket's ``**Blocked on #N:**`` record is posted before its label
+    and blocked-by edge (#2168), so a labelled ticket's current record is
+    always this one, and a record that fails to post leaves no label.
 
     A human step Nate closed as not planned for this ticket is his answer
     that no step will happen, so nothing is filed again (#1726): the ticket
@@ -3143,6 +3799,11 @@ def finish_blocked_on_human(
         raise ImplementError(
             "blocked_on_human needs the ticket's parent to file the "
             "human step under")
+    wip_sha = None
+    if agent == "codex":
+        wip_sha = _preserve_human_step_work(
+            context["root"], context["number"], context["branch"],
+            ref=ref, run=run, agent=agent)
     # Read before filing: a lane filed a second step for one ticket after Nate
     # closed the first as not planned, re-blocking the ticket he had unblocked.
     # Matching is on the ticket number the step names, never on the action's
@@ -3157,35 +3818,46 @@ def finish_blocked_on_human(
             heartbeat_finish=heartbeat_finish, block_effect=block_effect,
             comment_effect=comment_effect, comments_effect=comments_effect,
             head_effect=head_effect, route_needs_effect=route_needs_effect,
-            human_needs_effect=human_needs_effect, extra_note=extra_note)
-    title = render_human_step_title(blocked["action"])
+            human_needs_effect=human_needs_effect, extra_note=extra_note,
+            wip_sha=wip_sha)
+    step_needs = HUMAN_STEP_NEEDS[blocked["reason"]]
+    title = render_human_step_title(
+        blocked["action"], needs=step_needs)
     body = render_human_step_body(
         parent_number=parent_number, ticket_number=context["number"],
         reason=blocked["reason"], action=blocked["action"])
     created = create_effect(
         resolved, parent_number, title, body, cwd=context["root"])
-    step_needs = HUMAN_STEP_NEEDS[blocked["reason"]]
     try:
         if step_needs == "claude-code-environment":
             session_needs_effect(created["url"], created["ref"])
         else:
             needs_effect(created["url"], created["ref"])
-        block_effect(resolved, context["number"],
-                     blocked_by=created["number"], cwd=context["root"])
+        blocked_comment = block_record.render_blocked(
+            "Complete the human step before resuming this ticket.",
+            on=[created["number"]])
+        if wip_sha is not None:
+            blocked_comment += _human_step_wip_note(
+                context["branch"], wip_sha, blocked["reason"])
         comment_effect(
             resolved, context["number"],
-            "**Blocked on #{}:** Complete the human step before resuming "
-            "this ticket.".format(created["number"]),
+            blocked_comment,
             run=run, agent=agent, cwd=context["root"])
+        block_effect(resolved, context["number"],
+                     blocked_by=created["number"], cwd=context["root"])
     except funnel.GitHubError as exc:
         raise funnel.GitHubError(
             "{} (already created: {})".format(exc, created["ref"]))
-    release_effect(ref)
     note = "stopped: human step filed as #{}; ticket blocked; no PR opened".format(
         created["number"])
     if extra_note:
         note += "; " + extra_note.strip()
-    heartbeat_finish(agent, run, "skipped-human-step", note, ref)
+    _finish_exit(
+        ref, run=run, agent=agent, outcome="skipped-human-step", note=note,
+        release=release_effect, heartbeat_finish=heartbeat_finish,
+        remove_checkout=context,
+        done="human step {} filed".format(created["ref"]),
+    )
     return {"ticket": ref,
             "human_step": {"number": created["number"],
                            "ref": created["ref"],
@@ -3203,7 +3875,7 @@ def _finish_closed_human_step(
         head_effect: Callable[[pathlib.Path, str], Optional[str]],
         route_needs_effect: Callable[[str, str], None],
         human_needs_effect: Callable[[str, str], None],
-        extra_note: Optional[str]) -> dict:
+        extra_note: Optional[str], wip_sha: Optional[str]) -> dict:
     """Route a ticket whose step Nate closed as not planned; file nothing.
 
     Routed like an accept-body conflict: Needs stays with the agents and a
@@ -3220,16 +3892,22 @@ def _finish_closed_human_step(
     if routed_for_closed_step(comments_effect(resolved, number), step_ref,
                               head):
         human_needs_effect(ticket["url"], ref)
-        comment_effect(resolved, number,
-                       render_closed_step_hold(step_ref, head),
+        hold_comment = render_closed_step_hold(step_ref, head)
+        if wip_sha is not None:
+            hold_comment += _human_step_wip_note(
+                context["branch"], wip_sha, blocked["reason"])
+        comment_effect(resolved, number, hold_comment,
                        run=run, agent=agent, cwd=root)
         routed = "human"
         outcome = "already routed at this head; Needs human"
     else:
         route_needs_effect(ticket["url"], ref)
         try:
-            comment_effect(resolved, number,
-                           render_closed_step_route(step_ref, head, blocked),
+            route_comment = render_closed_step_route(step_ref, head, blocked)
+            if wip_sha is not None:
+                route_comment += _human_step_wip_note(
+                    context["branch"], wip_sha, blocked["reason"])
+            comment_effect(resolved, number, route_comment,
                            run=run, agent=agent, cwd=root)
             routed = "review"
             outcome = "routed to review and shaping"
@@ -3238,12 +3916,15 @@ def _finish_closed_human_step(
             block_effect(resolved, number, cwd=root)
             routed = "blocked"
             outcome = "review routing failed; ticket left blocked"
-    release(ref)
     note = "human step not filed: {} was closed as not planned; {}".format(
         step_ref, outcome)
     if extra_note:
         note += "; " + extra_note.strip()
-    heartbeat_finish(agent, run, "skipped-blocked", note, ref)
+    _finish_exit(
+        ref, run=run, agent=agent, outcome="skipped-blocked", note=note,
+        release=release, heartbeat_finish=heartbeat_finish,
+        remove_checkout=context, done=outcome,
+    )
     return {"ticket": ref, "closed_human_step": step_ref, "routed": routed}
 
 
@@ -3268,7 +3949,15 @@ def finish_declined(
         defer_note_close_effect: Callable[..., None]
         = close_declined_defer_note_proof,
         extra_note: Optional[str] = None) -> dict:
-    """Record the decline and route only verified, parseable reasons."""
+    """Record the decline and route only verified, parseable reasons.
+
+    The ``**Declined:**`` record is the first write (#2168): Needs, the
+    ``blocked`` label, a prerequisite's blocked-by edge and any routing
+    comment all follow it, so a labelled ticket's current record is always
+    this decline, and a record that fails to post leaves the ticket as it
+    was. Only the prerequisite read comes before it, since a disproof is
+    part of the record. Each decline class keeps its outcome (#1393, #1538).
+    """
     context = checkout_context(cwd)
     resolved = resolve_checkout_repo(context["root"], repo)
     ticket = fetch_ticket(resolved, context["number"])
@@ -3283,11 +3972,14 @@ def finish_declined(
             resolved, context["number"], reason,
             run=run, agent=agent, cwd=context["root"],
         )
-        release_effect(ref)
         note = "closed as completed: allowed defer-note proof"
         if extra_note:
             note += "; " + extra_note.strip()
-        heartbeat_finish(agent, run, "done", note, ref)
+        _finish_exit(
+            ref, run=run, agent=agent, outcome="done", note=note,
+            release=release_effect, heartbeat_finish=heartbeat_finish,
+            remove_checkout=context, done="ticket closed as completed",
+        )
         return {"ticket": ref, "declined": reason}
     accept_conflict_routed = (
         decline_class == "accept-body-conflict" and decline_target is not None
@@ -3299,10 +3991,8 @@ def finish_declined(
         decline_class == "unsatisfiable-acceptance"
     )
     pending_gate_answer_routed = decline_class == "pending-gate-answer"
-    if accept_conflict_routed:
-        # Keep this in an agent lane so review and shaping can see the ticket.
-        needs_effect(ticket["url"], ref)
-    elif decline_class == "prerequisite-ticket" and decline_target is not None:
+    prerequisite_open = False
+    if decline_class == "prerequisite-ticket" and decline_target is not None:
         try:
             prerequisite_facts = prerequisite_facts_effect(decline_target)
             landed = prerequisite_project_landed(prerequisite_facts)
@@ -3315,14 +4005,32 @@ def finish_declined(
                 isinstance(prerequisite_facts, dict)
                 and prerequisite_facts.get("state") == "OPEN"
             ):
-                prerequisite_edge_effect(
-                    resolved, context["number"], decline_target,
-                    cwd=context["root"],
-                )
-                prerequisite_recorded = True
+                prerequisite_open = True
         except (funnel.GitHubError, ImplementError, shape.ShapeError,
                 OSError, subprocess.SubprocessError):
-            # A failed lookup or edge write keeps today's visible block.
+            # A failed lookup keeps today's visible block.
+            prerequisite_open = False
+    # The record before any Needs, label or edge (#2168). The reason is the
+    # model's words: ``render_declined`` makes it one line with no ``<!--``,
+    # so it can never form a runner marker in the owner's comment (#1798).
+    declined_comment = block_record.render_declined(reason)
+    if prerequisite_evidence is not None:
+        declined_comment += "\n\n" + prerequisite_evidence
+    comment_effect(resolved, context["number"], declined_comment,
+                   run=run, agent=agent, cwd=context["root"])
+    if accept_conflict_routed:
+        # Keep this in an agent lane so review and shaping can see the ticket.
+        needs_effect(ticket["url"], ref)
+    elif prerequisite_open:
+        try:
+            prerequisite_edge_effect(
+                resolved, context["number"], decline_target,
+                cwd=context["root"],
+            )
+            prerequisite_recorded = True
+        except (funnel.GitHubError, ImplementError, shape.ShapeError,
+                OSError, subprocess.SubprocessError):
+            # A failed edge write keeps today's visible block.
             prerequisite_recorded = False
     if (not prerequisite_recorded and not accept_conflict_routed
             and not false_unlanded_prerequisite_routed
@@ -3333,14 +4041,6 @@ def finish_declined(
         # route its Unblock question through the funnel watch.
         declined_needs_effect(ticket["url"], ref)
         block_effect(resolved, context["number"], cwd=context["root"])
-    # The reason is the model's words: one line with no ``<!--``, so it can
-    # never form a runner marker in the owner's comment (#1798).
-    declined_comment = "{} {}".format(
-        funnel.DECLINED_PREFIX, funnel.inert_comment_text(reason))
-    if prerequisite_evidence is not None:
-        declined_comment += "\n\n" + prerequisite_evidence
-    comment_effect(resolved, context["number"], declined_comment,
-                   run=run, agent=agent, cwd=context["root"])
     if false_unlanded_prerequisite_routed:
         # Record proof before returning a false decline to the agent queue.
         clear_block_effect(
@@ -3398,7 +4098,6 @@ def finish_declined(
             declined_needs_effect(ticket["url"], ref)
             block_effect(resolved, context["number"], cwd=context["root"])
             routing_failed = True
-    release_effect(ref)
     first = reason.splitlines()[0] if reason else "no reason given"
     if len(first) > 200:
         first = first[:197].rstrip() + "..."
@@ -3431,7 +4130,11 @@ def finish_declined(
         note += "; review routing failed; ticket left blocked"
     if extra_note:
         note += "; " + extra_note.strip()
-    heartbeat_finish(agent, run, "skipped-blocked", note, ref)
+    _finish_exit(
+        ref, run=run, agent=agent, outcome="skipped-blocked", note=note,
+        release=release_effect, heartbeat_finish=heartbeat_finish,
+        remove_checkout=context, done="decline recorded on the ticket",
+    )
     return {"ticket": ref, "declined": reason}
 
 
@@ -3571,6 +4274,15 @@ def _finish_ticket(args: argparse.Namespace) -> int:
         return _record_superseded_finish(args, exc.ref, exc.reason)
     except (funnel.GitHubError, ImplementError, OSError,
             subprocess.SubprocessError) as exc:
+        # A declined finish can fail before it reaches _finish_exit (for
+        # example, when GitHub refuses the first decline write). Its ticket
+        # checkout is still safe to remove when the shared clean/content-safe
+        # guard proves all work is already durable; dirty or unknown checkouts
+        # remain for recovery.
+        if "declined" in answer and context is not None:
+            _remove_codex_run_checkout(
+                context["root"], context["number"], args.agent,
+            )
         print("finish-ticket: {}".format(exc), file=sys.stderr)
         return 1
     print(json.dumps(result, sort_keys=True))

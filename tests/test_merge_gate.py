@@ -38,7 +38,7 @@ def verdict(**kw):
 OWNER = "nateprich"
 
 
-def comment_row(body, author=OWNER):
+def comment_row(body, author=OWNER, created_at=None):
     """A comment row as ``gh ... --json comments`` and the batch return it.
 
     A dict passes through unchanged, so a test can hand over a row with a
@@ -46,7 +46,10 @@ def comment_row(body, author=OWNER):
     """
     if isinstance(body, dict):
         return body
-    return {"body": body, "author": {"login": author}}
+    row = {"body": body, "author": {"login": author}}
+    if created_at is not None:
+        row["createdAt"] = created_at
+    return row
 
 
 def items(klass="Improve", children_total=1, children_done=0,
@@ -170,6 +173,98 @@ def test_same_head_approval_does_not_clear_rejection_on_issue_1989_repro(
     fact["verdict"] = funnel._latest_verdict_from_comments([
         comment_row(body) for body in comments
     ])
+    assert "latest review says 'rejected'" in funnel.merge_blockers(
+        REPO, 5, items(), NOW, pr_fact=fact)
+
+
+def test_same_head_approval_clears_unsure_rejection_after_trusted_comment():
+    head = SHA
+    comments = [
+        comment_row(verdict(
+            verdict="rejected", head_sha=head,
+            blocking=["requirement unsure: verify the run"]),
+            created_at="2026-09-06T00:00:00Z"),
+        comment_row("Owner supplied new evidence.",
+                    created_at="2026-09-06T00:01:00Z"),
+        comment_row(verdict(head_sha=head),
+                    created_at="2026-09-06T00:02:00Z"),
+    ]
+    ticket = Item(repo=REPO, number=9, title="t", url="", state="OPEN",
+                  parent=REPO + "#1", risk="standard")
+    fact = pr(
+        number=5, headRefOid=head, createdAt="2026-09-05T23:59:00Z",
+        comments=comments[:2],
+    )
+    fact["verdict"] = funnel._latest_verdict_from_comments(comments[:2])
+    review_facts = funnel.TicketPRFacts(
+        rows_by_ref={ticket.ref: [fact]},
+    )
+
+    offered = funnel.review_queue(
+        [ticket], tier="standard", pr_facts=review_facts,
+    )
+    assert [entry["pr"] for entry in offered] == [5]
+
+    fact["comments"] = comments
+    fact["verdict"] = funnel._latest_verdict_from_comments(comments)
+    assert fact["verdict"]["verdict"] == "approved"
+    assert funnel.merge_blockers(REPO, 5, items(), NOW, pr_fact=fact) == []
+
+
+def test_same_head_approval_keeps_unsure_rejection_without_later_trusted_comment():
+    head = SHA
+    comments = [
+        comment_row(verdict(
+            verdict="rejected", head_sha=head,
+            blocking=["requirement unsure: verify the run"]),
+            created_at="2026-09-06T00:00:00Z"),
+        comment_row(verdict(head_sha=head),
+                    created_at="2026-09-06T00:02:00Z"),
+    ]
+    fact = pr(headRefOid=head)
+    fact["verdict"] = funnel._latest_verdict_from_comments(comments)
+
+    assert fact["verdict"]["verdict"] == "rejected"
+    assert "latest review says 'rejected'" in funnel.merge_blockers(
+        REPO, 5, items(), NOW, pr_fact=fact)
+
+
+def test_same_head_approval_keeps_unsure_rejection_after_untrusted_comment():
+    head = SHA
+    comments = [
+        comment_row(verdict(
+            verdict="rejected", head_sha=head,
+            blocking=["requirement unsure: verify the run"]),
+            created_at="2026-09-06T00:00:00Z"),
+        comment_row("An outsider supplied new evidence.", author="mallory",
+                    created_at="2026-09-06T00:01:00Z"),
+        comment_row(verdict(head_sha=head),
+                    created_at="2026-09-06T00:02:00Z"),
+    ]
+    fact = pr(headRefOid=head)
+    fact["verdict"] = funnel._latest_verdict_from_comments(comments)
+
+    assert fact["verdict"]["verdict"] == "rejected"
+    assert "latest review says 'rejected'" in funnel.merge_blockers(
+        REPO, 5, items(), NOW, pr_fact=fact)
+
+
+def test_same_head_approval_keeps_non_unsure_rejection_after_trusted_comment():
+    head = SHA
+    comments = [
+        comment_row(verdict(
+            verdict="rejected", head_sha=head,
+            blocking=["requirement unmet: repair the behavior"]),
+            created_at="2026-09-06T00:00:00Z"),
+        comment_row("Owner supplied new evidence.",
+                    created_at="2026-09-06T00:01:00Z"),
+        comment_row(verdict(head_sha=head),
+                    created_at="2026-09-06T00:02:00Z"),
+    ]
+    fact = pr(headRefOid=head)
+    fact["verdict"] = funnel._latest_verdict_from_comments(comments)
+
+    assert fact["verdict"]["verdict"] == "rejected"
     assert "latest review says 'rejected'" in funnel.merge_blockers(
         REPO, 5, items(), NOW, pr_fact=fact)
 

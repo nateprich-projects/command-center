@@ -1,0 +1,1766 @@
+{
+  "version": "v2",
+  "selection": {
+    "snapshot_generated_at": "2026-10-03T23:54:20.641417+00:00",
+    "history_window": {
+      "start": "2026-09-19T23:54:20.641417+00:00",
+      "end": "2026-10-03T23:54:20.641417+00:00",
+      "days": 14,
+      "end_exclusive": true
+    },
+    "known_bad_window": {
+      "start": "2026-09-26T23:54:20.641417+00:00",
+      "end": "2026-10-03T23:54:20.641417+00:00",
+      "days": 7,
+      "end_exclusive": true
+    },
+    "known_good_window": {
+      "start": "2026-09-19T23:54:20.641417+00:00",
+      "end": "2026-09-26T23:54:20.641417+00:00",
+      "days": 7,
+      "end_exclusive": true,
+      "follow_up_days": 7
+    },
+    "rule": "Known-bad is v1 must_reject plus the newest nine command-center merged PRs in fix_recurrence.py snapshot examples whose changed lines a later Broken-project fix re-touched; source lines were attributed with git blame on the fix parent. Known-good is v1 must_approve plus the newest nine command-center ticket PRs merged in the prior seven-day slice of the same 14-day history window, with closed tickets and no Broken-project line fix during a complete seven-day follow-up ending at the snapshot. All new packets are at the exact approved PR head. Retrospective merge state, verdicts, review comments, post-approval comments, overlap history, and parent rejected excerpts are omitted for blinded review.",
+    "fix_recurrence_snapshot": {
+      "generated_at": "2026-10-03T23:54:20.641417+00:00",
+      "window_days": 7,
+      "history_bounds": {
+        "start": "2026-09-19T23:54:20.641417+00:00",
+        "end": "2026-10-03T23:54:20.641417+00:00"
+      },
+      "example_count": 44,
+      "examples": [
+        {
+          "sha": "216e661b3ba5",
+          "commit_sha": "216e661b3ba5324ae4a372f6c245027c50c78a0d",
+          "ticket": 2228
+        },
+        {
+          "sha": "fd7ffcee9b77",
+          "commit_sha": "fd7ffcee9b77fbae013b1ea192462da9416f9b19",
+          "ticket": 2225
+        },
+        {
+          "sha": "8c6d2b6d1d87",
+          "commit_sha": "8c6d2b6d1d87df1a87e74d13a38ae6e680038aec",
+          "ticket": 2145
+        },
+        {
+          "sha": "c34cc5c6f9bc",
+          "commit_sha": "c34cc5c6f9bcadec54ff9f9ec46d3a37e17266b5",
+          "ticket": 2105
+        },
+        {
+          "sha": "4d3731354eaa",
+          "commit_sha": "4d3731354eaa2a10b196fcf56893358e82992f64",
+          "ticket": 1871
+        },
+        {
+          "sha": "b99d59568609",
+          "commit_sha": "b99d59568609c7d7d007bb75f121e2d49f7c1e3b",
+          "ticket": 2084
+        },
+        {
+          "sha": "6fbf142ab5c0",
+          "commit_sha": "6fbf142ab5c058310d593a5a46e4eb2261c5e107",
+          "ticket": 1961
+        },
+        {
+          "sha": "293e619f63df",
+          "commit_sha": "293e619f63dfbb1430ac77447c12c3fb149d49da",
+          "ticket": 2014
+        },
+        {
+          "sha": "6f21559480a3",
+          "commit_sha": "6f21559480a3ca97f6e87d9e97196ac1dc92915e",
+          "ticket": 2021
+        },
+        {
+          "sha": "1bfdbc42db25",
+          "commit_sha": "1bfdbc42db25b6b65fb8e2e523a63baaa1c0c670",
+          "ticket": 1964
+        },
+        {
+          "sha": "5bd86173fc6e",
+          "commit_sha": "5bd86173fc6eaa2fff63ae672adc7ff51ff36686",
+          "ticket": 1962
+        },
+        {
+          "sha": "a15d1b9516b1",
+          "commit_sha": "a15d1b9516b1296e5d145e7798deb60f0decd499",
+          "ticket": 1963
+        },
+        {
+          "sha": "22ae96e8cf0f",
+          "commit_sha": "22ae96e8cf0f4499e26fe9a92aa976188c67c7da",
+          "ticket": 1937
+        },
+        {
+          "sha": "7e35535e0edb",
+          "commit_sha": "7e35535e0edbd9a3e965863ee2a53585784e5d50",
+          "ticket": 1955
+        },
+        {
+          "sha": "0f3c007b5ee7",
+          "commit_sha": "0f3c007b5ee7157ffd632d57691b41c9abf8eaaa",
+          "ticket": 1981
+        },
+        {
+          "sha": "b19f1668670a",
+          "commit_sha": "b19f1668670a7c9180871b10bfd9a56657e3c77e",
+          "ticket": 1956
+        },
+        {
+          "sha": "379e8ddd0f07",
+          "commit_sha": "379e8ddd0f0798fdf75a6853b7ca098964e0dffe",
+          "ticket": 1972
+        },
+        {
+          "sha": "addf913c866c",
+          "commit_sha": "addf913c866cce0a5c94a4d5fc5263003e3276a2",
+          "ticket": 1902
+        },
+        {
+          "sha": "51b3b7bd948d",
+          "commit_sha": "51b3b7bd948dc64ac95938bd95379b1e85408ac5",
+          "ticket": 1968
+        },
+        {
+          "sha": "a96997ec648c",
+          "commit_sha": "a96997ec648c464d8e38e816932d9246df05caea",
+          "ticket": 1949
+        },
+        {
+          "sha": "baf4fbaed273",
+          "commit_sha": "baf4fbaed2730cbe64697ccd6e0f6cdf2400bf8a",
+          "ticket": 1938
+        },
+        {
+          "sha": "1349b8a5833b",
+          "commit_sha": "1349b8a5833ba785db29eb2051d2a8dd1b791d81",
+          "ticket": 1869
+        },
+        {
+          "sha": "f9d67563b879",
+          "commit_sha": "f9d67563b879cb4e7ef34a19a09fd2a597bde9fb",
+          "ticket": 1872
+        },
+        {
+          "sha": "587d0e572e1c",
+          "commit_sha": "587d0e572e1c9293b3bb62c144ca351b6b492794",
+          "ticket": 1874
+        },
+        {
+          "sha": "b2c619a60988",
+          "commit_sha": "b2c619a609882192a195186649fadab9580a5c9c",
+          "ticket": 1866
+        },
+        {
+          "sha": "23d135ec10db",
+          "commit_sha": "23d135ec10db199ea504c5e1762f868c9c79b455",
+          "ticket": 1856
+        },
+        {
+          "sha": "e9a06128114c",
+          "commit_sha": "e9a06128114c3936d06641ae678688dcc3cf750f",
+          "ticket": 1855
+        },
+        {
+          "sha": "338ceed8fb9c",
+          "commit_sha": "338ceed8fb9cafcd65ff80fb21366b8218f2468c",
+          "ticket": 1804
+        },
+        {
+          "sha": "a59f472b6077",
+          "commit_sha": "a59f472b6077ff5b39b7cf009fbc18057cfaad54",
+          "ticket": 1807
+        },
+        {
+          "sha": "290cb18f1ed9",
+          "commit_sha": "290cb18f1ed9deb39e8aa53153159df63e2102f5",
+          "ticket": 1784
+        },
+        {
+          "sha": "eab58ac6d277",
+          "commit_sha": "eab58ac6d2777aa6849177b9ab96e56421c93620",
+          "ticket": 1770
+        },
+        {
+          "sha": "8152b4e8fbca",
+          "commit_sha": "8152b4e8fbcaf289158960e60e02b4a1a60a537a",
+          "ticket": 1785
+        },
+        {
+          "sha": "c4fe14446cf0",
+          "commit_sha": "c4fe14446cf039ebfab643ceca4fbe294b6e0a54",
+          "ticket": 1652
+        },
+        {
+          "sha": "bf9113e8be50",
+          "commit_sha": "bf9113e8be50a09996892dce47934c33f26105b0",
+          "ticket": 1719
+        },
+        {
+          "sha": "885b670d8aa0",
+          "commit_sha": "885b670d8aa0eb2851b8d0ed9b2a52e10e0c91ed",
+          "ticket": 1722
+        },
+        {
+          "sha": "9d3f021aa564",
+          "commit_sha": "9d3f021aa564e40fcba1a12ce2745386a30bd04d",
+          "ticket": 1644
+        },
+        {
+          "sha": "2f8e5ab0771a",
+          "commit_sha": "2f8e5ab0771a60fa52514638d1054c894130a7be",
+          "ticket": 1610
+        },
+        {
+          "sha": "c1b219dd34b6",
+          "commit_sha": "c1b219dd34b6620b237be9df586b9aa67e4b3360",
+          "ticket": 1643
+        },
+        {
+          "sha": "e235f64f1019",
+          "commit_sha": "e235f64f1019c70da9894f604575fcb46ed6808d",
+          "ticket": 1646
+        },
+        {
+          "sha": "5fcc7dcee7e6",
+          "commit_sha": "5fcc7dcee7e6f10edbc586a70ffc6582e7082916",
+          "ticket": 1625
+        },
+        {
+          "sha": "c6cc8707492e",
+          "commit_sha": "c6cc8707492e872b18fe66abda553bb326465057",
+          "ticket": 1623
+        },
+        {
+          "sha": "69b3fcfb4738",
+          "commit_sha": "69b3fcfb47387b02be7e95203674edba15972eac",
+          "ticket": 1621
+        },
+        {
+          "sha": "79ed14bf325c",
+          "commit_sha": "79ed14bf325c6ba0f1e2f68c27e918cf261c72ad",
+          "ticket": 1605
+        },
+        {
+          "sha": "be11ca15b366",
+          "commit_sha": "be11ca15b366aadf711809f911acd2be386abcd1",
+          "ticket": 1599
+        }
+      ]
+    },
+    "known_bad_candidate_count": 53,
+    "known_bad_candidates": [
+      {
+        "rank": 1,
+        "merged_at": "2026-10-03T03:52:44+00:00",
+        "pr": 2191,
+        "source_ticket": 2076,
+        "source_commit_sha": "ac9a873069fbd27235f8dccfaf96ba2978b50ea8",
+        "later_fixes": [
+          {
+            "example_sha": "216e661b3ba5",
+            "fix_ticket": 2228,
+            "fix_commit_sha": "216e661b3ba5324ae4a372f6c245027c50c78a0d"
+          }
+        ],
+        "blame_proof": [
+          {
+            "example_sha": "216e661b3ba5",
+            "fix_ticket": 2228,
+            "fix_commit_sha": "216e661b3ba5324ae4a372f6c245027c50c78a0d",
+            "fix_parent_sha": "1f45bc0c9420c220eab01cf2628b2ebf84c6fbcb",
+            "source_commit_sha": "ac9a873069fbd27235f8dccfaf96ba2978b50ea8",
+            "blamed_lines": [
+              {
+                "path": "session_log_archive.py",
+                "parent_line": 4,
+                "commit_sha": "ac9a873069fbd27235f8dccfaf96ba2978b50ea8"
+              },
+              {
+                "path": "session_log_archive.py",
+                "parent_line": 5,
+                "commit_sha": "ac9a873069fbd27235f8dccfaf96ba2978b50ea8"
+              },
+              {
+                "path": "session_log_archive.py",
+                "parent_line": 6,
+                "commit_sha": "ac9a873069fbd27235f8dccfaf96ba2978b50ea8"
+              },
+              {
+                "path": "session_log_archive.py",
+                "parent_line": 207,
+                "commit_sha": "ac9a873069fbd27235f8dccfaf96ba2978b50ea8"
+              },
+              {
+                "path": "session_log_archive.py",
+                "parent_line": 208,
+                "commit_sha": "ac9a873069fbd27235f8dccfaf96ba2978b50ea8"
+              },
+              {
+                "path": "session_log_archive.py",
+                "parent_line": 209,
+                "commit_sha": "ac9a873069fbd27235f8dccfaf96ba2978b50ea8"
+              },
+              {
+                "path": "session_log_archive.py",
+                "parent_line": 210,
+                "commit_sha": "ac9a873069fbd27235f8dccfaf96ba2978b50ea8"
+              },
+              {
+                "path": "session_log_archive.py",
+                "parent_line": 211,
+                "commit_sha": "ac9a873069fbd27235f8dccfaf96ba2978b50ea8"
+              },
+              {
+                "path": "session_log_archive.py",
+                "parent_line": 212,
+                "commit_sha": "ac9a873069fbd27235f8dccfaf96ba2978b50ea8"
+              },
+              {
+                "path": "session_log_archive.py",
+                "parent_line": 213,
+                "commit_sha": "ac9a873069fbd27235f8dccfaf96ba2978b50ea8"
+              },
+              {
+                "path": "session_log_archive.py",
+                "parent_line": 258,
+                "commit_sha": "ac9a873069fbd27235f8dccfaf96ba2978b50ea8"
+              },
+              {
+                "path": "session_log_archive.py",
+                "parent_line": 273,
+                "commit_sha": "ac9a873069fbd27235f8dccfaf96ba2978b50ea8"
+              },
+              {
+                "path": "session_log_archive.py",
+                "parent_line": 275,
+                "commit_sha": "ac9a873069fbd27235f8dccfaf96ba2978b50ea8"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "rank": 2,
+        "merged_at": "2026-10-01T15:35:20+00:00",
+        "pr": 2091,
+        "source_ticket": 2074,
+        "source_commit_sha": "32b40fe241a34bf1fe192b9880bdacc48f48ca8c",
+        "later_fixes": [
+          {
+            "example_sha": "216e661b3ba5",
+            "fix_ticket": 2228,
+            "fix_commit_sha": "216e661b3ba5324ae4a372f6c245027c50c78a0d"
+          }
+        ],
+        "blame_proof": [
+          {
+            "example_sha": "216e661b3ba5",
+            "fix_ticket": 2228,
+            "fix_commit_sha": "216e661b3ba5324ae4a372f6c245027c50c78a0d",
+            "fix_parent_sha": "1f45bc0c9420c220eab01cf2628b2ebf84c6fbcb",
+            "source_commit_sha": "32b40fe241a34bf1fe192b9880bdacc48f48ca8c",
+            "blamed_lines": [
+              {
+                "path": "session_logs.py",
+                "parent_line": 15,
+                "commit_sha": "32b40fe241a34bf1fe192b9880bdacc48f48ca8c"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "rank": 3,
+        "merged_at": "2026-10-01T09:20:30+00:00",
+        "pr": 2030,
+        "source_ticket": 2014,
+        "source_commit_sha": "293e619f63dfbb1430ac77447c12c3fb149d49da",
+        "later_fixes": [
+          {
+            "example_sha": "fd7ffcee9b77",
+            "fix_ticket": 2225,
+            "fix_commit_sha": "fd7ffcee9b77fbae013b1ea192462da9416f9b19"
+          },
+          {
+            "example_sha": "8c6d2b6d1d87",
+            "fix_ticket": 2145,
+            "fix_commit_sha": "8c6d2b6d1d87df1a87e74d13a38ae6e680038aec"
+          }
+        ],
+        "blame_proof": [
+          {
+            "example_sha": "fd7ffcee9b77",
+            "fix_ticket": 2225,
+            "fix_commit_sha": "fd7ffcee9b77fbae013b1ea192462da9416f9b19",
+            "fix_parent_sha": "f4a13cae7c2b3691b28302f0f8e142a5df870178",
+            "source_commit_sha": "293e619f63dfbb1430ac77447c12c3fb149d49da",
+            "blamed_lines": [
+              {
+                "path": "engine/implement.py",
+                "parent_line": 2894,
+                "commit_sha": "293e619f63dfbb1430ac77447c12c3fb149d49da"
+              },
+              {
+                "path": "engine/implement.py",
+                "parent_line": 2895,
+                "commit_sha": "293e619f63dfbb1430ac77447c12c3fb149d49da"
+              },
+              {
+                "path": "engine/implement.py",
+                "parent_line": 2896,
+                "commit_sha": "293e619f63dfbb1430ac77447c12c3fb149d49da"
+              },
+              {
+                "path": "engine/implement.py",
+                "parent_line": 2910,
+                "commit_sha": "293e619f63dfbb1430ac77447c12c3fb149d49da"
+              },
+              {
+                "path": "engine/implement.py",
+                "parent_line": 2911,
+                "commit_sha": "293e619f63dfbb1430ac77447c12c3fb149d49da"
+              },
+              {
+                "path": "engine/implement.py",
+                "parent_line": 2912,
+                "commit_sha": "293e619f63dfbb1430ac77447c12c3fb149d49da"
+              },
+              {
+                "path": "engine/implement.py",
+                "parent_line": 2913,
+                "commit_sha": "293e619f63dfbb1430ac77447c12c3fb149d49da"
+              },
+              {
+                "path": "engine/implement.py",
+                "parent_line": 2914,
+                "commit_sha": "293e619f63dfbb1430ac77447c12c3fb149d49da"
+              },
+              {
+                "path": "engine/implement.py",
+                "parent_line": 2980,
+                "commit_sha": "293e619f63dfbb1430ac77447c12c3fb149d49da"
+              },
+              {
+                "path": "engine/implement.py",
+                "parent_line": 2983,
+                "commit_sha": "293e619f63dfbb1430ac77447c12c3fb149d49da"
+              },
+              {
+                "path": "engine/implement.py",
+                "parent_line": 2984,
+                "commit_sha": "293e619f63dfbb1430ac77447c12c3fb149d49da"
+              }
+            ]
+          },
+          {
+            "example_sha": "8c6d2b6d1d87",
+            "fix_ticket": 2145,
+            "fix_commit_sha": "8c6d2b6d1d87df1a87e74d13a38ae6e680038aec",
+            "fix_parent_sha": "bf855e0859ec8557ab5c33f34f2ea769a9bdbe00",
+            "source_commit_sha": "293e619f63dfbb1430ac77447c12c3fb149d49da",
+            "blamed_lines": [
+              {
+                "path": "engine/implement.py",
+                "parent_line": 3187,
+                "commit_sha": "293e619f63dfbb1430ac77447c12c3fb149d49da"
+              },
+              {
+                "path": "engine/implement.py",
+                "parent_line": 3188,
+                "commit_sha": "293e619f63dfbb1430ac77447c12c3fb149d49da"
+              },
+              {
+                "path": "engine/implement.py",
+                "parent_line": 3189,
+                "commit_sha": "293e619f63dfbb1430ac77447c12c3fb149d49da"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "rank": 4,
+        "merged_at": "2026-09-30T08:41:05+00:00",
+        "pr": 2025,
+        "source_ticket": 2016,
+        "source_commit_sha": "f3f7b494265af85cb8d1c5ecb81fcc63966b9b2c",
+        "later_fixes": [
+          {
+            "example_sha": "b99d59568609",
+            "fix_ticket": 2084,
+            "fix_commit_sha": "b99d59568609c7d7d007bb75f121e2d49f7c1e3b"
+          }
+        ],
+        "blame_proof": [
+          {
+            "example_sha": "b99d59568609",
+            "fix_ticket": 2084,
+            "fix_commit_sha": "b99d59568609c7d7d007bb75f121e2d49f7c1e3b",
+            "fix_parent_sha": "6fbf142ab5c058310d593a5a46e4eb2261c5e107",
+            "source_commit_sha": "f3f7b494265af85cb8d1c5ecb81fcc63966b9b2c",
+            "blamed_lines": [
+              {
+                "path": "funnel.py",
+                "parent_line": 16298,
+                "commit_sha": "f3f7b494265af85cb8d1c5ecb81fcc63966b9b2c"
+              },
+              {
+                "path": "funnel.py",
+                "parent_line": 16340,
+                "commit_sha": "f3f7b494265af85cb8d1c5ecb81fcc63966b9b2c"
+              },
+              {
+                "path": "funnel.py",
+                "parent_line": 16341,
+                "commit_sha": "f3f7b494265af85cb8d1c5ecb81fcc63966b9b2c"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "rank": 5,
+        "merged_at": "2026-09-29T17:48:03+00:00",
+        "pr": 1973,
+        "source_ticket": 1972,
+        "source_commit_sha": "379e8ddd0f0798fdf75a6853b7ca098964e0dffe",
+        "later_fixes": [
+          {
+            "example_sha": "0f3c007b5ee7",
+            "fix_ticket": 1981,
+            "fix_commit_sha": "0f3c007b5ee7157ffd632d57691b41c9abf8eaaa"
+          }
+        ],
+        "blame_proof": [
+          {
+            "example_sha": "0f3c007b5ee7",
+            "fix_ticket": 1981,
+            "fix_commit_sha": "0f3c007b5ee7157ffd632d57691b41c9abf8eaaa",
+            "fix_parent_sha": "ce1ae0c9440e3191b33c5f24b46fade2e8466616",
+            "source_commit_sha": "379e8ddd0f0798fdf75a6853b7ca098964e0dffe",
+            "blamed_lines": [
+              {
+                "path": "scripts/muse-review-engine",
+                "parent_line": 2193,
+                "commit_sha": "379e8ddd0f0798fdf75a6853b7ca098964e0dffe"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "rank": 6,
+        "merged_at": "2026-09-29T15:48:52+00:00",
+        "pr": 1958,
+        "source_ticket": 1897,
+        "source_commit_sha": "71f91d1c00e153bdad5242a562051673828a785a",
+        "later_fixes": [
+          {
+            "example_sha": "c34cc5c6f9bc",
+            "fix_ticket": 2105,
+            "fix_commit_sha": "c34cc5c6f9bcadec54ff9f9ec46d3a37e17266b5"
+          }
+        ],
+        "blame_proof": [
+          {
+            "example_sha": "c34cc5c6f9bc",
+            "fix_ticket": 2105,
+            "fix_commit_sha": "c34cc5c6f9bcadec54ff9f9ec46d3a37e17266b5",
+            "fix_parent_sha": "bc36492b940ed411469dcc80e19427339a84e4b2",
+            "source_commit_sha": "71f91d1c00e153bdad5242a562051673828a785a",
+            "blamed_lines": [
+              {
+                "path": "engine/shape.py",
+                "parent_line": 1347,
+                "commit_sha": "71f91d1c00e153bdad5242a562051673828a785a"
+              },
+              {
+                "path": "engine/shape.py",
+                "parent_line": 1348,
+                "commit_sha": "71f91d1c00e153bdad5242a562051673828a785a"
+              },
+              {
+                "path": "heartbeat.py",
+                "parent_line": 98,
+                "commit_sha": "71f91d1c00e153bdad5242a562051673828a785a"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "rank": 7,
+        "merged_at": "2026-09-29T08:57:36+00:00",
+        "pr": 1791,
+        "source_ticket": 1653,
+        "source_commit_sha": "591c5e80feb981cbcd8ab5d8f4a55a91b1a4920e",
+        "later_fixes": [
+          {
+            "example_sha": "51b3b7bd948d",
+            "fix_ticket": 1968,
+            "fix_commit_sha": "51b3b7bd948dc64ac95938bd95379b1e85408ac5"
+          }
+        ],
+        "blame_proof": [
+          {
+            "example_sha": "51b3b7bd948d",
+            "fix_ticket": 1968,
+            "fix_commit_sha": "51b3b7bd948dc64ac95938bd95379b1e85408ac5",
+            "fix_parent_sha": "71f91d1c00e153bdad5242a562051673828a785a",
+            "source_commit_sha": "591c5e80feb981cbcd8ab5d8f4a55a91b1a4920e",
+            "blamed_lines": [
+              {
+                "path": "engine/review.py",
+                "parent_line": 2231,
+                "commit_sha": "591c5e80feb981cbcd8ab5d8f4a55a91b1a4920e"
+              },
+              {
+                "path": "engine/review.py",
+                "parent_line": 2235,
+                "commit_sha": "591c5e80feb981cbcd8ab5d8f4a55a91b1a4920e"
+              },
+              {
+                "path": "engine/review.py",
+                "parent_line": 2236,
+                "commit_sha": "591c5e80feb981cbcd8ab5d8f4a55a91b1a4920e"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "rank": 8,
+        "merged_at": "2026-09-29T06:04:33+00:00",
+        "pr": 1873,
+        "source_ticket": 1869,
+        "source_commit_sha": "1349b8a5833ba785db29eb2051d2a8dd1b791d81",
+        "later_fixes": [
+          {
+            "example_sha": "6fbf142ab5c0",
+            "fix_ticket": 1961,
+            "fix_commit_sha": "6fbf142ab5c058310d593a5a46e4eb2261c5e107"
+          }
+        ],
+        "blame_proof": [
+          {
+            "example_sha": "6fbf142ab5c0",
+            "fix_ticket": 1961,
+            "fix_commit_sha": "6fbf142ab5c058310d593a5a46e4eb2261c5e107",
+            "fix_parent_sha": "b760f317b980d330b2d2dc6aad3ae23a7ddd9517",
+            "source_commit_sha": "1349b8a5833ba785db29eb2051d2a8dd1b791d81",
+            "blamed_lines": [
+              {
+                "path": "scripts/review_evidence.py",
+                "parent_line": 419,
+                "commit_sha": "1349b8a5833ba785db29eb2051d2a8dd1b791d81"
+              },
+              {
+                "path": "scripts/review_evidence.py",
+                "parent_line": 420,
+                "commit_sha": "1349b8a5833ba785db29eb2051d2a8dd1b791d81"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "rank": 9,
+        "merged_at": "2026-09-29T02:01:14+00:00",
+        "pr": 1870,
+        "source_ticket": 1866,
+        "source_commit_sha": "b2c619a609882192a195186649fadab9580a5c9c",
+        "later_fixes": [
+          {
+            "example_sha": "6f21559480a3",
+            "fix_ticket": 2021,
+            "fix_commit_sha": "6f21559480a3ca97f6e87d9e97196ac1dc92915e"
+          },
+          {
+            "example_sha": "0f3c007b5ee7",
+            "fix_ticket": 1981,
+            "fix_commit_sha": "0f3c007b5ee7157ffd632d57691b41c9abf8eaaa"
+          }
+        ],
+        "blame_proof": [
+          {
+            "example_sha": "6f21559480a3",
+            "fix_ticket": 2021,
+            "fix_commit_sha": "6f21559480a3ca97f6e87d9e97196ac1dc92915e",
+            "fix_parent_sha": "87f44ab944f8c5737a661fbb0e3c242cd34c6b0a",
+            "source_commit_sha": "b2c619a609882192a195186649fadab9580a5c9c",
+            "blamed_lines": [
+              {
+                "path": "scripts/muse-review-engine",
+                "parent_line": 2118,
+                "commit_sha": "b2c619a609882192a195186649fadab9580a5c9c"
+              },
+              {
+                "path": "scripts/muse-review-engine",
+                "parent_line": 2119,
+                "commit_sha": "b2c619a609882192a195186649fadab9580a5c9c"
+              },
+              {
+                "path": "scripts/muse-review-engine",
+                "parent_line": 2120,
+                "commit_sha": "b2c619a609882192a195186649fadab9580a5c9c"
+              },
+              {
+                "path": "scripts/muse-review-engine",
+                "parent_line": 2121,
+                "commit_sha": "b2c619a609882192a195186649fadab9580a5c9c"
+              }
+            ]
+          },
+          {
+            "example_sha": "0f3c007b5ee7",
+            "fix_ticket": 1981,
+            "fix_commit_sha": "0f3c007b5ee7157ffd632d57691b41c9abf8eaaa",
+            "fix_parent_sha": "ce1ae0c9440e3191b33c5f24b46fade2e8466616",
+            "source_commit_sha": "b2c619a609882192a195186649fadab9580a5c9c",
+            "blamed_lines": [
+              {
+                "path": "scripts/muse-review-engine",
+                "parent_line": 2095,
+                "commit_sha": "b2c619a609882192a195186649fadab9580a5c9c"
+              },
+              {
+                "path": "scripts/muse-review-engine",
+                "parent_line": 2096,
+                "commit_sha": "b2c619a609882192a195186649fadab9580a5c9c"
+              },
+              {
+                "path": "scripts/muse-review-engine",
+                "parent_line": 2097,
+                "commit_sha": "b2c619a609882192a195186649fadab9580a5c9c"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "rank": 10,
+        "merged_at": "2026-09-28T23:19:55+00:00",
+        "pr": 1860,
+        "source_ticket": 1856,
+        "source_commit_sha": "23d135ec10db199ea504c5e1762f868c9c79b455",
+        "later_fixes": [
+          {
+            "example_sha": "293e619f63df",
+            "fix_ticket": 2014,
+            "fix_commit_sha": "293e619f63dfbb1430ac77447c12c3fb149d49da"
+          }
+        ]
+      },
+      {
+        "rank": 11,
+        "merged_at": "2026-09-28T22:20:31+00:00",
+        "pr": 1859,
+        "source_ticket": 1855,
+        "source_commit_sha": "e9a06128114c3936d06641ae678688dcc3cf750f",
+        "later_fixes": [
+          {
+            "example_sha": "b2c619a60988",
+            "fix_ticket": 1866,
+            "fix_commit_sha": "b2c619a609882192a195186649fadab9580a5c9c"
+          }
+        ]
+      },
+      {
+        "rank": 12,
+        "merged_at": "2026-09-28T22:00:14+00:00",
+        "pr": 1858,
+        "source_ticket": 1798,
+        "source_commit_sha": "d849d090ec6f1dc4f49762d86d2d33e49ccc7cf2",
+        "later_fixes": [
+          {
+            "example_sha": "587d0e572e1c",
+            "fix_ticket": 1874,
+            "fix_commit_sha": "587d0e572e1c9293b3bb62c144ca351b6b492794"
+          }
+        ]
+      },
+      {
+        "rank": 13,
+        "merged_at": "2026-09-28T18:50:40+00:00",
+        "pr": 1835,
+        "source_ticket": 1805,
+        "source_commit_sha": "4db9c1630e750cc36e8db02e7012f58efa7e0d8c",
+        "later_fixes": [
+          {
+            "example_sha": "6fbf142ab5c0",
+            "fix_ticket": 1961,
+            "fix_commit_sha": "6fbf142ab5c058310d593a5a46e4eb2261c5e107"
+          },
+          {
+            "example_sha": "1349b8a5833b",
+            "fix_ticket": 1869,
+            "fix_commit_sha": "1349b8a5833ba785db29eb2051d2a8dd1b791d81"
+          },
+          {
+            "example_sha": "f9d67563b879",
+            "fix_ticket": 1872,
+            "fix_commit_sha": "f9d67563b879cb4e7ef34a19a09fd2a597bde9fb"
+          }
+        ]
+      },
+      {
+        "rank": 14,
+        "merged_at": "2026-09-28T17:55:29+00:00",
+        "pr": 1830,
+        "source_ticket": 1801,
+        "source_commit_sha": "d89c7712f2356988057000ee8ecce0c9b3e1fc5c",
+        "later_fixes": [
+          {
+            "example_sha": "4d3731354eaa",
+            "fix_ticket": 1871,
+            "fix_commit_sha": "4d3731354eaa2a10b196fcf56893358e82992f64"
+          },
+          {
+            "example_sha": "6f21559480a3",
+            "fix_ticket": 2021,
+            "fix_commit_sha": "6f21559480a3ca97f6e87d9e97196ac1dc92915e"
+          },
+          {
+            "example_sha": "1bfdbc42db25",
+            "fix_ticket": 1964,
+            "fix_commit_sha": "1bfdbc42db25b6b65fb8e2e523a63baaa1c0c670"
+          },
+          {
+            "example_sha": "a15d1b9516b1",
+            "fix_ticket": 1963,
+            "fix_commit_sha": "a15d1b9516b1296e5d145e7798deb60f0decd499"
+          }
+        ]
+      },
+      {
+        "rank": 15,
+        "merged_at": "2026-09-28T16:36:56+00:00",
+        "pr": 1828,
+        "source_ticket": 1804,
+        "source_commit_sha": "338ceed8fb9cafcd65ff80fb21366b8218f2468c",
+        "later_fixes": [
+          {
+            "example_sha": "6fbf142ab5c0",
+            "fix_ticket": 1961,
+            "fix_commit_sha": "6fbf142ab5c058310d593a5a46e4eb2261c5e107"
+          }
+        ]
+      },
+      {
+        "rank": 16,
+        "merged_at": "2026-09-28T15:22:54+00:00",
+        "pr": 1824,
+        "source_ticket": 1802,
+        "source_commit_sha": "89d2e510d124df56f8c4a76ad9daf6f196eccc90",
+        "later_fixes": [
+          {
+            "example_sha": "1349b8a5833b",
+            "fix_ticket": 1869,
+            "fix_commit_sha": "1349b8a5833ba785db29eb2051d2a8dd1b791d81"
+          }
+        ]
+      },
+      {
+        "rank": 17,
+        "merged_at": "2026-09-28T09:51:22+00:00",
+        "pr": 1799,
+        "source_ticket": 1796,
+        "source_commit_sha": "9c5a52732872f4467368f8b94cedd7c66e16be42",
+        "later_fixes": [
+          {
+            "example_sha": "338ceed8fb9c",
+            "fix_ticket": 1804,
+            "fix_commit_sha": "338ceed8fb9cafcd65ff80fb21366b8218f2468c"
+          }
+        ]
+      },
+      {
+        "rank": 18,
+        "merged_at": "2026-09-28T08:31:27+00:00",
+        "pr": 1790,
+        "source_ticket": 1785,
+        "source_commit_sha": "8152b4e8fbcaf289158960e60e02b4a1a60a537a",
+        "later_fixes": [
+          {
+            "example_sha": "b2c619a60988",
+            "fix_ticket": 1866,
+            "fix_commit_sha": "b2c619a609882192a195186649fadab9580a5c9c"
+          },
+          {
+            "example_sha": "e9a06128114c",
+            "fix_ticket": 1855,
+            "fix_commit_sha": "e9a06128114c3936d06641ae678688dcc3cf750f"
+          }
+        ]
+      },
+      {
+        "rank": 19,
+        "merged_at": "2026-09-28T07:02:10+00:00",
+        "pr": 1674,
+        "source_ticket": 1652,
+        "source_commit_sha": "c4fe14446cf039ebfab643ceca4fbe294b6e0a54",
+        "later_fixes": [
+          {
+            "example_sha": "51b3b7bd948d",
+            "fix_ticket": 1968,
+            "fix_commit_sha": "51b3b7bd948dc64ac95938bd95379b1e85408ac5"
+          }
+        ]
+      },
+      {
+        "rank": 20,
+        "merged_at": "2026-09-28T02:07:23+00:00",
+        "pr": 1768,
+        "source_ticket": 1713,
+        "source_commit_sha": "112848b6816aac0b0ce7da47e189be7c640ecf20",
+        "later_fixes": [
+          {
+            "example_sha": "5bd86173fc6e",
+            "fix_ticket": 1962,
+            "fix_commit_sha": "5bd86173fc6eaa2fff63ae672adc7ff51ff36686"
+          },
+          {
+            "example_sha": "23d135ec10db",
+            "fix_ticket": 1856,
+            "fix_commit_sha": "23d135ec10db199ea504c5e1762f868c9c79b455"
+          },
+          {
+            "example_sha": "338ceed8fb9c",
+            "fix_ticket": 1804,
+            "fix_commit_sha": "338ceed8fb9cafcd65ff80fb21366b8218f2468c"
+          }
+        ]
+      },
+      {
+        "rank": 21,
+        "merged_at": "2026-09-28T00:57:57+00:00",
+        "pr": 1743,
+        "source_ticket": 1710,
+        "source_commit_sha": "9e6edfe2d698c333961cfc0a074842474fd8f904",
+        "later_fixes": [
+          {
+            "example_sha": "6fbf142ab5c0",
+            "fix_ticket": 1961,
+            "fix_commit_sha": "6fbf142ab5c058310d593a5a46e4eb2261c5e107"
+          },
+          {
+            "example_sha": "1349b8a5833b",
+            "fix_ticket": 1869,
+            "fix_commit_sha": "1349b8a5833ba785db29eb2051d2a8dd1b791d81"
+          }
+        ]
+      },
+      {
+        "rank": 22,
+        "merged_at": "2026-09-28T00:10:52+00:00",
+        "pr": 1740,
+        "source_ticket": 1721,
+        "source_commit_sha": "c080e719748d479431fa0d788c7ec47a953451e9",
+        "later_fixes": [
+          {
+            "example_sha": "22ae96e8cf0f",
+            "fix_ticket": 1937,
+            "fix_commit_sha": "22ae96e8cf0f4499e26fe9a92aa976188c67c7da"
+          },
+          {
+            "example_sha": "baf4fbaed273",
+            "fix_ticket": 1938,
+            "fix_commit_sha": "baf4fbaed2730cbe64697ccd6e0f6cdf2400bf8a"
+          }
+        ]
+      },
+      {
+        "rank": 23,
+        "merged_at": "2026-09-27T23:58:48+00:00",
+        "pr": 1758,
+        "source_ticket": 1730,
+        "source_commit_sha": "034913eadaa2e63e917a3e7c33e008042cc86a0d",
+        "later_fixes": [
+          {
+            "example_sha": "b2c619a60988",
+            "fix_ticket": 1866,
+            "fix_commit_sha": "b2c619a609882192a195186649fadab9580a5c9c"
+          },
+          {
+            "example_sha": "290cb18f1ed9",
+            "fix_ticket": 1784,
+            "fix_commit_sha": "290cb18f1ed9deb39e8aa53153159df63e2102f5"
+          },
+          {
+            "example_sha": "8152b4e8fbca",
+            "fix_ticket": 1785,
+            "fix_commit_sha": "8152b4e8fbcaf289158960e60e02b4a1a60a537a"
+          }
+        ]
+      },
+      {
+        "rank": 24,
+        "merged_at": "2026-09-27T19:16:02+00:00",
+        "pr": 1736,
+        "source_ticket": 1711,
+        "source_commit_sha": "34e016c75e6ebe0131393c730233b43001e27207",
+        "later_fixes": [
+          {
+            "example_sha": "293e619f63df",
+            "fix_ticket": 2014,
+            "fix_commit_sha": "293e619f63dfbb1430ac77447c12c3fb149d49da"
+          },
+          {
+            "example_sha": "23d135ec10db",
+            "fix_ticket": 1856,
+            "fix_commit_sha": "23d135ec10db199ea504c5e1762f868c9c79b455"
+          }
+        ]
+      },
+      {
+        "rank": 25,
+        "merged_at": "2026-09-27T19:02:44+00:00",
+        "pr": 1735,
+        "source_ticket": 1719,
+        "source_commit_sha": "bf9113e8be50a09996892dce47934c33f26105b0",
+        "later_fixes": [
+          {
+            "example_sha": "e9a06128114c",
+            "fix_ticket": 1855,
+            "fix_commit_sha": "e9a06128114c3936d06641ae678688dcc3cf750f"
+          },
+          {
+            "example_sha": "8152b4e8fbca",
+            "fix_ticket": 1785,
+            "fix_commit_sha": "8152b4e8fbcaf289158960e60e02b4a1a60a537a"
+          }
+        ]
+      },
+      {
+        "rank": 26,
+        "merged_at": "2026-09-27T18:19:06+00:00",
+        "pr": 1728,
+        "source_ticket": 1722,
+        "source_commit_sha": "885b670d8aa0eb2851b8d0ed9b2a52e10e0c91ed",
+        "later_fixes": [
+          {
+            "example_sha": "eab58ac6d277",
+            "fix_ticket": 1770,
+            "fix_commit_sha": "eab58ac6d2777aa6849177b9ab96e56421c93620"
+          }
+        ]
+      },
+      {
+        "rank": 27,
+        "merged_at": "2026-09-27T17:55:49+00:00",
+        "pr": 1729,
+        "source_ticket": 1717,
+        "source_commit_sha": "a59ae3910d8d9f8c96d7113b0e18cb45e3e02c2f",
+        "later_fixes": [
+          {
+            "example_sha": "addf913c866c",
+            "fix_ticket": 1902,
+            "fix_commit_sha": "addf913c866cce0a5c94a4d5fc5263003e3276a2"
+          }
+        ]
+      },
+      {
+        "rank": 28,
+        "merged_at": "2026-09-27T17:28:49+00:00",
+        "pr": 1734,
+        "source_ticket": 1726,
+        "source_commit_sha": "5cf9f7420c7c20b401943d6fa04c934500ff1449",
+        "later_fixes": [
+          {
+            "example_sha": "8c6d2b6d1d87",
+            "fix_ticket": 2145,
+            "fix_commit_sha": "8c6d2b6d1d87df1a87e74d13a38ae6e680038aec"
+          },
+          {
+            "example_sha": "7e35535e0edb",
+            "fix_ticket": 1955,
+            "fix_commit_sha": "7e35535e0edbd9a3e965863ee2a53585784e5d50"
+          }
+        ]
+      },
+      {
+        "rank": 29,
+        "merged_at": "2026-09-27T16:24:25+00:00",
+        "pr": 1670,
+        "source_ticket": 1647,
+        "source_commit_sha": "efb128d83463be4046687fb59a1301e9388fe9c4",
+        "later_fixes": [
+          {
+            "example_sha": "7e35535e0edb",
+            "fix_ticket": 1955,
+            "fix_commit_sha": "7e35535e0edbd9a3e965863ee2a53585784e5d50"
+          }
+        ]
+      },
+      {
+        "rank": 30,
+        "merged_at": "2026-09-27T08:32:24+00:00",
+        "pr": 1661,
+        "source_ticket": 1643,
+        "source_commit_sha": "c1b219dd34b6620b237be9df586b9aa67e4b3360",
+        "later_fixes": [
+          {
+            "example_sha": "885b670d8aa0",
+            "fix_ticket": 1722,
+            "fix_commit_sha": "885b670d8aa0eb2851b8d0ed9b2a52e10e0c91ed"
+          }
+        ]
+      },
+      {
+        "rank": 31,
+        "merged_at": "2026-09-27T02:00:22+00:00",
+        "pr": 1636,
+        "source_ticket": 1608,
+        "source_commit_sha": "97714965409cf8efd9aceb841a9fe500012efed5",
+        "later_fixes": [
+          {
+            "example_sha": "c6cc8707492e",
+            "fix_ticket": 1623,
+            "fix_commit_sha": "c6cc8707492e872b18fe66abda553bb326465057"
+          }
+        ]
+      },
+      {
+        "rank": 32,
+        "merged_at": "2026-09-27T00:21:44+00:00",
+        "pr": 1633,
+        "source_ticket": 1599,
+        "source_commit_sha": "be11ca15b366aadf711809f911acd2be386abcd1",
+        "later_fixes": [
+          {
+            "example_sha": "bf9113e8be50",
+            "fix_ticket": 1719,
+            "fix_commit_sha": "bf9113e8be50a09996892dce47934c33f26105b0"
+          }
+        ]
+      },
+      {
+        "rank": 33,
+        "merged_at": "2026-09-26T23:45:54+00:00",
+        "pr": 1630,
+        "source_ticket": 1622,
+        "source_commit_sha": "c30fcee86769d9023adb1c4312b314b0c652164a",
+        "later_fixes": [
+          {
+            "example_sha": "2f8e5ab0771a",
+            "fix_ticket": 1610,
+            "fix_commit_sha": "2f8e5ab0771a60fa52514638d1054c894130a7be"
+          }
+        ]
+      },
+      {
+        "rank": 34,
+        "merged_at": "2026-09-26T21:59:18+00:00",
+        "pr": 1627,
+        "source_ticket": 1607,
+        "source_commit_sha": "d178637c2657e5d4a0e9fe23bcc38361670c4b33",
+        "later_fixes": [
+          {
+            "example_sha": "5fcc7dcee7e6",
+            "fix_ticket": 1625,
+            "fix_commit_sha": "5fcc7dcee7e6f10edbc586a70ffc6582e7082916"
+          }
+        ]
+      },
+      {
+        "rank": 35,
+        "merged_at": "2026-09-26T19:07:39+00:00",
+        "pr": 1615,
+        "source_ticket": 1611,
+        "source_commit_sha": "ab1a4c05cdb8058462a255dca172be64a01eb1af",
+        "later_fixes": [
+          {
+            "example_sha": "69b3fcfb4738",
+            "fix_ticket": 1621,
+            "fix_commit_sha": "69b3fcfb47387b02be7e95203674edba15972eac"
+          }
+        ]
+      },
+      {
+        "rank": 36,
+        "merged_at": "2026-09-26T18:22:02+00:00",
+        "pr": 1613,
+        "source_ticket": 1597,
+        "source_commit_sha": "067c4a5a4f28477471050b013a73863dc9e45deb",
+        "later_fixes": [
+          {
+            "example_sha": "c34cc5c6f9bc",
+            "fix_ticket": 2105,
+            "fix_commit_sha": "c34cc5c6f9bcadec54ff9f9ec46d3a37e17266b5"
+          }
+        ]
+      },
+      {
+        "rank": 37,
+        "merged_at": "2026-09-26T08:33:57+00:00",
+        "pr": 1569,
+        "source_ticket": 1549,
+        "source_commit_sha": "4f7198f0bf3483762f8999494fb6e1125b0f8295",
+        "later_fixes": [
+          {
+            "example_sha": "5fcc7dcee7e6",
+            "fix_ticket": 1625,
+            "fix_commit_sha": "5fcc7dcee7e6f10edbc586a70ffc6582e7082916"
+          },
+          {
+            "example_sha": "79ed14bf325c",
+            "fix_ticket": 1605,
+            "fix_commit_sha": "79ed14bf325c6ba0f1e2f68c27e918cf261c72ad"
+          }
+        ]
+      },
+      {
+        "rank": 38,
+        "merged_at": "2026-09-26T07:51:58+00:00",
+        "pr": 1552,
+        "source_ticket": 1525,
+        "source_commit_sha": "e26718ffbcb61b1b3b6c69ebc14b11be8ce571be",
+        "later_fixes": [
+          {
+            "example_sha": "c1b219dd34b6",
+            "fix_ticket": 1643,
+            "fix_commit_sha": "c1b219dd34b6620b237be9df586b9aa67e4b3360"
+          }
+        ]
+      },
+      {
+        "rank": 39,
+        "merged_at": "2026-09-25T20:27:56+00:00",
+        "pr": 1520,
+        "source_ticket": 1506,
+        "source_commit_sha": "580818ae306978b5156bc8d79f7ff93919c07446",
+        "later_fixes": [
+          {
+            "example_sha": "a59f472b6077",
+            "fix_ticket": 1807,
+            "fix_commit_sha": "a59f472b6077ff5b39b7cf009fbc18057cfaad54"
+          }
+        ]
+      },
+      {
+        "rank": 40,
+        "merged_at": "2026-09-25T20:12:36+00:00",
+        "pr": 1518,
+        "source_ticket": 1463,
+        "source_commit_sha": "7f35e6ceb20a7dd875d8c301aa04f1a0b3c3a5d6",
+        "later_fixes": [
+          {
+            "example_sha": "be11ca15b366",
+            "fix_ticket": 1599,
+            "fix_commit_sha": "be11ca15b366aadf711809f911acd2be386abcd1"
+          }
+        ]
+      },
+      {
+        "rank": 41,
+        "merged_at": "2026-09-25T10:56:35+00:00",
+        "pr": 1486,
+        "source_ticket": 1470,
+        "source_commit_sha": "ce17ab27e7702ac53988c36069851062b0fc8523",
+        "later_fixes": [
+          {
+            "example_sha": "2f8e5ab0771a",
+            "fix_ticket": 1610,
+            "fix_commit_sha": "2f8e5ab0771a60fa52514638d1054c894130a7be"
+          }
+        ]
+      },
+      {
+        "rank": 42,
+        "merged_at": "2026-09-25T10:09:25+00:00",
+        "pr": 1487,
+        "source_ticket": 1479,
+        "source_commit_sha": "5a585428aceb88d4d41773dff94cacf55f072753",
+        "later_fixes": [
+          {
+            "example_sha": "69b3fcfb4738",
+            "fix_ticket": 1621,
+            "fix_commit_sha": "69b3fcfb47387b02be7e95203674edba15972eac"
+          }
+        ]
+      },
+      {
+        "rank": 43,
+        "merged_at": "2026-09-25T04:22:32+00:00",
+        "pr": 1478,
+        "source_ticket": 1451,
+        "source_commit_sha": "8a37b6faa648f8de48192d5fbe4d6befe3429734",
+        "later_fixes": [
+          {
+            "example_sha": "7e35535e0edb",
+            "fix_ticket": 1955,
+            "fix_commit_sha": "7e35535e0edbd9a3e965863ee2a53585784e5d50"
+          }
+        ]
+      },
+      {
+        "rank": 44,
+        "merged_at": "2026-09-25T01:15:16+00:00",
+        "pr": 1446,
+        "source_ticket": 1420,
+        "source_commit_sha": "46e4e615bb8afd85129ccb1ae42fd30127a4a309",
+        "later_fixes": [
+          {
+            "example_sha": "7e35535e0edb",
+            "fix_ticket": 1955,
+            "fix_commit_sha": "7e35535e0edbd9a3e965863ee2a53585784e5d50"
+          },
+          {
+            "example_sha": "e235f64f1019",
+            "fix_ticket": 1646,
+            "fix_commit_sha": "e235f64f1019c70da9894f604575fcb46ed6808d"
+          }
+        ]
+      },
+      {
+        "rank": 45,
+        "merged_at": "2026-09-25T00:30:58+00:00",
+        "pr": 1459,
+        "source_ticket": 1450,
+        "source_commit_sha": "d9e02e96590c5dc751e32a54400a8b77ee0cb17c",
+        "later_fixes": [
+          {
+            "example_sha": "7e35535e0edb",
+            "fix_ticket": 1955,
+            "fix_commit_sha": "7e35535e0edbd9a3e965863ee2a53585784e5d50"
+          }
+        ]
+      },
+      {
+        "rank": 46,
+        "merged_at": "2026-09-24T19:01:57+00:00",
+        "pr": 1434,
+        "source_ticket": 1418,
+        "source_commit_sha": "4623759341f7d32270471563c707e6dd7747e0a1",
+        "later_fixes": [
+          {
+            "example_sha": "e235f64f1019",
+            "fix_ticket": 1646,
+            "fix_commit_sha": "e235f64f1019c70da9894f604575fcb46ed6808d"
+          }
+        ]
+      },
+      {
+        "rank": 47,
+        "merged_at": "2026-09-24T18:43:17+00:00",
+        "pr": 1433,
+        "source_ticket": 1432,
+        "source_commit_sha": "adb38f11e8739ca2a05a1dd9301c937f8615eee0",
+        "later_fixes": [
+          {
+            "example_sha": "e235f64f1019",
+            "fix_ticket": 1646,
+            "fix_commit_sha": "e235f64f1019c70da9894f604575fcb46ed6808d"
+          }
+        ]
+      },
+      {
+        "rank": 48,
+        "merged_at": "2026-09-24T09:45:56+00:00",
+        "pr": 1408,
+        "source_ticket": 1405,
+        "source_commit_sha": "23334db49f074c4a927ea38ddc7c1729254dcc0f",
+        "later_fixes": [
+          {
+            "example_sha": "b19f1668670a",
+            "fix_ticket": 1956,
+            "fix_commit_sha": "b19f1668670a7c9180871b10bfd9a56657e3c77e"
+          },
+          {
+            "example_sha": "9d3f021aa564",
+            "fix_ticket": 1644,
+            "fix_commit_sha": "9d3f021aa564e40fcba1a12ce2745386a30bd04d"
+          },
+          {
+            "example_sha": "69b3fcfb4738",
+            "fix_ticket": 1621,
+            "fix_commit_sha": "69b3fcfb47387b02be7e95203674edba15972eac"
+          }
+        ]
+      },
+      {
+        "rank": 49,
+        "merged_at": "2026-09-23T18:18:33+00:00",
+        "pr": 1374,
+        "source_ticket": 1228,
+        "source_commit_sha": "68de65341a853f990e8e4b25b66ae141832c1ee9",
+        "later_fixes": [
+          {
+            "example_sha": "a96997ec648c",
+            "fix_ticket": 1949,
+            "fix_commit_sha": "a96997ec648c464d8e38e816932d9246df05caea"
+          }
+        ]
+      },
+      {
+        "rank": 50,
+        "merged_at": "2026-09-23T11:22:28+00:00",
+        "pr": 1361,
+        "source_ticket": 1236,
+        "source_commit_sha": "20db98a99e28efcb320d99d852fd21b63b66ccdb",
+        "later_fixes": [
+          {
+            "example_sha": "9d3f021aa564",
+            "fix_ticket": 1644,
+            "fix_commit_sha": "9d3f021aa564e40fcba1a12ce2745386a30bd04d"
+          }
+        ]
+      },
+      {
+        "rank": 51,
+        "merged_at": "2026-09-23T07:11:30+00:00",
+        "pr": 1352,
+        "source_ticket": 1242,
+        "source_commit_sha": "2002b0bae57b2bca54f5a3eaa2fa51cf4e452d03",
+        "later_fixes": [
+          {
+            "example_sha": "c4fe14446cf0",
+            "fix_ticket": 1652,
+            "fix_commit_sha": "c4fe14446cf039ebfab643ceca4fbe294b6e0a54"
+          },
+          {
+            "example_sha": "bf9113e8be50",
+            "fix_ticket": 1719,
+            "fix_commit_sha": "bf9113e8be50a09996892dce47934c33f26105b0"
+          },
+          {
+            "example_sha": "be11ca15b366",
+            "fix_ticket": 1599,
+            "fix_commit_sha": "be11ca15b366aadf711809f911acd2be386abcd1"
+          }
+        ]
+      },
+      {
+        "rank": 52,
+        "merged_at": "2026-09-23T06:19:31+00:00",
+        "pr": 1340,
+        "source_ticket": 1170,
+        "source_commit_sha": "0d65c2f32242ee6f05c5bf6cfd5750e61f49396b",
+        "later_fixes": [
+          {
+            "example_sha": "9d3f021aa564",
+            "fix_ticket": 1644,
+            "fix_commit_sha": "9d3f021aa564e40fcba1a12ce2745386a30bd04d"
+          }
+        ]
+      },
+      {
+        "rank": 53,
+        "merged_at": "2026-09-23T05:35:49+00:00",
+        "pr": 1336,
+        "source_ticket": 1241,
+        "source_commit_sha": "6384a545f7a0180f10d00bb3e8b92a867e17a334",
+        "later_fixes": [
+          {
+            "example_sha": "0f3c007b5ee7",
+            "fix_ticket": 1981,
+            "fix_commit_sha": "0f3c007b5ee7157ffd632d57691b41c9abf8eaaa"
+          },
+          {
+            "example_sha": "379e8ddd0f07",
+            "fix_ticket": 1972,
+            "fix_commit_sha": "379e8ddd0f0798fdf75a6853b7ca098964e0dffe"
+          },
+          {
+            "example_sha": "b2c619a60988",
+            "fix_ticket": 1866,
+            "fix_commit_sha": "b2c619a609882192a195186649fadab9580a5c9c"
+          },
+          {
+            "example_sha": "c4fe14446cf0",
+            "fix_ticket": 1652,
+            "fix_commit_sha": "c4fe14446cf039ebfab643ceca4fbe294b6e0a54"
+          }
+        ]
+      }
+    ]
+  },
+  "packets": {
+    "must_reject": {
+      "reference": {
+        "version": "v1",
+        "name": "must_reject"
+      },
+      "sha256": "d292e9981a1c7dba768c1c659e0ead270d3917d63e708826f6650e8589c521a4",
+      "side": "bad",
+      "reason": "Reference to the immutable v1 must-reject calibration packet."
+    },
+    "must_approve": {
+      "reference": {
+        "version": "v1",
+        "name": "must_approve"
+      },
+      "sha256": "2e6c601ea1625d07fdc50075a26b1095c435a602bcd226dd0820d3feb5187eda",
+      "side": "good",
+      "reason": "Reference to the immutable v1 must-approve calibration packet."
+    },
+    "bad_01": {
+      "file": "bad_01.json",
+      "sha256": "d823c78e74db074b7ce1d241be8bbed05f6d385f3a56ace09c305ce5ecd14472",
+      "pr": 2191,
+      "head_sha": "14c02eb93bb07ce7105daf105f0c56a86a65fd35",
+      "side": "bad",
+      "reason": "Merged command-center ticket PR with same-head reviewer A approval; a later Broken-project fix ticket #2228 re-touched lines from this change.",
+      "source": {
+        "rank": 1,
+        "ticket": 2076,
+        "commit_sha": "ac9a873069fbd27235f8dccfaf96ba2978b50ea8",
+        "fix_examples": [
+          {
+            "sha": "216e661b3ba5",
+            "ticket": 2228,
+            "commit_sha": "216e661b3ba5324ae4a372f6c245027c50c78a0d"
+          }
+        ]
+      }
+    },
+    "bad_02": {
+      "file": "bad_02.json",
+      "sha256": "4dd366211b3c312cdc92a28b937db5160ffbcf720b62f12f32b1cb2ba5449291",
+      "pr": 2091,
+      "head_sha": "6362f4c94c412029fda31d3fd905196af334b0a5",
+      "side": "bad",
+      "reason": "Merged command-center ticket PR with same-head reviewer A approval; a later Broken-project fix ticket #2228 re-touched lines from this change.",
+      "source": {
+        "rank": 2,
+        "ticket": 2074,
+        "commit_sha": "32b40fe241a34bf1fe192b9880bdacc48f48ca8c",
+        "fix_examples": [
+          {
+            "sha": "216e661b3ba5",
+            "ticket": 2228,
+            "commit_sha": "216e661b3ba5324ae4a372f6c245027c50c78a0d"
+          }
+        ]
+      }
+    },
+    "bad_03": {
+      "file": "bad_03.json",
+      "sha256": "f25eb38bedbffbf56f9fc3c70c4957691a7b6e3b1f8e4a924086f47935f73337",
+      "pr": 2030,
+      "head_sha": "2c085ea1debf4107f355424f4ec350a2768cfc1e",
+      "side": "bad",
+      "reason": "Merged command-center ticket PR with same-head reviewer A approval; a later Broken-project fix ticket #2145, #2225 re-touched lines from this change.",
+      "source": {
+        "rank": 3,
+        "ticket": 2014,
+        "commit_sha": "293e619f63dfbb1430ac77447c12c3fb149d49da",
+        "fix_examples": [
+          {
+            "sha": "fd7ffcee9b77",
+            "ticket": 2225,
+            "commit_sha": "fd7ffcee9b77fbae013b1ea192462da9416f9b19"
+          },
+          {
+            "sha": "8c6d2b6d1d87",
+            "ticket": 2145,
+            "commit_sha": "8c6d2b6d1d87df1a87e74d13a38ae6e680038aec"
+          }
+        ]
+      }
+    },
+    "bad_04": {
+      "file": "bad_04.json",
+      "sha256": "a4893a750f11d73b4d1940ed262e17ed2bd42825531048512aff6d9bbbb6ddd7",
+      "pr": 2025,
+      "head_sha": "20930b2f0b0e3e3d6c773a8c775a195fa7db3af0",
+      "side": "bad",
+      "reason": "Merged command-center ticket PR with same-head reviewer A approval; a later Broken-project fix ticket #2084 re-touched lines from this change.",
+      "source": {
+        "rank": 4,
+        "ticket": 2016,
+        "commit_sha": "f3f7b494265af85cb8d1c5ecb81fcc63966b9b2c",
+        "fix_examples": [
+          {
+            "sha": "b99d59568609",
+            "ticket": 2084,
+            "commit_sha": "b99d59568609c7d7d007bb75f121e2d49f7c1e3b"
+          }
+        ]
+      }
+    },
+    "bad_05": {
+      "file": "bad_05.json",
+      "sha256": "4714d534f3a8ded80d869eaf5ae7b206116192bb90534f7551f9034508b211a7",
+      "pr": 1973,
+      "head_sha": "553b0b1e276a5bd69d19392b1f69189f58ee336a",
+      "side": "bad",
+      "reason": "Merged command-center ticket PR with same-head reviewer A approval; a later Broken-project fix ticket #1981 re-touched lines from this change.",
+      "source": {
+        "rank": 5,
+        "ticket": 1972,
+        "commit_sha": "379e8ddd0f0798fdf75a6853b7ca098964e0dffe",
+        "fix_examples": [
+          {
+            "sha": "0f3c007b5ee7",
+            "ticket": 1981,
+            "commit_sha": "0f3c007b5ee7157ffd632d57691b41c9abf8eaaa"
+          }
+        ]
+      }
+    },
+    "bad_06": {
+      "file": "bad_06.json",
+      "sha256": "6a743eab8113ff32a7515cc8180e5b3050ef01545181ad43d528b2e77cc3e97c",
+      "pr": 1958,
+      "head_sha": "9ad94e935c41ecdaf1b20a65f1f50bcdd8103da6",
+      "side": "bad",
+      "reason": "Merged command-center ticket PR with same-head reviewer A approval; a later Broken-project fix ticket #2105 re-touched lines from this change.",
+      "source": {
+        "rank": 6,
+        "ticket": 1897,
+        "commit_sha": "71f91d1c00e153bdad5242a562051673828a785a",
+        "fix_examples": [
+          {
+            "sha": "c34cc5c6f9bc",
+            "ticket": 2105,
+            "commit_sha": "c34cc5c6f9bcadec54ff9f9ec46d3a37e17266b5"
+          }
+        ]
+      }
+    },
+    "bad_07": {
+      "file": "bad_07.json",
+      "sha256": "4fbcf34be57305ab1fbb1fcdce824f140791f4e23a078b84ddb998f3f1587cad",
+      "pr": 1791,
+      "head_sha": "be01e5b5ceeb7e952cfbbf593ba1f8e906a9ae4f",
+      "side": "bad",
+      "reason": "Merged command-center ticket PR with same-head reviewer A approval; a later Broken-project fix ticket #1968 re-touched lines from this change.",
+      "source": {
+        "rank": 7,
+        "ticket": 1653,
+        "commit_sha": "591c5e80feb981cbcd8ab5d8f4a55a91b1a4920e",
+        "fix_examples": [
+          {
+            "sha": "51b3b7bd948d",
+            "ticket": 1968,
+            "commit_sha": "51b3b7bd948dc64ac95938bd95379b1e85408ac5"
+          }
+        ]
+      }
+    },
+    "bad_08": {
+      "file": "bad_08.json",
+      "sha256": "650b07207106bff8aae9eaaa87f313163b712af09e7138362ebc78efdf60baa4",
+      "pr": 1873,
+      "head_sha": "a6328d39545365a7628c05605cbe5225ccd45218",
+      "side": "bad",
+      "reason": "Merged command-center ticket PR with same-head reviewer A approval; a later Broken-project fix ticket #1961 re-touched lines from this change.",
+      "source": {
+        "rank": 8,
+        "ticket": 1869,
+        "commit_sha": "1349b8a5833ba785db29eb2051d2a8dd1b791d81",
+        "fix_examples": [
+          {
+            "sha": "6fbf142ab5c0",
+            "ticket": 1961,
+            "commit_sha": "6fbf142ab5c058310d593a5a46e4eb2261c5e107"
+          }
+        ]
+      }
+    },
+    "bad_09": {
+      "file": "bad_09.json",
+      "sha256": "cec5fdcf3588e3cdfaf09e1b34c721c6162bf231d83d6e03950a99bc467a8057",
+      "pr": 1870,
+      "head_sha": "f4d576d9b8cc962f2fb52426bd871f06368c154c",
+      "side": "bad",
+      "reason": "Merged command-center ticket PR with same-head reviewer A approval; a later Broken-project fix ticket #1981, #2021 re-touched lines from this change.",
+      "source": {
+        "rank": 9,
+        "ticket": 1866,
+        "commit_sha": "b2c619a609882192a195186649fadab9580a5c9c",
+        "fix_examples": [
+          {
+            "sha": "6f21559480a3",
+            "ticket": 2021,
+            "commit_sha": "6f21559480a3ca97f6e87d9e97196ac1dc92915e"
+          },
+          {
+            "sha": "0f3c007b5ee7",
+            "ticket": 1981,
+            "commit_sha": "0f3c007b5ee7157ffd632d57691b41c9abf8eaaa"
+          }
+        ]
+      }
+    },
+    "good_01": {
+      "file": "good_01.json",
+      "sha256": "ec056a4c382dcf3ebc4bdb71a3cb5afcb9ac0c7b9d499e04c176e5ebf3a628aa",
+      "pr": 1628,
+      "head_sha": "d8566e254e611c2cad6797159ed8d3bd10868db5",
+      "side": "good",
+      "reason": "Merged command-center ticket PR with same-head reviewer A approval and a closed ticket; no Broken-project fix re-touched its lines during the following seven days."
+    },
+    "good_02": {
+      "file": "good_02.json",
+      "sha256": "c12992bf6ddb54672b256d1386a632c016991b0aaba57d87b62d3aa13e7b880d",
+      "pr": 1614,
+      "head_sha": "5b8af2be48c7d9b2fea4f01c30eb6a924be3ad3e",
+      "side": "good",
+      "reason": "Merged command-center ticket PR with same-head reviewer A approval and a closed ticket; no Broken-project fix re-touched its lines during the following seven days."
+    },
+    "good_03": {
+      "file": "good_03.json",
+      "sha256": "cded7a92e3d13b231f74a200bfa7a5040b6cdba3b86e274fb4d92a4b6aadeb89",
+      "pr": 1612,
+      "head_sha": "b78dd4214f69aef44241ed42d4e281abbe2a48aa",
+      "side": "good",
+      "reason": "Merged command-center ticket PR with same-head reviewer A approval and a closed ticket; no Broken-project fix re-touched its lines during the following seven days."
+    },
+    "good_04": {
+      "file": "good_04.json",
+      "sha256": "c5bdfa421cf85bb5583893c6575378591b97fd679667dea8e658f55cccd9e593",
+      "pr": 1583,
+      "head_sha": "ee361bdea4cb2b4a7df0d868e06288e4b8fe0c0c",
+      "side": "good",
+      "reason": "Merged command-center ticket PR with same-head reviewer A approval and a closed ticket; no Broken-project fix re-touched its lines during the following seven days."
+    },
+    "good_05": {
+      "file": "good_05.json",
+      "sha256": "d28fd83f89e8367afa0909d512611748587ec1c2cb6f61577b3cf530165dcf33",
+      "pr": 1619,
+      "head_sha": "daebc469bf57c5f8fbb23cd1bb91a382205d8266",
+      "side": "good",
+      "reason": "Merged command-center ticket PR with same-head reviewer A approval and a closed ticket; no Broken-project fix re-touched its lines during the following seven days."
+    },
+    "good_06": {
+      "file": "good_06.json",
+      "sha256": "01116e0b863286ab5a62a877f71e0ef5033ad2bc089ff336317c59f2569ea815",
+      "pr": 1580,
+      "head_sha": "adffb6f203e781bd2b6f03f7f2f37e626949a62c",
+      "side": "good",
+      "reason": "Merged command-center ticket PR with same-head reviewer A approval and a closed ticket; no Broken-project fix re-touched its lines during the following seven days."
+    },
+    "good_07": {
+      "file": "good_07.json",
+      "sha256": "7881fed5e4a9e4d17259816c510d78f2ba3e02b52536c42fee95d41c9616e031",
+      "pr": 1544,
+      "head_sha": "6709970177e227c9cfb590375ede55c07266eef5",
+      "side": "good",
+      "reason": "Merged command-center ticket PR with same-head reviewer A approval and a closed ticket; no Broken-project fix re-touched its lines during the following seven days."
+    },
+    "good_08": {
+      "file": "good_08.json",
+      "sha256": "84e6aab7187afcbbb68801f84d8a50cf97c87bd4bc9a85d02e468b23b0d14376",
+      "pr": 1579,
+      "head_sha": "6ce5e173819c8c263bc497e19fdc6ba8996d6f8e",
+      "side": "good",
+      "reason": "Merged command-center ticket PR with same-head reviewer A approval and a closed ticket; no Broken-project fix re-touched its lines during the following seven days."
+    },
+    "good_09": {
+      "file": "good_09.json",
+      "sha256": "a409a740661aa8b3edc843e7d80e7b8d02ad63c1396947c8cafc449fe8af53d6",
+      "pr": 1573,
+      "head_sha": "693f245b97213417febdce53835dbb73b5e0c358",
+      "side": "good",
+      "reason": "Merged command-center ticket PR with same-head reviewer A approval and a closed ticket; no Broken-project fix re-touched its lines during the following seven days."
+    }
+  }
+}

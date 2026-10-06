@@ -69,6 +69,39 @@ def shaped_plan(number=40, *, origin="agent", klass="Broken",
     )
 
 
+HELD_SHAPED_BODY = "# Decision\nKeep current service plan.\n"
+HELD_SHAPED_VERSION = (
+    "371883196b99396eca7d9b9cb6613ec0395df5ca683d36fe7415b71343e40dbb"
+)
+
+
+def held_shaped_plan(number=42, *, body=HELD_SHAPED_BODY,
+                     condition_state="OPEN"):
+    condition = funnel.Item(
+        repo=REPO, number=41, title="Open prerequisite",
+        url="https://example.invalid/41", state=condition_state,
+    )
+    plan = funnel.Item(
+        repo=REPO, number=number, title="Held plan {}".format(number),
+        url="https://example.invalid/{}".format(number), state="OPEN",
+        status="Shaped", klass="New", origin="Nate", risk="standard",
+        needs="external-event", body=body, labels=["blocked"],
+        block_reason="Hold until the open prerequisite clears",
+        shaped_hold={
+            "Hold-Reason": "Hold until the open prerequisite clears",
+            "Hold-Conditions": ["nateprich/beta#41"],
+            "Plan-Version": HELD_SHAPED_VERSION,
+            "Proof": [
+                "https://github.com/nateprich-projects/command-center/"
+                "issues/2003#issuecomment-5945296610",
+            ],
+        },
+        status_since=NOW - timedelta(days=2),
+        blocked_since=NOW - timedelta(days=1),
+    )
+    return plan, condition
+
+
 def building_project(number=30):
     return funnel.Item(
         repo=REPO, number=number, title="Project {}".format(number),
@@ -79,12 +112,14 @@ def building_project(number=30):
     )
 
 
-def silent_blocked_ticket(number=31, parent=30, needs="none"):
+def silent_blocked_ticket(number=31, parent=30, needs="none",
+                          needs_decision=None):
     return funnel.Item(
         repo=REPO, number=number, title="Ticket {}".format(number),
         url="https://example.invalid/{}".format(number), state="OPEN",
         parent="{}#{}".format(REPO, parent), risk="standard", needs=needs,
         labels=["blocked"], blocked_since=NOW - timedelta(days=1),
+        needs_decision=needs_decision,
     )
 
 
@@ -95,7 +130,165 @@ def brief_for(items, capsys):
 
 def routed(item, *others):
     by_ref = {i.ref: i for i in (item,) + others}
-    return funnel.watch_owns_gate(item, funnel.gate_question(item), by_ref)
+    return funnel.watch_owns_gate(item, by_ref)
+
+
+def owner_route_fixture(case):
+    """Build one route from the inventory; expected routing stays in tests."""
+    if case == "held-shaped-condition":
+        item, condition = held_shaped_plan()
+        return item, [item, condition]
+    if case == "blocked-recorded-question":
+        parent = building_project()
+        item = silent_blocked_ticket(
+            needs_decision="Which repository owns the schedule?",
+        )
+        return item, [parent, item]
+    if case == "blocked-breakdown-question":
+        item = building_project()
+        item.labels = ["blocked"]
+        item.needs_decision = "Which repository owns the schedule?"
+        return item, [item]
+    if case == "blocked-unread-watch":
+        parent = building_project()
+        item = silent_blocked_ticket()
+        item.block_comments_error = "could not read comments"
+        return item, [parent, item]
+    if case == "blocked-unread-nate":
+        item = building_project()
+        item.labels = ["blocked"]
+        item.needs = "human"
+        item.block_comments_error = "could not read comments"
+        return item, [item]
+    if case == "blocked-ticket-unblock-watch":
+        parent = building_project()
+        item = silent_blocked_ticket()
+        return item, [parent, item]
+    if case == "blocked-ticket-unblock-nate":
+        parent = building_project()
+        item = silent_blocked_ticket(needs="human")
+        return item, [parent, item]
+    if case == "blocked-lane-decline-unblock-watch":
+        parent = building_project()
+        item = silent_blocked_ticket(needs="human")
+        item.decline_reason = "the prerequisite has not landed"
+        return item, [parent, item]
+    if case == "blocked-project-unblock-watch":
+        item = building_project()
+        item.labels = ["blocked"]
+        return item, [item]
+    if case == "blocked-project-unblock-nate":
+        item = building_project()
+        item.labels = ["blocked"]
+        item.needs = "human"
+        return item, [item]
+    if case == "building-accept":
+        item = building_project()
+        item.klass = "New"
+        item.origin = "Nate"
+        item.children_done = 1
+        return item, [item]
+    if case == "shaped-plan-watch":
+        item = shaped_plan(needs_lines=(
+            "- Scope and priority: include the sibling's fix?",
+        ))
+        return item, [item]
+    if case == "shaped-plan-nate":
+        item = shaped_plan(needs_lines=(
+            "- Preference: which wording should the alert use?",
+        ))
+        return item, [item]
+    raise AssertionError(case)
+
+
+@pytest.mark.parametrize(
+    ("case", "question", "watch_owned"),
+    [
+        ("held-shaped-condition", "Held — recheck?", True),
+        (
+            "blocked-recorded-question",
+            "Which repository owns the schedule?", False,
+        ),
+        (
+            "blocked-breakdown-question",
+            "Answer the breakdown's question?", False,
+        ),
+        ("blocked-unread-watch", "Block unread — recheck?", True),
+        ("blocked-unread-nate", "Block unread — recheck?", False),
+        ("blocked-ticket-unblock-watch", "Unblock?", True),
+        ("blocked-ticket-unblock-nate", "Unblock?", False),
+        ("blocked-lane-decline-unblock-watch", "Unblock?", True),
+        ("blocked-project-unblock-watch", "Unblock or park?", True),
+        ("blocked-project-unblock-nate", "Unblock or park?", False),
+        ("building-accept", "Accept it?", False),
+        ("shaped-plan-watch", "Is the plan good?", True),
+        ("shaped-plan-nate", "Is the plan good?", False),
+    ],
+)
+def test_owner_route_fixtures_pin_question_owner_and_brief_placement(
+    case, question, watch_owned, capsys,
+):
+    item, items = owner_route_fixture(case)
+    by_ref = {row.ref: row for row in items}
+
+    assert funnel.gate_question(item, by_ref) == question
+    assert funnel.watch_owns_gate(item, by_ref) is watch_owned
+
+    brief = brief_for(items, capsys)
+    if watch_owned:
+        assert brief["total_needing_nate"] == 0
+        assert brief["items"] == []
+        assert [row["ref"] for row in brief["watch_gates"]] == [item.ref]
+        assert brief["watch_gates"][0]["question"] == question
+    else:
+        assert brief["total_needing_nate"] == 1
+        assert [row["ref"] for row in brief["items"]] == [item.ref]
+        assert brief["items"][0]["waiting_on"] == question
+        assert brief["watch_gates"] == []
+
+
+def test_reproduction_unchanged_shaped_hold_is_watch_owned():
+    plan, condition = held_shaped_plan()
+    by_ref = {"nateprich/beta#42": plan, "nateprich/beta#41": condition}
+    held_question = "Held — recheck?"
+
+    assert funnel.gate_question(plan, by_ref) == held_question
+    assert funnel.watch_owns_gate(plan, by_ref)
+
+
+def test_brief_keeps_an_unchanged_hold_in_watch_gates_and_reopens_after_edit(
+    capsys,
+):
+    plan, condition = held_shaped_plan()
+
+    brief = brief_for([plan, condition], capsys)
+
+    assert brief["total_needing_nate"] == 0
+    assert brief["items"] == []
+    assert [row["ref"] for row in brief["watch_gates"]] == [
+        "nateprich/beta#42",
+    ]
+    assert brief["watch_gates"][0]["question"] == "Held — recheck?"
+
+    plan.body += "\nA material body edit.\n"
+    edited = brief_for([plan, condition], capsys)
+
+    assert edited["total_needing_nate"] == 1
+    assert edited["items"][0]["waiting_on"] == "Is the plan good?"
+    assert edited["watch_gates"] == []
+
+
+def test_a_resolved_shaped_hold_returns_to_the_plan_gate(capsys):
+    plan, condition = held_shaped_plan(condition_state="CLOSED")
+
+    brief = brief_for([plan, condition], capsys)
+
+    assert brief["total_needing_nate"] == 1
+    assert [row["ref"] for row in brief["items"]] == [
+        "nateprich/beta#42",
+    ]
+    assert brief["items"][0]["waiting_on"] == "Is the plan good?"
+    assert brief["watch_gates"] == []
 
 
 def test_a_silently_blocked_ticket_leaves_the_total_for_watch_gates(capsys):
@@ -115,6 +308,86 @@ def test_a_silently_blocked_ticket_leaves_the_total_for_watch_gates(capsys):
         "question": "Unblock?",
         "waited": funnel.humanise(ticket.waited(NOW)),
     }]
+
+
+def test_a_blocked_ticket_with_needs_decision_asks_nate_the_record_question():
+    question = "Which repository owns the schedule?"
+    ticket = silent_blocked_ticket(needs_decision=question)
+
+    assert ticket.parent is not None
+    assert funnel.gate_question(ticket) == question
+    assert not routed(ticket)
+
+
+def test_needs_decision_ticket_stays_with_nate_when_question_is_unblock():
+    ticket = silent_blocked_ticket(needs_decision="Unblock?")
+
+    assert funnel.gate_question(ticket) == "Unblock?"
+    assert not routed(ticket)
+
+
+def test_gate_ownership_does_not_depend_on_question_wording(monkeypatch):
+    plan = shaped_plan(needs_lines=("- Scope and priority: include it?",))
+    silent = silent_blocked_ticket()
+    recorded = silent_blocked_ticket(number=32, needs_decision="Unblock?")
+
+    monkeypatch.setitem(funnel.GATE_QUESTIONS, "plan", "Unblock?")
+    monkeypatch.setitem(funnel.GATE_QUESTIONS, "unblock", "Is the plan good?")
+
+    assert funnel.gate_question(plan) == "Unblock?"
+    assert funnel.gate_question(silent) == "Is the plan good?"
+    assert funnel.gate_question(recorded) == "Unblock?"
+    assert routed(plan, silent, recorded)
+    assert routed(silent, plan, recorded)
+    assert not routed(recorded, plan, silent)
+
+
+@pytest.mark.parametrize("needs", [None, "unrecognized"])
+def test_missing_or_unknown_block_needs_fails_closed_to_nate(needs, capsys):
+    project = building_project()
+    ticket = silent_blocked_ticket(needs=needs)
+
+    assert funnel.gate_question(ticket) == "Unblock?"
+    assert not routed(ticket, project)
+
+    brief = brief_for([project, ticket], capsys)
+
+    assert brief["total_needing_nate"] == 1
+    assert [row["ref"] for row in brief["items"]] == [ticket.ref]
+    assert brief["watch_gates"] == []
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("origin", "unknown"), ("risk", None), ("needs", "unknown")],
+)
+def test_unknown_shaped_routing_fields_fail_closed_to_nate(
+    field, value, capsys,
+):
+    plan = shaped_plan(needs_lines=("- Scope and priority: include it?",))
+    setattr(plan, field, value)
+
+    assert funnel.gate_question(plan) == "Is the plan good?"
+    assert not routed(plan)
+
+    brief = brief_for([plan], capsys)
+
+    assert brief["total_needing_nate"] == 1
+    assert [row["ref"] for row in brief["items"]] == [plan.ref]
+    assert brief["watch_gates"] == []
+
+
+def test_a_blocked_ticket_with_needs_decision_goes_to_nate_in_the_brief(capsys):
+    project = building_project()
+    question = "Which repository owns the schedule?"
+    ticket = silent_blocked_ticket(needs_decision=question)
+
+    brief = brief_for([project, ticket], capsys)
+
+    assert brief["total_needing_nate"] == 1
+    assert [row["ref"] for row in brief["items"]] == [ticket.ref]
+    assert brief["items"][0]["waiting_on"] == question
+    assert brief["watch_gates"] == []
 
 
 def test_a_silently_blocked_project_asking_unblock_or_park_is_the_watchs():

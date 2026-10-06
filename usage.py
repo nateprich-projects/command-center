@@ -8,6 +8,7 @@ implements the gate itself, for the same reason neither ranks anything itself.
     usage.py claude          # the two windows, as JSON
     usage.py codex
     usage.py gate codex      # exit 0 to proceed, 1 if over pace, 2 if unknown
+    usage.py claude-plan-sample  # raw signed-in weekly sample for the dashboard
 
 **The gate must be called from inside a live session**, after that session has
 made at least one model call. Both sources are written *by* a running session,
@@ -34,6 +35,7 @@ import time
 import urllib.request
 
 import muse_model
+import session_logs
 from datetime import timezone
 from typing import Dict, List, Optional, Tuple
 
@@ -296,6 +298,10 @@ MUSE_WEEKLY_RESERVE = round(
     100.0 * MUSE_SESSION_RESERVE_DOLLARS / MUSE_WEEKLY_CAP_DOLLARS, 2
 )
 
+# The bounded reviewer trial has its own total ceiling inside the existing
+# Muse allowance. This does not authorize trial activation or evaluation calls.
+MUSE_TRIAL_TOTAL_CAP_DOLLARS = 20.0
+
 #: Nate's dated release of the Muse pace brake (#1341), for the one window that
 #: resets on Sunday 2026-09-27 at 17:00 PDT. It names that window by its reset
 #: time, so it lapses there by construction: the next window reads against the
@@ -348,24 +354,29 @@ MUSE_WEEKLY_RESERVE = round(
 #: now runs to Sunday or to next Thursday is what that Sunday's panel
 #: reading settles. _(Nate, 2026-09-24: "Update it tonight".)_
 #:
-#: **The #1341 override lapsed at that Sunday reset, and the brake closed on
-#: a pricing gap (#1842).** The window resetting 2026-10-05 00:00 UTC opened
-#: with this meter pricing muse-spark-1.3-contributor at the standard card:
-#: $42.42 at standard against $3.09 at its own card. At 12:45 PDT on Monday
-#: 2026-09-28 it read $42.58, 21.29% of the $200 cap, and projected 101.21%,
-#: so every Muse lane and review-replay stopped. The panel read 3%. This
-#: pairing takes the panel's figure, as every pairing does. The pricing-model
-#: update is separate work, and this override lapses at the reset whether or
-#: not that has landed. _(Nate, 2026-09-28: "please turn off the Muse brake
-#: for now. Muse is showing 3% on the website, we just haven't updated the
-#: pricing model yet so the brake is activating incorrectly.")_
-MUSE_PACE_OVERRIDE = {
-    "issue": 1842,
+#: **The #1842 standard-card cap is replaced with the fresh own-card
+#: pairing.** On Tue 2026-09-29 at 20:55 PDT the panel read 15% and
+#: `usage.py muse` held $15.98 at own-card prices. All four same-window
+#: readings on #1673 fit a $108-$110 cap within the panel's 1-point
+#: resolution; use the recorded $109 cap for the window resetting
+#: 2026-10-05 00:00 UTC. The pairing is recorded for prerequisite #1994:
+#: https://github.com/nateprich-projects/command-center/issues/1673#issuecomment-5903766309
+#:
+#: Use the first panel reading in each new window as a fresh pairing. If a
+#: fresh same-timestamp panel used-percent exceeds the own-card meter's
+#: implied used-percent by more than 2 percentage points, restore standard-card
+#: pricing.
+#: Keep the standard-card total as an ungated diagnostic.
+#: _(Nate, #1994; implementation #1995.)_
+MUSE_PACE_OWN_CARD_CAP_V2 = {
+    "issue": 1995,
     "resets_at": 1791158400.0,  # 2026-10-05 00:00 UTC, Sunday 17:00 PDT
-    "panel_used_percent": 3.0,
-    "meter_dollars": 42.58,
+    "panel_displayed_percent": 15.0,
+    "meter_dollars": 15.98,
+    "cap_dollars": 109.0,
     "ceiling_percent": 100.0,
 }
+MUSE_PACE_OVERRIDE = MUSE_PACE_OWN_CARD_CAP_V2
 
 
 def muse_pace_override(resets_at: float, now: float) -> Optional[Dict]:
@@ -383,8 +394,7 @@ def muse_pace_override(resets_at: float, now: float) -> Optional[Dict]:
     until = float(override["resets_at"])
     if now >= until or float(resets_at) != until:
         return None
-    cap = round(float(override["meter_dollars"]) * 100.0
-                / float(override["panel_used_percent"]), 2)
+    cap = float(override["cap_dollars"])
     found = {
         "issue": override["issue"],
         "until": until,
@@ -397,6 +407,103 @@ def muse_pace_override(resets_at: float, now: float) -> Optional[Dict]:
     if reopened is not None and now >= float(reopened):
         found["reopened_at"] = float(reopened)
     return found
+
+
+def _finite_nonnegative_dollars(value) -> Optional[float]:
+    """Parse a recorded dollar amount without treating malformed data as zero."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        amount = float(value)
+    except (OverflowError, TypeError, ValueError):
+        return None
+    if not math.isfinite(amount) or amount < 0.0:
+        return None
+    return amount
+
+
+def muse_trial_allowance_dollars(now: Optional[float] = None) -> Optional[float]:
+    """Return the current Muse weekly cap that contains the trial's total.
+
+    The verified configuration has a $109 panel-paired cap through its
+    2026-10-05 reset and a $200 baseline cap. Read the active cap each time so
+    later allowance changes cannot silently create room for a new allowance.
+    """
+    now = time.time() if now is None else now
+    now = _finite_nonnegative_dollars(now)
+    if now is None:
+        return None
+    try:
+        resets_at = muse_window_start(now) + SEVEN_DAY
+        override = muse_pace_override(resets_at, now)
+        allowance = (
+            override["cap_dollars"] if override
+            else MUSE_WEEKLY_CAP_DOLLARS
+        )
+    except (KeyError, OverflowError, TypeError, ValueError):
+        return None
+    return _finite_nonnegative_dollars(allowance)
+
+
+def muse_trial_counter_read(spent_dollars, now: Optional[float] = None, *,
+                            reserve_dollars=None) -> Dict:
+    """Read a caller-supplied trial total and decide whether another run fits.
+
+    The caller supplies the previously recorded total from GitHub, the durable
+    state of this repository. No local counter file is written. Stop if the
+    total is unreadable, the $20 ceiling no longer fits the active Muse
+    allowance, or the reserved next work could take the total over $20. By
+    default that work is one full Muse session; replay batches can supply their
+    measured p90 reservation instead.
+    """
+    spent = _finite_nonnegative_dollars(spent_dollars)
+    cap = _finite_nonnegative_dollars(MUSE_TRIAL_TOTAL_CAP_DOLLARS)
+    reserve = _finite_nonnegative_dollars(
+        MUSE_SESSION_RESERVE_DOLLARS if reserve_dollars is None
+        else reserve_dollars
+    )
+    allowance = muse_trial_allowance_dollars(now)
+    known = all(value is not None for value in (spent, cap, reserve, allowance))
+    contained = (
+        cap is not None and allowance is not None and cap <= allowance
+    )
+    stop = (
+        not known or not contained
+        or spent + reserve > cap
+    )
+    return {
+        "known": known,
+        "spent_dollars": spent,
+        "cap_dollars": cap,
+        "allowance_dollars": allowance,
+        "reserve_dollars": reserve,
+        "contained": contained,
+        "stop": stop,
+    }
+
+
+def muse_trial_counter_increment(
+        spent_dollars, increment_dollars,
+        now: Optional[float] = None) -> Dict:
+    """Add observed trial usage to the caller's recorded total, failing closed."""
+    now = time.time() if now is None else now
+    reading = muse_trial_counter_read(spent_dollars, now)
+    increment = _finite_nonnegative_dollars(increment_dollars)
+    if not reading["known"] or increment is None:
+        reading["known"] = False
+        reading["stop"] = True
+        reading["increment_dollars"] = None
+        return reading
+
+    total = round(reading["spent_dollars"] + increment, 6)
+    if not math.isfinite(total):
+        reading["known"] = False
+        reading["stop"] = True
+        reading["increment_dollars"] = None
+        return reading
+    updated = muse_trial_counter_read(total, now)
+    updated["increment_dollars"] = increment
+    return updated
 
 
 #: The provider's weekly window opens on the same lattice every week: Monday
@@ -545,15 +652,8 @@ def read_claude() -> Optional[Dict]:
     }
 
 
-def read_claude_plan_history(now: Optional[float] = None) -> Optional[Dict]:
-    """Read Claude's latest app-reported percentages for the signed-in org.
-
-    The desktop app keeps samples for every organization in one file. Only the
-    organization in Claude Code's current OAuth account is relevant here. A
-    missing, malformed, stale, or future-dated sample is unavailable so the
-    caller can use the existing transcript estimate.
-    """
-    now = time.time() if now is None else now
+def _latest_claude_plan_sample() -> Optional[Dict]:
+    """Return the newest numeric-timestamp sample for Claude Code's org."""
     try:
         with open(CLAUDE_APP_CONFIG) as fh:
             account = json.load(fh).get("oauthAccount", {})
@@ -589,12 +689,73 @@ def read_claude_plan_history(now: Optional[float] = None) -> Optional[Dict]:
     if newest is None:
         return None
 
-    captured_at = newest[0] / 1000.0
+    return newest[1]
+
+
+def read_claude_plan_weekly_sample(
+        now: Optional[float] = None) -> Optional[Dict]:
+    """Return only the provider's raw weekly percentage and sample timestamp.
+
+    Unlike the budget reader, this display path keeps valid older samples so
+    the dashboard can label them stale from their original timestamp. It still
+    selects the signed-in organization and rejects malformed or future-dated
+    values. Organization identifiers never leave this reader.
+    """
+    now = time.time() if now is None else now
+    sample = _latest_claude_plan_sample()
+    if sample is None:
+        return None
+
+    stamp_ms = sample.get("t")
+    if isinstance(stamp_ms, bool) or not isinstance(stamp_ms, (int, float)):
+        return None
+    try:
+        stamp_number = float(stamp_ms)
+    except (OverflowError, TypeError, ValueError):
+        return None
+    if not math.isfinite(stamp_number) or stamp_number < 0:
+        return None
+    if now - stamp_number / 1000.0 < -60:
+        return None
+
+    sample_usage = sample.get("u")
+    if not isinstance(sample_usage, dict):
+        return None
+    weekly = sample_usage.get("sd")
+    if isinstance(weekly, bool) or not isinstance(weekly, (int, float)):
+        return None
+    try:
+        weekly_number = float(weekly)
+    except (OverflowError, TypeError, ValueError):
+        return None
+    if not math.isfinite(weekly_number) or not 0.0 <= weekly_number <= 100.0:
+        return None
+
+    return {"u": {"sd": weekly}, "t": stamp_ms}
+
+
+def read_claude_plan_history(now: Optional[float] = None) -> Optional[Dict]:
+    """Read Claude's latest app-reported percentages for the signed-in org.
+
+    The desktop app keeps samples for every organization in one file. Only the
+    organization in Claude Code's current OAuth account is relevant here. A
+    missing, malformed, stale, or future-dated sample is unavailable so the
+    caller can use the existing transcript estimate.
+    """
+    now = time.time() if now is None else now
+    sample = _latest_claude_plan_sample()
+    if sample is None:
+        return None
+
+    stamp_ms = sample.get("t")
+    if isinstance(stamp_ms, bool) or not isinstance(stamp_ms, (int, float)):
+        return None
+    captured_at = float(stamp_ms) / 1000.0
     age = now - captured_at
     if age > CLAUDE_PLAN_HISTORY_MAX_AGE or age < -60:
         return None
 
-    usage = newest[1].get("u")
+    usage = sample.get("u")
     if not isinstance(usage, dict):
         return None
     percentages = {}
@@ -775,24 +936,20 @@ def read_muse(now: float) -> Optional[Dict]:
     calls. A provider event with an unreadable timestamp or quantity fails
     closed rather than silently undercounting.
 
-    **The gated total prices everything at the standard card, whatever
-    model actually ran**, and that is deliberate rather than an oversight
-    (#1302).
+    **The gated anchored total and 72-hour rate price each call at the
+    configured model's own card.** `standard_card_dollars` and each model's
+    `dollars_at_standard` remain ungated diagnostics. The current window's
+    own-card ceiling is the versioned panel pairing above.
 
-    The $200 ceiling was calibrated from a 429 at $214.02 in a window
-    where every session was on the standard model, and that anchored
-    total matched the account panel to 0.22 of a point. A price-shaped
-    window and a token-shaped one are indistinguishable from that
-    evidence, because there was only one card in play.
+    The base $200 ceiling was calibrated from a 429 at $214.02 in a window
+    where every session was on the standard model; that one-card reading did
+    not settle contributor pricing. The current window uses the fresh 15%
+    panel / $15.98 own-card pairing, with a $109 cap that fits all four
+    same-window readings within the panel's 1-point resolution.
 
-    Pricing contributor sessions at the contributor card assumes
-    price-shaped. If the window is token-shaped, the meter then reads far
-    below what it is tracking, the pace brake never trips, and the lanes
-    walk into the provider's refusal — the 2026-09-19 outage, rebuilt on
-    purpose. Leaving them at the standard card is what they cost here
-    today, so the brake does not move; the only cost is forfeiting a
-    discount nobody has measured yet. #1304 reads the panel and settles
-    it, and ``by_model`` is what it reads.
+    The $200 base ceiling remains calibrated from the 2026-09-19 provider
+    refusal. A dated pairing replaces it only for its named window; use the
+    first panel reading in the next window as a fresh pairing.
     """
     resets_at = muse_window_start(now) + SEVEN_DAY
     # #1341: one window is priced from the account panel instead of the card,
@@ -803,11 +960,12 @@ def read_muse(now: float) -> Optional[Dict]:
     rate_cutoff = now - MUSE_RATE_LOOKBACK
     oldest = min(cutoff, rate_cutoff)
     spent = 0.0
+    standard_spent = 0.0
     trailing = 0.0
     calls = 0
     seen_usage_ids = set()
     by_model: Dict[str, Dict[str, float]] = {}
-    journals = glob.glob(MUSE_SESSIONS)
+    journals = session_logs.paths(MUSE_SESSIONS, "muse")
 
     for path in journals:
         try:
@@ -821,7 +979,7 @@ def read_muse(now: float) -> Optional[Dict]:
             # 2026-09-22 across 4,904 provider records: zero unmatched.
             run_models: Dict[str, str] = {}
             pending = []
-            with open(path, errors="replace") as handle:
+            with session_logs.open_text(path, errors="replace") as handle:
                 for line in handle:
                     # The usage test comes first, and a line that is a
                     # usage attribution is never also read as a model
@@ -872,13 +1030,6 @@ def read_muse(now: float) -> Optional[Dict]:
 
             standard_rates = _muse_rates(muse_model.STANDARD_MODEL)
             for recorded_at, tokens, run_id in pending:
-                cost = _muse_price(tokens, standard_rates)
-                if recorded_at >= rate_cutoff:
-                    trailing += cost
-                if recorded_at < cutoff:
-                    continue
-                spent += cost
-                calls += 1
                 model_id = run_models.get(run_id)
                 if model_id is None and len(set(run_models.values())) == 1:
                     # One model in the file and an unjoined record: the
@@ -886,14 +1037,22 @@ def read_muse(now: float) -> Optional[Dict]:
                     model_id = next(iter(run_models.values()))
                 if model_id is None:
                     model_id = MUSE_MODEL_UNKNOWN
+                standard_cost = _muse_price(tokens, standard_rates)
+                own_card_cost = _muse_price(tokens, _muse_rates(model_id))
+                if recorded_at >= rate_cutoff:
+                    trailing += own_card_cost
+                if recorded_at < cutoff:
+                    continue
+                spent += own_card_cost
+                standard_spent += standard_cost
+                calls += 1
                 row = by_model.setdefault(
                     model_id,
                     {"calls": 0, "dollars_at_standard": 0.0,
                      "dollars_at_own_card": 0.0})
                 row["calls"] += 1
-                row["dollars_at_standard"] += cost
-                row["dollars_at_own_card"] += _muse_price(
-                    tokens, _muse_rates(model_id))
+                row["dollars_at_standard"] += standard_cost
+                row["dollars_at_own_card"] += own_card_cost
         except OSError:
             continue
 
@@ -906,6 +1065,7 @@ def read_muse(now: float) -> Optional[Dict]:
         return None
 
     spent = round(spent, 6)
+    standard_spent = round(standard_spent, 6)
     trailing = round(trailing, 6)
     cap =override["cap_dollars"] if override else MUSE_WEEKLY_CAP_DOLLARS
     used_percent = round(100.0 * spent / cap, 2)
@@ -918,6 +1078,7 @@ def read_muse(now: float) -> Optional[Dict]:
         "source": "muse",
         "captured_at": now,
         "spent_dollars": spent,
+        "standard_card_dollars": standard_spent,
         "cap_dollars": cap,
         "windows": {
             "seven_day": {
@@ -941,17 +1102,8 @@ def read_muse(now: float) -> Optional[Dict]:
                 "calls": calls,
             }
         },
-        # What the window holds, per model, for #1304 to read against the
-        # account panel. `spent_dollars` above is the gated number and is
-        # the standard-card total; nothing here changes it.
-        #
-        # Both prices are carried per model on purpose. The difference
-        # between them is the whole size of the question: if the weekly
-        # window discounts contributor calls, `own_card` is what it
-        # actually cost and `standard` is the over-read the gate is
-        # currently paying for; if it does not, `standard` was right all
-        # along and `own_card` is the trap that would have been walked
-        # into.
+        # `spent_dollars` above is the gated own-card total. Keep the
+        # standard-card total and per-model values for diagnosis only.
         "by_model": {
             model_id: {
                 "calls": row["calls"],
@@ -1157,9 +1309,6 @@ def shaping_allowed(reading: Dict) -> bool:
     """
     if isinstance(reading, dict) and reading.get("unmetered"):
         return True
-    if isinstance(reading, dict) and reading.get("source") == "zai" \
-            and _zai_lane_live(time.time()):
-        return _zai_has_headroom(reading)
     try:
         windows = reading.get("windows") or {}
         five = windows.get("five_hour") or {}
@@ -1172,32 +1321,6 @@ def shaping_allowed(reading: Dict) -> bool:
     except (AttributeError, TypeError, ValueError):
         return False
     return IDLE_WINDOW_START <= used <= IDLE_WINDOW_CEILING
-
-
-def _zai_lane_live(now: float) -> bool:
-    """Whether the engine's z.ai standard tier is still routing (#1411)."""
-    import heartbeat
-
-    return now < heartbeat.ZAI_STANDARD_UNTIL
-
-
-def _zai_has_headroom(reading: Dict) -> bool:
-    """Shaping headroom on the z.ai lane: the pool's own stop, nothing lower.
-
-    The idle rule's 15% five-hour boundary keeps shaping off a window someone
-    may be working in, and keeps the committed review and breakdown jobs'
-    reserve. Neither applies here while the z.ai lane runs: the plan is
-    cancelled, nobody else spends it, and credits left at its expiry are worth
-    nothing, so the pool is unpaced by design (Nate, 2026-09-23). Holding
-    shaping to 15% would leave 85% of every five-hour window to lapse. What
-    still refuses is the pool's own stop — a spent five-hour or weekly window —
-    and a reading `pace` cannot judge. _(agent rule, unconfirmed — advisory.)_
-    """
-    try:
-        verdict = pace(reading, time.time(), "zai")
-    except (AttributeError, KeyError, TypeError, ValueError):
-        return False
-    return bool(verdict.get("known")) and not verdict.get("over_pace")
 
 
 def _rolling_week_has_headroom(reading: Dict, windows: Dict) -> bool:
@@ -1396,70 +1519,9 @@ DOWNSTREAM_RESERVE = 20.0
 # this is the half that was missed.
 
 PROVIDER_POLICY = {
-    # **Unpaced from 2026-09-23: spend it before it lapses.** Nate cancelled
-    # the Coding Plan; it stays active until it expires on 2026-10-07, and
-    # the engine's standard judgement tier runs on it until the start of that
-    # day in Beijing time (AGENTS.md; `heartbeat.ZAI_STANDARD_UNTIL`). The
-    # idle-window shaping gate is lifted for it too (`_zai_has_headroom`). Credits left at the expiry are worth
-    # nothing, so a line that holds the week back for later is holding it
-    # back for no later at all — the same reasoning that took `openai` to a
-    # floor of 100 on 2026-09-07. Floor and target are therefore both 100.
-    #
-    # What still stops `begin` is an actually spent window, in both of the
-    # windows z.ai reports: `used + reserve > 100`. Each reserve is one run,
-    # not a share held back — a real zcode routine run measured ~43 credits
-    # (below), about 2.2% of the five-hour window's 2,000 credits and 0.4%
-    # of the week's 10,000, so 2.5 and 0.5 refuse a run that could not
-    # finish rather than one that merely spends late. z.ai also refuses a
-    # spent window itself; `scripts/zai-exec` reports that as a quota skip,
-    # and the next `begin` stops here on the reading. _(agent rule,
-    # unconfirmed — advisory; Nate chose to use the credits, 2026-09-23.)_
-    #
-    # The history below explains the paced values this replaced, and is
-    # what to restore if the pool is ever bought again rather than run out.
-    #
-    # Bought for the automations and used for nothing else, so there is no
-    # interactive share to protect. Set to 90 on 2026-09-06 and lowered to 15 the
-    # same day, once a real routine run was measured at ~43 credits rather than
-    # the ~3 a trivial session had suggested.
-    #
-    # At 90 the floor equalled `WEEKLY_TARGET`, so the proportional line was inert
-    # and the whole week was spendable on Monday. At 15 the floor stops mattering
-    # after about a day and the rising line governs, which makes the schedule
-    # **self-limiting**: poll as often as you like and the gate simply refuses
-    # once the week is ahead of itself. Cadence stops being a number anyone has to
-    # choose. Below about 10 the floor stops doing its job and Monday morning
-    # becomes a dead zone again.
-    #
-    # The reserve moves with it. 5% of a weekly window is calibrated for Anthropic,
-    # where one run is ~1.5% of the budget. Measured here, a whole session cost
-    # **3 credits of 10,000** — 0.03% — so the shared reserve would hold back 500
-    # credits against a run that costs three, and the cap would really bite at 85%.
-    # **Temporarily 22, raised from 15 on 2026-09-07 by Nate's instruction.**
-    # zcode had been over pace for 35 consecutive runs since 00:38 — last real
-    # work 00:30, breaking #59 into #76-#81 — sitting at 19.1% used against 15.0
-    # allowed, 12.7% into a fresh weekly window. Proportional pacing would not
-    # have cleared it until 2026-09-08 00:33.
-    #
-    # This is a workaround for #93, not a revision of the reasoning below. The
-    # defect is that `allowed = max(floor, target * elapsed)` makes the floor a
-    # *plateau*: allowed stays exactly at the floor until the rising line
-    # overtakes it, so any pool that spends past its floor stalls until the
-    # calendar catches up. All three pools were blocked at once for that reason.
-    #
-    # The obvious fix — anchoring the line at the floor — was tried and reverted
-    # the same day: `floor + (target - floor) * elapsed` is **uniformly looser**,
-    # by `floor * (1 - elapsed)`, peaking around +17.5 points a third of the way
-    # through the week. Two tests correctly caught it. Removing the plateau
-    # without loosening is not possible, so the trade is real and belongs in #93.
-    #
-    # 22 clears the current 19.6% (used + reserve) with a little room. **Restore
-    # to 15 once #93 settles the model** — the measured reasoning for 15 is
-    # unchanged and is recorded below.
-    "zai": {"weekly_floor": 100.0, "weekly_target": 100.0,
-            "weekly_reserve": 0.5,
-            "five_hour_ceiling": 100.0, "five_hour_reserve": 2.5},
-
+    # zcode remains readable for historical quota records, but the retired
+    # standard tier has no provider-specific pace override. Any direct use
+    # follows the shared provider defaults.
     # Muse's pool is metered from local session attribution at the standard
     # rate card, counted from the provider's weekly reset (#1190). 100% is the
     # $200 cap, the flat ceiling that stops a run, and the $4.50 session
@@ -1685,6 +1747,10 @@ def main(argv=None) -> int:
     # Driven by the registry, so adding a provider adds its CLI surface too.
     for name in sorted(PROVIDERS):
         sub.add_parser(name, help="read {}'s usage".format(name))
+    sub.add_parser(
+        "claude-plan-sample",
+        help="read the signed-in Claude app's raw weekly sample for the dashboard",
+    )
     gate = sub.add_parser("gate", help="exit 1 if over pace, 2 if unknown")
     gate.add_argument("agent", choices=sorted(PROVIDERS))
     gate.add_argument(
@@ -1695,6 +1761,10 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
 
     now = time.time()
+    if args.command == "claude-plan-sample":
+        print(json.dumps(read_claude_plan_weekly_sample(now)))
+        return 0
+
     agent = args.agent if args.command == "gate" else args.command
     reading = read_agent(agent, now)
 

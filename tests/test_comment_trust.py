@@ -47,13 +47,16 @@ TEXT_PARSERS = frozenset({
     "funnel.py:render_voice",
     "funnel.py:parse_self_approval",
     "funnel.py:parse_park_comment",
-    "funnel.py:_parse_block_comment_header",
-    "funnel.py:_unconditioned_event_reason",
-    "funnel.py:_parse_block_comment_details",
-    "funnel.py:parse_block_comment",
-    "funnel.py:unparseable_block_comment_lines",
+    # block_record.py owns the block, decision and decline headers (#2165).
+    "block_record.py:_parse_block_comment_header",
+    "block_record.py:_unconditioned_event_reason",
+    "block_record.py:_parse_block_comment_details",
+    "block_record.py:parse_block_comment",
+    "block_record.py:parse_shaped_hold_comment",
+    "block_record.py:parse_shaped_hold_clear_comment",
+    "block_record.py:unparseable_block_comment_lines",
     "funnel.py:parse_needs_decision_comment",
-    "funnel.py:parse_decline_comment",
+    "block_record.py:parse_decline_comment",
     "funnel.py:parse_decline_route_comment",
     "funnel.py:parse_satisfied_block_comment",
     "funnel.py:parse_origin_override",
@@ -75,6 +78,8 @@ COMMENT_READERS: Dict[str, str] = {
     "funnel.py:_review_verdicts": "funnel.py:_review_verdicts",
     "funnel.py:_load_block_comment": "funnel.py:_load_block_comment",
     "funnel.py:_current_block_comment_details": "funnel.py:_load_block_comment",
+    "funnel.py:_current_shaped_hold_clear":
+        "funnel.py:_current_shaped_hold_clear",
     "funnel.py:_self_approval_markers": "funnel.py:_self_approval_markers",
     "funnel.py:_parked_item_json": "funnel.py:_parked_item_json",
     "funnel.py:_latest_park_comment": "funnel.py:_latest_park_comment",
@@ -118,14 +123,14 @@ BODY_READERS: Dict[str, str] = {
     "funnel.py:_acceptance_waiting_reason": _PLAN_BODY,
     "funnel.py:shaped_self_approvable": _PLAN_BODY,
     "funnel.py:_shaped_risk_holds": _PLAN_BODY,
-    "funnel.py:gate_question": _PLAN_BODY,
+    "funnel.py:_gate_route": _PLAN_BODY,
     "funnel.py:cmd_answer_gates": _PLAN_BODY,
     "funnel.py:_decline_route_withholds_startability": _PLAN_BODY,
     "funnel.py:recorded_cause_regressions": _PLAN_BODY,
     "metrics.py:_project_has_prior_cause": _PLAN_BODY,
-    "engine/shape.py:collect": _PLAN_BODY,
-    "engine/shape.py:preview_decision": _PLAN_BODY,
-    "engine/shape.py:apply_shape": _PLAN_BODY,
+    "engine/shape.py:shape_inputs": _PLAN_BODY,
+    "engine/shape.py:carried_override_blocks": _PLAN_BODY,
+    "engine/shape.py:read_back_mismatches": _PLAN_BODY,
     "engine/breakdown.py:apply": _PLAN_BODY,
     "engine/review.py:pr_body_section":
         "a funnel PR's body (#1794), which only its author and collaborators "
@@ -152,7 +157,18 @@ WRITERS = frozenset({
     "funnel.py:satisfied_block_comment",
     "funnel.py:closed_itself_comment",
     "funnel.py:shape_risk_block",
-    "funnel.py:_needs_decision_comment_body",
+    "funnel.py:clear_satisfied_blocks",
+    "funnel.py:cmd_release_shaped_hold",
+    # funnel.py's block, hold and needs-decision writers and the breakdown's
+    # apply_question render through these, so name no marker themselves
+    # (#2169).
+    "block_record.py:render_blocked",
+    "block_record.py:render_shaped_hold",
+    "block_record.py:render_conditioned_shaped_hold_clear",
+    "block_record.py:render_explicit_shaped_hold_release",
+    "block_record.py:render_blocked_until_event",
+    "block_record.py:render_needs_decision",
+    "block_record.py:render_declined",
     "funnel.py:_write_verdict",
     "funnel.py:cmd_park",
     "funnel.py:cmd_capture",
@@ -160,10 +176,10 @@ WRITERS = frozenset({
     "decline_classifier.py:declined_review_routing_comment",
     "decline_classifier.py:declined_unsatisfiable_acceptance_comment",
     "decline_classifier.py:declined_pending_gate_answer_comment",
-    "engine/breakdown.py:apply_question",
+    "engine/shape.py:render_plan",
     "engine/implement.py:render_closed_step_route",
-    "engine/implement.py:finish_declined",
-    "engine/implement.py:close_declined_defer_note_proof",
+    # finish_declined, close_declined_defer_note_proof and
+    # finish_blocked_on_human render through block_record's writers (#2168).
     "engine/implement.py:render_evidence_block",
 })
 
@@ -324,6 +340,44 @@ def test_every_comment_reader_applies_the_trust_filter():
         if node is None or not _called(node) & TRUST_FILTERS:
             missing.append(reader)
     assert missing == []
+
+
+def test_override_adjacent_marker_readers_stay_classified_and_filtered():
+    """Override citations reuse the established comment trust boundaries.
+
+    Origin overrides are read from the issue body, while block, decline,
+    verdict, ticket, and PR comment readers must stay on the trust registry.
+    """
+    required_comment_readers = {
+        "funnel.py:_load_block_comment",
+        "funnel.py:render_comment_voice",
+        "engine/review.py:ticket_comments",
+        "engine/review.py:_shape_pr_comment",
+    }
+    required_comment_text_readers = {
+        "funnel.py:_decline_routing_comment_rows",
+        "funnel.py:verdict_covers_head",
+    }
+    required_text_parsers = {
+        "funnel.py:parse_decline_route_comment",
+        "funnel.py:parse_provenance",
+        "funnel.py:render_voice",
+        "funnel.py:parse_origin_override",
+    }
+
+    assert required_comment_readers <= set(COMMENT_READERS)
+    assert required_comment_text_readers <= COMMENT_TEXT_READERS
+    assert required_text_parsers <= TEXT_PARSERS
+    # collect, preview and apply read the override through it (#2136).
+    assert BODY_READERS["engine/shape.py:shape_inputs"] == _PLAN_BODY
+
+    units = _units(_trees())
+    for reader in required_comment_readers:
+        assert _called(units[COMMENT_READERS[reader]]) & TRUST_FILTERS
+    for reader in required_comment_text_readers:
+        assert _called(units[reader]) & TRUST_FILTERS
+    for parser in required_text_parsers:
+        assert _called(units[parser]) & TRUST_FILTERS
 
 
 def test_the_walk_finds_a_new_reader_that_skips_the_filter():

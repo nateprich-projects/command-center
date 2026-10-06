@@ -34,6 +34,8 @@ import time
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
+import session_logs
+
 CODEX_SESSIONS = os.path.expanduser("~/.codex/sessions/*/*/*/*.jsonl")
 CLAUDE_SESSIONS = os.path.expanduser("~/.claude/projects/*/*.jsonl")
 MUSE_SESSIONS = os.path.expanduser(
@@ -49,15 +51,18 @@ MAX_CHARS_PER_MESSAGE = 600
 MAX_TOOL_CALLS = 15
 
 
-def candidates(pattern: str, needles: List[str], max_age_days: int) -> List[str]:
+def candidates(pattern: str, needles: List[str], max_age_days: int,
+               agent: Optional[str] = None) -> List[str]:
     """Session files mentioning the ticket, newest first."""
     cutoff = time.time() - max_age_days * 86400
     found = []
-    for path in glob.glob(pattern):
+    paths = (session_logs.paths(pattern, agent)
+             if agent in ("codex", "muse") else glob.glob(pattern))
+    for path in paths:
         try:
             if os.path.getmtime(path) < cutoff:
                 continue
-            with open(path, errors="replace") as fh:
+            with session_logs.open_text(path, errors="replace") as fh:
                 blob = fh.read()
         except OSError:
             continue
@@ -205,7 +210,7 @@ def _read_muse(record):
 def session_label(path: str, agent: Optional[str]) -> str:
     """What names a session in a digest. Muse calls every log session.jsonl,
     so the parent directory — the session id — is the name."""
-    name = os.path.basename(path)
+    name = os.path.basename(path[:-3] if path.endswith(".gz") else path)
     if agent == "muse" and name == "session.jsonl":
         return os.path.basename(os.path.dirname(path)) or name
     return name
@@ -223,7 +228,7 @@ def digest(path: str, shape: Optional[str] = None) -> Dict:
     tools: List[str] = []
     muse_seen = shape == "muse"
 
-    with open(path, errors="replace") as fh:
+    with session_logs.open_text(path, errors="replace") as fh:
         for line in fh:
             try:
                 record = json.loads(line)
@@ -408,7 +413,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     patterns = {"codex": CODEX_SESSIONS, "muse": MUSE_SESSIONS,
                 "claude": CLAUDE_SESSIONS}
     pattern = patterns[args.agent]
-    matches = candidates(pattern, needles, args.max_age_days)
+    matches = candidates(pattern, needles, args.max_age_days, agent=args.agent)
     if not matches:
         print(
             "no {} session in the last {} days mentions #{}".format(

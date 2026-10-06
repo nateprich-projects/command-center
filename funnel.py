@@ -47,6 +47,44 @@ from typing import (IO, Any, Callable, Collection, Dict, FrozenSet, Iterable,
 import agent_health as agent_health_module
 from agent_health import assess as assess_agent_health
 from decline_classifier import classify_decline_reason
+# The block, decision and decline headers and their single-comment parsers
+# have one owner (#2165); funnel.py keeps the row-level reading.
+from block_record import (  # noqa: F401 -- re-exported under the old names
+    BLOCK_COMMENT_PREFIX,
+    BLOCK_COMMENT_RE,
+    BLOCK_EVENT_COMMENT_PREFIX,
+    BLOCK_EVENT_COMMENT_RE,
+    BLOCK_EVENT_KIND_HEADER_RE,
+    BLOCK_FENCED_PAYLOAD_RE,
+    DECLINED_PREFIX,
+    NEEDS_DECISION_PREFIX,
+    NEEDS_DECISION_RE,
+    SHAPED_HOLD_COMMENT_PREFIX,
+    SHAPED_HOLD_CLEAR_PREFIX,
+    SHAPED_HOLD_RELEASE_PREFIX,
+    _parse_block_comment_details,
+    _parse_block_comment_header,
+    _parse_block_event_spec,
+    _unconditioned_event_reason,
+    _unique_json_object,
+    inert_comment_text,
+    parse_block_comment,
+    parse_decline_comment,
+    parse_shaped_hold_clear_comment,
+    parse_shaped_hold_comment,
+    shaped_hold_id,
+    shaped_plan_version,
+    unparseable_block_comment_lines,
+    validate_proof_comment_url,
+)
+# funnel's block, hold and needs-decision writers render through the owner
+# too, so their reasons are inert and their headers read back (#2169).
+from block_record import (
+    render_blocked, render_needs_decision, render_shaped_hold,
+    render_conditioned_shaped_hold_clear,
+    render_explicit_shaped_hold_release,
+)
+import nightly_watch
 import price_watch
 
 # --------------------------------------------------------------------------
@@ -63,6 +101,12 @@ REPO = "nateprich-projects/command-center"
 # batched Project load. Keep their concurrency bounded so a large portfolio
 # cannot turn one opening command into an unbounded request burst.
 BEGIN_FETCH_POOL_SIZE = 4
+
+# Begin spends one fixed envelope across Project rows, preflight GitHub calls,
+# and the detail fields reserved for a selected ticket. Keeping the accounting
+# here prevents separate page and hydration caps from adding up to an unbounded
+# opening read.
+BEGIN_WORK_ENVELOPE_LIMIT = 2048
 
 # The local checks deliberately keep their paths as module-level values. Tests
 # can point them at a temporary checkout and home directory without ever
@@ -394,10 +438,48 @@ SELF_APPROVABLE_CLASSES = frozenset(
 #: would drop at the split (#1845).
 DEFECT_CLASSES = frozenset({"Broken", "Bug"})
 
+#: Every question ``gate_question`` can ask, and the only place its wording
+#: lives (#2134). ``GATES`` and the watch-gates sentence of
+#: ``funnel_render.RENDER_TEMPLATE`` read it from here, so a
+#: reworded question cannot leave a consumer matching the old literal.
+GATE_QUESTIONS = {
+    "plan": "Is the plan good?",
+    "accept": "Accept it?",
+    "breakdown": "Answer the breakdown's question?",
+    # A silent block: nothing named can lift it. Only a project can park.
+    "unblock": "Unblock?",
+    "unblock_or_park": "Unblock or park?",
+    # A block whose comments could not be read: its condition is unknown,
+    # not absent, so it is never asked as a silent block.
+    "block_unread": "Block unread — recheck?",
+    "held_recheck": "Held — recheck?",
+}
+
+#: Routes selected from recorded item facts. The question value is a key in
+#: GATE_QUESTIONS, except "recorded" which reads Needs' recorded question.
+#: Ownership is explicit per row and never comes from question wording.
+GATE_OWNER_TABLE = {
+    "held_shaped_condition": ("held_recheck", "watch"),
+    "blocked_recorded_question": ("recorded", "Nate"),
+    "blocked_breakdown_question": ("breakdown", "Nate"),
+    "blocked_unread_watch": ("block_unread", "watch"),
+    "blocked_unread_nate": ("block_unread", "Nate"),
+    "blocked_ticket_unblock_watch": ("unblock", "watch"),
+    "blocked_ticket_unblock_nate": ("unblock", "Nate"),
+    "blocked_project_unblock_watch": ("unblock_or_park", "watch"),
+    "blocked_project_unblock_nate": ("unblock_or_park", "Nate"),
+    "building_accept": ("accept", "Nate"),
+    "shaped_plan_watch": ("plan", "watch"),
+    "shaped_plan_nate": ("plan", "Nate"),
+}
+WATCH_PLAN_CLASSES = frozenset(("Broken", "Bug"))
+#: Needs Nate categories that keep an agent-origin Broken or Bug plan with Nate.
+NATE_ONLY_NEEDS_CATEGORIES = frozenset(("exposure", "preference"))
+
 #: Which stages can wait on a human, and the question each one asks.
 GATES = {
-    "Shaped": "Is the plan good?",
-    "Building": "Accept it?",  # only once every child has closed
+    "Shaped": GATE_QUESTIONS["plan"],
+    "Building": GATE_QUESTIONS["accept"],  # only once every child has closed
 }
 
 #: Bottom-up: clear the decision closest to shipping first. Parking counts as
@@ -521,46 +603,10 @@ SELF_APPROVED_LINE = re.compile(
     re.IGNORECASE | re.MULTILINE,
 )
 
-#: A blocked comment names an optional, knowable condition after this marker.
-#: The parser below owns the rest of the fixed header shape.
-BLOCK_COMMENT_PREFIX = "**Blocked"
-BLOCK_COMMENT_RE = re.compile(
-    r"\A" + re.escape(BLOCK_COMMENT_PREFIX)
-    + r"(?: until (?P<blocked_until>[0-9]{4}-[0-9]{2}-[0-9]{2}))?"
-      r"(?: on (?P<references>#[0-9]+(?: and #[0-9]+)*))?:\*\*"
-)
-
-#: A blocked ticket may wait on the one event kind the queue understands.
-#: The body after this header must be a strict fenced JSON spec.
-BLOCK_EVENT_COMMENT_PREFIX = "**Blocked until event:**"
-BLOCK_EVENT_COMMENT_RE = re.compile(
-    r"\A" + re.escape(BLOCK_EVENT_COMMENT_PREFIX)
-    + r"[ \t]*\r?\n(?:[ \t]*\r?\n)?[ \t]*```json[ \t]*\r?\n"
-      r"(?P<event_spec>.*?)\r?\n[ \t]*```[ \t]*(?:\r?\n|$)",
-    re.DOTALL,
-)
-BLOCK_EVENT_KIND_HEADER_RE = re.compile(
-    r"\A\*\*Blocked until (?P<kind>[^:\r\n]+):\*\*"
-)
-BLOCK_FENCED_PAYLOAD_RE = re.compile(
-    r"\A[ \t]*\r?\n(?:[ \t]*\r?\n)?[ \t]*```[^\r\n]*\r?\n"
-    r".*?\r?\n[ \t]*```[ \t]*(?:\r?\n|$)",
-    re.DOTALL,
-)
-
-#: A breakdown can leave a project waiting on Nate's answer. The header is
-#: deliberately strict and anchored just like the ordinary block header so a
-#: quoted or embedded sentence cannot become a gate question by accident.
-NEEDS_DECISION_PREFIX = "**Needs a decision:**"
-NEEDS_DECISION_RE = re.compile(
-    r"\A" + re.escape(NEEDS_DECISION_PREFIX)
-    + r"[ \t]+(?P<question>.+)", flags=re.DOTALL
-)
-
-#: The implement runner's decline record (``finish_declined``). It names a
-#: reason in prose, not a condition the funnel can clear, so readers show it
-#: and ``stranded_items`` flags the block until a parseable one replaces it.
-DECLINED_PREFIX = "**Declined:**"
+#: The four block-record header kinds (``**Blocked[ until/on ...]:**``,
+#: ``**Blocked until event:**``, ``**Needs a decision:**`` and
+#: ``**Declined:**``) live in ``block_record.py`` and are imported above
+#: under their old names (#2165).
 
 #: Broken is observed, not latent (#1832). A Broken capture carries its
 #: evidence on this line in the issue body, and `promote` posts it as a comment
@@ -707,6 +753,13 @@ BRIEF_SECTION_BUDGETS = {
     "stale_locks_taken_over": 0.25,
     "maintenance_load": 0.25,
     "disposal": 0.25,
+    # The former resend_ratio section read codex and zcode together in
+    # 1.86–3.61 s (ticket #2132). Give each provider up to that observed pair
+    # maximum; the four-provider pass stays inside the 120 s brief envelope.
+    "heartbeat_claude": 4.0,
+    "heartbeat_codex": 4.0,
+    "heartbeat_muse": 4.0,
+    "heartbeat_zcode": 4.0,
     "resend_ratio": 3.0,
     "unattended_merges": 3.0,
     "unattended_approvals": 49.0,
@@ -765,6 +818,8 @@ BRIEF_PURE_SECTIONS = frozenset({
     "status_state_mismatches",
     "rejected_merges",
     "price_changes",
+    "model_releases",
+    "watch_faults",
 })
 
 # No brief section feeds a gate any more: the merge gate reads the
@@ -825,6 +880,8 @@ class Item:
     labels: List[str] = field(default_factory=list)
     block_references: List[str] = field(default_factory=list)
     block_reason: Optional[str] = None
+    shaped_hold: Optional[Dict[str, object]] = None
+    shaped_hold_clear: Optional[Dict[str, object]] = None
     blocked_until: Optional[date] = None
     needs_decision: Optional[str] = None
     decline_reason: Optional[str] = None
@@ -1036,55 +1093,164 @@ def _block_date_condition(item: Item) -> Optional[str]:
     return "until {}".format(blocked_until.isoformat())
 
 
-def gate_question(item: Item) -> Optional[str]:
-    """The decision this item is waiting on, or None if it waits on no one."""
+def block_condition(item: Item) -> Optional[str]:
+    """Name what can lift a blocked item's block, or None if nothing can.
+
+    One test for the conditions read from the block comment (#2134), shared
+    by ``gate_question`` and ``is_held_at_accept``:
+
+    - ``unread``: the comments could not be read (``block_comments_error``,
+      as when the GraphQL window runs dry, #1417). The condition is unknown,
+      not absent, so the block must not read as a silent one.
+    - ``event``: a well-formed ``**Blocked until event:**`` spec (#1403).
+    - ``date``: a valid ``**Blocked until YYYY-MM-DD:**`` date, future or
+      passed; one written with issues as well is still a date.
+    - ``reference``: ``**Blocked on #N:**`` issue references.
+
+    None is a silent block, or an item that is not blocked. Native
+    ``blockedBy`` edges are not read here: they are not a comment condition
+    and never suppressed the question.
+    """
+    if not item.is_blocked:
+        return None
+    if item.block_comments_error:
+        return "unread"
+    if item.block_event is not None:
+        return "event"
+    if _item_blocked_until(item) is not None:
+        return "date"
+    if item.block_references:
+        return "reference"
+    return None
+
+
+def _current_shaped_hold_record(item: Item) -> Optional[Dict[str, object]]:
+    """Return the parsed, current Shaped hold record on a blocked plan."""
+    record = item.shaped_hold
+    if (
+        item.state != "OPEN"
+        or item.status != "Shaped"
+        or not item.is_blocked
+        or item.block_comments_error is not None
+        or item.block_reason is None
+        or not isinstance(record, dict)
+    ):
+        return None
+    conditions = record.get("Hold-Conditions")
+    proofs = record.get("Proof")
+    if (
+        not isinstance(record.get("Hold-Reason"), str)
+        or not record["Hold-Reason"].strip()
+        or not isinstance(conditions, list)
+        or not conditions
+        or any(not isinstance(ref, str) or not ref.strip() for ref in conditions)
+        or not isinstance(record.get("Plan-Version"), str)
+        or not isinstance(proofs, list)
+        or not proofs
+        or any(not isinstance(proof, str) or not proof.strip() for proof in proofs)
+    ):
+        return None
+    return record
+
+
+def _shaped_hold_is_unresolved(
+    item: Item,
+    record: Mapping[str, object],
+    by_ref: Optional[Dict[str, Item]],
+) -> bool:
+    """Whether a proved hold still applies to this exact plan version."""
+    if not isinstance(item.body, str):
+        return False
+    if record.get("Plan-Version") != shaped_plan_version(item.body):
+        return False
+    conditions = record.get("Hold-Conditions")
+    if not isinstance(conditions, list) or not conditions:
+        return False
+    for ref in conditions:
+        if not isinstance(ref, str):
+            return False
+        condition = by_ref.get(ref) if by_ref is not None else None
+        # The hold remains unresolved until every named issue is read closed.
+        if condition is None or condition.state != "CLOSED":
+            return True
+    return False
+
+
+def _shaped_plan_route(item: Item, by_ref: Optional[Dict[str, Item]]) -> str:
+    """Choose the owner row for a Shaped plan from its recorded facts."""
+    if (
+        item.origin not in ORIGIN_OPTIONS
+        or item.risk not in RISK_OPTIONS
+        or item.needs not in NEEDS_OPTIONS
+        or item.origin != "agent"
+        or effective_class(item, by_ref or {}) not in WATCH_PLAN_CLASSES
+        or not isinstance(item.body, str)
+    ):
+        return "shaped_plan_nate"
+    categories = open_needs_nate_categories(item.body)
+    if categories is None or categories & NATE_ONLY_NEEDS_CATEGORIES:
+        return "shaped_plan_nate"
+    return "shaped_plan_watch"
+
+
+def _blocked_route(item: Item, *, question_key: Optional[str] = None) -> str:
+    """Choose the blocked-question owner row from recorded routing facts."""
+    nate_owns = (
+        item.needs not in NEEDS_OPTIONS
+        or (item.needs == "human" and item.decline_reason is None)
+        or (item.parent is not None and item.needs_decision is not None)
+    )
+    owner = "nate" if nate_owns else "watch"
+    if question_key == "block_unread":
+        return "blocked_unread_{}".format(owner)
+    kind = "ticket" if item.parent else "project"
+    return "blocked_{}_unblock_{}".format(kind, owner)
+
+
+def _gate_route(
+    item: Item, by_ref: Optional[Dict[str, Item]] = None,
+) -> Optional[str]:
+    """Return the canonical route row for an item's current recorded facts."""
     if item.state != "OPEN":
         return None
+
+    shaped_hold = _current_shaped_hold_record(item)
+    if shaped_hold is not None:
+        if _shaped_hold_is_unresolved(item, shaped_hold, by_ref):
+            return "held_shaped_condition"
+        # A changed plan version or cleared condition opens a fresh Shaped
+        # question even when the ordinary field check would not ask one.
+        return _shaped_plan_route(item, by_ref)
+
     if item.is_blocked:
-        # A lane decline still needs an Unblock gate even after its routing
-        # field changes to ``agent``. Ordinary agent-owned blocks stay quiet.
+        # A lane decline still needs an Unblock gate after Needs becomes
+        # agent. An ordinary agent-owned block stays quiet.
         if item.needs == "agent" and item.decline_reason is None:
             return None
-        # A named condition is knowable work for the system, not an unblock
-        # question. A silent block still needs an Unblock question; only a
-        # project can also be parked. Needs ``agent`` owns the work after the
-        # block lifts, and the watch answers a decline unless the item is
-        # waiting on Nate's hands.
-        # A valid date condition is also machine-readable. Both future and
-        # passed dates stay out of the question queue; the begin path clears a
-        # passed condition before selecting work.
-        # A well-formed event spec is also a named condition. Needs:
-        # external-event routes the ticket, but cannot suppress the question
-        # without that condition attached.
-        if (
-            item.block_event is not None
-            or item.block_references
-            or _item_blocked_until(item) is not None
-        ):
+        condition = block_condition(item)
+        if condition == "unread":
+            return _blocked_route(item, question_key="block_unread")
+        if condition is not None:
             return None
+        if item.parent is not None and item.needs_decision:
+            return "blocked_recorded_question"
         if item.parent is None and item.needs_decision:
             # An answered Gates question is settled, whatever the comment
-            # thread still says. The marker is consulted before the question
-            # is surfaced so the ask and the read share one predicate; an
-            # absent or malformed marker asks exactly as before.
+            # thread still says. An absent or malformed marker asks as before.
             if parse_gates_answer(item.body) is not None:
                 return None
-            return "Answer the breakdown's question?"
-        return "Unblock?" if item.parent else "Unblock or park?"
+            return "blocked_breakdown_question"
+        return _blocked_route(item)
+
     if item.status == "Building":
-        # New work, replacements, and Nate-owned improvements stop for
-        # acceptance. The same class/origin predicate drives the unattended
-        # close path below, so the gate cannot drift from the writer.
-        if not item.children_all_closed:
+        # The same class/origin predicate drives the unattended close path.
+        if not item.children_all_closed or _can_close_itself(item):
             return None
-        if _can_close_itself(item):
-            return None
-        return GATES["Building"]
+        return "building_accept"
+
     if item.status == "Shaped":
-        # The shape runner decides Ready versus Shaped at write time, so an
-        # item at Shaped was held and waits on Nate. This reader must not
-        # re-derive eligibility from plan prose: re-deriving could only hide
-        # an item the writer held.
+        # The shape writer holds on these recorded conditions. Unknown fields
+        # fail closed to Nate, in keeping with the owner-table precedent.
         waits_for_nate = (
             item.origin not in ORIGIN_OPTIONS
             or item.risk not in RISK_OPTIONS
@@ -1093,8 +1259,23 @@ def gate_question(item: Item) -> Optional[str]:
             or item.risk == "escalated"
             or item.origin == "Nate"
         )
-        return GATES["Shaped"] if waits_for_nate else None
+        if not waits_for_nate:
+            return None
+        return _shaped_plan_route(item, by_ref)
     return None
+
+
+def gate_question(
+    item: Item, by_ref: Optional[Dict[str, Item]] = None,
+) -> Optional[str]:
+    """The decision an item is waiting on, rendered from the owner table."""
+    route = _gate_route(item, by_ref)
+    if route is None:
+        return None
+    question_key, _owner = GATE_OWNER_TABLE[route]
+    if question_key == "recorded":
+        return item.needs_decision
+    return GATE_QUESTIONS[question_key]
 
 
 def _acceptance_waiting_reason(
@@ -1122,8 +1303,9 @@ def is_held_at_accept(item: Item) -> bool:
     Only a project that would otherwise ask "Accept it?" is held there: open,
     at Building, every ticket closed, and not one that closes itself (the
     unattended close ignores ``blocked``, so such a block holds nothing). A
-    block with no date or issue condition still asks "Unblock or park?", and
-    an event condition is an agent's wait, so both stay blocked work.
+    block with no date or issue condition still asks "Unblock or park?", an
+    event condition is an agent's wait, and an unread block's condition is
+    unknown, so all three stay blocked work (``block_condition``, #2134).
     """
     return (
         item.state == "OPEN"
@@ -1132,10 +1314,7 @@ def is_held_at_accept(item: Item) -> bool:
         and item.is_blocked
         and item.children_all_closed
         and not _can_close_itself(item)
-        and (
-            bool(item.block_references)
-            or _item_blocked_until(item) is not None
-        )
+        and block_condition(item) in ("date", "reference")
     )
 
 
@@ -1188,48 +1367,12 @@ def awaiting_decision(items: Iterable[Item]) -> List[Item]:
     return sorted((i for i in rows if gate_question(i)), key=key)
 
 
-#: The questions the funnel watch answers itself (Nate, 2026-09-28, #1891):
-#: a silent block, and the plan question on agent-origin Broken and Bug work.
-WATCH_UNBLOCK_QUESTIONS = frozenset(("Unblock?", "Unblock or park?"))
-WATCH_PLAN_CLASSES = frozenset(("Broken", "Bug"))
-
-#: Needs Nate categories that keep an agent-origin Broken or Bug plan with
-#: Nate. Scope and gates questions the watch settles itself.
-NATE_ONLY_NEEDS_CATEGORIES = frozenset(("exposure", "preference"))
-
-
 def watch_owns_gate(
-    item: Item, question: Optional[str], by_ref: Dict[str, Item],
+    item: Item, by_ref: Optional[Dict[str, Item]] = None,
 ) -> bool:
-    """Whether the funnel watch, not Nate, answers ``item``'s live question.
-
-    Nate's decision of 2026-09-28 (#1891): the watch answers every silent
-    block (``Unblock?`` and ``Unblock or park?``) except one waiting on his
-    hands (Needs ``human``, which he also sees as a blocked human step), and
-    ``Is the plan good?`` on an agent-origin plan of Class Broken or Bug
-    except one whose Needs Nate section still holds an Exposure or Preference
-    line. A plan body that was not loaded, or a Needs Nate section that
-    cannot be read, stays with Nate.
-
-    This partitions the shared gate question for the brief and queue. A
-    Declined marker distinguishes a legacy lane decline that still carries
-    Needs ``human`` from a hands-on step; new declines use Needs ``agent``.
-    Other readers use the same question predicate.
-    """
-    if question in WATCH_UNBLOCK_QUESTIONS:
-        return item.needs != "human" or item.decline_reason is not None
-    if question != GATES["Shaped"]:
-        return False
-    if item.origin != "agent":
-        return False
-    if effective_class(item, by_ref) not in WATCH_PLAN_CLASSES:
-        return False
-    if not isinstance(item.body, str):
-        return False
-    categories = open_needs_nate_categories(item.body)
-    if categories is None:
-        return False
-    return not (categories & NATE_ONLY_NEEDS_CATEGORIES)
+    """Whether the current recorded-facts route belongs to the funnel watch."""
+    route = _gate_route(item, by_ref)
+    return route is not None and GATE_OWNER_TABLE[route][1] == "watch"
 
 
 def split_decisions(
@@ -1244,7 +1387,7 @@ def split_decisions(
     nate: List[Item] = []
     watch: List[Item] = []
     for item in awaiting_decision(rows):
-        if watch_owns_gate(item, gate_question(item), by_ref):
+        if watch_owns_gate(item, by_ref):
             watch.append(item)
         else:
             nate.append(item)
@@ -1260,7 +1403,7 @@ def watch_gate_json(
         "title": item.title,
         "url": item.url,
         "class": effective_class(item, by_ref),
-        "question": gate_question(item),
+        "question": gate_question(item, by_ref),
         "waited": humanise(item.waited(now)),
     }
 
@@ -1462,30 +1605,45 @@ _CREDENTIALS_MATCHER_NAMED_TERMS = (
     r"api[- ]key|access token|client secret|credential store|password|private key"
 )
 _CREDENTIALS_MATCHER_ACTION_NOUN = r"credentials?"
+# These stems are the ticket-side boundary: retain their spelling and only
+# widen them when the category gains a listed verb form (#2181).
+_ESCALATION_MATCHER_VERB_STEMS = {
+    "authorisation": r"broaden|chang|elevat|expand|grant|reduc|revok|tighten",
+    "credentials": (
+        r"access|chang|creat|enter|expos|grant|handl|load|read|replac|revok|"
+        r"rotat|stor|suppl|touch|updat|use|uses|used|using|writ|wrote"
+    ),
+    "destructive": r"allow|enable|enabling|perform|permit|ran|run",
+}
+_DESTRUCTIVE_MATCHER_PHRASE_OBJECT = (
+    r"(?:destructive|irreversible)"
+    r"\s+(?:actions?|changes?|commands?|operations?)"
+)
 
 ESCALATION_PATTERNS = {
     "credentials": (
         r"(?<!no )\b(" + _CREDENTIALS_MATCHER_NAMED_TERMS + r")\b|"
-        r"(?<!not )(?<!never )\b(?:access|chang|creat|enter|expos|"
-        r"handl|load|read|replac|revok|rotat|stor|suppl|touch|"
-        r"use|uses|used|using|writ)\w*"
+        r"(?<!not )(?<!never )\b(?:"
+        + _ESCALATION_MATCHER_VERB_STEMS["credentials"] + r")\w*"
         r"(?:\s+(?!(?:no|not|nothing)\b)[\w'’-]+){0,4}"
         r"\s+" + _CREDENTIALS_MATCHER_ACTION_NOUN + r"\b"
     ),
     "authorisation": r"(?<!no )(?<!not )(?<!never )\b("
                      r"authoris(?:e|es|ed|ing)|authoriz(?:e|es|ed|ing)|"
                      r"permission model|access control|oauth|scope grant)\b|"
-                     r"(?<!not )(?<!never )\b(?:broaden|chang|elevat|expand|"
-                     r"grant|reduc|revok|tighten)\w*"
+                     r"(?<!not )(?<!never )\b(?:"
+                     + _ESCALATION_MATCHER_VERB_STEMS["authorisation"]
+                     + r")\w*"
                      r"(?:\s+(?!(?:no|not|nothing)\b)[\w'’-]+){0,4}"
                      r"\s+permissions?\b",
     "data-migration": r"(?<!no )\b(data migration|schema migration|backfill|"
                       r"irreversible migration|migrat(?:e|es|ed|ing))\b",
     "destructive": r"(?<!no )\b(force[- ]push|hard delete|permanently delete|"
                    r"drop the (table|branch)|rewrite history|"
-                   r"(?:allow|enable|perform|permit|run)\w*"
-                   r"(?:\s+[\w'’-]+){0,4}\s+(?:destructive|irreversible)"
-                   r"\s+(?:actions?|changes?|commands?|operations?))\b",
+                   r"(?:" + _ESCALATION_MATCHER_VERB_STEMS["destructive"]
+                   + r")\w*"
+                   r"(?:\s+[\w'’-]+){0,4}\s+"
+                   + _DESTRUCTIVE_MATCHER_PHRASE_OBJECT + r")\b",
     "concurrency": r"(?<!no )\b(race condition|deadlock|thread[- ]safe|mutex|"
                    r"atomic (write|commit)|"
                    r"(?:concurrent|overlapping)\s+(?:mutations?|processes|runs?|"
@@ -1548,6 +1706,28 @@ def asserted_text(text: str) -> str:
     )
 
 
+def _walk_escalation_matches(
+        text: str,
+        proposal: Optional[Callable[[str, re.Match, str], bool]] = None,
+        ) -> List[Dict[str, Optional[str]]]:
+    """Return the first accepted, trimmed matching line per category."""
+    found: List[Dict[str, Optional[str]]] = []
+    for name, pattern in sorted(ESCALATION_PATTERNS.items()):
+        for match in re.finditer(pattern, text, re.IGNORECASE):
+            if proposal is not None and not proposal(text, match, name):
+                continue
+            line_start = text.rfind("\n", 0, match.start()) + 1
+            line_end = text.find("\n", match.start())
+            if line_end < 0:
+                line_end = len(text)
+            found.append({
+                "reason": name,
+                "line": text[line_start:line_end].strip(),
+            })
+            break
+    return found
+
+
 def escalation_matches(title: str, body: str,
                        failed_before: bool = False
                        ) -> List[Dict[str, Optional[str]]]:
@@ -1583,19 +1763,7 @@ def escalation_matches(title: str, body: str,
             found.append({"reason": "prior attempt failed", "line": None})
         return found
 
-    found: List[Dict[str, Optional[str]]] = []
-    for name, pattern in sorted(ESCALATION_PATTERNS.items()):
-        match = re.search(pattern, text, re.IGNORECASE)
-        if not match:
-            continue
-        line_start = text.rfind("\n", 0, match.start()) + 1
-        line_end = text.find("\n", match.start())
-        if line_end < 0:
-            line_end = len(text)
-        found.append({
-            "reason": name,
-            "line": text[line_start:line_end].strip(),
-        })
+    found = _walk_escalation_matches(text)
     if failed_before:
         found.append({"reason": "prior attempt failed", "line": None})
     return found
@@ -1686,20 +1854,54 @@ _PLAN_FENCE_CLOSE_RE = re.compile(
 _PLAN_MALFORMED_ATX_RE = re.compile(
     r"^ {0,3}(?:#{7,}|#{1,6}(?!#)\S).*$"
 )
-_PLAN_MALFORMED_REJECTED_RE = re.compile(
-    r"^ {0,3}#{1,6}(?!#)[ \t]*Rejected\b", re.IGNORECASE
-)
 _PLAN_REJECTED_INLINE_RE = re.compile(
     r"[ \t]+\(rejected:[^\r\n]*\)[ \t]*$", re.IGNORECASE
 )
+_PLAN_LIST_ITEM_RE = re.compile(
+    r"^(?P<indent> {0,3})(?P<marker>[-*+]|\d{1,9}[.)])(?:[ \t]|$)"
+)
+#: A setext heading underline, when the line above it is not blank.
+_PLAN_SETEXT_UNDERLINE_RE = re.compile(r"^ {0,3}(?:=+|-+)[ \t]*$")
+#: Line breaks to ``str.splitlines`` that Markdown does not break on, so the
+#: two disagree about where a line, and so a heading, starts.
+_PLAN_NON_MARKDOWN_BREAK_RE = re.compile(
+    "[\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029]"
+)
+
+#: Every region of a plan body the wording scan does not read (#2180), as
+#: ``(kind, name)``; ``plan_scan_text`` is the one filter that applies it.
+#:
+#: - ``quoted``: text the plan shows rather than asserts, blanked in table
+#:   order.
+#: - ``section``: the content of a level-2 heading with exactly this title,
+#:   up to the next heading of level 2 or above. The heading line stays.
+#: - ``label``: a plain or bold ``Name:`` line on its own and the list
+#:   directly after it, the form 41 of 84 shaped plans give Rejected (#1749).
+#: - ``clause``: the trailing ``(rejected: ...)`` of each line in the
+#:   level-2 section with this title.
+#:
+#: Rejected text is an alternative the plan will not take; Premises is the
+#: runner's evidence and Siblings checked its citations of other plans, so
+#: none of them proposes the plan's own work.
+PLAN_SCAN_IGNORED_REGIONS: Tuple[Tuple[str, str], ...] = (
+    ("quoted", "code block"),            # fenced or indented (#1643)
+    ("quoted", "block quote"),           # (#1235)
+    ("quoted", "inline code"),           # paired backticks on a line (#1367)
+    ("quoted", "prose quote"),           # balanced quotation marks (#1643)
+    ("section", "Rejected"),             # (#1525)
+    ("section", "Premises"),             # (#2180)
+    ("section", "Siblings checked"),     # (#2180)
+    ("label", "Rejected"),               # (#2180)
+    ("clause", "Decided by the agent"),  # (#1525)
+)
 
 _PLAN_QUOTE_PAIRS = {"\"": "\"", "“": "”", "‘": "’", "«": "»"}
-# These literal forms are already used by the credentials proposal matcher.
-# The direct-action table below shares this list, like the existing direct
-# action entries use their category's established verbs.
+# Credentials forms are explicit because open stems accept misspellings. The
+# direct-action table and proposal matcher share this list (#2181).
 _CREDENTIALS_PLAN_ACTION_FORMS = (
     r"access|accesses|accessed|accessing|change|changes|changed|changing|"
-    r"create|creates|created|creating|expose|exposes|exposed|exposing|"
+    r"create|creates|created|creating|enter|enters|entered|entering|"
+    r"expose|exposes|exposed|exposing|"
     r"grant|grants|granted|granting|handle|handles|handled|handling|"
     r"load|loads|loaded|loading|read|reads|reading|replace|replaces|"
     r"replaced|replacing|revoke|revokes|revoked|revoking|rotate|rotates|"
@@ -1707,6 +1909,29 @@ _CREDENTIALS_PLAN_ACTION_FORMS = (
     r"supplied|supplying|touch|touches|touched|touching|update|updates|"
     r"updated|updating|use|uses|used|using|write|writes|wrote|written|writing"
 )
+# Each category's in-phrase verbs, with every inflection spelled out. The
+# direct-action entries below come from these lists; concurrency has no
+# in-phrase verb (#2181).
+_PLAN_IN_PHRASE_VERB_FORMS = {
+    "authorisation": (
+        r"broaden|broadens|broadened|broadening|change|changes|changed|"
+        r"changing|elevate|elevates|elevated|elevating|expand|expands|"
+        r"expanded|expanding|grant|grants|granted|granting|reduce|reduces|"
+        r"reduced|reducing|revoke|revokes|revoked|revoking|tighten|tightens|"
+        r"tightened|tightening"
+    ),
+    "concurrency": "",
+    "credentials": _CREDENTIALS_PLAN_ACTION_FORMS,
+    "data-migration": (
+        r"backfill|backfills|backfilled|backfilling|migrate|migrates|"
+        r"migrated|migrating|migration"
+    ),
+    "destructive": (
+        r"allow|allows|allowed|allowing|enable|enables|enabled|enabling|"
+        r"perform|performs|performed|performing|permit|permits|permitted|"
+        r"permitting|run|runs|ran|running"
+    ),
+}
 _PLAN_PROPOSAL_ACTIONS = {
     # Every inflection is spelled out: an optional suffix on a stem that
     # ends in "e" matches "changeing", never "changing" (#1681 review).
@@ -1772,33 +1997,37 @@ _PLAN_DIRECT_PROPOSAL_PREFIX_RE = re.compile(
 )
 _PLAN_DIRECT_ACTIONS = {
     # The authorisation pattern's own terms can carry the verb: "authorise
-    # the client", or "grant ... permissions" (#1678).
+    # the client, or a verb plus permissions (#1678). Spell every in-phrase
+    # inflection out rather than letting an open stem accept "changeing".
     "authorisation": re.compile(
         r"\b(?:authori[sz](?:e|es|ed|ing)|"
-        r"(?:broaden|chang|elevat|expand|grant|reduc|revok|tighten)\w*"
+        r"(?:" + _PLAN_IN_PHRASE_VERB_FORMS["authorisation"] + r")"
         r"(?:\s+[\w'’-]+){0,4}\s+permissions?)\b",
         re.IGNORECASE,
     ),
-    # "migrat\w*" also took "migrateing" (#1722). "migration" stays: it
-    # carries the proposal in a clause-led "Schema migration ..." item.
+    # "migration" stays: it carries the proposal in a clause-led
+    # "Schema migration ..." item (#1722).
     "data-migration": re.compile(
-        r"\b(?:backfill|backfills|backfilled|backfilling|migrate|migrates|"
-        r"migrated|migrating|migration)\b",
+        r"\b(?:" + _PLAN_IN_PHRASE_VERB_FORMS["data-migration"] + r")\b",
         re.IGNORECASE,
     ),
     # Like data-migration and authorisation, this category gets a direct
     # action entry for its own verb-inside-phrase proposal shape. Reuse the
     # credentials proposal forms and matcher terms verbatim (#1770).
     "credentials": re.compile(
-        r"\b(?:" + _CREDENTIALS_PLAN_ACTION_FORMS + r")"
+        r"\b(?:" + _PLAN_IN_PHRASE_VERB_FORMS["credentials"] + r")"
         r"(?:\s+[\w'’-]+){0,4}\s+"
         r"(?:" + _CREDENTIALS_MATCHER_NAMED_TERMS + r"|"
         + _CREDENTIALS_MATCHER_ACTION_NOUN + r")\b",
         re.IGNORECASE,
     ),
+    # The destructive phrase can carry its own proposing verb (#2181).
     "destructive": re.compile(
         r"\b(?:force[- ]push|hard[- ]delete|permanently\s+delete|"
-        r"drop\s+(?:the\s+)?(?:table|branch)|rewrite\s+history)\b",
+        r"drop\s+(?:the\s+)?(?:table|branch)|rewrite\s+history|"
+        r"(?:" + _PLAN_IN_PHRASE_VERB_FORMS["destructive"] + r")"
+        r"(?:\s+[\w'’-]+){0,4}\s+"
+        + _DESTRUCTIVE_MATCHER_PHRASE_OBJECT + r")\b",
         re.IGNORECASE,
     ),
 }
@@ -1896,109 +2125,267 @@ def _plan_match_is_proposed(text: str, match: re.Match,
     )
 
 
-def _plan_escalation_scan_text(plan_body: str) -> str:
-    """Remove code blocks and rejected prose before using the shared matcher.
+#: How each ``quoted`` entry of ``PLAN_SCAN_IGNORED_REGIONS`` is blanked.
+#: ``asserted_text`` blanks fences, block quotes and inline code in one pass.
+_PLAN_QUOTED_REGION_FILTERS = {
+    "code block": _strip_plan_code_blocks,
+    "block quote": asserted_text,
+    "inline code": asserted_text,
+    "prose quote": _strip_plan_prose_quotes,
+}
 
-    A malformed Rejected heading or a malformed heading inside its section
-    makes the section boundary ambiguous. In that case keep the original body
-    intact outside code blocks so an uncertain parse cannot hide an asserted
-    scan hit.
+
+def _plan_scan_regions(kind: str) -> Tuple[str, ...]:
+    """The names ``PLAN_SCAN_IGNORED_REGIONS`` lists for one kind."""
+    return tuple(name for region_kind, name in PLAN_SCAN_IGNORED_REGIONS
+                 if region_kind == kind)
+
+
+def _plan_scan_unquoted(text: str, skip: Collection[str] = ()) -> str:
+    """Blank the table's quoted regions, in table order, keeping lines.
+
+    ``skip`` names quoted regions to leave in place.
     """
-    body = _strip_plan_code_blocks(plan_body or "")
-    raw_lines = body.splitlines(keepends=True)
-    visible_lines = _strip_plan_prose_quotes(asserted_text(body)).splitlines()
-    if len(visible_lines) > len(raw_lines):
-        return body
-    visible_lines.extend([""] * (len(raw_lines) - len(visible_lines)))
+    applied = []
+    for name in _plan_scan_regions("quoted"):
+        if name in skip:
+            continue
+        blank = _PLAN_QUOTED_REGION_FILTERS[name]
+        if blank not in applied:
+            applied.append(blank)
+            text = blank(text)
+    return text
 
+
+def _plan_label_re(name: str) -> re.Pattern:
+    """A ``Name:`` label alone on its line, plain or bold."""
+    word = re.escape(name)
+    return re.compile(
+        r"^ {0,3}(?:" + word + r":|\*\*" + word + r"(?::\*\*|\*\*:)|"
+        r"__" + word + r"(?::__|__:))[ \t]*$",
+        re.IGNORECASE,
+    )
+
+
+def _plan_list_item(line: str) -> Optional[Tuple[int, str]]:
+    """A list item's indent and marker kind, or ``None`` for another line.
+
+    The kind is the bullet character, or the delimiter of a numbered item.
+    """
+    match = _PLAN_LIST_ITEM_RE.match(line)
+    if match is None:
+        return None
+    marker = match.group("marker")
+    return len(match.group("indent")), marker[-1]
+
+
+def _plan_label_list_end(lines: Sequence[str], label: int) -> Optional[int]:
+    """The line after a label's list, or ``None`` when its end is unclear.
+
+    The list may follow blank lines, and its first item sets its indent and
+    marker. It runs through items with that indent and marker, and through
+    lines indented deeper than its items directly below one. A blank line
+    continues it only into another such item; anything else after a blank
+    line ends it, as do a heading and a different marker at or outside the
+    list's indent. A label followed by prose or by an item indented less
+    than itself, or an unindented line directly after an item, leaves the
+    end unclear. A label with nothing before the next heading covers only
+    its own line.
+    """
+    label_indent = len(lines[label]) - len(lines[label].lstrip(" "))
+    index = label + 1
+    while index < len(lines) and not lines[index].strip():
+        index += 1
+    if index == len(lines) or _PLAN_ATX_HEADING_RE.match(lines[index]):
+        return label + 1
+    first = _plan_list_item(lines[index])
+    if first is None or first[0] < label_indent:
+        return None
+    end = index + 1
+    after_blank = False
+    for index in range(index + 1, len(lines)):
+        line = lines[index]
+        if not line.strip():
+            after_blank = True
+            continue
+        if _PLAN_ATX_HEADING_RE.match(line):
+            break
+        item = _plan_list_item(line)
+        if item == first:
+            end = index + 1
+            after_blank = False
+            continue
+        if after_blank or (item is not None and item[0] <= first[0]):
+            break
+        if len(line) - len(line.lstrip(" \t")) > first[0]:
+            end = index + 1
+            continue
+        return None
+    return end
+
+
+def _plan_boundary_like(line: str) -> bool:
+    """Whether a line is, or may be, a heading or a heading underline."""
+    return bool(_PLAN_ATX_HEADING_RE.match(line)
+                or _PLAN_MALFORMED_ATX_RE.match(line)
+                or _PLAN_SETEXT_UNDERLINE_RE.match(line))
+
+
+def _plan_scan_ignored_lines(lines: Sequence[str],
+                             unquoted_prose: Sequence[str]
+                             ) -> Optional[Tuple[Set[int], Set[int]]]:
+    """Lines to blank and lines whose rejected clause to blank (#2180).
+
+    ``lines`` are the body with its quoted regions already blank, so a
+    heading or label inside a quote is not one; ``unquoted_prose`` is the
+    same body with prose quotes left in. ``None`` means a boundary cannot
+    be read: a heading or heading underline that a prose quote hides, a
+    named section whose heading is malformed, at another level or repeated,
+    a malformed heading or a setext underline inside one, or a label whose
+    list has no clear end.
+    """
+    for line, shown in zip(lines, unquoted_prose):
+        if _plan_boundary_like(shown) and not _plan_boundary_like(line):
+            return None
+    sections = _plan_scan_regions("section")
+    clauses = _plan_scan_regions("clause")
+    named_malformed = [
+        re.compile(r"^ {0,3}#{1,6}(?!#)[ \t]*" + re.escape(name) + r"\b",
+                   re.IGNORECASE)
+        for name in sections
+    ]
     headings = []
     malformed = []
-    rejected_sections = []
-    malformed_rejected = False
-    for index, line in enumerate(visible_lines):
+    starts: Dict[str, List[int]] = {name: [] for name in sections + clauses}
+    for index, line in enumerate(lines):
         match = _PLAN_ATX_HEADING_RE.match(line)
         if match:
             level = len(match.group("hashes"))
             title = (match.group("title") or "").strip()
             title = re.sub(r"[ \t]+#+[ \t]*$", "", title).strip()
             headings.append((index, level, title))
-            if re.match(r"(?i)^rejected\b", title):
-                if level != 2 or title != "Rejected":
-                    malformed_rejected = True
-                else:
-                    rejected_sections.append(index)
+            for name in sections:
+                if re.match(r"(?i)^" + re.escape(name) + r"\b", title):
+                    if level != 2 or title != name:
+                        return None
+                    starts[name].append(index)
+            for name in clauses:
+                if level == 2 and title == name:
+                    starts[name].append(index)
         elif _PLAN_MALFORMED_ATX_RE.match(line):
             malformed.append(index)
-            if _PLAN_MALFORMED_REJECTED_RE.match(line):
-                malformed_rejected = True
+            if any(pattern.match(line) for pattern in named_malformed):
+                return None
 
-    if malformed_rejected or len(rejected_sections) > 1:
-        return body
+    def section_end(start: int) -> int:
+        return next((index for index, level, _ in headings
+                     if index > start and level <= 2), len(lines))
 
-    start = rejected_sections[0] if rejected_sections else None
-    end = len(raw_lines)
-    if start is not None:
-        end = next((index for index, level, _ in headings
-                    if index > start and level <= 2), len(raw_lines))
-        if any(start < index < end for index in malformed):
-            return body
+    blank: Set[int] = set()
+    for name in sections:
+        if len(starts[name]) > 1:
+            return None
+        for start in starts[name]:
+            end = section_end(start)
+            if any(start < index < end for index in malformed):
+                return None
+            if any(_PLAN_SETEXT_UNDERLINE_RE.match(lines[index])
+                   and lines[index - 1].strip()
+                   for index in range(start + 2, end)):
+                return None
+            blank.update(range(start + 1, end))
 
-    agent_decision_lines = set()
-    for section_start, level, title in headings:
-        if level != 2 or title != "Decided by the agent":
-            continue
-        section_end = next((index for index, next_level, _ in headings
-                            if index > section_start and next_level <= 2),
-                           len(raw_lines))
-        if any(section_start < index < section_end for index in malformed):
-            continue
-        agent_decision_lines.update(range(section_start + 1, section_end))
+    clause_lines: Set[int] = set()
+    for name in clauses:
+        for start in starts[name]:
+            end = section_end(start)
+            if any(start < index < end for index in malformed):
+                continue
+            clause_lines.update(range(start + 1, end))
+
+    for name in _plan_scan_regions("label"):
+        label_re = _plan_label_re(name)
+        for index, line in enumerate(lines):
+            # A label inside an ignored section is blank already.
+            if index in blank or not label_re.match(line):
+                continue
+            end = _plan_label_list_end(lines, index)
+            if end is None:
+                return None
+            blank.update(range(index, end))
+    return blank, clause_lines
+
+
+def plan_scan_text(plan_body: str) -> str:
+    """The plan text the wording scan reads (#2180).
+
+    Every region ``PLAN_SCAN_IGNORED_REGIONS`` names is blanked in place,
+    keeping line structure, and an ignored section keeps its heading line so
+    the Risk rationale reader still sees where the section before it ends.
+    When a boundary cannot be read, only the quoted regions are blanked, so
+    an uncertain parse cannot hide an asserted proposal. That includes a
+    body with a line break Markdown does not share, and one where blanking
+    a region pairs the prose quotes outside it differently.
+    """
+    body = _strip_plan_code_blocks(plan_body or "")
+    whole = _plan_scan_unquoted(body)
+    if _PLAN_NON_MARKDOWN_BREAK_RE.search(body):
+        return whole
+    raw_lines = body.splitlines(keepends=True)
+    visible_lines = whole.splitlines()
+    shown_lines = _plan_scan_unquoted(body, skip=("prose quote",)).splitlines()
+    if max(len(visible_lines), len(shown_lines)) > len(raw_lines):
+        return whole
+    visible_lines.extend([""] * (len(raw_lines) - len(visible_lines)))
+    shown_lines.extend([""] * (len(raw_lines) - len(shown_lines)))
+
+    ignored = _plan_scan_ignored_lines(visible_lines, shown_lines)
+    if ignored is None:
+        return whole
+    blank, clause_lines = ignored
 
     for index, line in enumerate(raw_lines):
         content = line.rstrip("\r\n")
         ending = line[len(content):]
-        if start is not None and start <= index < end:
-            raw_lines[index] = ending
-            continue
-        if index in agent_decision_lines:
+        if index in clause_lines:
             content = _PLAN_REJECTED_INLINE_RE.sub(
                 lambda match: " " * len(match.group(0)), content
             )
         raw_lines[index] = content + ending
-    return "".join(raw_lines)
+    # The text outside the blanked lines must read as it does with only the
+    # rejected clauses blanked. Prose quotes pair across the whole body, so a
+    # quote mark inside a blanked region can re-pair the ones outside it and
+    # blank active text; that makes the boundary unreadable too.
+    expected = _plan_scan_unquoted("".join(raw_lines)).splitlines()
+    for index in blank:
+        line = raw_lines[index]
+        raw_lines[index] = line[len(line.rstrip("\r\n")):]
+    scanned = _plan_scan_unquoted("".join(raw_lines))
+    scanned_lines = scanned.splitlines()
+    for lines in (expected, scanned_lines):
+        lines.extend([""] * (len(raw_lines) - len(lines)))
+    if any(scanned_lines[index] != expected[index]
+           for index in range(len(raw_lines)) if index not in blank):
+        return whole
+    return scanned
 
 
 def plan_escalation_matches(plan_body: str
                             ) -> List[Dict[str, Optional[str]]]:
-    """Return risks a plan affirmatively proposes after removing quoted text.
+    """Return risks a plan affirmatively proposes in the text it asserts.
 
     Plan-only section and proposal rules stay here; ticket text still uses the
-    canonical matcher unchanged. If a Rejected boundary cannot be parsed, the
-    whole asserted body is scanned, but a risk term still needs an affirmative
-    action in its sentence or list clause. If a Risk marker is present, its
-    existing authority remains unchanged.
+    canonical matcher unchanged. ``plan_scan_text`` decides what is read
+    (#2180). If a region boundary cannot be parsed, the whole asserted body is
+    scanned, but a risk term still needs an affirmative action in its
+    sentence or list clause. If a Risk marker is present, its existing
+    authority remains unchanged.
     """
-    text = _strip_plan_prose_quotes(
-        asserted_text(_plan_escalation_scan_text(plan_body))
-    )
+    text = plan_scan_text(plan_body)
     if RISK_LINE.search(text):
         return escalation_matches("", text)
 
-    found: List[Dict[str, Optional[str]]] = []
-    for name, pattern in sorted(ESCALATION_PATTERNS.items()):
-        for match in re.finditer(pattern, text, re.IGNORECASE):
-            if not _plan_match_is_proposed(text, match, name):
-                continue
-            line_start = text.rfind("\n", 0, match.start()) + 1
-            line_end = text.find("\n", match.start())
-            if line_end < 0:
-                line_end = len(text)
-            found.append({
-                "reason": name,
-                "line": text[line_start:line_end].strip(),
-            })
-            break
-    return found
+    return _walk_escalation_matches(text, _plan_match_is_proposed)
 
 
 def open_needs_nate_categories(plan_body: str) -> Optional[FrozenSet[str]]:
@@ -2977,6 +3364,99 @@ def _startable_candidate_items(
     return candidates
 
 
+def _decline_route_body_item(
+    item: Item, by_ref: Mapping[str, Item],
+) -> Optional[Item]:
+    """The row whose Issue.body decides ``item``'s decline route, if any.
+
+    These are the two routes ``_decline_route_withholds_startability`` defers
+    while a body is unloaded: an unsatisfiable-acceptance route compares the
+    ticket's own body with its digest, and a pending-gate-answer route reads
+    its gate's body for the answer. Every other item, routed or not, needs no
+    body for that check (#2067).
+    """
+    route = item.decline_route
+    if not isinstance(route, dict):
+        return None
+    if (
+        item.needs == "agent"
+        and route.get("type") == "unsatisfiable-acceptance"
+    ):
+        return item
+    if (
+        item.needs == "external-event"
+        and route.get("type") == "pending-gate-answer"
+    ):
+        gate_ref = route.get("gate_ref")
+        return by_ref.get(gate_ref) if isinstance(gate_ref, str) else None
+    return None
+
+
+def _load_decline_route_bodies(
+    items: Sequence[Item], candidates: Sequence[Item],
+) -> bool:
+    """Read the unloaded bodies the candidates' decline routes need (#2067).
+
+    The minimal listing omits Issue.body (#1775), so a routed ticket used to
+    be ranked startable, claimed, found withheld by its fresh body, released,
+    and offered again on the next fire, while other work waited. Only the rows
+    a candidate's route reads are fetched, through the detail read begin uses
+    after claim less its history half; unrouted rows are never read. Returns
+    whether anything was read, so the caller knows to filter again.
+
+    The history half is left out on purpose. The post-claim read charges the
+    begin envelope its full 60-event timeline, about 300 units a row, against
+    a 2,048-unit envelope that keeps 818 back for the claim, so a few routed
+    rows beside a large listing would refuse every begin, review lane
+    included. A body-only row costs three units. Leaving history out also
+    keeps a routed row's listed Status age, which the shared order sorts by,
+    the same as every other row's.
+
+    Inside begin the read is charged to the work envelope (#1776), and it
+    refuses rather than eat into the reserve the selected ticket's post-claim
+    refresh still needs.
+    """
+    by_ref = {item.ref: item for item in items}
+    wanted: List[Item] = []
+    seen: Set[str] = set()
+    for item in candidates:
+        row = _decline_route_body_item(item, by_ref)
+        if (
+            row is None
+            or getattr(row, "body_loaded", True)
+            or row.ref in seen
+        ):
+            continue
+        wanted.append(row)
+        seen.add(row.ref)
+    if not wanted:
+        return False
+    envelope = _ACTIVE_BEGIN_ENVELOPE
+    if envelope is not None:
+        work = begin_body_read_work(items, wanted)
+        # One unit for the GraphQL request itself, as the listing reserves.
+        if envelope.remaining - work - 1 < BEGIN_DETAIL_WORK_RESERVE:
+            raise BeginCannotComplete()
+        envelope.consume(hydrated_fields=work)
+    hydrate_item_details(items, wanted, body_only=True)
+    return True
+
+
+def _resolved_startable_candidates(
+    items: Sequence[Item], agent: str = "codex",
+) -> List[Item]:
+    """The shared startable candidates, decided with routed bodies loaded.
+
+    Queue and begin both take their candidates from here (#1773), so both
+    drop a ticket its decline route still withholds before anything ranks it
+    (#2067).
+    """
+    candidates = _startable_candidate_items(items, agent=agent)
+    if _load_decline_route_bodies(items, candidates):
+        candidates = _startable_candidate_items(items, agent=agent)
+    return candidates
+
+
 def _filter_prequalified_startable_items(
     candidates: Sequence[Item],
     awaiting_review: Optional[Set[str]] = None,
@@ -3586,30 +4066,8 @@ def checks_still_running(checks: Sequence[dict]) -> bool:
 
 _LINE_LEADING_MARKER_RE = re.compile(r"(?m)^[ \t]*<!-- command-center-")
 
-#: Every line break ``str.splitlines`` honours, with the blanks around it.
-_COMMENT_LINE_BREAK_RE = re.compile(
-    r"\s*[\n\r\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029]\s*")
-
-
-def inert_comment_text(text: object) -> str:
-    """Model text made safe to write outside a JSON block in a comment (#1798).
-
-    A runner comment is the owner's own, so the author filter (#1787, #1788)
-    trusts all of it, the model's words it echoes included: a blocking or
-    unsure item, a decline reason, a question. A blocking reason once carried
-    a line-leading ``<!-- command-center-review -->`` and a JSON block, and
-    the owner's rejection read as an approval (#1797). Line breaks collapse to
-    one space, so the text never begins a line or opens a fence, and ``<!--``
-    becomes ``&lt;!--``, so it holds no marker even mid-line. GitHub renders
-    the entity as ``<!--``, so a reader still sees every word. One pass is
-    enough: neither replacement can put a ``<!--`` together.
-
-    Text inside a JSON block needs none of this: ``json.dumps`` escapes the
-    line breaks, and a marker quoted there is content (#1688).
-    """
-    cleaned = _COMMENT_LINE_BREAK_RE.sub(
-        " ", "" if text is None else str(text)).strip()
-    return cleaned.replace("<!--", "&lt;!--")
+# ``inert_comment_text`` lives in ``block_record.py`` with the headers whose
+# model words it makes safe, and is imported above under its old name (#2165).
 
 
 def _marked_json_block_at(
@@ -3829,8 +4287,7 @@ def render_comment_voice(row: object) -> str:
     """
     if not trusted_comment(row):
         return "{} (not the owner account)".format(untrusted_comment_author(row))
-    body = row.get("body") if isinstance(row, Mapping) else None
-    return render_voice(body if isinstance(body, str) else "")
+    return render_voice(row)
 
 
 def _verdict_from_comment(row: Mapping[str, object]) -> Optional[Dict]:
@@ -3852,8 +4309,14 @@ def _verdict_from_comment(row: Mapping[str, object]) -> Optional[Dict]:
     return verdict
 
 
-def parse_provenance(body: str) -> Optional[Dict]:
-    """The provenance fields carried by one comment, or None if malformed."""
+def parse_provenance(body: object) -> Optional[Dict]:
+    """Read provenance text or a trusted comment row, failing closed."""
+    if isinstance(body, Mapping):
+        if not trusted_comment(body):
+            return None
+        body = body.get("body")
+    if not isinstance(body, str):
+        return None
     found = _marked_json(body, PROVENANCE_MARKER)
     if found is None or found.get("voice") not in PROVENANCE_VOICES:
         return None
@@ -3971,12 +4434,19 @@ def parse_caused_by(body: str) -> List[str]:
     return result
 
 
-def parse_origin_override(body: str) -> Optional[Dict]:
+def parse_origin_override(body: object) -> Optional[Dict]:
     """Return an authorised origin override, or None when it fails closed.
 
     Anyone may ask that an item be shaped with Nate. Only a marker carrying a
-    Nate provenance voice may hand an item to agents for unattended shaping.
+    trusted comment or issue body may carry the marker. Only a marker carrying
+    a Nate provenance voice may hand an item to agents for unattended shaping.
     """
+    if isinstance(body, Mapping):
+        if not trusted_comment(body):
+            return None
+        body = body.get("body")
+    if not isinstance(body, str):
+        return None
     found = _marked_json(body, ORIGIN_OVERRIDE_MARKER)
     if found is None or found.get("target") not in ORIGIN_OVERRIDE_TARGETS:
         return None
@@ -4159,135 +4629,28 @@ def answered_gates_body(body: str, answer: str, decider: str,
     return updated
 
 
-def _unique_json_object(pairs: List[Tuple[str, object]]) -> Dict[str, object]:
-    """Reject ambiguous JSON objects instead of silently taking the last key."""
-    result: Dict[str, object] = {}
-    for key, value in pairs:
-        if key in result:
-            raise ValueError("duplicate JSON key")
-        result[key] = value
-    return result
-
-
-def _parse_block_event_spec(raw: str) -> Optional[Dict[str, str]]:
-    """Return the one supported event spec, or None for malformed input."""
-    try:
-        spec = json.loads(raw, object_pairs_hook=_unique_json_object)
-    except (TypeError, ValueError):
-        return None
-    if not isinstance(spec, dict) or set(spec) != {
-        "agent", "job", "outcome", "after"
-    }:
-        return None
-    if (
-        not isinstance(spec["agent"], str)
-        or not spec["agent"].strip()
-        or not isinstance(spec["job"], str)
-        or not spec["job"].strip()
-        or spec["outcome"] != "errored"
-        or not isinstance(spec["after"], str)
-        or parse_time(spec["after"]) is None
-    ):
-        return None
-    return spec
-
-
-def _unconditioned_event_reason(body: str) -> Optional[str]:
-    """Keep malformed or unknown event forms as unconditioned block reasons."""
-    header = BLOCK_EVENT_KIND_HEADER_RE.match(body)
-    if header is None:
-        return None
-    if re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", header.group("kind")):
-        return None
-    suffix = body[header.end():]
-    payload = BLOCK_FENCED_PAYLOAD_RE.match(suffix)
-    if payload is not None:
-        suffix = suffix[payload.end():]
-    return suffix.strip()
-
-
-def _parse_block_comment_header(
-    body: str,
-) -> Optional[Tuple[re.Match, Optional[date], Optional[Dict[str, str]]]]:
-    """Return a block header and its validated date or event condition."""
-    event_match = BLOCK_EVENT_COMMENT_RE.match(body)
-    if event_match is not None:
-        event = _parse_block_event_spec(event_match.group("event_spec"))
-        if event is None:
-            return None
-        return event_match, None, event
-
-    match = BLOCK_COMMENT_RE.match(body)
-    if match is None:
-        return None
-    raw_date = match.group("blocked_until")
-    if raw_date is None:
-        return match, None, None
-    try:
-        blocked_until = date.fromisoformat(raw_date)
-    except ValueError:
-        # The regex establishes the shape; the date parser establishes that
-        # the calendar date actually exists (for example, no February 30).
-        return None
-    return match, blocked_until, None
-
-
-def _parse_block_comment_details(
-    bodies: Iterable[str],
-) -> Optional[Tuple[List[str], Optional[date], str, Optional[Dict[str, str]]]]:
-    """Return the newest parseable block's refs, date, reason and event."""
-    for body in reversed(list(bodies)):
-        if not isinstance(body, str):
-            continue
-        parsed_header = _parse_block_comment_header(body)
-        if parsed_header is None:
-            reason = _unconditioned_event_reason(body)
-            if reason is not None:
-                return [], None, reason, None
-            continue
-        match, blocked_until, event = parsed_header
-        references = match.groupdict().get("references")
-        return (
-            references.split(" and ") if references else [],
-            blocked_until,
-            body[match.end():].strip(),
-            event,
-        )
-    return None
-
-
-def parse_block_comment(
-    bodies: Iterable[str],
-) -> Optional[Tuple[List[str], Optional[date], str]]:
-    """Return the newest parseable block comment's refs, date and reason.
-
-    The header is deliberately strict and anchored at the start of the body so
-    an old or embedded mention cannot accidentally become a condition.
-    """
-    parsed = _parse_block_comment_details(bodies)
-    return parsed[:3] if parsed is not None else None
-
-
-def parse_decline_comment(bodies: Iterable[str]) -> Optional[str]:
-    """Return the newest decline record's first line of reason, if any."""
-    for body in reversed(list(bodies)):
-        if not isinstance(body, str) or not body.startswith(DECLINED_PREFIX):
-            continue
-        reason = body[len(DECLINED_PREFIX):].strip()
-        return reason.splitlines()[0].strip() if reason else ""
-    return None
+# The single-comment block and decline parsers (``parse_block_comment``,
+# ``parse_decline_comment``, ``unparseable_block_comment_lines`` and their
+# helpers) live in ``block_record.py`` and are imported above (#2165).
 
 
 def parse_decline_route_comment(
-    bodies: Iterable[str],
+    rows: Iterable[object],
 ) -> Optional[Dict[str, object]]:
-    """Read the durable route belonging to the newest agent decline."""
-    rows = list(bodies)
-    latest_run = None
-    for body in reversed(rows):
-        if not isinstance(body, str) or not body.startswith(DECLINED_PREFIX):
+    """Read the newest decline route from trusted comment rows only."""
+    comments = []
+    for row in rows:
+        if not isinstance(row, Mapping) or not trusted_comment(row):
             continue
-        provenance = parse_provenance(body)
+        body = row.get("body")
+        if isinstance(body, str):
+            comments.append((row, body))
+
+    latest_run = None
+    for row, body in reversed(comments):
+        if not body.startswith(DECLINED_PREFIX):
+            continue
+        provenance = parse_provenance(row)
         if (
             provenance is not None
             and provenance.get("voice") == "agent"
@@ -4299,14 +4662,11 @@ def parse_decline_route_comment(
     if latest_run is None:
         return None
 
-    for body in reversed(rows):
-        if (
-            not isinstance(body, str)
-            or DECLINE_ROUTING_REVIEW_MARKER not in body
-        ):
+    for row, body in reversed(comments):
+        if DECLINE_ROUTING_REVIEW_MARKER not in body:
             continue
         record = _marked_json(body, DECLINE_ROUTING_REVIEW_MARKER)
-        provenance = parse_provenance(body)
+        provenance = parse_provenance(row)
         if (
             not isinstance(record, dict)
             or not isinstance(record.get("decline_excerpt"), str)
@@ -4370,21 +4730,6 @@ def parse_satisfied_block_comment(body: str) -> Optional[Dict[str, object]]:
     ):
         return None
     return found
-
-
-def unparseable_block_comment_lines(bodies: Iterable[str]) -> List[str]:
-    """Return first lines that look like block comments but fail the parser."""
-    findings: List[str] = []
-    for body in bodies:
-        if not isinstance(body, str):
-            continue
-        if not body.lstrip().startswith(BLOCK_COMMENT_PREFIX):
-            continue
-        if _parse_block_comment_header(body) is not None:
-            continue
-        lines = body.splitlines()
-        findings.append(lines[0] if lines else body)
-    return findings
 
 
 def _heartbeat_context(run: Optional[str], agent: Optional[str]):
@@ -4596,8 +4941,14 @@ def append_caused_by(body: str, refs: Iterable[str],
     return "{}\n\n{}".format(body, caused_by_block(refs, at=at))
 
 
-def render_voice(body: str) -> str:
+def render_voice(body: object) -> str:
     """Render the four-value voice contract, failing closed when needed."""
+    if isinstance(body, Mapping):
+        if not trusted_comment(body):
+            return UNATTRIBUTED
+        body = body.get("body")
+    if not isinstance(body, str):
+        return UNATTRIBUTED
     found = parse_provenance(body)
     if found is None:
         return UNATTRIBUTED
@@ -4621,13 +4972,19 @@ def _visible_comment(body: str) -> str:
 
 
 def _latest_verdict_for_reviewed_head(comments: object) -> Optional[Dict]:
-    """Resolve the latest trusted verdict sequence, keeping same-head rejects."""
+    """Resolve the latest trusted verdict sequence for each reviewed head.
+
+    Same-head rejections remain sticky, except an unsure-only rejection stops
+    covering after later trusted evidence, so a subsequent approval can replace
+    it under the same rule used to re-offer that head for review.
+    """
     if not isinstance(comments, list):
         return None
 
     selected: Optional[Dict] = None
     selected_head: Optional[str] = None
-    for row in comments:
+    selected_position: Optional[int] = None
+    for position, row in enumerate(comments):
         if not isinstance(row, dict):
             continue
         found = _verdict_from_comment(row)
@@ -4640,6 +4997,7 @@ def _latest_verdict_for_reviewed_head(comments: object) -> Optional[Dict]:
             # still requires this verdict to match the PR's current head.
             selected = found
             selected_head = head_key
+            selected_position = position
             continue
 
         if (
@@ -4647,8 +5005,22 @@ def _latest_verdict_for_reviewed_head(comments: object) -> Optional[Dict]:
             or selected.get("verdict") != "rejected"
         ):
             # A later rejection on this head updates the recorded rejection;
-            # an approval on that same head cannot clear it.
+            # same-head approvals are considered by the trusted-evidence rule.
             selected = found
+            selected_position = position
+        elif (
+            found.get("verdict") == "approved"
+            and selected_position is not None
+            and not verdict_covers_head(
+                selected, selected_head,
+                comments[selected_position + 1:position],
+            )
+        ):
+            # Do not count the approval itself as new evidence. Only a trusted
+            # comment that landed after the rejection and before this approval
+            # can reopen an unsure-only rejection for the merge gate.
+            selected = found
+            selected_position = position
 
     return selected
 
@@ -4657,13 +5029,24 @@ def latest_verdict(repo: str, pr) -> Optional[Dict]:
     """The latest trusted decision for the most recently reviewed head.
 
     The fresh-read boundary is a head change: a review on a new SHA starts a
-    new decision sequence, while a trusted rejection stays authoritative on
-    its SHA despite any later approval there. The merge gate separately checks
-    that the selected verdict covers the PR's current head. ``--json comments``
-    rows carry ``author.login`` for the trusted-author check (#1787).
+    new decision sequence. Same-head rejections stay authoritative unless an
+    unsure-only rejection no longer covers its head after later trusted
+    evidence and a subsequent approval supersedes it. The merge gate separately
+    checks that the selected verdict covers the PR's current head.
+    ``--json comments`` rows carry ``author.login`` for the trusted-author
+    check (#1787).
+
+    A failed or malformed comment read raises ``GitHubError`` rather than
+    reading as no verdict (#2194): a review packet built on it judged a head
+    again without its prior rejection. An empty comment list is still none.
     """
-    rows = (_gh_json("gh", "pr", "view", str(pr), "--repo", repo,
-                     "--json", "comments") or {}).get("comments", [])
+    payload = _gh_json("gh", "pr", "view", str(pr), "--repo", repo,
+                       "--json", "comments")
+    rows = payload.get("comments") if isinstance(payload, dict) else None
+    if not isinstance(rows, list):
+        raise GitHubError(
+            "could not read the review verdict on PR #{} in {}".format(
+                pr, repo))
     return _latest_verdict_for_reviewed_head(rows)
 
 
@@ -5696,7 +6079,7 @@ def connector_gate_answers(
             verb = _connector_gate_verb(comment)
             if verb is None:
                 continue
-            provenance = parse_provenance(body)
+            provenance = parse_provenance(comment)
             if not isinstance(provenance, dict):
                 continue
             instruction = provenance.get("instruction")
@@ -6252,6 +6635,10 @@ def command_center_ticket_pr_share(
     cutoff = now - MAINTENANCE_WINDOW
     try:
         rows = _recent_merged_pr_rows(REPO, cutoff)
+    except BriefSectionTimeout:
+        # A brief section's timeout belongs to its runner, which publishes
+        # null and names the section in `missing` (#2131).
+        raise
     except Exception as exc:
         return {
             "window_days": MAINTENANCE_WINDOW.days,
@@ -9400,10 +9787,25 @@ def check_block_conditions(
                 _dependency_ref(item, value) or str(value).strip()
                 for value in item.open_blockers
             ))
+        elif item.block_reason is None and item.block_comments_error:
+            # Unread, not unparseable: ``check_block_comments`` names the
+            # error, and the block is not stranded (#2135).
+            detail = "block comments unread"
         elif item.block_reason is None:
             detail = "block comment is not parseable"
         else:
             details = []
+            if item.block_event is not None:
+                # A well-formed event wait is a condition, not an absence of
+                # one, now that it is no longer reported as stranded (#2135).
+                details.append(
+                    "until event agent={} job={} outcome={} after={}".format(
+                        item.block_event.get("agent"),
+                        item.block_event.get("job"),
+                        item.block_event.get("outcome"),
+                        item.block_event.get("after"),
+                    )
+                )
             if item.block_references:
                 resolved = [
                     _dependency_ref(item, value) or str(value).strip()
@@ -9709,7 +10111,9 @@ BEGIN_ITEM_NODE_FIELDS = ITEM_NODE_FIELDS.replace(
 # selected ticket's body and history are fetched after its claim.
 # The response aliases name the shared listing contract: startable issue
 # facts, Status, Class, gate (Needs), claim, and canonical ticket Risk. Pinned
-# is also read for the settled ordering rule; Origin does not route ticket work.
+# is also read for the settled ordering rule. Origin does not route ticket
+# work, but begin and merge decide a finished project's close from this view,
+# and without it every Improve project read as Nate's and never closed (#2147).
 STARTABLE_ITEM_NODE_FIELDS = """\
           id
           claim: fieldValueByName(name: "In motion since") {
@@ -9719,6 +10123,9 @@ STARTABLE_ITEM_NODE_FIELDS = """\
             ... on ProjectV2ItemFieldSingleSelectValue { name updatedAt }
           }
           class: fieldValueByName(name: "Class") {
+            ... on ProjectV2ItemFieldSingleSelectValue { name }
+          }
+          origin: fieldValueByName(name: "Origin") {
             ... on ProjectV2ItemFieldSingleSelectValue { name }
           }
           gate: fieldValueByName(name: "Needs") {
@@ -9782,6 +10189,7 @@ BEGIN_ITEM_CONNECTIONS: Tuple[Tuple[str, str], ...] = (
 def _begin_item_query(
     aliases: Sequence[str], extra_field: str = "",
     minimal_startable: bool = False,
+    page_sizes: Optional[Mapping[str, int]] = None,
 ) -> str:
     """One aliased Project query carrying only the named begin connections.
 
@@ -9809,7 +10217,8 @@ def _begin_item_query(
         "        pageInfo {{ hasNextPage endCursor }}\n"
         "        nodes {{ ...{fragment} }}\n"
         "      }}\n".format(
-            alias=alias, size=PROJECT_ITEM_PAGE_SIZE,
+            alias=alias,
+            size=(page_sizes or {}).get(alias, PROJECT_ITEM_PAGE_SIZE),
             query=json.dumps(filters[alias]),
             fragment=(
                 "StartableItem"
@@ -9870,6 +10279,7 @@ def _project_item_ref_filter(ref: str) -> str:
 
 def _project_item_refs_query(
     refs: Sequence[str], node_fields: str = ITEM_NODE_FIELDS,
+    page_size: int = PROJECT_REF_PAGE_SIZE,
 ) -> str:
     """One Project query with a filtered connection per ref, ``r0`` onward."""
     if not refs or len(refs) > PROJECT_REF_ALIASES_PER_REQUEST:
@@ -9883,7 +10293,7 @@ def _project_item_refs_query(
         "        pageInfo {{ hasNextPage endCursor }}\n"
         "        nodes {{ ...ProjectRefItem }}\n"
         "      }}\n".format(
-            index=index, size=PROJECT_REF_PAGE_SIZE,
+            index=index, size=page_size,
             query=json.dumps(_project_item_ref_filter(ref)),
         )
         for index, ref in enumerate(refs)
@@ -10038,6 +10448,29 @@ def read_issue_comments(repo: str, number: int) -> List[Dict[str, object]]:
 # fetched below only for the candidate items a caller has kept after its cheap
 # checks; they do not belong on every Project row.
 PROJECT_ITEM_DETAIL_BATCH_SIZE = 100
+BEGIN_DETAIL_TIMELINE_ITEMS_MAX = 60
+BEGIN_DETAIL_CHILD_ITEMS_MAX = 50
+BEGIN_DETAIL_MAX_SELECTED_ITEMS = 2
+BEGIN_DETAIL_HISTORY_FIELDS_PER_EVENT_MAX = 5
+BEGIN_DETAIL_BASE_FIELDS_PER_ITEM = 4  # id, content, body, timelineItems
+BEGIN_DETAIL_CHILD_FIELDS_PER_ITEM = 3  # id, content, subIssues
+BEGIN_DETAIL_CHILD_FIELDS_PER_CHILD = 2  # createdAt, closedAt
+BEGIN_DETAIL_FIELDS_PER_ITEM_MAX = (
+    BEGIN_DETAIL_BASE_FIELDS_PER_ITEM
+    + BEGIN_DETAIL_TIMELINE_ITEMS_MAX
+    * BEGIN_DETAIL_HISTORY_FIELDS_PER_EVENT_MAX
+    + BEGIN_DETAIL_CHILD_FIELDS_PER_ITEM
+    + BEGIN_DETAIL_CHILD_ITEMS_MAX * BEGIN_DETAIL_CHILD_FIELDS_PER_CHILD
+)
+BEGIN_DETAIL_QUERY_OVERHEAD = 4  # one request plus rateLimit's three fields
+# One detail batch covers the selected ticket and, when needed, its decline
+# gate. This is the worst-case reserve used while listing the Project.
+BEGIN_DETAIL_WORK_RESERVE = (
+    BEGIN_DETAIL_MAX_SELECTED_ITEMS * BEGIN_DETAIL_FIELDS_PER_ITEM_MAX
+    + BEGIN_DETAIL_QUERY_OVERHEAD
+)
+# A body-only read (#2067) carries no timeline and no children.
+BEGIN_DETAIL_BODY_FIELDS_PER_ITEM = 3  # id, content, body
 
 ITEM_DETAILS_QUERY = """
 query($ids: [ID!]!, $childIds: [ID!]!) {
@@ -10047,7 +10480,7 @@ query($ids: [ID!]!, $childIds: [ID!]!) {
       id
       content {
         ... on Issue {
-          timelineItems(last: 60, itemTypes: [PROJECT_V2_ITEM_STATUS_CHANGED_EVENT, LABELED_EVENT, UNLABELED_EVENT]) {
+          timelineItems(last: {timeline_max}, itemTypes: [PROJECT_V2_ITEM_STATUS_CHANGED_EVENT, LABELED_EVENT, UNLABELED_EVENT]) {
             nodes {
               __typename
               ... on ProjectV2ItemStatusChangedEvent {
@@ -10070,7 +10503,7 @@ query($ids: [ID!]!, $childIds: [ID!]!) {
       id
       content {
         ... on Issue {
-          subIssues(first: 50) {
+          subIssues(first: {children_max}) {
             nodes { createdAt closedAt }
           }
         }
@@ -10078,7 +10511,11 @@ query($ids: [ID!]!, $childIds: [ID!]!) {
     }
   }
 }
-"""
+""".replace(
+    "{timeline_max}", str(BEGIN_DETAIL_TIMELINE_ITEMS_MAX)
+).replace(
+    "{children_max}", str(BEGIN_DETAIL_CHILD_ITEMS_MAX)
+)
 
 # GitHub's CLI does not pass an empty list variable, so a detail batch with no
 # child-bearing rows uses this timeline-only form instead of sending an invalid
@@ -10092,7 +10529,7 @@ query($ids: [ID!]!) {
       id
       content {
         ... on Issue {
-          timelineItems(last: 60, itemTypes: [PROJECT_V2_ITEM_STATUS_CHANGED_EVENT, LABELED_EVENT, UNLABELED_EVENT]) {
+          timelineItems(last: {timeline_max}, itemTypes: [PROJECT_V2_ITEM_STATUS_CHANGED_EVENT, LABELED_EVENT, UNLABELED_EVENT]) {
             nodes {
               __typename
               ... on ProjectV2ItemStatusChangedEvent {
@@ -10111,20 +10548,45 @@ query($ids: [ID!]!) {
     }
   }
 }
+""".replace(
+    "{timeline_max}", str(BEGIN_DETAIL_TIMELINE_ITEMS_MAX)
+)
+
+# Before ranking, a candidate's decline route may need an Issue.body that the
+# minimal listing left out (#2067). This is the post-claim detail read without
+# its history half: only the body is added, and every listed field, including
+# the Status age the shared order sorts by, stays exactly as listed.
+ITEM_BODY_DETAILS_QUERY = """
+query($ids: [ID!]!) {
+  rateLimit { cost remaining resetAt }
+  nodes(ids: $ids) {
+    ... on ProjectV2Item {
+      id
+      content {
+        ... on Issue {
+          body
+        }
+      }
+    }
+  }
+}
 """
 
 
 def _item_detail_request(
     ids: Sequence[str], child_ids: Sequence[str], include_body: bool = False,
-    include_history: bool = False,
+    include_history: bool = False, body_only: bool = False,
 ) -> Tuple[str, Dict[str, List[str]], str, Optional[str]]:
     """Assemble one batched document for requested history and child nodes.
 
     The compact begin listing is complete for selection and does not need a
     detail request. Callers opt in to history explicitly; a body read also
     requests history so the selected item's stale fields can be refreshed in
-    one post-claim GraphQL call.
+    one post-claim GraphQL call. ``body_only`` is the pre-ranking decline-route
+    read (#2067), which asks for the body alone.
     """
+    if body_only:
+        return ITEM_BODY_DETAILS_QUERY, {"ids": list(ids)}, "nodes", None
     include_history = include_history or include_body
     if not include_history:
         raise ValueError("a detail request needs history or a body")
@@ -10169,6 +10631,68 @@ class GitHubError(RuntimeError):
         self.request_id = request_id
 
 
+BEGIN_CANNOT_COMPLETE_REASON = (
+    "cannot-complete: begin exceeded its fixed {}-unit work envelope; "
+    "no ticket was started"
+).format(BEGIN_WORK_ENVELOPE_LIMIT)
+
+
+class BeginCannotComplete(RuntimeError):
+    """The bounded begin view cannot be completed inside its work envelope."""
+
+    def __init__(self):
+        super().__init__(BEGIN_CANNOT_COMPLETE_REASON)
+
+
+class BeginWorkEnvelope:
+    """Count begin's listed rows, hydrated fields, and preflight API calls."""
+
+    def __init__(self, limit: int = BEGIN_WORK_ENVELOPE_LIMIT):
+        self.limit = limit
+        self.listed_items = 0
+        self.hydrated_fields = 0
+        self.preflight_calls = 0
+        self._lock = threading.Lock()
+
+    @property
+    def used(self) -> int:
+        with self._lock:
+            return (
+                self.listed_items
+                + self.hydrated_fields
+                + self.preflight_calls
+            )
+
+    @property
+    def remaining(self) -> int:
+        return self.limit - self.used
+
+    def consume(
+        self, *, listed_items: int = 0, hydrated_fields: int = 0,
+        preflight_calls: int = 0,
+    ) -> None:
+        amounts = (listed_items, hydrated_fields, preflight_calls)
+        if any(amount < 0 for amount in amounts):
+            raise ValueError("begin envelope amounts cannot be negative")
+        with self._lock:
+            if self.used_unlocked() + sum(amounts) > self.limit:
+                raise BeginCannotComplete()
+            self.listed_items += listed_items
+            self.hydrated_fields += hydrated_fields
+            self.preflight_calls += preflight_calls
+
+    def used_unlocked(self) -> int:
+        """Read the counters while the caller holds ``_lock``."""
+        return (
+            self.listed_items
+            + self.hydrated_fields
+            + self.preflight_calls
+        )
+
+
+_ACTIVE_BEGIN_ENVELOPE: Optional[BeginWorkEnvelope] = None
+
+
 class BeginReserveStop(RuntimeError):
     """Stop before the Project read when the first query shows low headroom."""
 
@@ -10177,17 +10701,18 @@ class BeginReserveStop(RuntimeError):
         super().__init__(str(result.get("why") or "begin reserve gate"))
 
 
-# `gh api graphql` occasionally returns a partial JSON document. The CLI
-# reports the same condition as `unexpected end of JSON input` when it cannot
-# decode the response itself. Keep this retry deliberately narrow: a real
-# GraphQL error, an exhausted route, or an ordinary CLI failure must still
-# stop on its first attempt.
+# `gh api graphql` can return a partial JSON document, a reset HTTP/2 stream,
+# or a malformed response body. Keep retries limited to observed response
+# failures: a real GraphQL error, an exhausted route, or an ordinary CLI
+# failure must still stop on its first attempt.
 GRAPHQL_MAX_ATTEMPTS = 3
 GRAPHQL_RETRY_DELAY_SECONDS = 0.5
-GRAPHQL_TRUNCATED_RESPONSE_SIGNALS = (
+GRAPHQL_RETRYABLE_RESPONSE_SIGNALS = (
     "unexpected end of json input",
     "unexpected end of input",
     "unexpected eof",
+    "stream error: stream id",
+    "in string escape code",
 )
 # A gateway error is GitHub's server timing out, not an answer. The batched PR
 # scan runs close to that ~10 s limit, so one 502 or 504 used to fail a whole
@@ -10376,10 +10901,10 @@ def _graphql_request_id(text: object) -> Optional[str]:
     return match.group(1) if match else None
 
 
-def _is_truncated_graphql_text(text: object) -> bool:
-    """Whether CLI text identifies the known partial-response failure."""
+def _is_retryable_graphql_error_text(text: object) -> bool:
+    """Whether CLI text identifies a known transient response failure."""
     lowered = _graphql_text(text).lower()
-    return any(signal in lowered for signal in GRAPHQL_TRUNCATED_RESPONSE_SIGNALS)
+    return any(signal in lowered for signal in GRAPHQL_RETRYABLE_RESPONSE_SIGNALS)
 
 
 def _is_gateway_error_text(text: object) -> bool:
@@ -10604,7 +11129,8 @@ def _budget_exhaustion_signal() -> Optional[Tuple[int, str]]:
 def reset_api_usage() -> None:
     """Start a fresh per-command API measurement."""
     global _GRAPHQL_COST_READS, _PROJECT_ITEM_PAGE_COUNT
-    global _PROJECT_ITEM_ROW_COUNT
+    global _PROJECT_ITEM_ROW_COUNT, _ACTIVE_BEGIN_ENVELOPE
+    _ACTIVE_BEGIN_ENVELOPE = None
     _API_USAGE.update({"graphql_calls": 0, "cli_calls": 0, "refused_exhausted": 0})
     _GRAPHQL_SPEND.update(
         {"calls": 0, "cost": 0, "remaining": None, "reset_at": None}
@@ -10668,6 +11194,8 @@ def _run_gh(args: Sequence[str], **kwargs):
     """
     command = _frozen_ticket_create_command(list(args))
     _refuse_if_exhausted(command)
+    if _ACTIVE_BEGIN_ENVELOPE is not None:
+        _ACTIVE_BEGIN_ENVELOPE.consume(preflight_calls=1)
     if command[:3] == ["gh", "api", "graphql"]:
         _API_USAGE["graphql_calls"] += 1
     else:
@@ -10805,7 +11333,9 @@ def gh_graphql(query: str, **variables) -> dict:
                 gateway = _is_gateway_error_text(detail)
                 error = GitHubError(
                     detail,
-                    transient=gateway or _is_truncated_graphql_text(stderr),
+                    transient=(
+                        gateway or _is_retryable_graphql_error_text(detail)
+                    ),
                     request_id=request_id or last_request_id,
                 )
                 if not error.transient or attempt + 1 >= GRAPHQL_MAX_ATTEMPTS:
@@ -11236,6 +11766,7 @@ def _from_node(node: dict) -> Optional[Item]:
 def hydrate_item_details(
     items: Sequence[Item], candidates: Optional[Iterable[Item]] = None,
     *, include_body: bool = False, include_history: bool = False,
+    body_only: bool = False,
 ) -> None:
     """Read selected item history and optionally bodies when requested.
 
@@ -11243,10 +11774,13 @@ def hydrate_item_details(
     default it already carries the fields needed for startability, routing,
     and claims, so this function does no extra read. Callers that need history
     opt in; begin requests the selected ticket's body and history only after
-    claiming it. A missing requested body is a load failure, never permission
-    to guess at body contents.
+    claiming it. ``body_only`` reads the body alone, through the same batches
+    and checks, for the decline routes decided before ranking (#2067). A
+    missing requested body is a load failure, never permission to guess at
+    body contents.
     """
-    if not include_history and not include_body:
+    reads_body = include_body or body_only
+    if not include_history and not reads_body:
         return
     by_id = {
         item.item_id: item
@@ -11266,7 +11800,7 @@ def hydrate_item_details(
         ):
             ids.append(item_id)
             seen.add(item_id)
-            if item.children_total > 0:
+            if item.children_total > 0 and not body_only:
                 child_ids.append(item_id)
     if not ids:
         return
@@ -11277,7 +11811,7 @@ def hydrate_item_details(
         child_batch = [item_id for item_id in batch if item_id in child_id_set]
         query, variables, history_field, child_field = _item_detail_request(
             batch, child_batch, include_body=include_body,
-            include_history=include_history,
+            include_history=include_history, body_only=body_only,
         )
         data = gh_graphql(query, **variables)
         if not isinstance(data, dict):
@@ -11300,16 +11834,17 @@ def hydrate_item_details(
             item = by_id.get(node.get("id"))
             content = node.get("content")
             if item is not None and isinstance(content, dict):
-                if include_body:
+                if reads_body:
                     if "body" not in content:
                         raise GitHubError(
                             "Project item detail response omitted issue body"
                         )
                     loaded_bodies.add(item.item_id or "")
                 _apply_item_detail_fields(
-                    item, content, include_children=False
+                    item, content, include_children=False,
+                    include_timeline=not body_only,
                 )
-        if include_body and loaded_bodies != set(batch):
+        if reads_body and loaded_bodies != set(batch):
             raise GitHubError(
                 "Project item detail response omitted a selected issue body"
             )
@@ -11322,6 +11857,79 @@ def hydrate_item_details(
                 _apply_item_detail_fields(
                     item, content, include_timeline=False
                 )
+
+
+def begin_detail_hydration_work(
+    items: Sequence[Item], candidates: Iterable[Item],
+) -> int:
+    """Upper-bound the selected item's body, history, and child fields.
+
+    The detail query is deliberately small and has fixed timeline and child
+    page sizes. Reserve its maximum before the ticket claim so an oversized
+    Project cannot be partially read and then start work without its packet.
+    """
+    by_id = {
+        item.item_id: item
+        for item in items
+        if isinstance(item.item_id, str) and item.item_id
+    }
+    selected: List[Item] = []
+    seen: Set[str] = set()
+    for item in candidates:
+        item_id = item.item_id
+        if (
+            isinstance(item_id, str)
+            and item_id in by_id
+            and item_id not in seen
+        ):
+            selected.append(by_id[item_id])
+            seen.add(item_id)
+    if not selected:
+        return 0
+
+    fields = 0
+    for item in selected:
+        fields += (
+            BEGIN_DETAIL_BASE_FIELDS_PER_ITEM
+            + BEGIN_DETAIL_TIMELINE_ITEMS_MAX
+            * BEGIN_DETAIL_HISTORY_FIELDS_PER_EVENT_MAX
+        )
+        if item.children_total > 0:
+            fields += (
+                BEGIN_DETAIL_CHILD_FIELDS_PER_ITEM
+                + min(
+                    BEGIN_DETAIL_CHILD_ITEMS_MAX,
+                    item.children_total,
+                ) * BEGIN_DETAIL_CHILD_FIELDS_PER_CHILD
+            )
+    batches = math.ceil(len(selected) / PROJECT_ITEM_DETAIL_BATCH_SIZE)
+    return fields + batches * BEGIN_DETAIL_QUERY_OVERHEAD
+
+
+def begin_body_read_work(
+    items: Sequence[Item], candidates: Iterable[Item],
+) -> int:
+    """Upper-bound a body-only read of ``candidates`` (#2067).
+
+    Each row returns its id, its content, and one body; each batch is one
+    request with its ``rateLimit`` fields. Rows ``hydrate_item_details`` would
+    not request, because they have no Project item id here, cost nothing.
+    """
+    known = {
+        item.item_id for item in items
+        if isinstance(item.item_id, str) and item.item_id
+    }
+    rows = {
+        item.item_id for item in candidates
+        if isinstance(item.item_id, str) and item.item_id in known
+    }
+    if not rows:
+        return 0
+    batches = math.ceil(len(rows) / PROJECT_ITEM_DETAIL_BATCH_SIZE)
+    return (
+        len(rows) * BEGIN_DETAIL_BODY_FIELDS_PER_ITEM
+        + batches * BEGIN_DETAIL_QUERY_OVERHEAD
+    )
 
 
 def hydrate_regression_history(items: Sequence[Item]) -> None:
@@ -11420,6 +12028,28 @@ BEGIN_ITEM_PREDICATES: Dict[str, Callable[[Item], bool]] = {
 }
 
 
+def _begin_listing_page_sizes(
+    aliases: Sequence[str], envelope: Optional[BeginWorkEnvelope],
+) -> Optional[Dict[str, int]]:
+    """Fit the next filtered Project page inside the shared work envelope."""
+    if envelope is None:
+        return None
+    # Reserve the selected ticket and optional decline-gate detail read before
+    # spending the envelope on Project rows. One unit is also reserved for the
+    # GraphQL request that will return this page.
+    capacity = envelope.remaining - BEGIN_DETAIL_WORK_RESERVE - 1
+    if capacity < len(aliases):
+        raise BeginCannotComplete()
+    base, extra = divmod(capacity, len(aliases))
+    return {
+        alias: min(
+            PROJECT_ITEM_PAGE_SIZE,
+            base + (1 if index < extra else 0),
+        )
+        for index, alias in enumerate(aliases)
+    }
+
+
 def _begin_project_from_response(response: object) -> dict:
     user = response.get("user") if isinstance(response, dict) else None
     if not isinstance(user, dict) or "projectV2" not in user:
@@ -11514,6 +12144,9 @@ def _load_begin_items(
     block_comment_seconds = 0.0
     try:
         while paging:
+            page_sizes = _begin_listing_page_sizes(
+                paging, _ACTIVE_BEGIN_ENVELOPE
+            )
             variables: Dict[str, object] = {
                 "login": PROJECT_OWNER, "number": PROJECT_NUMBER,
             }
@@ -11526,6 +12159,7 @@ def _load_begin_items(
                     paging,
                     shape_field if first_request else "",
                     minimal_startable=minimal_startable,
+                    page_sizes=page_sizes,
                 ),
                 **variables,
             )
@@ -11536,11 +12170,13 @@ def _load_begin_items(
             first_request = False
             project = _begin_project_from_response(response)
             still_paging: List[str] = []
+            listed_rows = 0
             for alias in paging:
                 nodes, has_next, cursor = _begin_connection_page(
                     project, alias
                 )
                 _PROJECT_ITEM_ROW_COUNT += len(nodes)
+                listed_rows += len(nodes)
                 for node in nodes:
                     try:
                         item = _from_node(node)
@@ -11575,6 +12211,8 @@ def _load_begin_items(
                     seen_cursors[alias].add(cursor)
                     cursors[alias] = cursor
                     still_paging.append(alias)
+            if _ACTIVE_BEGIN_ENVELOPE is not None:
+                _ACTIVE_BEGIN_ENVELOPE.consume(listed_items=listed_rows)
             paging = still_paging
         if require_open and open_rows == 0:
             raise GitHubError(
@@ -11700,20 +12338,46 @@ def _load_project_items_by_refs(
     """Fetch Project items through one exact-ref connection per issue."""
     global _PROJECT_ITEM_PAGE_COUNT, _PROJECT_ITEM_ROW_COUNT
     found: Dict[str, Item] = {}
-    for start in range(0, len(refs), PROJECT_REF_ALIASES_PER_REQUEST):
-        batch = refs[start:start + PROJECT_REF_ALIASES_PER_REQUEST]
+    start = 0
+    while start < len(refs):
+        batch_size = min(
+            PROJECT_REF_ALIASES_PER_REQUEST, len(refs) - start
+        )
+        page_size = PROJECT_REF_PAGE_SIZE
+        if _ACTIVE_BEGIN_ENVELOPE is not None:
+            capacity = (
+                _ACTIVE_BEGIN_ENVELOPE.remaining
+                - BEGIN_DETAIL_WORK_RESERVE - 1
+            )
+            if capacity < 1:
+                raise BeginCannotComplete()
+            batch_size = min(batch_size, capacity)
+            page_size = min(
+                PROJECT_REF_PAGE_SIZE,
+                max(1, capacity // batch_size),
+            )
+        batch = refs[start:start + batch_size]
         _PROJECT_ITEM_PAGE_COUNT += 1
         response = gh_graphql(
-            _project_item_refs_query(batch, node_fields=node_fields),
+            _project_item_refs_query(
+                batch, node_fields=node_fields, page_size=page_size
+            ),
             login=PROJECT_OWNER, number=PROJECT_NUMBER,
         )
         project = _begin_project_from_response(response)
+        listed_rows = 0
+        pages = []
         for index, ref in enumerate(batch):
             alias = "r{}".format(index)
             nodes, has_next, _cursor = _begin_connection_page(
                 project, alias
             )
             _PROJECT_ITEM_ROW_COUNT += len(nodes)
+            listed_rows += len(nodes)
+            pages.append((ref, nodes, has_next))
+        if _ACTIVE_BEGIN_ENVELOPE is not None:
+            _ACTIVE_BEGIN_ENVELOPE.consume(listed_items=listed_rows)
+        for ref, nodes, has_next in pages:
             match = None
             for node in nodes:
                 try:
@@ -11738,6 +12402,7 @@ def _load_project_items_by_refs(
             ):
                 _load_block_comment(match)
             found[ref] = match
+        start += len(batch)
     return found
 
 
@@ -11923,7 +12588,7 @@ def _ensure_startable_view(
     return ScopedItems(
         items,
         scope=items_scope(items),
-        startable_candidates=_startable_candidate_items(
+        startable_candidates=_resolved_startable_candidates(
             startable_items, agent=agent
         ),
         startable_items=startable_items,
@@ -12027,7 +12692,9 @@ def load_items(
             _load_begin_anchor_items(begin_items, members, timings)
         )
         candidates = (
-            _startable_candidate_items(begin_items, agent=startable_agent)
+            _resolved_startable_candidates(
+                begin_items, agent=startable_agent
+            )
             if include_startable else None
         )
         if include_details:
@@ -12041,6 +12708,8 @@ def load_items(
                     begin_items, details, include_history=True
                 ),
             )
+        # Keep the scope on the actual list; FunnelSession uses this tag to
+        # decide whether a later command can reuse the view or must load all.
         return ScopedItems(
             begin_items,
             scope="begin",
@@ -12123,7 +12792,7 @@ def load_items(
         # Candidate eligibility and ordering therefore share one row shape
         # instead of deriving work from this full-board response.
         startable_items = _load_minimal_startable_view(members)
-        candidates = _startable_candidate_items(
+        candidates = _resolved_startable_candidates(
             startable_items, agent=startable_agent
         )
     if include_details:
@@ -12210,7 +12879,7 @@ def class_display(item: Item, by_ref: Dict[str, Item]) -> str:
 def item_json(item: Item, now: datetime, by_ref: Optional[Dict[str, Item]] = None) -> dict:
     by_ref = by_ref if by_ref is not None else {}
     breakdown = breakdown_latency(item)
-    question = gate_question(item)
+    question = gate_question(item, by_ref)
     acceptance_reason = _acceptance_waiting_reason(item, question)
     rendered = {
         "ref": item.ref,
@@ -12595,8 +13264,8 @@ def _dashboard_item(
 #: only on its siblings is "queued"; it and "blocked" share one run, ordered
 #: by ``_dashboard_pip_order``.
 PIP_PROGRESS_ORDER = (
-    "closed", "approved", "changes-requested", "submitted", "unknown",
-    "open", "queued", "blocked",
+    "closed", "approved", "changes-requested", "submitted", "stale",
+    "unknown", "open", "queued", "blocked",
 )
 _PIP_BLOCKED_STATES = ("queued", "blocked")
 
@@ -12605,6 +13274,10 @@ def _dashboard_pip_state(ticket: Mapping[str, object]) -> str:
     """The furthest state one ticket has reached, for its bar segment."""
     if ticket.get("state") != "OPEN":
         return "closed"
+    if ticket.get("pr_stale"):
+        return "stale"
+    if ticket.get("pr_unknown"):
+        return "unknown"
     pr = ticket.get("pr")
     if pr == "approved":
         return "approved"
@@ -12783,6 +13456,7 @@ def dashboard_board(
     authoring_pr_agents: Optional[Mapping[str, Iterable[str]]] = None,
     backed_off: Optional[Mapping[str, Mapping[str, object]]] = None,
     recent_starts: Sequence[Optional[str]] = (),
+    pr_display_overrides: Optional[Mapping[str, Mapping[str, object]]] = None,
 ) -> Dict[str, List[Dict[str, object]]]:
     """Build the ordered parent-project board for one already-loaded brief.
 
@@ -12809,6 +13483,7 @@ def dashboard_board(
     max_time = datetime.max.replace(tzinfo=timezone.utc)
 
     facts = dict(pr_facts or {})
+    display_overrides = pr_display_overrides or {}
     authoring = authoring_pr_agents or {}
     # The brief returns an empty mapping both when nothing has a PR and when
     # the scan failed, so it says which through ``pr_facts_known``. A caller
@@ -12880,6 +13555,7 @@ def dashboard_board(
             children.setdefault(row.parent, []).append(row)
 
     verdicts: Dict[str, Optional[Dict]] = {}
+    failed_verdict_refs: Set[str] = set()
 
     def verdict_for(ticket: Item) -> Optional[Dict]:
         """Return the batch verdict, with a fixture-only legacy fallback."""
@@ -12892,7 +13568,14 @@ def dashboard_board(
         if ticket.ref in verdicts:
             return verdicts[ticket.ref]
         number = fact.get("number")
-        found = latest_verdict(ticket.repo, number) if number else None
+        try:
+            found = latest_verdict(ticket.repo, number) if number else None
+        except Exception:
+            # A single pip's legacy verdict fallback must not prevent the
+            # current board and its unrelated sections from being published.
+            # That ticket alone reads unknown; this is one bounded attempt.
+            failed_verdict_refs.add(ticket.ref)
+            found = None
         verdicts[ticket.ref] = found
         return found
 
@@ -12937,8 +13620,9 @@ def dashboard_board(
             )
         siblings_of = list(children.get(parent.ref, ()))
         siblings = {child.ref for child in siblings_of}
-        return [
-            _dashboard_ticket(
+
+        def render_ticket(child: Item) -> Dict[str, object]:
+            row = _dashboard_ticket(
                 child,
                 facts.get(child.ref),
                 verdict_for(child),
@@ -12946,7 +13630,7 @@ def dashboard_board(
                 # Native edges when there are any, else the refs parsed from
                 # the block comment, so "blocked" always says by what.
                 list(child.open_blockers or child.block_references),
-                known,
+                known and child.ref not in failed_verdict_refs,
                 parent_block if child.state == "OPEN" else None,
                 authoring_for(facts.get(child.ref)),
                 siblings,
@@ -12964,6 +13648,24 @@ def dashboard_board(
                 paused_rows.get(child.ref) if child.state == "OPEN" else None,
                 child.ref in finished and child.state == "OPEN",
             )
+            override = display_overrides.get(child.ref)
+            if isinstance(override, Mapping):
+                if override.get("status") == "stale":
+                    row["pr_stale"] = True
+                    row["pr_stale_state"] = override.get("pr")
+                    row["pr_stale_age"] = override.get("age")
+                    captured_at = override.get("captured_at")
+                    if isinstance(captured_at, str):
+                        row["pr_stale_captured_at"] = captured_at
+                    number = override.get("pr_number")
+                    if isinstance(number, int) and not isinstance(number, bool):
+                        row["pr_stale_number"] = number
+                elif override.get("status") == "unknown":
+                    row["pr_unknown"] = True
+            return row
+
+        return [
+            render_ticket(child)
             for child in sorted(siblings_of, key=ticket_key)
         ]
 
@@ -13088,11 +13790,11 @@ def dashboard_board(
 
 
 def _dashboard_muse_usage(now_epoch: float) -> Optional[Dict[str, object]]:
-    """Return the compact Muse spend row for the dashboard snapshot.
+    """Return the compact Muse local-spend estimate for the dashboard.
 
     Rolling seven-day dollars against the cap only; the 2026-09-18 decision
     declined a 24-hour companion line. Best effort like the rest of the
-    snapshot: an unreadable reader yields None and the page hides the row,
+    snapshot: an unreadable reader yields None and the page shows unavailable,
     never a failed brief.
     """
     try:
@@ -13113,6 +13815,7 @@ def _dashboard_muse_usage(now_epoch: float) -> Optional[Dict[str, object]]:
     cap = reading.get("cap_dollars")
     percent = window.get("used_percent")
     calls = window.get("calls")
+    captured_at = reading.get("captured_at")
     for value in (spent, cap, percent):
         if (
             not isinstance(value, (int, float))
@@ -13121,6 +13824,13 @@ def _dashboard_muse_usage(now_epoch: float) -> Optional[Dict[str, object]]:
             or value in (float("inf"), float("-inf"))
         ):
             return None
+    if (
+        not isinstance(captured_at, (int, float))
+        or isinstance(captured_at, bool)
+        or not math.isfinite(captured_at)
+        or captured_at < 0
+    ):
+        return None
     if cap <= 0 or spent < 0:
         return None
     if (
@@ -13130,6 +13840,8 @@ def _dashboard_muse_usage(now_epoch: float) -> Optional[Dict[str, object]]:
     ):
         return None
     row: Dict[str, object] = {
+        "source": "Local Muse session journal estimate",
+        "captured_at": float(captured_at),
         "spent_dollars": float(spent),
         "cap_dollars": float(cap),
         "used_percent": float(percent),
@@ -13153,6 +13865,42 @@ def _dashboard_muse_usage(now_epoch: float) -> Optional[Dict[str, object]]:
                 row[key] = float(value)
         break
     return row
+
+
+def _dashboard_muse_panel_usage() -> Dict[str, object]:
+    """Return the latest validated account-panel sample recorded on GitHub.
+
+    The source issue comment records 15% at Tue 2026-09-29 20:55 PDT. Keep
+    the source timestamp intact; the measurement owner in #2123 owns future
+    refreshes, while the dashboard marks this seed stale after 90 minutes.
+    """
+    return {
+        "used_percent": 15.0,
+        "sampled_at": "2026-09-29T20:55:00-07:00",
+        "source": "Muse account panel",
+        "source_url": (
+            "https://github.com/nateprich-projects/command-center/"
+            "issues/1673#issuecomment-5903766309"
+        ),
+    }
+
+
+def _dashboard_claude_usage(now_epoch: float) -> Optional[Dict[str, object]]:
+    """Return only the signed-in Claude org's raw weekly fields."""
+    try:
+        import usage
+
+        sample = usage.read_claude_plan_weekly_sample(now_epoch)
+    except Exception:
+        return None
+    if not isinstance(sample, Mapping):
+        return None
+    sample_usage = sample.get("u")
+    if not isinstance(sample_usage, Mapping) or "sd" not in sample_usage:
+        return None
+    if "t" not in sample:
+        return None
+    return {"u": {"sd": sample_usage["sd"]}, "t": sample["t"]}
 
 
 def write_dashboard_snapshot(
@@ -13373,14 +14121,18 @@ def parse_park_comment(body: str) -> Optional[Dict[str, object]]:
     }
 
 
-def _parked_item_json(item: Item) -> Dict[str, object]:
-    """Render one parked item and read its durable reason comment.
+def _parked_item_json(
+    item: Item, comments: Optional[Sequence[dict]] = None
+) -> Dict[str, object]:
+    """Render one parked item from its durable reason comment.
 
-    Comments are deliberately fetched here, rather than in ``ITEM_QUERY``:
-    parked items are uncommon and the normal Project load must not pay for a
-    comment request for every issue.
+    Comments are deliberately not part of ``ITEM_QUERY``: the normal Project
+    load must not pay for a comment request for every issue. ``comments`` is
+    the item's bounded tail from the brief's shared batched read (#2133);
+    without it, the whole thread is read here.
     """
-    comments = _issue_comments(item)
+    if comments is None:
+        comments = _issue_comments(item)
     parsed = None
     # Only the owner's park header is the reason and wake date (#1788).
     for comment in reversed(trusted_comments(comments)):
@@ -13402,9 +14154,35 @@ def _parked_item_json(item: Item) -> Dict[str, object]:
     return rendered
 
 
-def parked_json(items: Iterable[Item]) -> List[Dict[str, object]]:
-    """The brief's parked section, with one comment lookup per parked item."""
-    return [_parked_item_json(item) for item in parked_items(items)]
+def parked_json(
+    items: Iterable[Item], brief_cache=None
+) -> List[Dict[str, object]]:
+    """The brief's parked section, read through the shared comment tails.
+
+    One batched read covers every parked item (#2133); with a comment read
+    per item the section took 9.4-15.2 s. A full tail with no park header may
+    have cut the header off, so only then is that item's whole thread read.
+    An unreadable batch raises: the section is unknown, never a list of
+    reasonless parks.
+    """
+    candidates = parked_items(items)
+    if not candidates:
+        return []
+    cache = brief_cache or _ACTIVE_BRIEF_CACHE.get() or BriefCache()
+    tails = cache.comment_tails(candidates)
+    rows = []
+    for item in candidates:
+        tail = tails.get(item.ref)
+        if tail is None:
+            raise GitHubError(
+                "could not read comments for {}".format(item.ref)
+            )
+        row = _parked_item_json(item, tail)
+        if (row["reason"] is None
+                and len(tail) >= CLOSED_ITSELF_COMMENT_PAGE_SIZE):
+            row = _parked_item_json(item)
+        rows.append(row)
+    return rows
 
 
 def pending_wakes_json(
@@ -13454,6 +14232,13 @@ def closed_itself_items(items: Iterable[Item], now: datetime) -> List[Item]:
     )
 
 
+#: The classes whose finished projects close themselves whoever raised them.
+#: Improve also closes, when its shape owner is the agents (#987, #1845).
+SELF_CLOSING_UPKEEP_CLASSES = frozenset(
+    {"Investigate", "Broken", "Maintenance", "Bug"}
+)
+
+
 def _can_close_itself(item: Item) -> bool:
     """Whether a finished project may close without Nate's acceptance.
 
@@ -13474,7 +14259,7 @@ def _can_close_itself(item: Item) -> bool:
     # rule names the upkeep classes as SELF_APPROVABLE_CLASSES and lets every
     # one but Improve close itself whoever raised it; Bug is a defect class,
     # upkeep like Broken, so no Bug project waits at `Accept it?`.
-    if item.klass in {"Investigate", "Broken", "Maintenance", "Bug"}:
+    if item.klass in SELF_CLOSING_UPKEEP_CLASSES:
         return True
     if item.klass != "Improve":
         return False
@@ -13569,9 +14354,16 @@ def cleared_block_items(items: Iterable[Item], now: datetime) -> List[Item]:
     )
 
 
-def _cleared_block_item_json(item: Item) -> Optional[Dict[str, object]]:
-    """Render the newest valid satisfied-block record on one unblocked item."""
-    comments = _issue_comments(item)
+def _cleared_block_item_json(
+    item: Item, comments: Optional[Sequence[dict]] = None
+) -> Optional[Dict[str, object]]:
+    """Render the newest valid satisfied-block record on one unblocked item.
+
+    ``comments`` is the item's bounded tail from the brief's shared batched
+    read (#2133); without it, the whole thread is read here.
+    """
+    if comments is None:
+        comments = _issue_comments(item)
     for comment in reversed(comments):
         # The record's agent voice is only an agent's when the owner account
         # posted it (#1788).
@@ -13594,12 +14386,31 @@ def _cleared_block_item_json(item: Item) -> Optional[Dict[str, object]]:
 
 
 def cleared_blocks_json(
-    items: Iterable[Item], now: datetime
+    items: Iterable[Item], now: datetime, brief_cache=None
 ) -> List[Dict[str, object]]:
-    """The brief's recent provenance-backed mechanical block clears."""
+    """The brief's recent provenance-backed mechanical block clears.
+
+    One batched read covers every candidate (#2133): a comment read per item
+    hit the section's 30 s budget in every brief from 2026-10-01 15:13 to
+    2026-10-02 00:19 PDT. A full tail with no satisfied-block record may have
+    cut it off, so only then is that item's whole thread read. An unreadable
+    batch raises: the section is unknown, never an empty list of clears.
+    """
+    candidates = cleared_block_items(items, now)
+    if not candidates:
+        return []
+    cache = brief_cache or _ACTIVE_BRIEF_CACHE.get() or BriefCache()
+    tails = cache.comment_tails(candidates)
     rows = []
-    for item in cleared_block_items(items, now):
-        row = _cleared_block_item_json(item)
+    for item in candidates:
+        tail = tails.get(item.ref)
+        if tail is None:
+            raise GitHubError(
+                "could not read comments for {}".format(item.ref)
+            )
+        row = _cleared_block_item_json(item, tail)
+        if row is None and len(tail) >= CLOSED_ITSELF_COMMENT_PAGE_SIZE:
+            row = _cleared_block_item_json(item)
         if row is not None:
             rows.append(row)
     return rows
@@ -13723,6 +14534,8 @@ def held_at_accept_json(items: Iterable[Item]) -> List[Dict[str, object]]:
 def _event_block_mismatch(item: Item) -> Optional[str]:
     """How a blocked ticket's event spec and Needs routing disagree, if at all.
 
+    A parsed issue-reference or date condition also makes external-event a
+    consistent route.
     Only tickets are checked, and only when their block comments were read:
     an unread comment cannot show whether a spec is there.
     """
@@ -13733,6 +14546,8 @@ def _event_block_mismatch(item: Item) -> Optional[str]:
             return None
         return "well-formed event spec without Needs: external-event"
     if item.needs == "external-event":
+        if item.block_references or _item_blocked_until(item) is not None:
+            return None
         return "Needs: external-event without a well-formed event spec"
     return None
 # Approval may adopt an unset Class only from an explicit, whole-line
@@ -13824,6 +14639,32 @@ def blocked_step_reason(
     return "; ".join(reasons) if reasons else None
 
 
+def _step_has_parked_parent(
+    item: Item, by_ref: Mapping[str, Item]
+) -> bool:
+    """Whether a Needs step belongs to a Parked Project row."""
+    parent = by_ref.get(item.parent or "")
+    return parent is not None and parent.status == "Parked"
+
+
+def _needs_step_candidates(
+    items: Iterable[Item],
+    by_ref: Mapping[str, Item],
+    needs: str,
+) -> List[Item]:
+    """Return open Needs steps eligible for either output list."""
+    return sorted(
+        (
+            item for item in items
+            if item.state == "OPEN"
+            and item.parent is not None
+            and item.needs == needs
+            and not _step_has_parked_parent(item, by_ref)
+        ),
+        key=lambda item: (item.repo, item.number),
+    )
+
+
 def _blocked_step_refs(item: Item, by_ref: Mapping[str, Item]) -> List[str]:
     """Return stable blocker references for one withheld Needs step."""
     refs: List[str] = []
@@ -13863,16 +14704,11 @@ def human_step_items(items: Iterable[Item]) -> List[Item]:
     """
     rows = list(items)
     by_ref = {item.ref: item for item in rows}
-    return sorted(
-        (
-            item for item in rows
-            if item.state == "OPEN"
-            and item.parent is not None
-            and item.needs == "human"
-            and blocked_step_reason(item, by_ref) is None
-        ),
-        key=lambda item: (item.repo, item.number),
-    )
+    candidates = _needs_step_candidates(rows, by_ref, "human")
+    return [
+        item for item in candidates
+        if blocked_step_reason(item, by_ref) is None
+    ]
 
 
 def _human_step_item_json(
@@ -13907,16 +14743,11 @@ def blocked_human_step_items(items: Iterable[Item]) -> List[Item]:
     """Open human-step tickets withheld by a native or label block."""
     rows = list(items)
     by_ref = {item.ref: item for item in rows}
-    return sorted(
-        (
-            item for item in rows
-            if item.state == "OPEN"
-            and item.parent is not None
-            and item.needs == "human"
-            and blocked_step_reason(item, by_ref) is not None
-        ),
-        key=lambda item: (item.repo, item.number),
-    )
+    candidates = _needs_step_candidates(rows, by_ref, "human")
+    return [
+        item for item in candidates
+        if blocked_step_reason(item, by_ref) is not None
+    ]
 
 
 def blocked_human_step_json(
@@ -13935,16 +14766,13 @@ def machine_local_step_items(items: Iterable[Item]) -> List[Item]:
     """Open child issues whose work needs Claude Code's local environment."""
     rows = list(items)
     by_ref = {item.ref: item for item in rows}
-    return sorted(
-        (
-            item for item in rows
-            if item.state == "OPEN"
-            and item.parent is not None
-            and item.needs == "claude-code-environment"
-            and blocked_step_reason(item, by_ref) is None
-        ),
-        key=lambda item: (item.repo, item.number),
+    candidates = _needs_step_candidates(
+        rows, by_ref, "claude-code-environment"
     )
+    return [
+        item for item in candidates
+        if blocked_step_reason(item, by_ref) is None
+    ]
 
 
 def machine_local_step_json(
@@ -13961,16 +14789,13 @@ def blocked_machine_local_step_items(items: Iterable[Item]) -> List[Item]:
     """Open Claude-local tickets withheld by a native or label block."""
     rows = list(items)
     by_ref = {item.ref: item for item in rows}
-    return sorted(
-        (
-            item for item in rows
-            if item.state == "OPEN"
-            and item.parent is not None
-            and item.needs == "claude-code-environment"
-            and blocked_step_reason(item, by_ref) is not None
-        ),
-        key=lambda item: (item.repo, item.number),
+    candidates = _needs_step_candidates(
+        rows, by_ref, "claude-code-environment"
     )
+    return [
+        item for item in candidates
+        if blocked_step_reason(item, by_ref) is not None
+    ]
 
 
 def blocked_machine_local_step_json(
@@ -14091,6 +14916,21 @@ def _abandoned_ticket(blocker: Item, dependent: Item,
     return dependent.parent != blocker.parent
 
 
+def _block_event_can_clear(item: Item) -> bool:
+    """Whether ``clear_satisfied_blocks`` can ever lift this event wait.
+
+    The clear reads GitHub heartbeat finishes only for agents in
+    ``heartbeat.PROVIDERS`` and matches every other agent against no records,
+    so an event naming any other agent (a member repo's own job, say) never
+    lifts. ``satisfied_block_refs`` needs every parsed condition, so nothing
+    beside such an event can lift the block either (#2135).
+    """
+    import heartbeat
+
+    event = item.block_event
+    return isinstance(event, dict) and event.get("agent") in heartbeat.PROVIDERS
+
+
 def unclearable_block(item: Item) -> bool:
     """Whether a blocked item has no condition that can lift it and no asker.
 
@@ -14099,12 +14939,20 @@ def unclearable_block(item: Item) -> bool:
     ``agent`` still gets an Unblock question for the watch; an ordinary
     agent-owned block without that decline marker remains stranded. The
     funnel watch also supports ``claude-code-environment`` blocks.
+
+    The comment conditions are read through ``block_condition`` (#2135), so
+    a well-formed event spec counts as a condition, as it does for the clear
+    (#1451), and a block whose comments could not be read is never called
+    unclearable: its condition is unknown, not absent (#1417's dry window).
+    An event counts only when its agent is one whose heartbeat the clear
+    reads (``_block_event_can_clear``); any other agent's event never lifts.
     """
     if item.state != "OPEN" or not item.is_blocked:
         return False
-    if item.block_references or item.open_blockers:
-        return False
-    if _item_blocked_until(item) is not None:
+    condition = block_condition(item)
+    if condition == "event" and not _block_event_can_clear(item):
+        condition = None
+    if condition is not None or item.open_blockers:
         return False
     if item.needs == "claude-code-environment":
         return False
@@ -14275,6 +15123,124 @@ def _record_covers_current_block(item: Item, conditions: Sequence[str]) -> bool:
     )
 
 
+def _live_shaped_hold_body(item: Item) -> Optional[str]:
+    """Read the held project's current issue state and plan body from GitHub."""
+    if live_issue_state(item) != "OPEN":
+        return None
+    try:
+        body = _ticket_body(item.repo, item.number)
+    except (GitHubError, OSError, subprocess.SubprocessError, ValueError):
+        return None
+    return body if isinstance(body, str) and body.strip() else None
+
+
+def _shaped_hold_proof_is_live_owner_comment(url: object) -> bool:
+    """Whether one proof URL still resolves to a comment by the owner account."""
+    try:
+        canonical = validate_proof_comment_url(url)
+        target, fragment = canonical.split("#", 1)
+        owner, repository, _route, _issue_number = target[
+            len("https://github.com/"):].split("/")
+        raw_id = fragment.removeprefix("issuecomment-")
+        comment_id = int(raw_id)
+        comment = _gh_api_json(
+            "repos/{}/{}/issues/comments/{}".format(
+                owner, repository, comment_id)
+        )
+    except (GitHubError, OSError, subprocess.SubprocessError, ValueError):
+        return False
+    return (
+        isinstance(comment, Mapping)
+        and comment.get("id") == comment_id
+        and isinstance(comment.get("html_url"), str)
+        and comment["html_url"].rstrip("/").lower()
+        == canonical.rstrip("/").lower()
+        and trusted_comment(comment)
+    )
+
+
+def _shaped_hold_clear_inputs(
+    item: Item, record: Mapping[str, object],
+) -> Optional[Tuple[str, str]]:
+    """Return a live plan version only after every issue and proof rechecks."""
+    body = _live_shaped_hold_body(item)
+    if body is None:
+        return None
+    plan_version = shaped_plan_version(body)
+    conditions = record.get("Hold-Conditions")
+    if not isinstance(conditions, list) or not conditions:
+        return None
+
+    all_closed = True
+    for ref in conditions:
+        if not isinstance(ref, str) or "#" not in ref:
+            all_closed = False
+            continue
+        repo, raw_number = ref.rsplit("#", 1)
+        try:
+            number = int(raw_number)
+        except ValueError:
+            all_closed = False
+            continue
+        condition = Item(
+            repo=repo, number=number, title="", url="", state="OPEN")
+        if live_issue_state(condition) != "CLOSED":
+            all_closed = False
+
+    proofs = record.get("Proof")
+    if not isinstance(proofs, list) or not proofs:
+        return None
+    all_proofs_present = True
+    for proof in proofs:
+        if not _shaped_hold_proof_is_live_owner_comment(proof):
+            all_proofs_present = False
+
+    if not all_closed or not all_proofs_present:
+        return None
+    return body, plan_version
+
+
+def _shaped_hold_clear_matches(
+    item: Item, record: Mapping[str, object],
+) -> bool:
+    clear = item.shaped_hold_clear
+    if not isinstance(clear, Mapping):
+        return False
+    try:
+        expected_id = shaped_hold_id(record)
+    except ValueError:
+        return False
+    return clear.get("Hold-ID") == expected_id
+
+
+def _finish_shaped_hold_clear(item: Item, body: str, now: datetime) -> None:
+    """Restore decision routing and remove the blocked label after its record."""
+    remaining_needs = "human" if plan_needs_nate(body) else "none"
+    if item.needs != remaining_needs:
+        if not item.item_id:
+            raise GitHubError("{} is not in the Project".format(item.ref))
+        write_project_select(
+            item.item_id, "Needs", remaining_needs, item.ref)
+        item.needs = remaining_needs
+
+    if item.is_blocked:
+        edit = _run_gh(
+            [
+                "gh", "issue", "edit", str(item.number),
+                "--repo", item.repo, "--remove-label", "blocked",
+            ],
+            capture_output=True, text=True,
+        )
+        if edit.returncode != 0:
+            raise GitHubError(
+                "recorded hold clear on {}, but could not remove its blocked "
+                "label: {}".format(item.ref, edit.stderr.strip())
+            )
+        item.labels = [label for label in item.labels if label != "blocked"]
+    item.body = body
+    item.blocked_cleared_at = now
+
+
 def clear_satisfied_blocks(
     items: Sequence[Item], now: datetime,
     run: Optional[str] = None, agent: Optional[str] = None,
@@ -14325,6 +15291,65 @@ def clear_satisfied_blocks(
                 )
 
     for item in candidates:
+        shaped_hold = _current_shaped_hold_record(item)
+        if shaped_hold is not None:
+            if _shaped_hold_clear_matches(item, shaped_hold):
+                # The durable clear comment was written by an earlier run;
+                # finish any routing or label write left by a partial failure.
+                body = _live_shaped_hold_body(item)
+                if body is None:
+                    continue
+                _finish_shaped_hold_clear(item, body, now)
+                clear = item.shaped_hold_clear or {}
+                cleared.append({
+                    "ref": item.ref,
+                    "kind": "shaped-hold",
+                    "clear": clear.get("kind"),
+                    "conditions": list(shaped_hold["Hold-Conditions"]),
+                    "proof": list(shaped_hold["Proof"]),
+                    "plan_version": clear.get("Plan-Version"),
+                    "cleared_at": now.isoformat(),
+                })
+                continue
+
+            inputs = _shaped_hold_clear_inputs(item, shaped_hold)
+            if inputs is None:
+                continue
+            body, plan_version = inputs
+            clear_body = render_conditioned_shaped_hold_clear(
+                shaped_hold, plan_version)
+            comment = _run_gh(
+                [
+                    "gh", "issue", "comment", str(item.number),
+                    "--repo", item.repo,
+                    "--body", append_provenance(
+                        clear_body, "agent", at=now, run=run, agent=agent),
+                ],
+                capture_output=True, text=True,
+            )
+            if comment.returncode != 0:
+                raise GitHubError(
+                    "could not record conditioned hold clear on {}: {}".format(
+                        item.ref, comment.stderr.strip())
+                )
+            item.shaped_hold_clear = parse_shaped_hold_clear_comment(clear_body)
+            if item.shaped_hold_clear is None:
+                raise GitHubError(
+                    "conditioned hold clear for {} did not parse back".format(
+                        item.ref)
+                )
+            _finish_shaped_hold_clear(item, body, now)
+            cleared.append({
+                "ref": item.ref,
+                "kind": "shaped-hold",
+                "clear": "conditioned",
+                "conditions": list(shaped_hold["Hold-Conditions"]),
+                "proof": list(shaped_hold["Proof"]),
+                "plan_version": plan_version,
+                "cleared_at": now.isoformat(),
+            })
+            continue
+
         event_records = (
             heartbeat_records.get(item.block_event.get("agent"), [])
             if isinstance(item.block_event, dict) else []
@@ -14473,6 +15498,200 @@ def _block_cycle_reasons(
     return reasons
 
 
+@dataclass(frozen=True)
+class _StrandFacts:
+    """What the named stranded checks read besides the item itself (#2135).
+
+    Built once per ``stranded_items`` call from the loaded rows, so each
+    check stays a pure function of one item and these shared facts.
+    ``pr_facts`` keeps its three-way meaning: ``None`` means no PR lookups
+    were requested, a missing key means that fact was not fetched, and a
+    ``None`` value is a known absence.
+    """
+
+    by_ref: Dict[str, Item]
+    pr_facts: Optional[Dict[str, Optional[Dict[str, object]]]]
+    stale: FrozenSet[str]
+    cycles: Dict[str, List[str]]
+
+    def pr(self, item: Item) -> Optional[Dict[str, object]]:
+        return None if self.pr_facts is None else self.pr_facts.get(item.ref)
+
+    def pr_known(self, item: Item) -> bool:
+        return self.pr_facts is None or item.ref in self.pr_facts
+
+
+def _strand_facts(
+    rows: Sequence[Item], now: datetime,
+    pr_facts: Optional[Dict[str, Optional[Dict[str, object]]]] = None,
+) -> _StrandFacts:
+    """Derive the shared facts for ``STRANDED_CHECKS`` from loaded rows."""
+    by_ref = {item.ref: item for item in rows}
+    return _StrandFacts(
+        by_ref=by_ref,
+        pr_facts=pr_facts,
+        stale=frozenset(
+            item.ref for item in stale_locks(rows, now, pr_facts=pr_facts)
+        ),
+        cycles=_block_cycle_reasons(rows, by_ref),
+    )
+
+
+def _open_pr_fact(pr: Optional[Dict[str, object]]) -> bool:
+    return isinstance(pr, dict) and str(pr.get("state") or "").upper() == "OPEN"
+
+
+def _strand_open_pr_on_closed_ticket(
+    item: Item, facts: _StrandFacts,
+) -> Optional[str]:
+    """A ticket closed while its PR stayed open. The only check on closed rows."""
+    if (
+        item.state == "CLOSED"
+        and item.parent is not None
+        and _open_pr_fact(facts.pr(item))
+    ):
+        return "open PR on closed ticket"
+    return None
+
+
+def _strand_pr_under_non_building_project(
+    item: Item, facts: _StrandFacts,
+) -> Optional[str]:
+    """An open ticket's open PR whose project is not ``Building``.
+
+    The merge gate refuses it, so it cannot land however good it is. A
+    project that is not loaded is not evidence either way.
+    """
+    if (
+        item.state != "OPEN"
+        or item.parent is None
+        or not _open_pr_fact(facts.pr(item))
+    ):
+        return None
+    parent = facts.by_ref.get(item.parent)
+    if parent is None or parent.status == "Building":
+        return None
+    return (
+        "open PR on open ticket whose project Status is {}; "
+        "merge gate will refuse it".format(parent.status or "unset")
+    )
+
+
+def _strand_approved_conflicting_head(
+    item: Item, facts: _StrandFacts,
+) -> Optional[str]:
+    """An approved current head that cannot merge for a conflict."""
+    pr = facts.pr(item)
+    if (
+        item.state == "OPEN"
+        and _open_pr_fact(pr)
+        and str(pr.get("mergeable") or "").upper() == "CONFLICTING"
+        and _approved_current_head(pr)
+    ):
+        return "approved verdict against an unmergeable branch"
+    return None
+
+
+def _strand_stale_claim(item: Item, facts: _StrandFacts) -> Optional[str]:
+    """A claim past its TTL whose PR is known to be absent."""
+    if (
+        item.state == "OPEN"
+        and item.ref in facts.stale
+        and facts.pr_known(item)
+        and facts.pr(item) is None
+    ):
+        return "claim past its TTL with no PR"
+    return None
+
+
+def _strand_childless_building_project(
+    item: Item, facts: _StrandFacts,
+) -> Optional[str]:
+    """A project at ``Building`` with no tickets to build."""
+    if (
+        item.state == "OPEN"
+        and item.parent is None
+        and item.status == "Building"
+        and not item.children_total
+    ):
+        return "Building project has no tickets"
+    return None
+
+
+def _strand_closed_parent(item: Item, facts: _StrandFacts) -> Optional[str]:
+    """An open ticket under a closed project that was not parked (#1169).
+
+    It has nowhere to go: no gate is watching it, the ladder ranks it through
+    a parent that is finished, and nothing will close it. Parked parents are
+    excluded on purpose — parking is a decision, and its tickets are meant to
+    sit. Detection only; nothing here closes anything.
+    """
+    parent = facts.by_ref.get(item.parent or "")
+    if (
+        item.state == "OPEN"
+        and parent is not None
+        and parent.state != "OPEN"
+        and parent.status != "Parked"
+    ):
+        return "parent {} is closed with Status {}".format(
+            parent.ref, parent.status or "unset"
+        )
+    return None
+
+
+def _strand_finished_upkeep_project(
+    item: Item, facts: _StrandFacts,
+) -> Optional[str]:
+    """A project that has earned its unattended close but is still open."""
+    if _auto_closeable_project(item):
+        return "finished upkeep project not closed"
+    return None
+
+
+def _strand_dead_blocker(item: Item, facts: _StrandFacts) -> Optional[str]:
+    """A native or named blocker that will never close (#1432)."""
+    if item.state != "OPEN":
+        return None
+    dead = _dead_dependency_refs(item, facts.by_ref)
+    if dead:
+        return "blocked on blocker that will never close: {}".format(
+            ", ".join(dead))
+    return None
+
+
+def _strand_unclearable_block(
+    item: Item, facts: _StrandFacts,
+) -> Optional[str]:
+    """A block nothing can lift and nobody is asked about (#1393, #1432)."""
+    if unclearable_block(item):
+        return _unclearable_block_reason(item)
+    return None
+
+
+def _strand_block_cycle(item: Item, facts: _StrandFacts) -> Optional[str]:
+    """A block cycle, reported once on its lowest-numbered member."""
+    if item.state != "OPEN":
+        return None
+    return "; ".join(facts.cycles.get(item.ref, [])) or None
+
+
+#: Every reason ``stranded_items`` can give, one named check each (#2135),
+#: in the order the reasons are joined. Each check guards its own state, so
+#: a closed row reaches only the open-PR-on-closed-ticket check.
+STRANDED_CHECKS: Tuple[Callable[[Item, _StrandFacts], Optional[str]], ...] = (
+    _strand_open_pr_on_closed_ticket,
+    _strand_pr_under_non_building_project,
+    _strand_approved_conflicting_head,
+    _strand_stale_claim,
+    _strand_childless_building_project,
+    _strand_closed_parent,
+    _strand_finished_upkeep_project,
+    _strand_dead_blocker,
+    _strand_unclearable_block,
+    _strand_block_cycle,
+)
+
+
 def stranded_items(
     items: Iterable[Item],
     now: datetime,
@@ -14491,96 +15710,25 @@ def stranded_items(
     ``Building``. Missing CI history is intentionally absent; no fetched fact
     distinguishes that from a PR whose first check is still pending.
 
+    Each reason is one named check in ``STRANDED_CHECKS`` (#2135), which also
+    holds the open ticket under a closed, unparked project (#1169) and the
+    block nothing can lift and nobody is asked about (#1432). An item's
+    reasons are joined in that order.
+
     ``pr_facts`` is optional so the function remains fixture-pure. ``None``
     means the caller has not requested PR lookups and therefore treats a stale
     claim as having no PR; a supplied mapping distinguishes a known no-PR
     result from a fact that was not fetched.
     """
     rows = list(items)
-    by_ref = {item.ref: item for item in rows}
-    stale = {
-        item.ref for item in stale_locks(rows, now, pr_facts=pr_facts)
-    }
-    cycle_reasons = _block_cycle_reasons(rows, by_ref)
+    facts = _strand_facts(rows, now, pr_facts)
     found: List[Dict[str, object]] = []
 
     for item in rows:
-        reasons: List[str] = []
-        pr_known = pr_facts is None or item.ref in pr_facts
-        pr = None if pr_facts is None else pr_facts.get(item.ref)
-
-        if (
-            isinstance(pr, dict)
-            and str(pr.get("state") or "").upper() == "OPEN"
-            and item.parent is not None
-        ):
-            if item.state == "CLOSED":
-                reasons.append("open PR on closed ticket")
-            elif item.state == "OPEN":
-                parent = by_ref.get(item.parent)
-                if parent is not None and parent.status != "Building":
-                    status = parent.status or "unset"
-                    reasons.append(
-                        "open PR on open ticket whose project Status is {}; "
-                        "merge gate will refuse it".format(status)
-                    )
-
-        if item.state != "OPEN":
-            if reasons:
-                found.append({
-                    "ref": item.ref,
-                    "title": item.title,
-                    "url": item.url,
-                    "reason": "; ".join(reasons),
-                })
-            continue
-
-        if (
-            pr
-            and str(pr.get("state") or "").upper() == "OPEN"
-            and str(pr.get("mergeable") or "").upper() == "CONFLICTING"
-            and _approved_current_head(pr)
-        ):
-            reasons.append("approved verdict against an unmergeable branch")
-
-        if item.ref in stale and pr_known and pr is None:
-            reasons.append("claim past its TTL with no PR")
-
-        if item.parent is None and item.status == "Building" and not item.children_total:
-            reasons.append("Building project has no tickets")
-
-        # An open ticket under a closed project has nowhere to go: no gate is
-        # watching it, the ladder ranks it through a parent that is finished,
-        # and nothing will close it. Parked parents are excluded on purpose —
-        # parking is a decision, and its tickets are meant to sit. Detection
-        # only; nothing here closes anything.
-        parent = by_ref.get(item.parent or "")
-        if (
-            parent is not None
-            and parent.state != "OPEN"
-            and parent.status != "Parked"
-        ):
-            reasons.append(
-                "parent {} is closed with Status {}".format(
-                    parent.ref, parent.status or "unset"
-                )
-            )
-
-        if _auto_closeable_project(item):
-            reasons.append("finished upkeep project not closed")
-
-        dead = _dead_dependency_refs(item, by_ref)
-        if dead:
-            reasons.append(
-                "blocked on blocker that will never close: {}".format(
-                    ", ".join(dead))
-            )
-
-        if unclearable_block(item):
-            reasons.append(_unclearable_block_reason(item))
-
-        reasons.extend(cycle_reasons.get(item.ref, []))
-
+        reasons = [
+            reason for reason in (check(item, facts) for check in STRANDED_CHECKS)
+            if reason
+        ]
         if reasons:
             found.append({
                 "ref": item.ref,
@@ -14847,7 +15995,7 @@ def cmd_queue(
             class_display(item, by_ref),
             item.ref,
             humanise(item.waited(now)),
-            gate_question(item),
+            gate_question(item, by_ref),
         ),
     )
 
@@ -14864,7 +16012,7 @@ def cmd_queue(
                 class_display(item, by_ref),
                 item.ref,
                 humanise(item.waited(now)),
-                gate_question(item),
+                gate_question(item, by_ref),
             ),
         )
 
@@ -15097,6 +16245,9 @@ _BRIEF_UNAVAILABLE = object()
 _ACTIVE_BRIEF_CACHE: contextvars.ContextVar = contextvars.ContextVar(
     "active_brief_cache", default=None
 )
+_ACTIVE_BRIEF_HEARTBEAT_CACHE: contextvars.ContextVar = contextvars.ContextVar(
+    "active_brief_heartbeat_cache", default=None
+)
 _BRIEF_SECTION_STATE: contextvars.ContextVar = contextvars.ContextVar(
     "brief_section_state", default=None
 )
@@ -15132,12 +16283,16 @@ class BriefCache:
     def __init__(self):
         self._pr_facts = _BRIEF_UNAVAILABLE
         self._heartbeat_rows: Dict[str, List[Dict]] = {}
+        self._strict_heartbeat_rows: Dict[str, List[Dict]] = {}
+        self._strict_heartbeat_errors: Dict[str, Exception] = {}
         self._comment_tails: Dict[str, List[Dict]] = {}
 
     def clear(self) -> None:
         """Forget auxiliary reads after a command may have mutated GitHub."""
         self._pr_facts = _BRIEF_UNAVAILABLE
         self._heartbeat_rows.clear()
+        self._strict_heartbeat_rows.clear()
+        self._strict_heartbeat_errors.clear()
         self._comment_tails.clear()
 
     def get_pr_facts(self, items: Sequence[Item]):
@@ -15170,6 +16325,8 @@ class BriefCache:
         return self.comment_tails(items)
 
     def heartbeat_rows(self, agent: str) -> List[Dict]:
+        if agent in self._strict_heartbeat_rows:
+            return self._strict_heartbeat_rows[agent]
         if agent in self._heartbeat_rows:
             return self._heartbeat_rows[agent]
 
@@ -15198,9 +16355,49 @@ class BriefCache:
         self._heartbeat_rows[agent] = rows
         return rows
 
+    def brief_heartbeat_rows(self, agent: str) -> List[Dict]:
+        """Read strict heartbeat history once for the five published sections."""
+        if agent in self._strict_heartbeat_rows:
+            return self._strict_heartbeat_rows[agent]
+        if agent in self._strict_heartbeat_errors:
+            raise self._strict_heartbeat_errors[agent]
+
+        import heartbeat
+
+        timeout = _brief_timeout_remaining()
+        try:
+            if timeout is None:
+                rows = heartbeat.read_brief(agent)
+            else:
+                try:
+                    rows = heartbeat.read_brief(agent, timeout=timeout)
+                except TypeError as exc:
+                    # Keep fixture-era one-argument test doubles compatible
+                    # while the real heartbeat reader uses the bound.
+                    if "timeout" not in str(exc):
+                        raise
+                    rows = heartbeat.read_brief(agent)
+        except subprocess.TimeoutExpired as exc:
+            state = _BRIEF_SECTION_STATE.get()
+            section = state[0] if state else "unknown"
+            error = BriefSectionTimeout(
+                section, "heartbeat read timed out"
+            )
+            self._strict_heartbeat_errors[agent] = error
+            raise error from exc
+        except Exception as exc:
+            self._strict_heartbeat_errors[agent] = exc
+            raise
+
+        self._strict_heartbeat_rows[agent] = rows
+        return rows
+
 
 def _brief_heartbeat_rows(agent: str) -> List[Dict]:
     """Read one heartbeat spool, reusing the active brief cache when present."""
+    brief_cache = _ACTIVE_BRIEF_HEARTBEAT_CACHE.get()
+    if brief_cache is not None:
+        return brief_cache.brief_heartbeat_rows(agent)
     cache = _ACTIVE_BRIEF_CACHE.get()
     if cache is not None:
         return cache.heartbeat_rows(agent)
@@ -15214,6 +16411,10 @@ def _read_outcome_signals(now: datetime) -> Dict[str, object]:
         import outcomes
 
         return outcomes.signal_summary(outcomes.read_records(), now=now)
+    except BriefSectionTimeout:
+        # The section runner owns a timeout: it publishes null and names the
+        # section in `missing`, which this fallback would hide (#2131).
+        raise
     except Exception as exc:
         # Outcome history is diagnostic input. Keep the brief usable when its
         # separate heartbeat-branch read is unavailable, while making the
@@ -15303,6 +16504,46 @@ def _brief_timed(
     return value
 
 
+def _brief_section(
+    name: str,
+    reader: Callable[[], object],
+    missing: List[Dict[str, str]],
+    timings: Dict[str, object],
+    degraded: List[Dict[str, object]],
+    *,
+    deadline: Optional[float] = None,
+    unread_error: Optional[str] = None,
+) -> object:
+    """Run one brief section to its published value; ``None`` means unread.
+
+    The one section runner (#2131): ``cmd_brief`` runs its sections through
+    it, and ``main`` runs the reads it makes before ``cmd_brief`` through it
+    too, so every section keeps #1595's contract. A section skipped by its
+    budget or the shared deadline, timed out, or whose reader raises publishes
+    ``None`` with exactly one ``missing`` entry; a skip or timeout also keeps
+    ``_brief_timed``'s ``degraded`` record. ``unread_error`` words that entry
+    for a skip or timeout where the caller already has its own wording.
+    """
+    value = _brief_timed(
+        name,
+        lambda: _brief_read(name, reader, missing),
+        timings,
+        degraded,
+        deadline=None if name in BRIEF_PURE_SECTIONS else deadline,
+    )
+    if value is _BRIEF_UNAVAILABLE:
+        if not any(entry.get("section") == name for entry in missing):
+            missing.append({
+                "section": name,
+                "error": unread_error or (
+                    "could not read {} within its budget; this is "
+                    "an unread section, not an empty one".format(name)
+                ),
+            })
+        return None
+    return value
+
+
 def cmd_brief(
     items: List[Item],
     now: datetime,
@@ -15325,26 +16566,14 @@ def cmd_brief(
         deadline = time.perf_counter() + BRIEF_TOTAL_BUDGET_SECONDS
     cache = brief_cache or _ACTIVE_BRIEF_CACHE.get() or BriefCache()
     cache_token = _ACTIVE_BRIEF_CACHE.set(cache)
+    heartbeat_cache_token = _ACTIVE_BRIEF_HEARTBEAT_CACHE.set(cache)
     deferred_pure: Dict[str, Callable[[], object]] = {}
     deferred_section = object()
 
     def run_section(name: str, reader: Callable[[], object]):
-        value = _brief_timed(
-            name,
-            lambda: _brief_read(name, reader, missing),
-            timings,
-            degraded,
-            deadline=None if name in BRIEF_PURE_SECTIONS else deadline,
+        return _brief_section(
+            name, reader, missing, timings, degraded, deadline=deadline
         )
-        if value is _BRIEF_UNAVAILABLE:
-            if not any(entry.get("section") == name for entry in missing):
-                missing.append({
-                    "section": name,
-                    "error": "could not read {} within its budget; this is "
-                             "an unread section, not an empty one".format(name),
-                })
-            return None
-        return value
 
     def section(name: str, reader: Callable[[], object]):
         if name in BRIEF_PURE_SECTIONS:
@@ -15360,6 +16589,68 @@ def cmd_brief(
         return decisions, by_ref, [
             item_json(i, now, by_ref) for i in decisions
         ], [watch_gate_json(i, now, by_ref) for i in watched]
+
+    try:
+        import heartbeat
+
+        heartbeat_providers = sorted(heartbeat.PROVIDERS)
+        heartbeat_agents = sorted(
+            set(heartbeat_providers) | set(METERED_AGENTS)
+        )
+        active_heartbeat_agents = [
+            agent for agent in heartbeat_providers
+            if agent not in heartbeat.RETIRED_AGENTS
+        ]
+        heartbeat_module_error = None
+    except Exception as exc:
+        heartbeat_providers = []
+        heartbeat_agents = []
+        active_heartbeat_agents = []
+        heartbeat_module_error = _brief_error(exc)
+
+    heartbeat_errors: Dict[str, str] = (
+        {"unknown": heartbeat_module_error}
+        if heartbeat_module_error else {}
+    )
+
+    def read_provider_heartbeat(agent: str) -> None:
+        name = "heartbeat_" + agent
+        rows = section(
+            name, lambda agent=agent: cache.brief_heartbeat_rows(agent)
+        )
+        if rows is not None:
+            return
+        error = "heartbeat read failed"
+        for entry in missing:
+            if entry.get("section") == name:
+                entry.setdefault("agent", agent)
+                error = entry.get("error", error)
+        heartbeat_errors[agent] = error
+
+    def heartbeat_section(
+        name: str, agents: Sequence[str], reader: Callable[[], object]
+    ):
+        failures = (
+            [("unknown", heartbeat_module_error)]
+            if heartbeat_module_error else [
+                (agent, heartbeat_errors[agent])
+                for agent in agents if agent in heartbeat_errors
+            ]
+        )
+        for agent, error in failures:
+            missing.append({
+                "section": name,
+                "agent": agent,
+                "error": "heartbeat read unavailable for {}: {}".format(
+                    agent, error
+                ),
+            })
+        if failures:
+            # The provider read already established that this section's input
+            # is unavailable. Publish null without asking its consumer to read
+            # the same heartbeat again.
+            return section(name, lambda: None)
+        return section(name, reader)
 
     try:
         decision_result = section("items", decision_payload)
@@ -15438,9 +16729,21 @@ def cmd_brief(
             "maintenance_load", lambda: maintenance_load(items, now)
         )
         disposal_report = section("disposal", lambda: disposal(items, now))
-        resend = section("resend_ratio", lambda: recent_resend_ratio(now))
-        merges = section(
-            "unattended_merges", lambda: unattended_merges(now)
+
+        for agent in heartbeat_agents:
+            read_provider_heartbeat(agent)
+
+        all_heartbeat_agents = (
+            heartbeat_providers
+            if heartbeat_module_error is None else []
+        )
+        resend = heartbeat_section(
+            "resend_ratio", METERED_AGENTS,
+            lambda: recent_resend_ratio(now),
+        )
+        merges = heartbeat_section(
+            "unattended_merges", all_heartbeat_agents,
+            lambda: unattended_merges(now),
         )
         approvals = section(
             "unattended_approvals",
@@ -15450,10 +16753,17 @@ def cmd_brief(
             "connector_gate_answers",
             lambda: connector_gate_answers(items, now, brief_cache=cache),
         )
-        run_summary = section("run_summary", lambda: agent_run_summary(now))
-        health = section("agent_health", lambda: agent_health(now))
-        touched = section(
-            "working_tree_touched", lambda: working_tree_touched(now)
+        run_summary = heartbeat_section(
+            "run_summary", active_heartbeat_agents,
+            lambda: agent_run_summary(now),
+        )
+        health = heartbeat_section(
+            "agent_health", active_heartbeat_agents,
+            lambda: agent_health(now),
+        )
+        touched = heartbeat_section(
+            "working_tree_touched", all_heartbeat_agents,
+            lambda: working_tree_touched(now),
         )
         rejected = section(
             "rejected_merges", lambda: rejected_merges(items, now)
@@ -15464,6 +16774,22 @@ def cmd_brief(
         )
         price_changes = section(
             "price_changes", lambda: price_watch.recent_changes(now),
+        )
+        recent_watch_cache = None
+
+        def recent_watch_values():
+            nonlocal recent_watch_cache
+            if recent_watch_cache is None:
+                recent_watch_cache = nightly_watch.recent_entries(now)
+            return recent_watch_cache
+
+        model_releases = section(
+            "model_releases",
+            lambda: recent_watch_values()["model_releases"],
+        )
+        watch_faults = section(
+            "watch_faults",
+            lambda: recent_watch_values()["watch_faults"],
         )
 
         # The reader-bound sections have now had their deadline-bounded turn.
@@ -15503,6 +16829,8 @@ def cmd_brief(
         rejected = pure_values["rejected_merges"]
         status_mismatches = pure_values["status_state_mismatches"]
         price_changes = pure_values["price_changes"]
+        model_releases = pure_values["model_releases"]
+        watch_faults = pure_values["watch_faults"]
         pending_wakes = pending_wakes_json(parked)
 
         blocked_comment_errors = [
@@ -15584,6 +16912,8 @@ def cmd_brief(
             "member_issues_without_project_items": orphan_issues,
             "outcome_signals": outcome_signals,
             "price_changes": price_changes,
+            "model_releases": model_releases,
+            "watch_faults": watch_faults,
             "rejected_merges": rejected,
             "degraded": degraded,
             "timings": timings,
@@ -15595,6 +16925,7 @@ def cmd_brief(
         print(json.dumps(brief, indent=2))
         return 0
     finally:
+        _ACTIVE_BRIEF_HEARTBEAT_CACHE.reset(heartbeat_cache_token)
         _ACTIVE_BRIEF_CACHE.reset(cache_token)
 
 
@@ -15656,6 +16987,8 @@ def claim_ticket(
     now: datetime,
     target: Item,
     pr_facts: Optional[Dict[str, Optional[Dict[str, object]]]] = None,
+    run: Optional[str] = None,
+    agent: Optional[str] = None,
 ) -> Optional[str]:
     """Write a ticket claim, or return the reason it must be refused."""
     running = in_motion(items, now, pr_facts=pr_facts)
@@ -15687,6 +17020,20 @@ def claim_ticket(
         print("took over stale claim on {}".format(item.ref), file=sys.stderr)
 
     write_lock(target, now.strftime("%Y-%m-%dT%H:%M:%SZ"))
+    if run and agent:
+        try:
+            import heartbeat
+
+            by_ref = {item.ref: item for item in items}
+            heartbeat.record_binding(
+                agent, run, "ticket", target.ref,
+                repo=target.repo,
+                klass=effective_class(target, by_ref),
+            )
+        except Exception:
+            # Binding is bookkeeping; keep the successful claim as the
+            # correctness-bearing write, like begin's run binding.
+            pass
     # `Ready -> Building` is written on the first claim, here in the shared
     # implementation so `funnel begin` (#349) and `funnel claim` promote alike.
     _begin_parent(items, target)
@@ -15773,6 +17120,8 @@ def cmd_claim(
     now: datetime,
     ref: str,
     pr_facts: Optional[Dict[str, Optional[Dict[str, object]]]] = None,
+    run: Optional[str] = None,
+    agent: Optional[str] = None,
 ) -> int:
     """Claim a ticket, or refuse. Two separate refusals, deliberately.
 
@@ -15787,8 +17136,14 @@ def cmd_claim(
     Refusing is the normal outcome and is not an error worth shouting about; the
     caller distinguishes by exit code.
     """
+    if bool(run) != bool(agent):
+        print("refused — --run and --agent must be supplied together",
+              file=sys.stderr)
+        return 1
     target = find(items, ref)
-    refusal = claim_ticket(items, now, target, pr_facts=pr_facts)
+    refusal = claim_ticket(
+        items, now, target, pr_facts=pr_facts, run=run, agent=agent,
+    )
     if refusal is not None:
         print(refusal, file=sys.stderr)
         return 1
@@ -16261,7 +17616,7 @@ def cmd_send_back(items: List[Item], now: datetime, ref: str, reason: str,
                   confirmed: bool = False, run: Optional[str] = None,
                   agent: Optional[str] = None,
                   instruction: Optional[str] = None) -> int:
-    """Return a Shaped project to Ideas on Nate's explicit instruction."""
+    """Return a Shaped project to Ideas, ready for reshaping."""
     if not isinstance(reason, str) or not reason.strip():
         raise GitHubError("send-back requires a non-empty reason")
     if not isinstance(instruction, str) or not instruction.strip():
@@ -16303,12 +17658,41 @@ def cmd_send_back(items: List[Item], now: datetime, ref: str, reason: str,
     if refusal is not None:
         raise GitHubError(refusal)
 
-    # Keep an already-loaded FunnelSession aligned with the confirmed write,
-    # without changing the plan body or any routing fields.
+    # Record the confirmed Status write before the label write. If that
+    # separate GitHub mutation fails, the next run can reconcile from GitHub
+    # and this session still reflects the Status that did succeed.
     item.status = fresh.status
     item.status_since = fresh.status_since
     item.status_updated_at = fresh.status_updated_at
     item.status_events = fresh.status_events
+    item.labels = list(fresh.labels)
+
+    if "needs-shaping" not in fresh.labels:
+        label_error = None
+        for _attempt in range(2):
+            try:
+                edit = _run_gh(
+                    ["gh", "issue", "edit", str(item.number), "--repo",
+                     item.repo, "--add-label", "needs-shaping"],
+                    capture_output=True, text=True,
+                )
+            except (OSError, subprocess.SubprocessError, GitHubError) as exc:
+                label_error = str(exc)
+                continue
+            if edit.returncode == 0:
+                fresh.labels.append("needs-shaping")
+                label_error = None
+                break
+            label_error = (
+                (getattr(edit, "stderr", None) or "").strip()
+                or "gh exited with status {}".format(edit.returncode)
+            )
+        if label_error is not None:
+            raise GitHubError(
+                "moved {} to Ideas, but could not add needs-shaping after "
+                "one retry: {}".format(item.ref, label_error)
+            )
+        item.labels = list(fresh.labels)
 
     comment = _run_gh(
         ["gh", "issue", "comment", str(item.number), "--repo", item.repo,
@@ -16328,9 +17712,11 @@ def cmd_send_back(items: List[Item], now: datetime, ref: str, reason: str,
 
 
 def _hold_refusal(item: Item) -> Optional[str]:
-    """Why ``item`` cannot be held at Accept, or ``None`` when it can (#1724).
+    """Why item cannot be held at Shaped or Accept, or None when it can (#1724).
 
-    A hold means something only where ``gate_question`` would otherwise ask
+    A Shaped hold is for an open root project and carries named conditions
+    and proof. An Accept hold means something only where ``gate_question``
+    would otherwise ask
     "Accept it?": an open Building project with every ticket closed that does
     not close itself. The unattended close (``_auto_closeable_project``)
     never reads ``blocked``, so a hold on a project that closes itself would
@@ -16342,6 +17728,8 @@ def _hold_refusal(item: Item) -> Optional[str]:
     if item.state != "OPEN":
         return "{} is {}; only an open project waits at Accept".format(
             item.ref, item.state)
+    if item.status == "Shaped":
+        return None
     if item.status != "Building":
         return (
             "{} is at {}, not Building; only a finished Building project "
@@ -16371,15 +17759,13 @@ def cmd_hold(items: List[Item], now: datetime, ref: str, reason: str,
              until: Optional[date] = None, on: Sequence[str] = (),
              confirmed: bool = False, run: Optional[str] = None,
              agent: Optional[str] = None,
-             instruction: Optional[str] = None) -> int:
-    """Record Nate's hold on a finished project at Accept (#1724).
+             instruction: Optional[str] = None,
+             proof: Sequence[str] = ()) -> int:
+    """Record a Shaped-plan hold or finished-project Accept hold (#1724).
 
-    A hold written as prose ("Accept held by Nate ...") is read by nothing, so
-    the project kept asking "Accept it?". The ``blocked`` label with a
-    parseable ``**Blocked until/on ...:**`` comment already takes an item out
-    of his queue, shows its condition, and is lifted by
-    ``clear_satisfied_blocks`` once that condition is met; this verb writes
-    exactly that form, in Nate's relayed voice.
+    Shaped holds write one proof-linked record with the current plan version,
+    named issue conditions, and the owner reason. Finished Building projects
+    retain their existing date- or issue-conditioned Accept hold record.
 
     **Dry run unless ``confirmed``**, like the gate answers: holding is
     Nate's call at his own gate.
@@ -16390,13 +17776,23 @@ def cmd_hold(items: List[Item], now: datetime, ref: str, reason: str,
         raise GitHubError(refusal)
     if (until is None) == (not on):
         raise GitHubError("a hold needs exactly one of --until or --on")
+    shaped_hold = item.status == "Shaped"
+    if shaped_hold and until is not None:
+        raise GitHubError("a Shaped hold needs issue conditions via --on")
     if until is not None and until <= _block_condition_date(now):
         raise GitHubError("hold date must be after today's UTC date")
-    body = _hold_comment_body(reason, until=until, on=on)
+    if shaped_hold:
+        if not proof:
+            raise GitHubError(
+                "a Shaped hold needs at least one --proof comment URL")
+        body = _shaped_hold_record_body(item, reason, on, proof)
+    else:
+        body = _hold_comment_body(reason, until=until, on=on)
 
     if not confirmed:
-        print("would hold {} at Accept ({}) with the blocked label and:".format(
-            item.ref, item.title))
+        place = "as a Shaped plan" if shaped_hold else "at Accept"
+        print("would hold {} {} ({}) with the blocked label and:".format(
+            item.ref, place, item.title))
         print(body)
         print("\nNothing was changed. Re-run with --yes to record the hold.")
         return 1
@@ -16414,6 +17810,10 @@ def cmd_hold(items: List[Item], now: datetime, ref: str, reason: str,
     )
     if comment.returncode != 0:
         raise GitHubError(comment.stderr.strip())
+    if shaped_hold:
+        write_project_select(
+            item.item_id, "Needs", "external-event", item.ref)
+        item.needs = "external-event"
     edit = _run_gh(
         ["gh", "issue", "edit", str(item.number), "--repo", item.repo,
          "--add-label", "blocked"],
@@ -16427,7 +17827,120 @@ def cmd_hold(items: List[Item], now: datetime, ref: str, reason: str,
     if not item.is_blocked:
         item.labels.append("blocked")
 
-    print("{} held at Accept\n{}".format(item.ref, body))
+    place = "at Shaped" if shaped_hold else "at Accept"
+    print("{} held {}\n{}".format(item.ref, place, body))
+    return 0
+
+
+def _reload_shaped_hold_for_release(item: Item) -> str:
+    """Re-read a Shaped hold, its plan and labels before an owner release."""
+    live_state = live_issue_state(item)
+    if live_state != "OPEN":
+        raise GitHubError(
+            "{} is not open on GitHub; its Shaped hold cannot be released"
+            .format(item.ref)
+        )
+    payload = _gh_json(
+        "gh", "issue", "view", str(item.number), "--repo", item.repo,
+        "--json", "state,body,comments,labels",
+    )
+    if (
+        not isinstance(payload, Mapping)
+        or not isinstance(payload.get("body"), str)
+        or not isinstance(payload.get("comments"), list)
+        or not isinstance(payload.get("labels"), list)
+        or str(payload.get("state") or "").upper() != "OPEN"
+    ):
+        raise GitHubError(
+            "could not re-read the live Shaped hold on {}".format(item.ref)
+        )
+    labels = []
+    for label in payload["labels"]:
+        name = label.get("name") if isinstance(label, Mapping) else label
+        if isinstance(name, str):
+            labels.append(name)
+    comments = trusted_comments(payload["comments"])
+    (
+        item.block_references,
+        item.blocked_until,
+        item.block_reason,
+        item.block_event,
+        item.needs_decision,
+        item.shaped_hold,
+    ) = _current_block_comment_details(comments)
+    item.shaped_hold_clear = _current_shaped_hold_clear(comments)
+    item.block_comments_error = None
+    item.state = "OPEN"
+    item.body = payload["body"]
+    item.labels = labels
+
+    if item.parent is not None or item.status != "Shaped":
+        raise GitHubError(
+            "{} is not an open Shaped project".format(item.ref)
+        )
+    if not item.item_id:
+        raise GitHubError("{} is not in the Project".format(item.ref))
+    if not isinstance(item.shaped_hold, dict):
+        raise GitHubError("{} has no current Shaped hold to release".format(
+            item.ref))
+    if not item.body.strip():
+        raise GitHubError("{} has no current Shaped plan to re-present".format(
+            item.ref))
+    return item.body
+
+
+def cmd_release_shaped_hold(
+    items: List[Item], now: datetime, ref: str, confirmed: bool,
+    instruction: Optional[str] = None, run: Optional[str] = None,
+    agent: Optional[str] = None,
+) -> int:
+    """Release a Shaped hold only on Nate's explicit owner instruction."""
+    item = find(items, ref)
+    if not confirmed:
+        print("would explicitly release the Shaped hold on {}".format(item.ref))
+        print("\nNothing was changed. Re-run with --yes and --instruction.")
+        return 1
+    if not isinstance(instruction, str) or not instruction.strip():
+        raise GitHubError(
+            "an explicit hold release requires Nate's verbatim --instruction"
+        )
+
+    body = _reload_shaped_hold_for_release(item)
+    record = item.shaped_hold
+    if not isinstance(record, dict):
+        raise GitHubError("{} has no current Shaped hold to release".format(
+            item.ref))
+    if _shaped_hold_clear_matches(item, record):
+        _finish_shaped_hold_clear(item, body, now)
+        print("{} was already cleared; the Shaped approval gate is pending again"
+              .format(item.ref))
+        return 0
+    if not item.is_blocked:
+        raise GitHubError("{} has no active blocked Shaped hold".format(
+            item.ref))
+
+    current_plan_version = shaped_plan_version(body)
+    clear_body = render_explicit_shaped_hold_release(
+        record, current_plan_version)
+    comment = _run_gh(
+        [
+            "gh", "issue", "comment", str(item.number), "--repo", item.repo,
+            "--body", append_provenance(
+                clear_body, "nate-relayed", at=now, run=run, agent=agent,
+                instruction=instruction,
+            ),
+        ],
+        capture_output=True, text=True,
+    )
+    if comment.returncode != 0:
+        raise GitHubError(comment.stderr.strip())
+    item.shaped_hold_clear = parse_shaped_hold_clear_comment(clear_body)
+    if item.shaped_hold_clear is None:
+        raise GitHubError("explicit hold release for {} did not parse back".format(
+            item.ref))
+    _finish_shaped_hold_clear(item, body, now)
+    print("{} explicitly released; the Shaped approval gate is pending again"
+          .format(item.ref))
     return 0
 
 
@@ -16435,11 +17948,16 @@ def cmd_answer_gates(items: List[Item], now: datetime, ref: str,
                      answer: str, decider: str,
                      run: Optional[str] = None,
                      agent: Optional[str] = None) -> int:
-    """Record one answered Gates question in the plan body.
+    """Record one answered Gates question and re-check delegated Shaped work.
 
     The sanctioned post-Ready write. It is one ``gh issue edit``: the marker
     and the Gates line move together or neither does, so no reader can catch
     the body in a state where the two disagree.
+
+    Once the answer clears Needs, a Nate-origin Shaped plan is checked with
+    the existing self-approval predicate. The ordinary sweep remains
+    agent-origin only; this command handles the one plan whose answer just
+    made its delegation actionable.
 
     Deliberately not gated on Status. The question this answers is asked from
     a block, and a blocked project can be sitting at Shaped, Ready or Building
@@ -16470,8 +17988,8 @@ def cmd_answer_gates(items: List[Item], now: datetime, ref: str,
     )
     if out.returncode != 0:
         raise GitHubError(out.stderr.strip())
-    # The caller may evaluate this item again in the same session; keep it
-    # aligned with what GitHub now holds rather than with what it held.
+    # Keep the same-session item aligned with what GitHub now holds before
+    # the single-plan self-approval check.
     item.body = body
     remaining_needs = "human" if plan_needs_nate(body) else "none"
     write_project_select(item.item_id, "Needs", remaining_needs, item.ref)
@@ -16486,8 +18004,66 @@ def cmd_answer_gates(items: List[Item], now: datetime, ref: str,
             "wrote {} but the answered-Gates reader rejects the "
             "record".format(item.ref)
         )
-    print("{} Gates answered by {}\n{}\n{}".format(
-        item.ref, recorded["decider"], recorded["answer"], item.url))
+
+    self_approved = False
+    if item.status == "Shaped" and item.origin == "Nate":
+        by_ref = {item.ref: item}
+        if shaped_self_approvable(item, by_ref):
+            body = _loaded_item_body(item)
+            klass = effective_class(item, by_ref)
+            reason = (
+                "needs_nate all null; class {} self-approvable; "
+                "origin override to agents"
+            ).format(klass)
+            scan_only = item.risk == "escalated"
+            if scan_only:
+                reason += "; " + scan_only_escalation_note(
+                    plan_is_escalated(body))
+
+            try:
+                status_error = _write_status(item, "Ready", now)
+            except (OSError, subprocess.SubprocessError, GitHubError) as exc:
+                status_error = str(exc)
+            if status_error is not None:
+                raise GitHubError(
+                    "Gates answer recorded, but {} could not advance to "
+                    "Ready: {}".format(item.ref, status_error)
+                )
+
+            basis = "{}; {}".format(
+                reason, "no declared risk" if scan_only
+                else "no escalated risk"
+            )
+            authority_signals = needs_nate_signals(body)
+            if authority_signals:
+                basis += "; authority signals: {}".format(
+                    ", ".join(authority_signals)
+                )
+            try:
+                comment = _run_gh(
+                    ["gh", "issue", "comment", str(item.number),
+                     "--repo", item.repo,
+                     "--body", self_approval_comment(
+                         basis, at=now, run=run, agent=agent
+                     )],
+                    capture_output=True, text=True,
+                )
+            except (OSError, subprocess.SubprocessError, GitHubError) as exc:
+                raise GitHubError(
+                    "Ready was written but the Self-approved marker "
+                    "failed: {}".format(exc)
+                ) from exc
+            if comment.returncode != 0:
+                raise GitHubError(
+                    "Ready was written but the Self-approved marker "
+                    "failed: {}".format(comment.stderr.strip())
+                )
+            self_approved = True
+
+    status_note = "\nShaped self-approved → Ready" if self_approved else ""
+    print("{} Gates answered by {}\n{}{}\n{}".format(
+        item.ref, recorded["decider"], recorded["answer"], status_note,
+        item.url))
     return 0
 
 
@@ -16561,11 +18137,33 @@ def _set_pinned(items: List[Item], now: datetime, ref: str, pinned: bool,
 def cmd_comment(items: List[Item], now: datetime, ref: str, body: str,
                 voice: str, run: Optional[str] = None,
                 agent: Optional[str] = None,
-                apply_blocked: bool = False) -> int:
+                apply_blocked: bool = False,
+                blocked_on: Optional[Sequence[str]] = None,
+                because: Optional[str] = None,
+                proof: Sequence[str] = ()) -> int:
     """Post an issue comment with an explicit, stamped voice."""
-    if not body.strip():
+    if not body.strip() and not blocked_on:
         raise GitHubError("a non-empty comment body is required")
     item = find(items, ref)
+    if blocked_on:
+        if not item.item_id:
+            raise GitHubError("{} is not in the Project".format(item.ref))
+        if item.status == "Shaped" and item.parent is None:
+            if voice != "nate-relayed":
+                raise GitHubError(
+                    "a Shaped hold needs the Nate-relayed comment voice")
+            if not proof:
+                raise GitHubError(
+                    "a Shaped hold needs at least one --proof comment URL")
+            body = _shaped_hold_record_body(
+                item, because or "", blocked_on, proof)
+        else:
+            if proof:
+                raise GitHubError(
+                    "--proof is only supported for a Shaped plan block")
+            body = _blocked_comment_body(blocked_on, because or "")
+    elif apply_blocked and not item.item_id:
+        raise GitHubError("{} is not in the Project".format(item.ref))
     comment = _run_gh(
         ["gh", "issue", "comment", str(item.number), "--repo", item.repo,
          "--body", append_provenance(body, voice, at=now, run=run, agent=agent)],
@@ -16573,11 +18171,10 @@ def cmd_comment(items: List[Item], now: datetime, ref: str, body: str,
     )
     if comment.returncode != 0:
         raise GitHubError(comment.stderr.strip())
-    if apply_blocked:
-        if not item.item_id:
-            raise GitHubError("{} is not in the Project".format(item.ref))
-        write_project_select(item.item_id, "Needs", "human", item.ref)
-        item.needs = "human"
+    if apply_blocked or blocked_on:
+        needs = "human" if apply_blocked else "external-event"
+        write_project_select(item.item_id, "Needs", needs, item.ref)
+        item.needs = needs
         edit = _run_gh(
             [
                 "gh", "issue", "edit", str(item.number), "--repo", item.repo,
@@ -16586,9 +18183,13 @@ def cmd_comment(items: List[Item], now: datetime, ref: str, body: str,
             capture_output=True, text=True,
         )
         if edit.returncode != 0:
+            purpose = (
+                "needs-decision comment" if apply_blocked
+                else "blocked-on comment"
+            )
             raise GitHubError(
-                "recorded needs-decision comment on {}, but could not add its "
-                "blocked label: {}".format(item.ref, edit.stderr.strip())
+                "recorded {} on {}, but could not add its blocked label: {}"
+                .format(purpose, item.ref, edit.stderr.strip())
             )
         if not item.is_blocked:
             item.labels.append("blocked")
@@ -16778,7 +18379,9 @@ def cmd_capture(items: List[Item], now: datetime, title: str, note: Optional[str
                 klass: Optional[str] = None,
                 caused_by: Optional[Sequence[str]] = None,
                 voice: str = "agent",
-                observed: Optional[str] = None) -> int:
+                observed: Optional[str] = None,
+                created_urls: Optional[List[str]] = None,
+                quiet: bool = False) -> int:
     """Capture an idea. Unbounded and guilt-free, by design."""
     if origin not in ORIGIN_VOICES:
         raise GitHubError(
@@ -16855,7 +18458,10 @@ def cmd_capture(items: List[Item], now: datetime, title: str, note: Optional[str
         write_project_select(
             item_id, "Risk", required_tier(title, note or ""), url)
         write_project_select(item_id, "Needs", "none", url)
-        print("{}  → Ideas (needs-shaping) in {}".format(url, repo))
+        if created_urls is not None:
+            created_urls.append(url)
+        if not quiet:
+            print("{}  → Ideas (needs-shaping) in {}".format(url, repo))
     else:
         raise GitHubError(_capture_item_add_error(add))
     return 0
@@ -17294,41 +18900,110 @@ def classify_blockers(blockers: Iterable[dict], repo: str) -> Dict[str, List[str
 
 def _current_block_comment_details(
     comments: Sequence[Mapping[str, object]],
-) -> Optional[Tuple[List[str], Optional[date], str,
-                    Optional[Dict[str, str]]]]:
-    """Choose the newest block-making comment by its GitHub creation time.
+) -> Tuple[List[str], Optional[date], Optional[str],
+           Optional[Dict[str, str]], Optional[str],
+           Optional[Dict[str, object]]]:
+    """Read the current block record: the newest one of any kind (#2166).
 
-    A later Declined comment starts a new blocked episode without machine-
-    readable conditions. An older Blocked-on header must not satisfy it. A
-    newer Blocked-on header can establish conditions for that later episode.
+    Three kinds of comment record a block: a parseable block header, a
+    Needs-a-decision question, a Declined, or a Shaped hold. The newest
+    record is current; its fields are returned in a six-field tuple:
+    references, blocked date, reason, event, question, and Shaped-hold record.
+    Other kinds' fields are empty when the thread has no current record.
+
+    A later Declined starts a new blocked episode without machine-readable
+    conditions (#2019), and a later question is waiting on Nate's answer, so
+    an older header's conditions must satisfy neither. A newer header can
+    establish conditions for a later episode, and then an older question is
+    no longer the one being asked.
+
+    Newest is by GitHub creation time when every record carries one, the later
+    comment winning a tie; when any record lacks it, by body order, which is
+    the order GitHub returns comments in.
     """
-    bodies = [str(comment.get("body") or "") for comment in comments]
-    block_rows = []
-    decline_times = []
-    has_decline = False
-    for comment, body in zip(comments, bodies):
+    records = []
+    for index, comment in enumerate(comments):
+        body = str(comment.get("body") or "")
+        shaped_hold = parse_shaped_hold_comment(body)
+        if shaped_hold is not None:
+            # Hold conditions stay out of generic block references until the
+            # hold gate has checked the attached proof.
+            fields = (
+                [], None, str(shaped_hold["Hold-Reason"]), None, None,
+                shaped_hold,
+            )
+            records.append((parse_time(comment.get("createdAt")), index, fields))
+            continue
         details = _parse_block_comment_details([body])
         if details is not None:
-            block_rows.append((parse_time(comment.get("createdAt")), details))
-        if body.lstrip().startswith(DECLINED_PREFIX):
-            has_decline = True
-            decline_times.append(parse_time(comment.get("createdAt")))
+            fields = details + (None, None)
+        elif NEEDS_DECISION_RE.match(body):
+            # A question header whose text reads as empty is still the
+            # current record: it asks rather than lets an older header clear.
+            fields = ([], None, None, None,
+                      parse_needs_decision_comment([body]), None)
+        elif body.lstrip().startswith(DECLINED_PREFIX):
+            fields = ([], None, None, None, None, None)
+        else:
+            continue
+        records.append((parse_time(comment.get("createdAt")), index, fields))
 
-    if has_decline:
+    if not records:
+        return [], None, None, None, None, None
+    if all(at is not None for at, _, _ in records):
+        return max(records, key=lambda record: record[:2])[2]
+    return records[-1][2]
+
+
+def _current_shaped_hold_clear(
+    comments: Sequence[Mapping[str, object]],
+) -> Optional[Dict[str, object]]:
+    """The newest owner-authored clear that follows the matching hold."""
+    records = []
+    for index, comment in enumerate(comments):
+        if not isinstance(comment, Mapping) or not trusted_comment(comment):
+            continue
+        body = str(comment.get("body") or "")
+        hold = parse_shaped_hold_comment(body)
+        if hold is not None:
+            records.append((parse_time(comment.get("createdAt")), index,
+                            "hold", hold))
+            continue
+        cleared = parse_shaped_hold_clear_comment(body)
+        if cleared is not None:
+            records.append((parse_time(comment.get("createdAt")), index,
+                            "clear", cleared))
+            continue
         if (
-            not block_rows
-            or any(at is None for at, _ in block_rows)
-            or any(at is None for at in decline_times)
+            _parse_block_comment_details([body]) is not None
+            or NEEDS_DECISION_RE.match(body)
+            or body.lstrip().startswith(DECLINED_PREFIX)
         ):
-            return None
-        newest_block = max(at for at, _ in block_rows)
-        newest_decline = max(decline_times)
-        if newest_decline >= newest_block:
-            return None
+            records.append((parse_time(comment.get("createdAt")), index,
+                            "reset", None))
 
-    if block_rows and all(at is not None for at, _ in block_rows):
-        return max(block_rows, key=lambda row: row[0])[1]
-    return _parse_block_comment_details(bodies)
+    if all(at is not None for at, _, _, _ in records):
+        records.sort(key=lambda record: (record[0], record[1]))
+
+    active_hold_id = None
+    active_clear = None
+    for _at, _index, kind, value in records:
+        if kind == "hold":
+            try:
+                active_hold_id = shaped_hold_id(value)
+            except ValueError:
+                active_hold_id = None
+            active_clear = None
+        elif kind == "clear":
+            if (
+                active_hold_id is not None
+                and value.get("Hold-ID") == active_hold_id
+            ):
+                active_clear = value
+        else:
+            active_hold_id = None
+            active_clear = None
+    return active_clear
 
 
 def _load_block_comment(item: Item) -> None:
@@ -17337,7 +19012,20 @@ def _load_block_comment(item: Item) -> None:
     Block comments are intentionally loaded outside the Project query. The
     normal load pays for this only for open blocked items, and the parsed state
     stays on ``Item`` for pure queue functions and the brief to reuse.
+
+    The current block record alone sets ``block_references``,
+    ``blocked_until``, ``block_reason``, ``block_event`` and
+    ``needs_decision`` and ``shaped_hold`` (#2166): an older
+    header's conditions never read beside a newer question, so the clear
+    cannot lift a block that is waiting on Nate's answer.
+
+    ``decline_reason`` stays thread-wide: it is the newest Declined however
+    old. ``gate_question`` and ``watch_owns_gate`` read it as "this ticket
+    was declined", and so does the #1942 reset of a legacy Needs ``human``
+    in ``clear_satisfied_blocks``, which runs only once a newer header's
+    conditions are satisfied.
     """
+    item.shaped_hold_clear = None
     payload = _gh_json(
         "gh", "issue", "view", str(item.number), "--repo", item.repo,
         "--json", "comments",
@@ -17350,21 +19038,23 @@ def _load_block_comment(item: Item) -> None:
     # Only the owner account's comments carry them (#1788); anyone can
     # comment on a public repository, and an outsider's copy of any of these
     # would block, unblock or re-route real work.
-    comments = trusted_comments(payload["comments"])
+    comments = [
+        row for row in payload["comments"]
+        if isinstance(row, Mapping) and trusted_comment(row)
+    ]
     bodies = [comment.get("body") or "" for comment in comments]
     item.unparseable_block_comments = unparseable_block_comment_lines(bodies)
-    item.block_event = None
-    parsed = _current_block_comment_details(comments)
-    if parsed is not None:
-        (
-            item.block_references,
-            item.blocked_until,
-            item.block_reason,
-            item.block_event,
-        ) = parsed
-    item.needs_decision = parse_needs_decision_comment(bodies)
+    (
+        item.block_references,
+        item.blocked_until,
+        item.block_reason,
+        item.block_event,
+        item.needs_decision,
+        item.shaped_hold,
+    ) = _current_block_comment_details(comments)
+    item.shaped_hold_clear = _current_shaped_hold_clear(comments)
     item.decline_reason = parse_decline_comment(bodies)
-    item.decline_route = parse_decline_route_comment(bodies)
+    item.decline_route = parse_decline_route_comment(payload["comments"])
     for body in reversed(bodies):
         record = parse_satisfied_block_comment(body)
         if record is not None:
@@ -17803,10 +19493,19 @@ def _pr_rows_for_ref(
 
 
 def _row_verdict(row: Mapping[str, object], repo: str) -> Optional[Dict]:
-    """Use the batch's comment tail, falling back for old fixture maps."""
+    """Use the batch's verdict or the row's own comment tail (#2194).
+
+    A ``ticket_pr_facts`` row carries ``verdict``; a ``_pr_fact_for_number``
+    fact carries its ``comments`` tail, resolved here with the same head rule
+    instead of a second read that could fail. Only a row with neither, as in
+    old fixture maps, reads again, and a failed read raises ``GitHubError``.
+    """
     if "verdict" in row:
         value = row.get("verdict")
         return value if isinstance(value, dict) else None
+    comments = row.get("comments")
+    if isinstance(comments, list):
+        return _latest_verdict_from_comments(comments)
     number = row.get("number")
     return latest_verdict(repo, number) if number is not None else None
 
@@ -18096,10 +19795,85 @@ def ticket_pr_facts(
     return facts
 
 
+#: Where a PR head stands for review, and why (#2192). ``state`` is one of
+#: ``closed``, ``foreign``, ``conflict``, ``wait``, ``covered`` and
+#: ``reviewable``; ``reason`` is None only for ``reviewable``.
+ReviewStanding = namedtuple("ReviewStanding", "state reason")
+
+
+def review_standing(
+    repo: str, row: Mapping[str, object],
+    verdict: object, comments: Optional[Sequence[Mapping[str, object]]],
+) -> ReviewStanding:
+    """The one reviewable-head predicate (#2192, plan #1747).
+
+    Read from fields the batched PR read and ``gh pr view`` both carry:
+    ``state``, ``headRefName``, ``headRefOid``, ``mergeable``,
+    ``mergeStateStatus``, ``statusCheckRollup`` and the trust fields.
+    ``comments`` are GitHub-shaped comment rows (``author.login``,
+    ``createdAt``). Pure, so ``engine/review.py``'s packet path can stand
+    down through it too without the funnel importing the engine.
+
+    The first state that holds decides:
+
+    - ``closed``: the PR is not open. A row without a state reads as open,
+      as the listing always has.
+    - ``foreign``: not a ``ticket/<n>`` branch, or not the funnel's own PR
+      (#1794).
+    - ``conflict``: GitHub reports the branch CONFLICTING or DIRTY; the
+      reason is the canonical blocker the merge gate writes.
+    - ``wait``: the head SHA is unreadable, GitHub has not established the
+      branch MERGEABLE, or a check has not reported yet (#900). Precedent
+      (#1019): reviewable requires MERGEABLE, and only a conflicting branch
+      rejects as stale, so an uncomputed mergeability waits for the next
+      read instead of being judged.
+    - ``covered``: a verdict covers the current head (``verdict_covers_head``).
+    - ``reviewable``: everything else. Red CI and an empty rollup are
+      reviewable, so the review pre-check rejects them with a reason.
+
+    ``verdict`` is the PR's latest verdict, or a zero-argument callable that
+    returns it; the callable is invoked only when the head is otherwise
+    reviewable, so a listing pays no verdict read for any other row.
+    """
+    state = str(row.get("state") or "OPEN").upper()
+    if state != "OPEN":
+        return ReviewStanding("closed", "PR is {}".format(state))
+    branch = str(row.get("headRefName") or "")
+    if ticket_ref_from_branch(repo, branch) is None:
+        return ReviewStanding(
+            "foreign", "branch {!r} is not a ticket/<n> branch".format(branch))
+    foreign = foreign_pr_reason(repo, row)
+    if foreign is not None:
+        return ReviewStanding(
+            "foreign", "not the funnel's own PR: {}".format(foreign))
+    conflict = _conflicting_branch_blocker(row)
+    if conflict is not None:
+        return ReviewStanding("conflict", conflict)
+    head_sha = row.get("headRefOid")
+    if not head_sha:
+        return ReviewStanding("wait", "head SHA unreadable")
+    mergeable = str(row.get("mergeable") or "").upper()
+    if mergeable != "MERGEABLE":
+        return ReviewStanding(
+            "wait", "mergeability {}".format(mergeable or "unreadable"))
+    if checks_still_running(row.get("statusCheckRollup")):
+        return ReviewStanding("wait", "checks still running")
+    if callable(verdict):
+        verdict = verdict()
+    if verdict_covers_head(
+        verdict if isinstance(verdict, dict) else None, head_sha, comments
+    ):
+        return ReviewStanding(
+            "covered",
+            "a verdict already covers head {}".format(str(head_sha)[:12]))
+    return ReviewStanding("reviewable", None)
+
+
 def review_queue(
     items: Sequence[Item], tier: Optional[str] = None,
     pr_facts: Optional[Mapping[str, Optional[Dict[str, object]]]] = None,
     output_stream: Optional[IO[str]] = None,
+    skipped: Optional[List[Dict[str, object]]] = None,
 ) -> List[Dict]:
     """Open ticket PRs that need a review, best-first.
 
@@ -18112,11 +19886,16 @@ def review_queue(
     matched to the work the same way an engine is: the expensive judgement is
     spent where the ticket says the stakes are, and nowhere else.
 
-    A PR whose checks are still running is not offered. A ticket branch that
-    GitHub reports as conflicting is rejected mechanically at its current
-    head and never offered for model review; repeated queue reads leave that
-    canonical rejection in place until the engineer pushes a new head. Red CI
-    and a normal empty rollup remain visible to the review pre-check.
+    Each row's standing comes from ``review_standing``, the predicate the
+    review packet shares (#2192). A ticket branch that GitHub reports as
+    conflicting is rejected mechanically at its current head and never
+    offered for model review; repeated queue reads leave that canonical
+    rejection in place until the engineer pushes a new head. A head that
+    waits -- checks still running, mergeability not yet MERGEABLE, or an
+    unreadable SHA -- is not offered, and when ``skipped`` is given it
+    receives ``{ref, pr, reason}`` for each waiting head in this tier, as
+    ``shapeable_idea`` reports its skips. Forks are never reported (#1794).
+    Red CI and a normal empty rollup remain visible to the review pre-check.
     """
     if pr_facts is None:
         pr_facts = ticket_pr_facts(items)
@@ -18124,19 +19903,17 @@ def review_queue(
     for ticket in items:
         if str(getattr(ticket, "state", "OPEN") or "OPEN").upper() != "OPEN":
             continue
+        recorded_risk = getattr(ticket, "risk", None)
+        needed = (
+            recorded_risk if recorded_risk in RISK_OPTIONS else "escalated"
+        )
         for row in _pr_rows_for_ref(pr_facts, ticket.ref):
             repo = ticket.repo
-            if str(row.get("state") or "OPEN").upper() != "OPEN":
-                continue
-            head = row.get("headRefName") or ""
-            if not head.startswith("ticket/"):
-                continue
-            if not is_funnel_pr(repo, row):
-                # A fork or another author's PR is never offered, and never
-                # rejected below either: no verdict is written on it (#1794).
-                continue
-            conflict = _conflicting_branch_blocker(row)
-            if conflict is not None:
+            standing = review_standing(
+                repo, row, lambda: _row_verdict(row, repo),
+                row.get("comments"),
+            )
+            if standing.state == "conflict":
                 # Conflict is a complete, deterministic rejection. Record it
                 # against this snapshot's head before it can reach a model
                 # reviewer. The gate helper makes repeat ticks idempotent and
@@ -18156,22 +19933,23 @@ def review_queue(
                         output_stream=output_stream,
                     )
                 continue
-            if checks_still_running(row.get("statusCheckRollup")):
-                # The checks have not reported yet, so the only answer a
-                # reviewer could record is "CI not green (state unknown)" —
-                # and that rejection then covers this head, locking the PR
-                # out of re-review once CI turns green (#900). Wait instead:
+            if standing.state == "wait":
+                # Nothing a reviewer could record here would be a judgement
+                # of the diff: running checks read "CI not green (state
+                # unknown)", and that rejection covers the head, locking it
+                # out of re-review once CI turns green (#900). Wait instead;
                 # the next tick reconsiders, because nothing was recorded.
+                if skipped is not None and not (tier and needed != tier):
+                    skipped.append({
+                        "ref": ticket.ref,
+                        "pr": row.get("number"),
+                        "reason": standing.reason,
+                    })
                 continue
-            verdict = _row_verdict(row, repo)
-            if verdict_covers_head(
-                verdict, row.get("headRefOid"), row.get("comments")
-            ):
-                continue  # this exact diff has already been judged
-            recorded_risk = getattr(ticket, "risk", None)
-            needed = (
-                recorded_risk if recorded_risk in RISK_OPTIONS else "escalated"
-            )
+            if standing.state != "reviewable":
+                # Closed, foreign (never rejected either: no verdict is
+                # written on a fork, #1794) or already judged at this head.
+                continue
             if tier and needed != tier:
                 continue
             candidate = {"pr": row.get("number"), "repo": repo,
@@ -18190,13 +19968,39 @@ def review_queue(
     return found
 
 
+def unshapeable_reason(state: Optional[str], status: Optional[str],
+                       children_total: int) -> Optional[str]:
+    """Why a row cannot be shaped now, or ``None`` when it can (#2139).
+
+    The one shapeable-now predicate: ``shapeable_idea`` filters with it, and
+    ``shape.apply_shape`` refuses a stale apply with it on its fresh re-read,
+    so the picker offers a row exactly when apply would proceed on it. A
+    closed issue is never shaped, nor is one that has left Ideas or already
+    has children. The needs-shaping label, tier and headroom are not here:
+    they are the picker's alone, because ``shape-apply --voice nate-relayed``
+    shapes unlabelled ideas in session.
+    """
+    if state != "OPEN":
+        return "not-open"
+    if status != "Ideas":
+        return "status-changed"
+    if children_total > 0:
+        return "with-children"
+    return None
+
+
 def shapeable_idea(items: Sequence[Item], tier: Optional[str],
-                   reading: Dict) -> Optional[Item]:
+                   reading: Dict,
+                   skipped: Optional[List[Dict[str, str]]] = None
+                   ) -> Optional[Item]:
     """Return the first idea this run may shape, or ``None``.
 
     Shaping starts new work, so it is the last optional job after review and
     breakdown. The ordering itself stays in ``ideas()``; this function only
-    filters that shared order through the existing tier and headroom rules.
+    filters that shared order through the existing tier and headroom rules
+    and ``unshapeable_reason``, the predicate ``shape.apply_shape``'s
+    fresh-read refusal shares (#2139). That refusal is the backstop for a
+    row that closes, moves or gains children after this selection.
 
     Each tier shapes its own ideas: an escalated run is offered the
     first escalated-tier idea, a standard run the first standard-tier
@@ -18216,6 +20020,16 @@ def shapeable_idea(items: Sequence[Item], tier: Optional[str],
             recorded_risk if recorded_risk in RISK_OPTIONS else "escalated"
         )
         if tier is not None and needed != tier:
+            continue
+        reason = unshapeable_reason(
+            getattr(item, "state", None), getattr(item, "status", None),
+            getattr(item, "children_total", 0))
+        if reason is not None:
+            if skipped is not None:
+                skipped.append({
+                    "ref": item.ref,
+                    "reason": reason,
+                })
             continue
         return item
     return None
@@ -18257,14 +20071,12 @@ def plan_declared_risks(plan_body: str) -> List[str]:
     ``Risk rationale`` section, however it got into the body, or a
     ``Risk: escalated`` line; either holds a plan at Shaped, while a hit from
     ``plan_escalation_matches`` alone only raises the review tier. The text is
-    the one that scan reads, so quoted, code and Rejected text declares
-    nothing. A rationale section with prose but no readable entry counts as
-    ``declared``, so a malformed record holds rather than releases; one that
-    is empty or says ``None`` declares nothing.
+    the one that scan reads (``plan_scan_text``, #2180), so nothing in a
+    region it ignores declares anything. A rationale section with prose but
+    no readable entry counts as ``declared``, so a malformed record holds
+    rather than releases; one that is empty or says ``None`` declares nothing.
     """
-    text = _strip_plan_prose_quotes(
-        asserted_text(_plan_escalation_scan_text(plan_body or ""))
-    )
+    text = plan_scan_text(plan_body or "")
     declared: List[str] = []
 
     def add(reason: str) -> None:
@@ -18419,8 +20231,12 @@ def shaped_self_approvable(item: Item,
     """Re-evaluate one Shaped plan with the existing self-approval rule.
 
     Only a declared risk holds (#1721): an escalated Risk the wording scan
-    set alone no longer does.
+    set alone no longer does. A plan whose body the load left out holds: the
+    begin view lists Origin but no body (#2147), and an override toward Nate
+    lives in the body.
     """
+    if not getattr(item, "body_loaded", True):
+        return False
     body = _loaded_item_body(item)
     override = parse_origin_override(body)
     override_target = override["target"] if override is not None else None
@@ -18442,17 +20258,47 @@ def sweep_shaped_self_approvals(
 
     The Shaped gate is re-checked by the same predicate used when a plan is
     first written. Other live questions, such as an unblock question, remain
-    owned by their existing gate and are not swept.
+    owned by their existing gate and are not swept. The compact begin view
+    carries the row fields needed to select candidates but omits their bodies;
+    read only those bodies, oldest at the gate first, before applying the
+    predicate. If the begin envelope cannot cover another body read, leave
+    that candidate and every later one at Shaped for a later run.
     """
     by_ref = {item.ref: item for item in items}
     advanced: List[Dict[str, str]] = []
     errors: List[Dict[str, str]] = []
+    candidates = []
     for item in items:
-        if item.state != "OPEN" or item.status != "Shaped":
+        if (
+            item.state != "OPEN"
+            or item.status != "Shaped"
+            or item.origin != "agent"
+            or item.needs != "none"
+        ):
             continue
         question = gate_question(item)
+        # The Shaped question is this sweep's own gate; other live questions
+        # (for example, Unblock) stay with their existing owner.
         if question is not None and question != GATES["Shaped"]:
             continue
+        candidates.append(item)
+
+    oldest_unknown = datetime.max.replace(tzinfo=timezone.utc)
+    candidates.sort(key=lambda item: (
+        question_since(item) is None,
+        question_since(item) or oldest_unknown,
+        item.repo,
+        item.number,
+    ))
+
+    for item in candidates:
+        if not getattr(item, "body_loaded", True):
+            try:
+                _load_close_candidate_bodies(items, [item])
+            except BeginCannotComplete:
+                break
+            if not getattr(item, "body_loaded", True):
+                continue
         if not shaped_self_approvable(item, by_ref):
             continue
 
@@ -18960,16 +20806,23 @@ def claude_window_refusal(local: datetime) -> Optional[str]:
 
 
 def _begin_preflight(
-    now: datetime, agent: str, idle: bool, tier: Optional[str] = None
+    now: datetime, agent: str, idle: bool, tier: Optional[str] = None, *,
+    codex_profile: str = "mac",
+    cloud_metadata: Optional[Mapping[str, object]] = None,
 ) -> Tuple[Dict[str, object], Optional[Dict[str, object]]]:
-    """Start a run and apply the local gates before reading Project state.
+    """Apply only run-level local gates before reading Project state.
 
     ``load_items`` is the expensive part of an otherwise empty poll.  Usage
     and idle are local facts, so a refusal must happen before the Project list
     query; ``#655`` measured the old baseline at 42 API calls and 47 GraphQL
     points.  The selected run keeps the exact same reading for later shaping
     decisions.  ``None`` for the reading means the preflight produced a stop
-    envelope, not that a caller may guess at headroom.
+    envelope, not that a caller may guess at headroom.  Project listing
+    belongs to the shared ``load_items(scope="begin")`` path after this gate
+    passes.  Candidate hydration and ordering stay in their shared post-load
+    paths; keep all three out of this preflight. The optional Codex profile
+    inputs only expose the fail-closed evaluator; the normal begin command
+    keeps using the Mac profile and adds no cloud start path.
     """
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import usage
@@ -18982,7 +20835,11 @@ def _begin_preflight(
         # Before the usage read: a run on the wrong model or with a wider
         # sandbox must not reach anything, including the budget it would
         # spend (#1316).
-        settings = _codex_settings_check()
+        if codex_profile == "mac" and cloud_metadata is None:
+            settings = _codex_settings_check()
+        else:
+            settings = _codex_settings_check(
+                profile=codex_profile, metadata=cloud_metadata)
         if not settings.get("ok"):
             why = settings.get("why") or "Codex run settings could not be checked"
             _record_begin_config_drift(agent, out["run"], why)
@@ -19135,7 +20992,10 @@ def _record_queue_empty(agent: str, run: Optional[str],
         pass
 
 
-def _codex_settings_check() -> Dict[str, object]:
+def _codex_settings_check(
+    profile: Optional[str] = None,
+    metadata: Optional[Mapping[str, object]] = None,
+) -> Dict[str, object]:
     """Whether this Codex run is the one ``codex_run.py`` describes.
 
     One seam, so the suite's shared fixture can stand in for a machine's
@@ -19147,7 +21007,9 @@ def _codex_settings_check() -> Dict[str, object]:
     try:
         import codex_run
 
-        return codex_run.check()
+        if profile is None and metadata is None:
+            return codex_run.check()
+        return codex_run.check(profile=profile or "mac", metadata=metadata)
     except Exception as exc:  # pragma: no cover - defensive; see docstring
         return {"ok": False,
                 "why": "Codex run settings could not be checked: {}".format(
@@ -19280,6 +21142,7 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
     recorded is one the watchdog reads as never having happened, so the record
     comes before the decision, not after it.
     """
+    global _ACTIVE_BEGIN_ENVELOPE
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import heartbeat
 
@@ -19318,6 +21181,8 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
     def attempt_reconcile(step, func, *args):
         try:
             return func(*args)
+        except BeginCannotComplete:
+            raise
         except GitHubError as exc:
             text, transient = _github_error_text(exc)
             reconcile_errors.append({
@@ -19341,6 +21206,14 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
             pr_facts = _begin_load_timed(
                 timings, "ticket_pr_facts", lambda: ticket_pr_facts(items)
             )
+    except BeginCannotComplete:
+        out.update(
+            do="stop",
+            gate="ok",
+            why=BEGIN_CANNOT_COMPLETE_REASON,
+        )
+        print(json.dumps(out, indent=2))
+        return 0
     except GitHubError as exc:
         out.update(
             do="stop",
@@ -19463,46 +21336,70 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
             recent_starts=begin_starts,
         )
         recently_claimed: Set[str] = set()
-        while ticket is not None:
-            try:
-                current_claim = read_lock(ticket)
-            except GitHubError as exc:
-                out.update(
-                    do="stop",
-                    gate="error",
-                    why="could not re-read {} claim: {}".format(ticket.ref, exc),
-                )
-                ticket = None
-                break
-            if (
-                current_claim is None
-                or now - current_claim >= BEGIN_CLAIM_COLLISION_WINDOW
-            ):
-                break
+        # Tickets this run claimed and then released because their refreshed
+        # body withheld them (#2067). They are excluded like a fresh claim, so
+        # no ticket is offered twice and the move-on below always ends.
+        withheld_after_claim: List[Dict[str, str]] = []
 
-            # This process has not claimed its selected ticket yet, so a new
-            # value in the live Project view belongs to another begin. Keep the
-            # local view honest for the WIP check and pass over it without
-            # changing the shared ordering.
-            ticket.in_motion_since = current_claim
-            recently_claimed.add(ticket.ref)
-            # That begin's start may not have reached the heartbeat when this
-            # one read it. Count it, or lanes pulling together would each see
-            # the Bugs' turn and take a Bug apiece (#1846). If its binding did
-            # land first it counts twice here, which can hold a Bug back but
-            # never let one through.
-            begin_starts = list(begin_starts) + [effective_class(
-                ticket, {entry.ref: entry for entry in items})]
-            ticket = next_ticket_for_tier(
-                items, now, tier=tier, blocked=blocked,
-                excluded=recently_claimed,
-                agent=agent,
-                repo_readiness=repo_readiness,
-                pr_facts=pr_facts,
-                backed_off=begin_backed_off,
-                startable_order=startable_order,
-                recent_starts=begin_starts,
-            )
+        def passed_over() -> Set[str]:
+            return recently_claimed | {
+                str(row["ref"]) for row in withheld_after_claim
+            }
+
+        def first_unclaimed(ticket: Optional[Item]) -> Optional[Item]:
+            """Re-read each pick's claim and pass over another begin's."""
+            nonlocal begin_starts
+            while ticket is not None:
+                try:
+                    current_claim = read_lock(ticket)
+                except BeginCannotComplete:
+                    out.update(
+                        do="stop",
+                        gate="ok",
+                        why=BEGIN_CANNOT_COMPLETE_REASON,
+                    )
+                    return None
+                except GitHubError as exc:
+                    out.update(
+                        do="stop",
+                        gate="error",
+                        why="could not re-read {} claim: {}".format(
+                            ticket.ref, exc
+                        ),
+                    )
+                    return None
+                if (
+                    current_claim is None
+                    or now - current_claim >= BEGIN_CLAIM_COLLISION_WINDOW
+                ):
+                    return ticket
+
+                # This process has not claimed its selected ticket yet, so a
+                # new value in the live Project view belongs to another begin.
+                # Keep the local view honest for the WIP check and pass over
+                # it without changing the shared ordering.
+                ticket.in_motion_since = current_claim
+                recently_claimed.add(ticket.ref)
+                # That begin's start may not have reached the heartbeat when
+                # this one read it. Count it, or lanes pulling together would
+                # each see the Bugs' turn and take a Bug apiece (#1846). If its
+                # binding did land first it counts twice here, which can hold
+                # a Bug back but never let one through.
+                begin_starts = list(begin_starts) + [effective_class(
+                    ticket, {entry.ref: entry for entry in items})]
+                ticket = next_ticket_for_tier(
+                    items, now, tier=tier, blocked=blocked,
+                    excluded=passed_over(),
+                    agent=agent,
+                    repo_readiness=repo_readiness,
+                    pr_facts=pr_facts,
+                    backed_off=begin_backed_off,
+                    startable_order=startable_order,
+                    recent_starts=begin_starts,
+                )
+            return None
+
+        ticket = first_unclaimed(ticket)
         held = held_claims_before(
             items,
             now,
@@ -19573,23 +21470,36 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
             if queue_empty:
                 out["queue"] = "empty"
                 _record_queue_empty(agent, out.get("run"), tier)
-        else:
+        # One pass per claim attempt. A pass ends the loop unless the claimed
+        # ticket's fresh body withholds it, when the run moves on (#2067).
+        selection_envelope = _ACTIVE_BEGIN_ENVELOPE
+        while ticket is not None:
+            detail_candidates = [ticket]
+            route = ticket.decline_route
+            if (
+                isinstance(route, dict)
+                and route.get("type") == "pending-gate-answer"
+            ):
+                gate_ref = route.get("gate_ref")
+                gate = next((item for item in items
+                             if item.ref == gate_ref), None)
+                if gate is not None and gate is not ticket:
+                    detail_candidates.append(gate)
+            if selection_envelope is not None:
+                # Every attempt's refresh is charged to the one envelope; one
+                # that no longer fits refuses, as the first attempt would.
+                selection_envelope.consume(
+                    hydrated_fields=begin_detail_hydration_work(
+                        items, detail_candidates
+                    )
+                )
+                # Selection is complete. The reserved detail fields cover the
+                # one post-claim refresh and all later work is ticket work.
+                _ACTIVE_BEGIN_ENVELOPE = None
             refusal = claim_ticket(items, now, ticket, pr_facts=pr_facts)
             if refusal is not None:
                 out.update(do="stop", why=refusal)
             else:
-                detail_candidates = [ticket]
-                route = ticket.decline_route
-                if (
-                    isinstance(route, dict)
-                    and route.get("type") == "pending-gate-answer"
-                ):
-                    gate_ref = route.get("gate_ref")
-                    gate = next((item for item in items
-                                 if item.ref == gate_ref), None)
-                    if gate is not None and gate is not ticket:
-                        detail_candidates.append(gate)
-
                 detail_error = None
                 try:
                     if _detail_loader is not None:
@@ -19638,15 +21548,44 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
                             "ticket's decline route still withholds work"
                         )
                     if body_reason is not None:
+                        released = False
                         try:
                             write_lock(ticket, "")
                             ticket.in_motion_since = None
+                            released = True
                         except GitHubError as release_exc:
                             out["release_error"] = str(release_exc)
                         out.update(
                             do="stop",
                             why="nothing — {}".format(body_reason),
                         )
+                        if released:
+                            # The listing judged this ticket startable and its
+                            # fresh body withholds it: a race, or a check only
+                            # a body can make. Move on to the next pick in the
+                            # same order instead of stopping with work waiting
+                            # (#2067). Each pass excludes one more ticket.
+                            withheld_after_claim.append(
+                                {"ref": ticket.ref, "reason": body_reason}
+                            )
+                            out["withheld_after_claim"] = withheld_after_claim
+                            _ACTIVE_BEGIN_ENVELOPE = selection_envelope
+                            following = first_unclaimed(next_ticket_for_tier(
+                                items, now, tier=tier, blocked=blocked,
+                                excluded=passed_over(),
+                                agent=agent,
+                                repo_readiness=repo_readiness,
+                                pr_facts=pr_facts,
+                                backed_off=begin_backed_off,
+                                startable_order=startable_order,
+                                recent_starts=begin_starts,
+                            ))
+                            _ACTIVE_BEGIN_ENVELOPE = None
+                            if following is not None:
+                                out.pop("do", None)
+                                out.pop("why", None)
+                                ticket = following
+                                continue
                     else:
                         out.update(
                             do="ticket",
@@ -19702,16 +21641,22 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
                             )
                         else:
                             out["vendor"] = IMPLEMENT_VENDORS[agent]
+            break
         if "bound" not in out:
             _bind_run(agent, out)
         print(json.dumps(out, indent=2))
         return 0
 
     review_phase_boundary("review_queue")
+    review_waiting: List[Dict[str, object]] = []
     queue = _call_with_optional_keywords(
         review_queue, items, tier, pr_facts=pr_facts,
-        output_stream=sys.stderr,
+        output_stream=sys.stderr, skipped=review_waiting,
     )
+    if review_waiting:
+        # A head the listing waits on is reported, never dropped silently
+        # (#2192), as the shape picker reports its skips.
+        out["review_waiting"] = review_waiting
     # The fixed job order remains the tiebreak within a class group, but a
     # finite preempting class can cross stages. Build one candidate for each
     # queue: the next run gets the next item if this run preempts it.
@@ -19759,10 +21704,35 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
     pending = [entry for entry in pending
                if entry.ref not in review_backed_off]
     review_phase_boundary("shape_queue")
+    shape_skipped: List[Dict[str, str]] = []
     shape_item = shapeable_idea(
         [entry for entry in items if entry.ref not in review_backed_off],
-        tier, reading,
+        tier, reading, shape_skipped,
     )
+    if shape_skipped:
+        out["shape_skipped"] = shape_skipped
+        for row in shape_skipped:
+            print(
+                "run outcome: skipped-stale-shape ref={} reason={}".format(
+                    row["ref"], row["reason"]
+                ),
+                file=sys.stderr,
+            )
+        run = out.get("run")
+        if run:
+            try:
+                heartbeat.record_event(
+                    agent, str(run), "skipped-stale-shape",
+                    queue="shape", skipped=shape_skipped,
+                    note="shape picker skipped Ideas items with children",
+                )
+            except Exception as exc:
+                print(
+                    "heartbeat: could not record shape picker skip: {}".format(
+                        exc
+                    ),
+                    file=sys.stderr,
+                )
     withheld_issue_jobs = [
         row for row in review_backed_off.values()
         if row["ref"] in {
@@ -19963,6 +21933,19 @@ def _begin_error_envelope(agent: str, error: GitHubError) -> None:
     }, indent=2))
 
 
+def _begin_cannot_complete_envelope(
+    out: Mapping[str, object],
+) -> None:
+    """Return a bounded stop response when begin cannot finish its view."""
+    result = dict(out)
+    result.update(
+        gate="ok",
+        do="stop",
+        why=BEGIN_CANNOT_COMPLETE_REASON,
+    )
+    print(json.dumps(result, indent=2))
+
+
 def _reserve_verdict(do: object) -> Optional[Dict[str, object]]:
     """Decline this run if the GraphQL budget is below its tier's floor.
 
@@ -20045,9 +22028,16 @@ def cmd_next_review(
             # while the session's normal non-brief invalidation still clears
             # observations from an earlier command before this one starts.
             cache._pr_facts = pr_facts
-    queue = _call_with_optional_keyword(
-        review_queue, "pr_facts", pr_facts, items, tier
+    waiting: List[Dict[str, object]] = []
+    queue = _call_with_optional_keywords(
+        review_queue, items, tier, pr_facts=pr_facts, skipped=waiting,
     )
+    for entry in waiting:
+        # Heads the listing waits on (#2192): named, so a quiet queue is
+        # never mistaken for an empty one.
+        print("review waits: {} PR #{} ({})".format(
+            entry.get("ref"), entry.get("pr"), entry.get("reason")),
+            file=sys.stderr)
     if not queue:
         print("nothing — no {}review waiting".format(
             (tier + " ") if tier else ""), file=sys.stderr)
@@ -20537,6 +22527,62 @@ def _auto_closeable_project(item: Item, *, children_done: Optional[int] = None
     )
 
 
+def _finished_close_candidate(item: Item, *,
+                              children_done: Optional[int] = None) -> bool:
+    """Whether ``item``'s unattended close turns on its body (#2147).
+
+    Open at Building with every ticket closed, in a class that can close
+    itself. Its body decides the rest: an analysis marker keeps it at Accept,
+    and an Improve project's origin override can hand it to either owner.
+    """
+    completed = item.children_done if children_done is None else children_done
+    return (
+        item.state == "OPEN"
+        and item.status == "Building"
+        and item.children_total > 0
+        and completed == item.children_total
+        and (
+            item.klass in SELF_CLOSING_UPKEEP_CLASSES
+            or item.klass == "Improve"
+        )
+    )
+
+
+def _load_close_candidate_bodies(
+    items: Sequence[Item], candidates: Sequence[Item],
+) -> None:
+    """Read the unloaded bodies of finished close candidates (#2147).
+
+    The begin view lists open items without Issue.body (#1775), so the close
+    read an analysis marker or origin override as absent: an analysis-marked
+    upkeep project could close itself, and an override to the agents was
+    never seen. Only the candidates the caller names are read, through the
+    body-only read #2067 added; a row already carrying its body, as every
+    full-board row does, is never read again.
+
+    Inside begin the read is charged to the work envelope (#1776), and it
+    refuses rather than eat into the reserve the selected ticket's post-claim
+    refresh still needs, as the decline-route read does.
+    """
+    wanted: List[Item] = []
+    seen: Set[str] = set()
+    for item in candidates:
+        if getattr(item, "body_loaded", True) or item.ref in seen:
+            continue
+        wanted.append(item)
+        seen.add(item.ref)
+    if not wanted:
+        return
+    envelope = _ACTIVE_BEGIN_ENVELOPE
+    if envelope is not None:
+        work = begin_body_read_work(items, wanted)
+        # One unit for the GraphQL request itself, as the listing reserves.
+        if envelope.remaining - work - 1 < BEGIN_DETAIL_WORK_RESERVE:
+            raise BeginCannotComplete()
+        envelope.consume(hydrated_fields=work)
+    hydrate_item_details(items, wanted, body_only=True)
+
+
 def _close_auto_closeable_project(project: Item,
                                   *, children_done: Optional[int] = None
                                   ) -> bool:
@@ -20596,7 +22642,14 @@ def _close_auto_closeable_project(project: Item,
 
 
 def reconcile_auto_closeable_projects(items: Sequence[Item]) -> List[str]:
-    """Close every eligible item with finished children before queue selection."""
+    """Close every eligible item with finished children before queue selection.
+
+    The candidates' bodies are read first when the view left them out
+    (#2147), so the decision below never reads an unloaded body as empty.
+    """
+    _load_close_candidate_bodies(
+        items, [item for item in items if _finished_close_candidate(item)]
+    )
     closed: List[str] = []
     projects = sorted(
         (item for item in items if _auto_closeable_project(item)),
@@ -20685,7 +22738,9 @@ def _auto_close_parent(items: Sequence[Item], ticket: Item) -> bool:
 
     The Project summary is read before the merge, so exactly one open child is
     the evidence that this merge was the last open ticket. The project-level
-    eligibility decision is shared with the begin reconcile.
+    eligibility decision is shared with the begin reconcile. Merge is served
+    from the begin view, so the parent's body is read here when that view
+    left it out (#2147).
     """
     parent = next((item for item in items if item.ref == ticket.parent), None)
     if parent is None:
@@ -20698,6 +22753,8 @@ def _auto_close_parent(items: Sequence[Item], ticket: Item) -> bool:
         or parent.children_done != parent.children_total - 1
     ):
         return False
+    if _finished_close_candidate(parent, children_done=parent.children_total):
+        _load_close_candidate_bodies(items, [parent])
     return _close_auto_closeable_project(
         parent, children_done=parent.children_total
     )
@@ -20856,7 +22913,12 @@ def merge_blockers(
             why.append("CI not green: {} skipped — a skipped check verified "
                        "nothing".format(", ".join(str(s) for s in skipped)))
 
-    verdict = _row_verdict(data, repo)
+    # An unreadable verdict is named as unreadable, not as absent (#2194).
+    try:
+        verdict = _row_verdict(data, repo)
+    except GitHubError as exc:
+        why.append("review verdict unreadable: {}".format(exc))
+        return why
     if verdict is None:
         why.append("no review verdict recorded")
     else:
@@ -20987,7 +23049,8 @@ def cmd_show(items: List[Item], now: datetime, ref: str) -> int:
         humanise(item.waited(now))))
     print(item.url)
     print("=" * 72)
-    question = gate_question(item)
+    by_ref = {row.ref: row for row in items}
+    question = gate_question(item, by_ref)
     print("GATE: {}".format(question or "not waiting on you"))
     if item.needs_decision is not None:
         print("NEEDS DECISION: {}".format(item.needs_decision))
@@ -21288,6 +23351,35 @@ def _decision_question(value: str) -> str:
     return question
 
 
+def _proof_comment_url(value: str) -> str:
+    """Parse one GitHub comment URL used as hold proof."""
+    try:
+        return validate_proof_comment_url(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc))
+
+
+def _shaped_hold_record_body(
+    item: Item, reason: str, conditions: Sequence[str],
+    proof: Sequence[str],
+) -> str:
+    """Render a Shaped hold from the loaded issue body and supplied evidence."""
+    if not item.item_id:
+        raise GitHubError("{} is not in the Project".format(item.ref))
+    if not isinstance(item.body, str) or not item.body.strip():
+        raise GitHubError("{} has no Shaped plan body to version".format(
+            item.ref))
+    condition_refs = [
+        "{}#{}".format(item.repo, str(value).lstrip("#"))
+        for value in conditions
+    ]
+    try:
+        return render_shaped_hold(
+            reason, condition_refs, shaped_plan_version(item.body), proof)
+    except (TypeError, ValueError) as exc:
+        raise GitHubError(str(exc))
+
+
 def _blocked_reference(value: str) -> str:
     """Normalise one issue number for the strict block-comment header."""
     reference = value.strip()
@@ -21301,17 +23393,21 @@ def _blocked_reference(value: str) -> str:
 
 
 def _blocked_comment_body(blocked_on: Sequence[str], because: str) -> str:
-    """Render the block-comment header owned by ``BLOCK_COMMENT_RE``."""
-    references = " and ".join("#{}".format(number) for number in blocked_on)
-    return "**Blocked on {}:** {}".format(references, because)
+    """Render ``comment --blocked-on`` through ``block_record`` (#2169).
+
+    The reason is made inert like a question or a decline reason (#1798):
+    a line break or ``<!--`` in it once put a runner marker at the start of
+    a line in an owner-trusted comment.
+    """
+    return render_blocked(because, on=blocked_on)
 
 
 def _needs_decision_comment_body(question: str) -> str:
-    """Render the breakdown-question header owned by its parser.
+    """Render the breakdown-question header through ``block_record`` (#2169).
 
     The question is a model's words, so it is made inert (#1798).
     """
-    return "{} {}".format(NEEDS_DECISION_PREFIX, inert_comment_text(question))
+    return render_needs_decision(question)
 
 
 def _hold_reference(value: str) -> str:
@@ -21347,16 +23443,17 @@ def _hold_until_date(value: str) -> date:
 
 def _hold_comment_body(reason: str, until: Optional[date] = None,
                        on: Sequence[str] = ()) -> str:
-    """Render an Accept hold as the block header ``BLOCK_COMMENT_RE`` owns.
+    """Render an Accept hold through ``block_record.render_blocked`` (#2169).
 
     Exactly one condition: a hold on both a date and an issue would parse,
-    but the verb offers one so the brief can say plainly what lifts it.
+    but the verb offers one so the brief can say plainly what lifts it. The
+    reason is made inert, as ``comment --blocked-on``'s is.
     """
     if (until is None) == (not on):
         raise ValueError("a hold needs exactly one of a date or issues")
     if until is not None:
-        return "**Blocked until {}:** {}".format(until.isoformat(), reason)
-    return _blocked_comment_body(on, reason)
+        return render_blocked(reason, until=until)
+    return render_blocked(reason, on=on)
 
 
 #: Whether each command's shared Project load must carry item history (#1622).
@@ -21557,6 +23654,14 @@ def main(argv: Optional[Sequence[str]] = None, *,
     )
     claim = sub.add_parser("claim", help="take the single-in-motion lock on a ticket")
     claim.add_argument("ref", help="issue number, owner/repo#number, or URL")
+    claim.add_argument(
+        "--run", default=None,
+        help="heartbeat run id to bind after the claim succeeds",
+    )
+    claim.add_argument(
+        "--agent", default=None, choices=tuple(AGENTS_BY_ROLE["implement"]),
+        help="implementing agent that owns the heartbeat run",
+    )
     release = sub.add_parser("release", help="give up the lock on a ticket")
     release.add_argument("ref", help="issue number, owner/repo#number, or URL")
     for verb, help_text in (
@@ -21659,7 +23764,7 @@ def main(argv: Optional[Sequence[str]] = None, *,
     comment_body.add_argument("--body-file", help="file containing the comment text")
     comment_body.add_argument(
         "--blocked-on", action="append", type=_blocked_reference, metavar="N",
-        help="post a canonical block header; repeat for multiple issue numbers",
+        help="post a routed block record; repeat for multiple issue numbers",
     )
     comment_body.add_argument(
         "--needs-decision", type=_decision_question, metavar="QUESTION",
@@ -21667,7 +23772,11 @@ def main(argv: Optional[Sequence[str]] = None, *,
     )
     comment.add_argument(
         "--because", type=_comment_reason,
-        help="reason appended to a canonical block header (requires --blocked-on)",
+        help="reason for the block record (requires --blocked-on)",
+    )
+    comment.add_argument(
+        "--proof", action="append", type=_proof_comment_url, default=None,
+        help="GitHub comment URL proving a Shaped hold; repeat as needed",
     )
     comment.add_argument(
         "--run", default=None,
@@ -21679,8 +23788,8 @@ def main(argv: Optional[Sequence[str]] = None, *,
     )
     hold = sub.add_parser(
         "hold",
-        help="Nate's hold on a finished project at Accept, recorded as a "
-             "conditioned block — dry run without --yes",
+        help="owner-authorized hold or explicit release of a Shaped plan — "
+             "dry run without --yes",
     )
     hold.add_argument("ref", help="issue number, owner/repo#number, or URL")
     hold_condition = hold.add_mutually_exclusive_group(required=True)
@@ -21692,9 +23801,13 @@ def main(argv: Optional[Sequence[str]] = None, *,
         "--on", nargs="+", type=_hold_reference, default=None, metavar="N",
         help="hold until these issues in the project's repository close",
     )
+    hold_condition.add_argument(
+        "--release", action="store_true",
+        help="explicitly release a Shaped hold (requires --yes and --instruction)",
+    )
     hold.add_argument(
-        "--reason", required=True, type=_comment_reason,
-        help="why Nate is holding it (required)",
+        "--reason", required=False, type=_comment_reason,
+        help="why Nate is holding it (required unless --release)",
     )
     hold.add_argument(
         "--yes", action="store_true", dest="confirmed",
@@ -21703,6 +23816,10 @@ def main(argv: Optional[Sequence[str]] = None, *,
     hold.add_argument(
         "--instruction", type=_verbatim_instruction, default=None,
         help="verbatim instruction received from Nate; recorded in provenance",
+    )
+    hold.add_argument(
+        "--proof", action="append", type=_proof_comment_url, default=None,
+        help="GitHub comment URL proving a Shaped hold; repeat as needed",
     )
     hold.add_argument(
         "--run", default=None,
@@ -21770,11 +23887,22 @@ def main(argv: Optional[Sequence[str]] = None, *,
     reject.add_argument("--note", default=None, help="what is broken")
     args = parser.parse_args(argv)
 
+    if args.command == "hold":
+        if not args.release and not args.reason:
+            parser.error("hold needs --reason unless --release is used")
+        if args.release and args.confirmed and not args.instruction:
+            parser.error("--instruction is required for a confirmed --release")
+
     if args.command == "comment":
         if args.blocked_on and args.because is None:
             parser.error("--because is required with --blocked-on")
         if args.because is not None and not args.blocked_on:
             parser.error("--because requires --blocked-on")
+        if args.proof and not args.blocked_on:
+            parser.error("--proof requires --blocked-on")
+    if (args.command == "claim"
+            and bool(args.run) != bool(args.agent)):
+        parser.error("--run and --agent must be supplied together")
     if (args.command == "capture" and args.origin == "agent"
             and args.klass is None):
         parser.error("--class is required with --origin agent")
@@ -21784,6 +23912,7 @@ def main(argv: Optional[Sequence[str]] = None, *,
             parser.error(refusal)
 
     global _ACTIVE_HEARTBEAT_RUN, _ACTIVE_HEARTBEAT_AGENT
+    global _ACTIVE_BEGIN_ENVELOPE
     _ACTIVE_HEARTBEAT_RUN = getattr(args, "run", None)
     _ACTIVE_HEARTBEAT_AGENT = getattr(args, "agent", None)
 
@@ -21791,6 +23920,12 @@ def main(argv: Optional[Sequence[str]] = None, *,
     # repeated `main()` calls in tests from blending two commands' readings.
     if _reset_api_usage:
         reset_api_usage()
+    else:
+        _ACTIVE_BEGIN_ENVELOPE = None
+    if args.command == "begin":
+        _ACTIVE_BEGIN_ENVELOPE = BeginWorkEnvelope(
+            BEGIN_WORK_ENVELOPE_LIMIT
+        )
     now = datetime.now(timezone.utc)
     if args.command == "session-server":
         return serve_session(args.parent_pid)
@@ -21836,12 +23971,14 @@ def main(argv: Optional[Sequence[str]] = None, *,
         begin_preflight = _begin_preflight(
             now, args.agent, args.idle, args.tier)
         if begin_preflight[1] is None:
+            _ACTIVE_BEGIN_ENVELOPE = None
             print(json.dumps(begin_preflight[0], indent=2))
             return 0
         role_refusal = _begin_role_refusal(
             args.agent, args.tier, args.caller_role)
         if role_refusal is not None:
             begin_preflight[0].update(role_refusal)
+            _ACTIVE_BEGIN_ENVELOPE = None
             print(json.dumps(begin_preflight[0], indent=2))
             return 0
         begin_timings = {}
@@ -21882,7 +24019,13 @@ def main(argv: Optional[Sequence[str]] = None, *,
                 begin_preflight[0].get("run"),
                 begin_preflight[0]["why"],
             )
+            _ACTIVE_BEGIN_ENVELOPE = None
             print(json.dumps(begin_preflight[0], indent=2))
+            return 0
+        except BeginCannotComplete:
+            begin_preflight[0]["timings"] = begin_timings
+            _ACTIVE_BEGIN_ENVELOPE = None
+            _begin_cannot_complete_envelope(begin_preflight[0])
             return 0
         except GitHubError as exc:
             if _budget_exhaustion_signal() is not None:
@@ -21897,8 +24040,10 @@ def main(argv: Optional[Sequence[str]] = None, *,
                         begin_preflight[0].get("run"),
                         begin_preflight[0]["why"],
                     )
+                    _ACTIVE_BEGIN_ENVELOPE = None
                     print(json.dumps(begin_preflight[0], indent=2))
                     return 0
+            _ACTIVE_BEGIN_ENVELOPE = None
             _begin_error_envelope(args.agent, exc)
             return 2
 
@@ -21922,6 +24067,13 @@ def main(argv: Optional[Sequence[str]] = None, *,
         _items = None
     try:
         if _items is not None:
+            if (
+                args.command == "begin"
+                and _ACTIVE_BEGIN_ENVELOPE is not None
+            ):
+                _ACTIVE_BEGIN_ENVELOPE.consume(
+                    listed_items=len(_items)
+                )
             if args.command in ("begin", "queue"):
                 listing_agent = (
                     args.agent if args.command == "begin" else "codex"
@@ -22005,6 +24157,25 @@ def main(argv: Optional[Sequence[str]] = None, *,
                 )
 
             begin_detail_loader = hydrate_begin_candidates
+        if (
+            args.command == "begin"
+            and _ACTIVE_BEGIN_ENVELOPE is not None
+            and _ACTIVE_BEGIN_ENVELOPE.listed_items == 0
+        ):
+            # Test and adapter loaders may provide the rows directly instead
+            # of reading through the instrumented Project connections.
+            _ACTIVE_BEGIN_ENVELOPE.consume(listed_items=len(items))
+    except BeginCannotComplete:
+        if args.command == "begin":
+            _ACTIVE_BEGIN_ENVELOPE = None
+            if begin_preflight is not None:
+                if begin_timings is not None:
+                    begin_preflight[0]["timings"] = begin_timings
+                _begin_cannot_complete_envelope(begin_preflight[0])
+            else:
+                _begin_cannot_complete_envelope({"agent": args.agent})
+            return 0
+        raise
     except GitHubError as exc:
         if args.command == "brief":
             print(json.dumps({
@@ -22016,6 +24187,7 @@ def main(argv: Optional[Sequence[str]] = None, *,
             }, indent=2))
             return 0
         if args.command == "begin":
+            _ACTIVE_BEGIN_ENVELOPE = None
             _begin_error_envelope(args.agent, exc)
             return 2
         print("funnel: {}".format(exc), file=sys.stderr)
@@ -22067,7 +24239,8 @@ def main(argv: Optional[Sequence[str]] = None, *,
                 ) = pr_facts_future.result()
         if args.command == "claim":
             return cmd_claim(
-                items, now, args.ref, pr_facts=ticket_pr_facts(items)
+                items, now, args.ref, pr_facts=ticket_pr_facts(items),
+                run=args.run, agent=args.agent,
             )
         if args.command == "release":
             return cmd_release(items, now, args.ref)
@@ -22090,10 +24263,16 @@ def main(argv: Optional[Sequence[str]] = None, *,
             return cmd_answer_gates(items, now, args.ref, args.answer,
                                     args.decider, args.run, args.agent)
         if args.command == "hold":
+            if args.release:
+                return cmd_release_shaped_hold(
+                    items, now, args.ref, args.confirmed,
+                    instruction=args.instruction, run=args.run, agent=args.agent,
+                )
             return cmd_hold(items, now, args.ref, args.reason,
                             until=args.until, on=args.on or (),
                             confirmed=args.confirmed, run=args.run,
-                            agent=args.agent, instruction=args.instruction)
+                            agent=args.agent, instruction=args.instruction,
+                            proof=args.proof or ())
         if args.command == "comment":
             if args.needs_decision is not None:
                 body = _needs_decision_comment_body(args.needs_decision)
@@ -22110,7 +24289,10 @@ def main(argv: Optional[Sequence[str]] = None, *,
                     )
             return cmd_comment(
                 items, now, args.ref, body or "", args.voice,
-                args.run, args.agent, apply_blocked=args.needs_decision is not None,
+                args.run, args.agent,
+                apply_blocked=args.needs_decision is not None,
+                blocked_on=args.blocked_on, because=args.because,
+                proof=args.proof or (),
             )
         if args.command == "reject":
             return cmd_reject(items, now, args.pr, args.note)
@@ -22152,10 +24334,21 @@ def main(argv: Optional[Sequence[str]] = None, *,
                     _pr_facts_error=begin_pr_facts_error,
                     _pr_facts_elapsed=begin_pr_facts_elapsed,
                 )
-            return cmd_begin(
-                items, now, args.agent, args.tier, args.idle,
-                args.breakdown, **begin_kwargs
-            )
+            try:
+                return cmd_begin(
+                    items, now, args.agent, args.tier, args.idle,
+                    args.breakdown, **begin_kwargs
+                )
+            except BeginCannotComplete:
+                if begin_preflight is not None:
+                    if begin_timings is not None:
+                        begin_preflight[0]["timings"] = begin_timings
+                    _begin_cannot_complete_envelope(begin_preflight[0])
+                else:
+                    _begin_cannot_complete_envelope({"agent": args.agent})
+                return 0
+            finally:
+                _ACTIVE_BEGIN_ENVELOPE = None
         if args.command == "next-review":
             return cmd_next_review(items, args.tier)
         if args.command == "review":
@@ -22184,113 +24377,84 @@ def main(argv: Optional[Sequence[str]] = None, *,
             brief_timing_token = _ACTIVE_BRIEF_TIMINGS.set(timings)
 
             try:
-                pr_facts_error: List[str] = []
-
-                def read_pr_facts():
-                    try:
-                        return cache.get_pr_facts(items)
-                    except BriefSectionTimeout:
-                        # One retry sharing the section deadline (#1210):
-                        # the section state set by _brief_timed still
-                        # bounds the second attempt, so no extra budget
-                        # is granted. Only retry when time remains.
-                        state = _BRIEF_SECTION_STATE.get()
-                        if (
-                            state is not None
-                            and float(state[1]) - time.monotonic() <= 0
-                        ):
-                            raise
-                        return cache.get_pr_facts(items)
-                    except GitHubError as exc:
-                        pr_facts_error.append(
-                            "could not read ticket branch facts: {}".format(exc)
-                        )
-                        for section in BRIEF_PR_FACT_SECTIONS:
-                            missing.append({
-                                "section": section,
-                                "error": pr_facts_error[-1],
-                            })
-                        return {}
-
-                pr_facts = _brief_timed(
+                # All six reads made here go through the runner cmd_brief's
+                # sections use, so a skipped, timed-out or raising read is
+                # null with exactly one `missing` entry and never fails the
+                # brief (#2131).
+                #
+                # ticket_pr_facts is not a published section: unread, it
+                # names each section built on it instead of itself (#1168).
+                # A timed-out read is not waited on or retried before the
+                # current brief is published.
+                pr_facts_unread: List[Dict[str, str]] = []
+                pr_facts = _brief_section(
                     "ticket_pr_facts",
-                    read_pr_facts,
+                    lambda: cache.get_pr_facts(items),
+                    pr_facts_unread,
                     timings,
                     degraded,
                     deadline=deadline,
+                    unread_error="brief section read timed out",
                 )
-                pr_facts_missing = bool(pr_facts_error)
-                if pr_facts is _BRIEF_UNAVAILABLE:
-                    pr_facts_missing = True
+                pr_facts_missing = bool(pr_facts_unread)
+                if pr_facts_missing:
                     # A missing PR/branch scan must not turn a stale claim into a
                     # false diagnostic. An empty mapping says those facts are
                     # unavailable, so the pure consumers preserve the safe side.
                     pr_facts = {}
-                    if not pr_facts_error:
-                        error = "could not read ticket branch facts: brief section read timed out"
-                        for section in BRIEF_PR_FACT_SECTIONS:
-                            missing.append({"section": section, "error": error})
-                outcome_signals = _brief_timed(
+                    error = "could not read ticket branch facts: {}".format(
+                        pr_facts_unread[0]["error"]
+                    )
+                    for section in BRIEF_PR_FACT_SECTIONS:
+                        missing.append({"section": section, "error": error})
+                outcome_signals = _brief_section(
                     "outcome_signals",
                     lambda: _read_outcome_signals(now),
+                    missing,
                     timings,
                     degraded,
                     deadline=deadline,
                 )
-                if outcome_signals is _BRIEF_UNAVAILABLE:
-                    outcome_signals = None
-                portfolio_metrics = _brief_timed(
+                portfolio_metrics = _brief_section(
                     "portfolio_metrics",
                     lambda: _read_portfolio_metrics(items, now),
+                    missing,
                     timings,
                     degraded,
                     deadline=deadline,
                 )
-                if portfolio_metrics is _BRIEF_UNAVAILABLE:
-                    portfolio_metrics = None
-                decline_routing = _brief_timed(
+                decline_routing = _brief_section(
                     "decline_routing",
-                    lambda: _brief_read(
-                        "decline_routing",
-                        lambda: decline_routing_metric(items, now),
-                        missing,
-                    ),
+                    lambda: decline_routing_metric(items, now),
+                    missing,
                     timings,
                     degraded,
                     deadline=deadline,
                 )
-                if decline_routing is _BRIEF_UNAVAILABLE:
-                    decline_routing = None
                 # Live read, computed here rather than inside cmd_brief for the
                 # same reason as the two above: the renderer stays pure over its
                 # arguments, so a fixture brief needs no network and reports
                 # `main_ci` as null — unknown — instead of an empty list.
-                main_ci = _brief_timed(
+                main_ci = _brief_section(
                     "main_ci",
-                    lambda: _brief_read("main_ci", main_ci_json, missing),
+                    main_ci_json,
+                    missing,
                     timings,
                     degraded,
                     deadline=deadline,
                 )
-                if main_ci is _BRIEF_UNAVAILABLE:
-                    main_ci = None
                 # Live per-repo read, computed here for the same reason as the
                 # three above: cmd_brief stays pure over its arguments and a
                 # fixture brief reports null — unknown — rather than an empty
                 # list that would read as "nothing outside the Project".
-                orphans = _brief_timed(
+                orphans = _brief_section(
                     "member_issues_without_project_items",
-                    lambda: _brief_read(
-                        "member_issues_without_project_items",
-                        lambda: member_issues_without_project_items(items),
-                        missing,
-                    ),
+                    lambda: member_issues_without_project_items(items),
+                    missing,
                     timings,
                     degraded,
                     deadline=deadline,
                 )
-                if orphans is _BRIEF_UNAVAILABLE:
-                    orphans = None
                 # Keep the existing brief JSON as the command's stdout. The
                 # display snapshot is a separate, best-effort side effect and
                 # must not change what callers parse or whether the command
@@ -22348,6 +24512,40 @@ def main(argv: Optional[Sequence[str]] = None, *,
                         recent_starts = recent_ticket_starts(heartbeat_rows)
                     except Exception:
                         recent_starts = []
+                    pr_display_overrides: Dict[str, Dict[str, object]] = {}
+                    try:
+                        # Local to the display snapshot path: merge and review
+                        # continue to read only the live GitHub fact helpers.
+                        from dashboard.prior_facts import (
+                            dashboard_pr_display_overrides,
+                        )
+
+                        pr_display_overrides = dashboard_pr_display_overrides(
+                            _dashboard_spool_dir(),
+                            [
+                                item.ref for item in items
+                                if item.parent is not None
+                                and item.state == "OPEN"
+                            ],
+                            pr_facts,
+                            live_facts_known=not pr_facts_missing,
+                            now=now,
+                        )
+                    except Exception as exc:
+                        # The prior brief is only a display buffer. If it
+                        # cannot be read, keep the live or unknown board intact.
+                        print(
+                            "funnel: could not read prior dashboard PR facts: "
+                            "{}".format(exc),
+                            file=sys.stderr,
+                        )
+                    snapshot_usage = {
+                        "muse": _dashboard_muse_usage(now.timestamp()),
+                        "muse_panel": _dashboard_muse_panel_usage(),
+                        "claude": _dashboard_claude_usage(now.timestamp()),
+                    }
+                    if snapshot_usage["claude"] is None:
+                        del snapshot_usage["claude"]
                     write_dashboard_snapshot(
                         brief_payload,
                         dashboard_board(
@@ -22356,13 +24554,10 @@ def main(argv: Optional[Sequence[str]] = None, *,
                             authoring_pr_agents=authoring_pr_agents,
                             backed_off=backed_off,
                             recent_starts=recent_starts,
+                            pr_display_overrides=pr_display_overrides,
                         ),
                         generated_at,
-                        usage={
-                            "muse": _dashboard_muse_usage(
-                                now.timestamp()
-                            ),
-                        },
+                        usage=snapshot_usage,
                     )
                 except Exception as exc:
                     # The dashboard is downstream instrumentation. A missing
@@ -22378,8 +24573,20 @@ def main(argv: Optional[Sequence[str]] = None, *,
         if args.command == "queue":
             return cmd_queue(items, now, repo_readiness=repo_readiness)
         return cmd_brief(items, now, pr_facts=ticket_pr_facts(items))
+    except BeginCannotComplete:
+        if args.command == "begin":
+            _ACTIVE_BEGIN_ENVELOPE = None
+            if begin_preflight is not None:
+                if begin_timings is not None:
+                    begin_preflight[0]["timings"] = begin_timings
+                _begin_cannot_complete_envelope(begin_preflight[0])
+            else:
+                _begin_cannot_complete_envelope({"agent": args.agent})
+            return 0
+        raise
     except GitHubError as exc:
         if args.command == "begin":
+            _ACTIVE_BEGIN_ENVELOPE = None
             _begin_error_envelope(args.agent, exc)
             return 2
         print("funnel: {}".format(exc), file=sys.stderr)
@@ -22652,12 +24859,13 @@ def _run_bounded_subprocess(command: Sequence[str], **kwargs):
 
 
 class FunnelSession:
-    """Serve one run's commands from one in-memory Project read.
+    """Serve one run's commands from its in-memory Project reads.
 
     This is deliberately a per-run session, not a cache or a daemon. The
-    Project is loaded lazily on the first command so a ``begin`` claim still
-    reads GitHub at claim time. Later commands in the same Muse run reuse the
-    already-loaded objects and their locally updated mutation state.
+    Project is loaded lazily on the first command. Each ``begin`` also refreshes
+    the minimal view after its local gates so claim selection uses current
+    GitHub state. Other commands reuse the loaded objects and their locally
+    updated mutation state when the view serves them.
     """
 
     def __init__(self, loader=None):
@@ -22689,17 +24897,22 @@ class FunnelSession:
         include_startable: bool = False,
         startable_agent: str = "codex",
     ) -> List[Item]:
-        """Load once per session, or again when the cached read is a
-        narrower view than this command asked for.
+        """Load once per session, refreshing the view for each begin attempt.
 
         ``main`` asks with ``scope="begin"`` for ``begin`` and with no scope
-        otherwise. A cached full read serves either; a cached begin view
-        serves only a begin-scoped ask, and a full ask replaces it, along with
-        any local mutation state, by a fresh read of GitHub (#1591). A full
-        read loaded without history by a cheaper first command is hydrated
-        once, in place, by the first later command that reads history
-        (PROJECT_LOAD_READS_HISTORY).
+        otherwise. A cached begin view can serve other begin-scoped consumers,
+        while an actual begin attempt refreshes through the minimal shared
+        loader. A full ask replaces a narrow view, along with any local
+        mutation state, by a fresh read of GitHub (#1591). A full read loaded
+        without history by a cheaper first command is hydrated once, in place,
+        by the first later command that reads history (PROJECT_LOAD_READS_HISTORY).
         """
+        if self._command == "begin":
+            # A begin may claim work, so its minimal Project view must come
+            # from this attempt's post-preflight shared load, not a snapshot
+            # retained from an earlier command in the session.
+            self.items = None
+            self._history_pending = False
         if self.items is not None and (
             scope == "begin" or items_scope(self.items) == "full"
         ):
@@ -22773,7 +24986,11 @@ class FunnelSession:
                 self._command = argv[0] if argv else None
                 # A view still owed its history goes back through the loader,
                 # which hydrates it when this command reads history.
-                current = None if self._history_pending else self.items
+                current = (
+                    None
+                    if self._history_pending or self._command == "begin"
+                    else self.items
+                )
                 if stdin is None:
                     code = main(list(argv), _items=current,
                                 _items_loader=self._load_items,

@@ -51,6 +51,7 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import funnel  # noqa: E402
+from block_record import render_needs_decision  # noqa: E402
 from engine.shape import issue_thread_section  # noqa: E402
 
 
@@ -71,6 +72,13 @@ NEEDS_OPTIONS = funnel.NEEDS_OPTIONS
 SIZING_SKILL_PATH = os.path.join("skills", "breakdown", "SKILL.md")
 SIZING_START = "## The unit"
 SIZING_END = "## Ordering and independence"
+
+# A plan's Review focus is optional, so add its breakdown rule only when the
+# rendered plan carries one or more focus bullets.
+REVIEW_FOCUS_ACCEPT_RULE = (
+    "For each `## Review focus` bullet, put one `Accept` test in the ticket "
+    "that owns that behavior. Copy the bullet's text verbatim, exactly once."
+)
 
 #: An external dependency: owner/repo#n, the only string shape accepted.
 REF_RE = re.compile(
@@ -167,6 +175,23 @@ def fetch_plan(repo: str, number: int) -> dict:
     return data
 
 
+def fetch_plan_body(repo: str, number: int) -> str:
+    """Read the live plan body for answer constraints without loading its thread."""
+    data = funnel._gh_json(
+        "gh", "issue", "view", str(number), "--repo", repo,
+        "--json", "body")
+    if not isinstance(data, dict) or not isinstance(data.get("body"), str):
+        raise funnel.GitHubError(
+            "could not read the body of project {}#{}".format(repo, number))
+    return data["body"]
+
+
+def has_one_ticket_containment(body: object) -> bool:
+    """Whether the plan carries the exact runner-owned containment line."""
+    return (isinstance(body, str)
+            and "Containment: one ticket" in body.splitlines())
+
+
 def fetch_siblings(repo: str, number: int) -> List[dict]:
     """The project's existing sub-issues, so the model does not re-plan them.
 
@@ -233,12 +258,36 @@ def fetch_project_risk(ref: str) -> Optional[str]:
     return risk
 
 
+def _has_review_focus_bullets(plan_body: object) -> bool:
+    """Whether a rendered plan has a populated Review focus section."""
+    if not isinstance(plan_body, str):
+        return False
+    lines = plan_body.splitlines()
+    for index, line in enumerate(lines):
+        if line.strip() != "## Review focus":
+            continue
+        for section_line in lines[index + 1:]:
+            stripped = section_line.strip()
+            if stripped.startswith("#"):
+                break
+            if stripped.startswith("- ") and stripped[2:].strip():
+                return True
+        return False
+    return False
+
+
 def build_packet(*, repo: str, number: int, plan: dict,
                  siblings: Sequence[dict], sizing: str,
                  collected_at: str,
                  issue_comments: Optional[Sequence[Dict]] = None) -> Dict:
-    """Assemble the packet from already-fetched pieces. Pure: no IO."""
+    """Assemble the packet from already-fetched pieces. Pure: no IO.
+
+    A populated Review focus section adds its one-per-bullet Accept rule to
+    the sizing instructions sent with this plan.
+    """
     plan = plan or {}
+    if _has_review_focus_bullets(plan.get("body")):
+        sizing = sizing.rstrip() + "\n\n" + REVIEW_FOCUS_ACCEPT_RULE + "\n"
     packet = {
         "project": {
             "ref": "{}#{}".format(repo, number),
@@ -339,7 +388,8 @@ def _find_cycle(edges: Dict[int, List[int]]) -> Optional[List[int]]:
     return None
 
 
-def validate_answer(answer: object, issue_state: Callable[[str], Optional[str]]
+def validate_answer(answer: object, issue_state: Callable[[str], Optional[str]], *,
+                    max_tickets: Optional[int] = None
                     ) -> Tuple[List[str], Optional[dict]]:
     """Validate one breakdown answer against the ticket schema.
 
@@ -357,6 +407,11 @@ def validate_answer(answer: object, issue_state: Callable[[str], Optional[str]]
     raw_tickets = answer.get("tickets", [])
     if not isinstance(raw_tickets, list):
         return ["tickets must be a list of ticket objects"], None
+    if max_tickets is not None and len(raw_tickets) > max_tickets:
+        count = "one" if max_tickets == 1 else str(max_tickets)
+        suffix = "" if max_tickets == 1 else "s"
+        return ["the plan allows at most {} ticket{}".format(
+            count, suffix)], None
     for index, raw in enumerate(raw_tickets):
         if not isinstance(raw, dict):
             return ["ticket {} must be an object with title, body, risk, "
@@ -783,6 +838,27 @@ def match_existing_siblings(tickets: Sequence[dict],
     return matched
 
 
+def ticket_routing(ticket: dict, project_risk: Optional[str]) -> dict:
+    """One ticket's routing record: Origin, Risk, Needs, inherited (#2140).
+
+    Under an escalated ``project_risk`` the Risk is escalated whatever the
+    answer said (#1757): the #1679 approval promises the escalated reviewer
+    for scan-escalated work, and the model copying the project's tier is a
+    judgement that can be missed. Under a standard project, or one with no
+    Risk, the answer's per-ticket risk stands, escalated included.
+
+    The Project field writes and the coverage row both read this record, so
+    what GitHub holds and what the coverage comment names cannot drift.
+    """
+    inherited = project_risk == "escalated"
+    return {
+        "origin": "agent",
+        "risk": "escalated" if inherited else ticket["risk"],
+        "risk_inherited": inherited,
+        "needs": ticket["needs"],
+    }
+
+
 def apply_create(repo: str, parent_number: int, tickets: Sequence[dict], *,
                  project_risk: Optional[str] = None,
                  run: Optional[str] = None,
@@ -791,22 +867,19 @@ def apply_create(repo: str, parent_number: int, tickets: Sequence[dict], *,
 
     Blockers go first, so every native edge points at an issue that already
     exists. Existing children are matched by unique title from GitHub; their
-    Project add and Needs write are repeated so a later attempt repairs a
+    Project add and field writes are repeated so a later attempt repairs a
     half-applied sequence. The returned rows follow creation order, so the
     coverage comment lists each blocker before its dependents. A failure
     names the issues already present, so the next attempt starts from
     GitHub's truth rather than this run's memory.
 
-    Under an escalated ``project_risk`` every ticket, created or resumed, is
-    written escalated whatever the answer said (#1757): the #1679 approval
-    promises the escalated reviewer for scan-escalated work, and the model
-    copying the project's tier is a judgement that can be missed. Under a
-    standard project, or one with no Risk, the answer's per-ticket risk
-    stands, escalated included.
+    Every ticket, created or resumed, gets one ``ticket_routing`` record
+    (#2140), carrying the escalated project's Risk (#1757); its Origin,
+    Risk and Needs writes and its coverage row are all read from it.
     """
-    inherit = project_risk == "escalated"
     created_numbers: Dict[int, int] = {}
     created_refs: Dict[int, str] = {}
+    routing: Dict[int, dict] = {}
     order = creation_order(tickets)
     existing = match_existing_siblings(
         tickets, fetch_siblings(repo, parent_number))
@@ -824,19 +897,20 @@ def apply_create(repo: str, parent_number: int, tickets: Sequence[dict], *,
                 url = issue_url(ref)
             created_numbers[index] = number
             created_refs[index] = ref
+            routing[index] = ticket_routing(ticket, project_risk)
             item_id = add_to_project(url)
-            funnel.write_project_select(item_id, "Origin", "agent", ref)
             funnel.write_project_select(
-                item_id, "Risk",
-                "escalated" if inherit else ticket["risk"], ref)
-            write_needs(item_id, ticket["needs"], ref)
+                item_id, "Origin", routing[index]["origin"], ref)
+            funnel.write_project_select(
+                item_id, "Risk", routing[index]["risk"], ref)
+            write_needs(item_id, routing[index]["needs"], ref)
         created = [{
             "ref": created_refs[index],
             "number": created_numbers[index],
             "title": tickets[index]["title"],
-            "risk": "escalated" if inherit else tickets[index]["risk"],
-            "risk_inherited": inherit,
-            "needs": tickets[index]["needs"],
+            "risk": routing[index]["risk"],
+            "risk_inherited": routing[index]["risk_inherited"],
+            "needs": routing[index]["needs"],
             "blocked_by": display_blockers(
                 tickets[index], created_refs, repo),
         } for index in order]
@@ -863,12 +937,11 @@ def apply_question(repo: str, parent_number: int, question: str, *,
 
     Creates no tickets: a ticket built on an invented decision is worse
     than no ticket, because someone will implement it. The question is the
-    model's words, so it is made inert (#1798).
+    model's words, so it is made inert (#1798); ``block_record`` renders it,
+    the one owner of the header ``_load_block_comment`` reads (#2169).
     """
     post_comment(
-        repo, parent_number,
-        "{} {}".format(funnel.NEEDS_DECISION_PREFIX,
-                       funnel.inert_comment_text(question)),
+        repo, parent_number, render_needs_decision(question),
         run=run, agent=agent)
     url = "https://github.com/{}/issues/{}".format(repo, parent_number)
     funnel.write_project_select(
@@ -883,6 +956,10 @@ def apply(repo: str, number: int, normalized: dict, *,
     """Perform one validated answer's effects. Reads, then writes, in order."""
     project_ref = "{}#{}".format(repo, number)
     plan = fetch_plan(repo, number)
+    if (has_one_ticket_containment(plan.get("body"))
+            and len(normalized.get("tickets", [])) > 1):
+        raise BreakdownError(
+            "the plan allows at most one ticket (Containment: one ticket)")
     if str(plan.get("state") or "").upper() != "OPEN":
         raise funnel.GitHubError(
             "project {} is {}; a closed project takes no breakdown".format(
@@ -982,7 +1059,14 @@ def apply_main(argv: Optional[Sequence[str]] = None) -> int:
         print("breakdown-apply: {}".format(exc), file=sys.stderr)
         return validation_exit(args.attempt)
     try:
-        errors, normalized = validate_answer(answer, fetch_issue_state)
+        max_tickets = None
+        tickets = answer.get("tickets") if isinstance(answer, dict) else None
+        if isinstance(tickets, list) and len(tickets) > 1:
+            plan_body = fetch_plan_body(repo, number)
+            if has_one_ticket_containment(plan_body):
+                max_tickets = 1
+        errors, normalized = validate_answer(
+            answer, fetch_issue_state, max_tickets=max_tickets)
     except funnel.GitHubError as exc:
         print("breakdown-apply: {}".format(exc), file=sys.stderr)
         return 1

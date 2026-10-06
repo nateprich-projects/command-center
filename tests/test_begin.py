@@ -101,6 +101,49 @@ def _allow_begin(monkeypatch):
     monkeypatch.setattr(funnel, "member_repos", member_repos)
 
 
+def _allow_local_preflight(monkeypatch, reading):
+    monkeypatch.setattr(
+        funnel, "_start_begin_heartbeat",
+        lambda agent, tier=None: "run-id",
+    )
+    monkeypatch.setattr(
+        funnel, "_codex_settings_check",
+        lambda: {"ok": True, "effective": {"model": "fixture"},
+                 "automation": None},
+    )
+    monkeypatch.setattr(funnel, "_codex_memory_reset", lambda _job: "reset")
+    monkeypatch.setattr(usage, "read_agent", lambda *_args: reading)
+    monkeypatch.setattr(
+        usage, "pace", lambda *_args, **_kwargs: {"over_pace": False}
+    )
+
+
+def _deny_preflight_project_reads(monkeypatch):
+    def denied(name):
+        def call(*_args, **_kwargs):
+            pytest.fail("run preflight unexpectedly called {}".format(name))
+        return call
+
+    for name in (
+        "member_repos", "load_items", "_load_begin_items",
+        "_load_minimal_startable_view", "hydrate_item_details", "gh_graphql",
+        "startable_listing", "_order_startable_items",
+        "_run_bounded_subprocess",
+    ):
+        monkeypatch.setattr(funnel, name, denied(name))
+    monkeypatch.setattr(funnel.subprocess, "run", denied("subprocess.run"))
+
+    real_clock = funnel.time
+
+    class NoTimeoutClock:
+        def __getattr__(self, name):
+            if name in ("monotonic", "perf_counter", "sleep", "time"):
+                return denied("time." + name)
+            return getattr(real_clock, name)
+
+    monkeypatch.setattr(funnel, "time", NoTimeoutClock())
+
+
 def _begin(monkeypatch, capsys, *, breakdown):
     _allow_begin(monkeypatch)
     monkeypatch.setattr(funnel, "reconcile_approved_merges", lambda *args: [])
@@ -316,6 +359,146 @@ def test_begin_prints_a_transient_json_envelope_when_project_load_is_truncated(
     )
 
 
+def test_begin_reports_bounded_cannot_complete_before_starting_a_ticket(
+    monkeypatch, capsys,
+):
+    _allow_local_preflight(monkeypatch, {"windows": {}})
+
+    def member_repos(after_first_response=None):
+        if after_first_response is not None:
+            after_first_response({
+                "rateLimit": {"cost": 1, "remaining": 5_000,
+                              "resetAt": "later"},
+            })
+        return ["nateprich-projects/command-center"]
+
+    def over_envelope(**_kwargs):
+        raise funnel.BeginCannotComplete()
+
+    monkeypatch.setattr(funnel, "member_repos", member_repos)
+    monkeypatch.setattr(
+        funnel, "cmd_begin",
+        lambda *_args, **_kwargs: pytest.fail(
+            "cannot-complete must stop before ticket selection"
+        ),
+    )
+
+    assert funnel.main(
+        ["begin", "--agent", "codex", "--tier", "standard"],
+        _items_loader=over_envelope,
+    ) == 0
+
+    result = json.loads(capsys.readouterr().out)
+    assert result["gate"] == "ok"
+    assert result["do"] == "stop"
+    assert result["why"] == funnel.BEGIN_CANNOT_COMPLETE_REASON
+    assert "work" not in result
+    assert funnel._ACTIVE_BEGIN_ENVELOPE is None
+
+
+def test_main_keeps_begin_envelope_active_during_project_load(
+    monkeypatch, capsys,
+):
+    _allow_local_preflight(monkeypatch, {"windows": {}})
+
+    def member_repos(after_first_response=None):
+        if after_first_response is not None:
+            after_first_response({
+                "rateLimit": {"cost": 1, "remaining": 5_000,
+                              "resetAt": "later"},
+            })
+        return ["nateprich-projects/command-center"]
+
+    monkeypatch.setattr(funnel, "member_repos", member_repos)
+    loaded_envelopes = []
+
+    def refuse_during_load(**_kwargs):
+        loaded_envelopes.append(funnel._ACTIVE_BEGIN_ENVELOPE)
+        assert isinstance(funnel._ACTIVE_BEGIN_ENVELOPE,
+                          funnel.BeginWorkEnvelope)
+        raise funnel.BeginCannotComplete()
+
+    monkeypatch.setattr(funnel, "load_items", refuse_during_load)
+
+    assert funnel.main(
+        ["begin", "--agent", "codex", "--tier", "standard"],
+    ) == 0
+
+    result = json.loads(capsys.readouterr().out)
+    assert len(loaded_envelopes) == 1
+    assert result["do"] == "stop"
+    assert result["why"] == funnel.BEGIN_CANNOT_COMPLETE_REASON
+
+
+def test_begin_work_envelope_counts_preflight_calls_before_running_gh(
+    monkeypatch,
+):
+    funnel.reset_api_usage()
+    envelope = funnel.BeginWorkEnvelope(limit=1)
+    monkeypatch.setattr(funnel, "_ACTIVE_BEGIN_ENVELOPE", envelope)
+    commands = []
+
+    def run(command, **_kwargs):
+        commands.append(command)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(funnel, "_run_bounded_subprocess", run)
+    funnel._run_gh(["gh", "api", "graphql", "-f", "query={viewer{login}}"])
+
+    with pytest.raises(funnel.BeginCannotComplete):
+        funnel._run_gh(["gh", "api", "graphql", "-f", "query={viewer{login}}"])
+
+    assert len(commands) == 1
+    assert envelope.preflight_calls == 1
+
+
+def test_cmd_begin_refuses_before_claim_when_detail_reserve_exceeds_envelope(
+    monkeypatch,
+):
+    project, ticket = _ticket(7, 6)
+    envelope = funnel.BeginWorkEnvelope(limit=100)
+    monkeypatch.setattr(funnel, "_ACTIVE_BEGIN_ENVELOPE", envelope)
+    monkeypatch.setattr(funnel, "ticket_pr_facts", lambda _items: {})
+    monkeypatch.setattr(funnel, "reconcile_approved_merges",
+                        lambda *args: [])
+    monkeypatch.setattr(funnel, "reconcile_auto_closeable_projects",
+                        lambda *args: [])
+    monkeypatch.setattr(funnel, "reconcile_closed_items",
+                        lambda *args: [])
+    monkeypatch.setattr(funnel, "reconcile_parked_wakes",
+                        lambda *args: [])
+    monkeypatch.setattr(funnel, "reconcile_closed_claims",
+                        lambda *args: [])
+    monkeypatch.setattr(funnel, "clear_satisfied_blocks",
+                        lambda *args, **kwargs: [])
+    monkeypatch.setattr(funnel, "clear_answered_decline_routes",
+                        lambda *args, **kwargs: [])
+    monkeypatch.setattr(funnel, "awaiting_review", lambda *args, **kwargs: set())
+    monkeypatch.setattr(funnel, "_backoff_rows", lambda: [])
+    monkeypatch.setattr(funnel, "next_ticket_for_tier",
+                        lambda *args, **kwargs: ticket)
+    monkeypatch.setattr(funnel, "read_lock", lambda _item: None)
+    calls = []
+    monkeypatch.setattr(
+        funnel, "claim_ticket",
+        lambda *args, **kwargs: calls.append("claim_ticket"),
+    )
+    monkeypatch.setattr(
+        funnel, "write_lock",
+        lambda *args, **kwargs: calls.append("write_lock"),
+    )
+
+    with pytest.raises(funnel.BeginCannotComplete):
+        funnel.cmd_begin(
+            [project, ticket], NOW, "codex", "standard", False,
+            _preflight=({"agent": "codex", "run": "run-id"},
+                        {"windows": {}}),
+            _pr_facts={},
+        )
+
+    assert calls == []
+
+
 @pytest.mark.parametrize("gate", ["pace", "idle"])
 def test_main_applies_begin_gates_before_loading_the_project(
     monkeypatch, capsys, gate
@@ -375,6 +558,7 @@ def test_main_loads_the_project_after_begin_gates_pass(
 ):
     """A passing preflight still reaches the normal queue and WIP checks."""
     events = []
+    load_args = []
     monkeypatch.setattr(
         funnel,
         "_start_begin_heartbeat",
@@ -405,11 +589,13 @@ def test_main_loads_the_project_after_begin_gates_pass(
         return []
 
     monkeypatch.setattr(funnel, "member_repos", member_repos)
-    monkeypatch.setattr(
-        funnel,
-        "load_items",
-        lambda include_details=True: events.append("load") or [],
-    )
+
+    def load_items(**kwargs):
+        events.append("load")
+        load_args.append(kwargs)
+        return []
+
+    monkeypatch.setattr(funnel, "load_items", load_items)
     monkeypatch.setattr(funnel, "repo_readiness_for_items", lambda items: {})
     monkeypatch.setattr(
         funnel,
@@ -430,6 +616,11 @@ def test_main_loads_the_project_after_begin_gates_pass(
     assert events[-1][0] == "begin"
     assert events[-1][2][0]["gate"] == "ok"
     assert "begin_load.member_repos" in events[-1][3]
+    assert len(load_args) == 1
+    assert load_args[0]["include_details"] is False
+    assert load_args[0]["scope"] == "begin"
+    assert load_args[0]["include_startable"] is True
+    assert load_args[0]["startable_agent"] == "codex"
 
 
 def test_main_stands_down_before_loading_the_project_when_reserve_is_low(
@@ -519,6 +710,95 @@ def test_begin_preflight_uses_the_capped_engineering_floor(monkeypatch):
         "codex", "standard", None,
         {"rateLimit": {"remaining": 826}},
     ) is None
+
+
+def test_run_preflight_uses_local_gates_without_ordering_or_timeout_work(
+    monkeypatch,
+):
+    reading = {"windows": {}}
+    _allow_local_preflight(monkeypatch, reading)
+    _deny_preflight_project_reads(monkeypatch)
+
+    out, result = funnel._begin_preflight(NOW, "codex", False, "standard")
+
+    assert out["gate"] == "ok"
+    assert result == reading
+
+
+def test_run_preflight_stops_on_missing_budget_before_project_reads(monkeypatch):
+    _allow_local_preflight(monkeypatch, None)
+    _deny_preflight_project_reads(monkeypatch)
+
+    out, reading = funnel._begin_preflight(
+        NOW, "codex", False, "standard"
+    )
+
+    assert reading is None
+    assert out["gate"] == "unknown"
+    assert out["do"] == "stop"
+
+
+def test_run_preflight_accepts_the_existing_mac_profile_before_project_reads(
+    monkeypatch,
+):
+    """The default Codex path still accepts a verified Mac rollout."""
+    reading = {"source": "codex", "windows": {}}
+    _allow_local_preflight(monkeypatch, reading)
+    _deny_preflight_project_reads(monkeypatch)
+    checked = []
+
+    def mac_settings_check(*args, **kwargs):
+        checked.append((args, kwargs))
+        return {"ok": True,
+                "effective": {"model": "gpt-6-luna", "effort": "max"},
+                "automation": None}
+
+    monkeypatch.setattr(funnel, "_codex_settings_check", mac_settings_check)
+
+    out, result = funnel._begin_preflight(NOW, "codex", False, "standard")
+
+    assert checked == [((), {})]  # No cloud profile or metadata is supplied.
+    assert out["gate"] == "ok"
+    assert out["effective"] == {"model": "gpt-6-luna", "effort": "max"}
+    assert result is reading
+
+
+def test_run_preflight_refuses_partial_cloud_metadata_before_project_reads(
+    monkeypatch, codex_settings_match,
+):
+    import heartbeat
+
+    monkeypatch.setattr(funnel, "_codex_settings_check", codex_settings_match)
+    monkeypatch.setattr(
+        funnel,
+        "_start_begin_heartbeat",
+        lambda agent, tier=None: "run-id",
+    )
+    monkeypatch.setattr(
+        heartbeat,
+        "record_event",
+        lambda *args, **kwargs: "recorded",
+    )
+    monkeypatch.setattr(
+        usage,
+        "read_agent",
+        lambda *args: pytest.fail("refused cloud metadata reached usage"),
+    )
+    _deny_preflight_project_reads(monkeypatch)
+
+    out, reading = funnel._begin_preflight(
+        NOW,
+        "codex",
+        False,
+        "standard",
+        codex_profile="cloud",
+        cloud_metadata={"model": "fixture-model"},
+    )
+
+    assert reading is None
+    assert out["gate"] == "config"
+    assert out["do"] == "stop"
+    assert "cloud profile" in out["why"]
 
 
 def test_main_treats_a_structured_empty_window_as_a_clean_reserve_stop(
@@ -1972,6 +2252,36 @@ def test_codex_begin_does_not_plant_a_branch_for_an_already_claimed_ticket(
     assert writes == []
 
 
+def test_begin_rechecks_a_stale_claim_projection_before_claiming(
+        monkeypatch, capsys):
+    project, ticket = _ticket(88, 84)
+    # The filtered listing can carry a claim that has since expired. A fresh
+    # claim read returning no value is authoritative, so the ticket can start.
+    ticket.in_motion_since = NOW - funnel.LOCK_TTL - timedelta(seconds=1)
+
+    result, writes = _implementing_begin(
+        monkeypatch, capsys, [project, ticket],
+        current_claims={ticket.ref: None},
+    )
+
+    assert result["do"] == "ticket"
+    assert result["work"]["ref"] == ticket.ref
+    assert writes[0][0] == ticket.ref and writes[0][1] is not None
+
+
+def test_begin_claims_ticket_when_live_claim_is_missing(monkeypatch, capsys):
+    project, ticket = _ticket(89, 84)
+
+    result, writes = _implementing_begin(
+        monkeypatch, capsys, [project, ticket],
+        current_claims={ticket.ref: None},
+    )
+
+    assert result["do"] == "ticket"
+    assert result["work"]["ref"] == ticket.ref
+    assert writes[0][0] == ticket.ref and writes[0][1] is not None
+
+
 def test_ticket_branch_facts_failure_stops_with_an_error_gate(
     monkeypatch, capsys
 ):
@@ -2796,7 +3106,8 @@ def test_begin_keeps_review_first_against_same_class_later_jobs(monkeypatch, cap
         lambda items: breakdown_calls.append(items) or [pending],
     )
     monkeypatch.setattr(
-        funnel, "shapeable_idea", lambda items, tier, reading: idea
+        funnel, "shapeable_idea",
+        lambda items, tier, reading, skipped=None: idea,
     )
 
     result = _begin(monkeypatch, capsys, breakdown=True)
@@ -2906,7 +3217,10 @@ def test_review_lane_skips_a_backed_off_breakdown(monkeypatch, capsys):
     )
     monkeypatch.setattr(funnel, "review_queue", lambda items, tier: [])
     monkeypatch.setattr(funnel, "awaiting_breakdown", lambda items: [project])
-    monkeypatch.setattr(funnel, "shapeable_idea", lambda items, tier, reading: None)
+    monkeypatch.setattr(
+        funnel, "shapeable_idea",
+        lambda items, tier, reading, skipped=None: None,
+    )
     monkeypatch.setattr(funnel, "_backed_off_work",
                         lambda items, now: {project.ref: _backoff_row(project.ref)})
     _allow_begin(monkeypatch)
@@ -2969,6 +3283,10 @@ def _idea(number, title, body, klass=None, labels=None):
         url="https://github.com/nateprich-projects/command-center/issues/{}".format(number),
         title=title,
         body=body,
+        # What ``ideas()`` yields; the picker checks it (#2139).
+        state="OPEN",
+        status="Ideas",
+        children_total=0,
         origin="agent",
         risk=("escalated" if "Risk: escalated" in body else "standard"),
         needs="none",
@@ -3019,7 +3337,7 @@ def _reviewer_begin(
     monkeypatch.setattr(
         funnel,
         "shapeable_idea",
-        lambda rows, tier, reading: idea,
+        lambda rows, tier, reading, skipped=None: idea,
     )
     monkeypatch.setattr(funnel, "_ticket_body", lambda repo, number: "")
 
@@ -3059,6 +3377,56 @@ def test_improve_idea_does_not_preempt_an_improve_review(monkeypatch, capsys):
 
     assert result["do"] == "review"
     assert result["work"] == _review_job(ticket)
+
+
+def test_begin_reports_the_review_heads_the_listing_waits_on(
+    monkeypatch, capsys
+):
+    """A waiting head is named in begin's JSON, never dropped (#2192).
+
+    The review queue fills a ``skipped`` list, as the shape picker does, and
+    begin reports it as ``review_waiting`` beside the job it hands out.
+    """
+    project, ticket = _ticket(131, 130)
+    _, waiting_ticket = _ticket(133, 130)
+    review = _review_job(ticket, pr=132)
+    waiting = {"ref": waiting_ticket.ref, "pr": 134,
+               "reason": "mergeability UNKNOWN"}
+
+    def review_queue(rows, tier, *, pr_facts=None, output_stream=None,
+                     skipped=None):
+        if skipped is not None:
+            skipped.append(dict(waiting))
+        return [review]
+
+    _allow_begin(monkeypatch)
+    monkeypatch.setattr(funnel, "reconcile_approved_merges", lambda *args: [])
+    monkeypatch.setattr(funnel, "review_queue", review_queue)
+    monkeypatch.setattr(funnel, "shapeable_idea", lambda *args: None)
+    monkeypatch.setattr(funnel, "_ticket_body", lambda repo, number: "")
+
+    assert funnel.cmd_begin(
+        [project, ticket, waiting_ticket], NOW, "zcode", "standard", False,
+        caller_role="review",
+    ) == 0
+    result = json.loads(capsys.readouterr().out)
+
+    assert result["do"] == "review"
+    assert result["work"] == review
+    assert result["review_waiting"] == [waiting]
+
+
+def test_begin_has_no_review_waiting_key_when_nothing_waits(
+    monkeypatch, capsys
+):
+    project, ticket = _ticket(141, 140)
+
+    result = _reviewer_begin(
+        monkeypatch, capsys, [project, ticket], review=_review_job(ticket),
+    )
+
+    assert result["do"] == "review"
+    assert "review_waiting" not in result
 
 
 def test_muse_escalated_begin_uses_the_explicit_reviewer_role(
@@ -3487,6 +3855,45 @@ def test_shape_offers_only_the_first_idea_matching_the_run_tier(
         "title": candidates[1].title,
     }
     assert len(calls) == 1
+
+
+def test_shape_picker_skips_with_children_and_records_the_skip(
+        monkeypatch, capsys
+):
+    import heartbeat
+
+    with_children = _idea(36, "Idea with children", "Risk: standard")
+    with_children.children_total = 1
+    next_idea = _idea(37, "Next idea", "Risk: standard")
+    candidates = [with_children, next_idea]
+    events = []
+
+    _allow_begin(monkeypatch)
+    monkeypatch.setattr(funnel, "reconcile_approved_merges", lambda *args: [])
+    monkeypatch.setattr(funnel, "ideas", lambda items: candidates)
+    monkeypatch.setattr(usage, "shaping_allowed", lambda reading: True)
+    monkeypatch.setattr(
+        heartbeat, "record_event",
+        lambda *args, **kwargs: events.append((args, kwargs)) or "pushed",
+    )
+
+    assert funnel.cmd_begin([], NOW, "zcode", "standard", False,
+                            breakdown=True) == 0
+    captured = capsys.readouterr()
+    result = json.loads(captured.out)
+
+    skipped = [{"ref": with_children.ref, "reason": "with-children"}]
+    assert result["do"] == "shape"
+    assert result["work"]["ref"] == next_idea.ref
+    assert result["shape_skipped"] == skipped
+    assert events == [(("zcode", "run-id", "skipped-stale-shape"), {
+        "queue": "shape",
+        "skipped": skipped,
+        "note": "shape picker skipped Ideas items with children",
+    })]
+    assert "run outcome: skipped-stale-shape ref={} reason=with-children".format(
+        with_children.ref
+    ) in captured.err
 
 
 @pytest.mark.parametrize(
@@ -4164,7 +4571,8 @@ def test_sweep_releases_an_escalated_plan_whose_record_declares_none(
     """#1721: #1195's body, whose Needs Nate question has been answered, so
     Needs is none, carries the runner's record that the decision declared
     no risk. It is swept to Ready and Risk stays escalated for the review
-    tier."""
+    tier. Its body's only scan hit was a Siblings checked line, which the
+    scan no longer reads (#2180), so the note names no reason."""
     fixture = next(entry for entry in SCAN_ONLY_HOLDS
                    if "#1195 " in entry["source"])
     stranded = _held_plan(305, fixture["body"], needs="none",
@@ -4184,7 +4592,7 @@ def test_sweep_releases_an_escalated_plan_whose_record_declares_none(
     assert len(comments) == 1
     assert funnel.parse_self_approval(comments[0]) == (
         "needs_nate all null; class Broken self-approvable; origin agent; "
-        "scan-only escalation (data-migration) raises the review tier; "
+        "scan-only escalation raises the review tier; "
         "no declared risk")
 
 

@@ -4,7 +4,9 @@ import test from "node:test";
 
 import {
   STAGES, age, boardColumns, boardTabCounts, boardTabFromUrl, boardTabUrl, tabColumns,
-  failureState, museUsageText, nextOwner, ownerCell,
+  failureState, museUsageText, musePanelUsage, museEstimate,
+  claudeUsage, claudeUsageChanged, snapshotNeedsRender,
+  renderUsage, nextOwner, ownerCell,
   phoneState, pipState, projectBlocked, projectHold, holdChip, renderPhoneBoard, ticketHold, unblocksChip,
   repoLabels, repoOf,
   repoOptions, rowTier, shortRepo, visible, renderExecutionTiles, requestMetrics,
@@ -129,6 +131,29 @@ function renderWaitingFixture(brief) {
   }
 }
 
+function renderUsageFixture(usage, nowMs) {
+  const container = new TestNode("div");
+  const previousDocument = globalThis.document;
+  globalThis.document = {
+    createElement(tagName) { return new TestNode(tagName); },
+    querySelector(selector) {
+      assert.equal(selector, "#usage");
+      return container;
+    },
+  };
+  try {
+    renderUsage(usage, nowMs);
+    return container;
+  } finally {
+    if (previousDocument === undefined) delete globalThis.document;
+    else globalThis.document = previousDocument;
+  }
+}
+
+function usageRow(container, label) {
+  return container.querySelectorAll(".usage").find((row) => row.textContent.includes(label));
+}
+
 function nodesByTag(root, tagName) {
   return [...root.walk()].filter((node) => node.tagName === tagName);
 }
@@ -219,11 +244,46 @@ test("a pip carries the ticket's furthest state", () => {
   assert.equal(pipState({ state: "OPEN", pr: "approved" }), "approved");
   assert.equal(pipState({ state: "OPEN", pr: "changes requested" }), "changes-requested");
   assert.equal(pipState({ state: "OPEN", pr: "submitted" }), "submitted");
+  assert.equal(pipState({ state: "OPEN", pr_stale: true }), "stale");
+  assert.equal(pipState({ state: "OPEN", pr_unknown: true }), "unknown");
   assert.equal(pipState({ state: "OPEN", blocked: true }), "blocked");
   assert.equal(
     pipState({ state: "OPEN", blocked: true, blocked_by_siblings: true }), "queued",
   );
   assert.equal(pipState({ state: "OPEN" }), "open");
+});
+
+test("a carried PR fact has a stale pip and visible age on the phone board", () => {
+  const previousDocument = globalThis.document;
+  globalThis.document = new TestDocument();
+  try {
+    const board = renderPhoneBoard([{
+      stage: "Building",
+      items: [{
+        ref: "repo#1",
+        title: "Plan",
+        tickets: [{
+          ref: "repo#2",
+          number: 2,
+          title: "Review PR",
+          state: "OPEN",
+          pr_stale: true,
+          pr_stale_state: "approved",
+          pr_stale_age: "5h",
+        }],
+      }],
+    }]);
+    const staleRow = board.querySelectorAll(".phone-row").find(
+      (row) => row.className.split(/\s+/).includes("phone-row-stale"),
+    );
+
+    assert.ok(staleRow);
+    assert.ok(staleRow.querySelector(".pip")?.className.split(/\s+/).includes("pip-stale"));
+    assert.equal(staleRow.querySelector(".pr-stale-age")?.textContent, "stale approved · 5h");
+  } finally {
+    if (previousDocument === undefined) delete globalThis.document;
+    else globalThis.document = previousDocument;
+  }
 });
 
 test("tier describes open tickets only", () => {
@@ -566,10 +626,14 @@ test("the phone progress shows its count once (#994)", async () => {
   assert.match(source, /element\("span", "pip-count", `\$\{closed\}\/\$\{total\}`\)/);
 });
 
-test("the page polls its own snapshot and re-renders only on a new timestamp", async () => {
+test("the page poll refreshes usage age and detects changed provider fields", async () => {
   const source = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
   assert.match(source, /setInterval/);
-  assert.match(source, /generatedAt === lastGeneratedAt/);
+  const poll = source.slice(
+    source.indexOf("async function loadSnapshot("), source.indexOf("\nfunction activateTab("),
+  );
+  assert.match(poll, /snapshotNeedsRender\(lastSnapshot, snapshot, lastGeneratedAt\)/);
+  assert.match(poll, /renderUsage\(snapshot\.usage \|\| \{\}\)/);
   // A hidden tab is not read, so it should not poll.
   assert.match(source, /visibilityState === "hidden"/);
 });
@@ -715,6 +779,239 @@ test("the usage line shows rolling 7-day Muse spend against the cap", () => {
     museUsageText({ spent_dollars: "0.70", cap_dollars: 20.0, used_percent: 3.5 }),
     null,
   );
+});
+
+test("Muse account-panel usage shows its validated value, source and original sample age", () => {
+  const sample = {
+    used_percent: 15,
+    sampled_at: "2026-09-29T20:55:00-07:00",
+    source: "Muse account panel",
+    source_url: "https://github.com/nateprich-projects/command-center/issues/1673#issuecomment-5903766309",
+  };
+  const now = Date.parse("2026-09-29T21:40:00-07:00");
+  assert.deepEqual(musePanelUsage(sample, now), {
+    state: "live",
+    percent: 15,
+    source: "Muse account panel",
+    sourceUrl: sample.source_url,
+    sampledAt: sample.sampled_at,
+    ageText: "45m old",
+  });
+
+  const container = renderUsageFixture({ muse_panel: sample }, now);
+  const row = usageRow(container, "Muse account-panel usage");
+  assert.equal(row.querySelector(".usage-percent").textContent, "15%");
+  const source = row.querySelectorAll(".usage-label").find((node) => (
+    node.tagName === "a" && node.textContent === "Muse account panel"
+  ));
+  assert.equal(source.attributes.get("href"), sample.source_url);
+  const sampledAt = row.querySelectorAll(".usage-age").find((node) => node.tagName === "time");
+  assert.equal(sampledAt.textContent, "Sampled 2026-09-29T20:55:00-07:00 · 45m old");
+  assert.ok(row.querySelector(".usage-fill"));
+  const refresh = row.querySelectorAll(".usage-age").find((node) => (
+    node.tagName === "a" && node.textContent.includes("#2123")
+  ));
+  assert.equal(refresh.attributes.get("href"),
+    "https://github.com/nateprich-projects/command-center/issues/2123");
+});
+
+test("Muse account-panel usage hides a stale value and keeps its source timestamp and age", () => {
+  const sample = {
+    used_percent: 15,
+    sampled_at: "2026-09-29T20:55:00-07:00",
+    source: "Muse account panel",
+    source_url: "https://github.com/nateprich-projects/command-center/issues/1673#issuecomment-5903766309",
+  };
+  const now = Date.parse("2026-09-29T22:26:00-07:00");
+  assert.equal(musePanelUsage(sample, now).state, "stale");
+
+  const row = usageRow(renderUsageFixture({ muse_panel: sample }, now), "Muse account-panel usage");
+  assert.match(row.textContent, /Stale/);
+  assert.equal(row.querySelector(".usage-percent"), null);
+  assert.equal(row.querySelector(".usage-fill"), null);
+  assert.ok(row.querySelectorAll(".usage-label").some((node) => (
+    node.tagName === "a" && node.textContent === "Muse account panel"
+  )));
+  const sampledAt = row.querySelectorAll(".usage-age").find((node) => node.tagName === "time");
+  assert.equal(sampledAt.textContent, "Sampled 2026-09-29T20:55:00-07:00 · 1h old");
+});
+
+test("Muse panel usage is unavailable without a validated source reading", () => {
+  assert.deepEqual(musePanelUsage(null), { state: "unavailable" });
+  const row = usageRow(renderUsageFixture({}, Date.parse("2026-10-01T19:00:00Z")),
+    "Muse account-panel usage");
+  assert.match(row.textContent, /Unavailable/);
+  assert.equal(row.querySelector(".usage-percent"), null);
+  assert.equal(row.querySelector(".usage-fill"), null);
+  assert.equal(row.querySelectorAll(".usage-age").some((node) => node.tagName === "time"), false);
+  const refresh = row.querySelectorAll(".usage-age").find((node) => (
+    node.tagName === "a" && node.textContent.includes("#2123")
+  ));
+  assert.equal(refresh.attributes.get("href"),
+    "https://github.com/nateprich-projects/command-center/issues/2123");
+});
+
+test("the Muse derived-spend estimate labels its journal source and sample age", () => {
+  const now = Date.parse("2026-09-29T21:40:00-07:00");
+  const estimate = {
+    source: "Local Muse session journal estimate",
+    captured_at: Date.parse("2026-09-29T20:55:00-07:00") / 1000,
+    spent_dollars: 14.3,
+    cap_dollars: 200,
+    used_percent: 7.15,
+    calls: 42,
+  };
+  assert.deepEqual(museEstimate(estimate, now), {
+    state: "live",
+    source: "Local Muse session journal estimate",
+    sampledAt: new Date(estimate.captured_at * 1000).toISOString(),
+    ageText: "45m old",
+    spent: 14.3,
+    cap: 200,
+    percent: 7.15,
+  });
+
+  const row = usageRow(renderUsageFixture({ muse: estimate }, now), "Muse 7-day spend estimate");
+  assert.match(row.querySelector(".usage-label").textContent, /estimate/i);
+  assert.ok(row.querySelectorAll(".usage-label").some((node) => (
+    node.textContent === "Local Muse session journal estimate"
+  )));
+  const sampledAt = row.querySelectorAll(".usage-age").find((node) => node.tagName === "time");
+  assert.equal(sampledAt.textContent, "Sampled 2026-09-30T03:55:00.000Z · 45m old");
+
+  const stale = museEstimate(estimate, Date.parse("2026-09-29T22:26:00-07:00"));
+  assert.equal(stale.state, "stale");
+  const staleRow = usageRow(renderUsageFixture({ muse: estimate },
+    Date.parse("2026-09-29T22:26:00-07:00")), "Muse 7-day spend estimate");
+  assert.match(staleRow.textContent, /Stale/);
+  assert.equal(staleRow.querySelector(".usage-percent"), null);
+  assert.ok(staleRow.querySelectorAll(".usage-label").some((node) => (
+    node.textContent === "Local Muse session journal estimate"
+  )));
+});
+
+test("Claude weekly usage shows the exact percentage and recomputed sample age", () => {
+  const now = Date.parse("2026-10-01T19:00:00Z");
+  const sample = new Date(now - 45 * 60 * 1000).toISOString();
+  assert.deepEqual(
+    claudeUsage({ u: { sd: 42.375 }, t: sample }, now),
+    { state: "live", percent: 42.375, ageText: "45m old" },
+  );
+
+  const container = new TestNode("div");
+  const previousDocument = globalThis.document;
+  globalThis.document = {
+    createElement(tagName) { return new TestNode(tagName); },
+    querySelector(selector) {
+      assert.equal(selector, "#usage");
+      return container;
+    },
+  };
+  try {
+    renderUsage({ claude: { u: { sd: 42.375 }, t: sample } }, now);
+    const row = usageRow(container, "Claude weekly usage");
+    assert.equal(row.querySelector(".usage-percent").textContent, "42.375%");
+    assert.equal(row.querySelector(".usage-age").textContent, "45m old");
+    assert.match(row.textContent, /Claude weekly usage/);
+
+    renderUsage({ claude: { u: { sd: 42.375 }, t: sample } }, now + 30 * 60 * 1000);
+    assert.equal(usageRow(container, "Claude weekly usage").querySelector(".usage-age").textContent,
+      "1h old");
+
+    renderUsage({ claude: { u: { sd: 42.375 }, t: now / 1000 - 91 * 60 } }, now);
+    const staleRow = usageRow(container, "Claude weekly usage");
+    assert.match(staleRow.textContent, /Stale/);
+    assert.equal(staleRow.querySelector(".usage-percent"), null);
+
+    renderUsage({}, now);
+    const unavailableRow = usageRow(container, "Claude weekly usage");
+    assert.match(unavailableRow.textContent, /Unavailable/);
+    assert.equal(unavailableRow.querySelector(".usage-fill"), null);
+  } finally {
+    if (previousDocument === undefined) delete globalThis.document;
+    else globalThis.document = previousDocument;
+  }
+});
+
+test("Claude weekly usage is live through 90 minutes, then stale without a percentage", () => {
+  const now = Date.parse("2026-10-01T19:00:00Z");
+  const atLimit = (now - 90 * 60 * 1000) / 1000;
+  assert.equal(claudeUsage({ u: { sd: 42.375 }, t: atLimit }, now).state, "live");
+  assert.deepEqual(
+    claudeUsage({ u: { sd: 42.375 }, t: atLimit - 1 }, now),
+    { state: "stale", ageText: "1h old" },
+  );
+});
+
+test("Claude weekly usage is unavailable when its provider fields are missing or malformed", () => {
+  const now = Date.parse("2026-10-01T19:00:00Z");
+  const validTime = new Date(now).toISOString();
+  assert.deepEqual(claudeUsage(null, now), { state: "unavailable" });
+  assert.deepEqual(claudeUsage({ u: {}, t: validTime }, now), { state: "unavailable" });
+  assert.deepEqual(claudeUsage({ u: { sd: "42" }, t: validTime }, now), { state: "unavailable" });
+  assert.deepEqual(claudeUsage({ u: { sd: 42 }, t: "bad timestamp" }, now), { state: "unavailable" });
+});
+
+test("same-timestamp snapshots re-render when the published Claude sample changes", () => {
+  const previous = {
+    generated_at: "2026-10-01T19:00:00Z",
+    usage: { claude: { u: { sd: 42 }, t: "2026-10-01T18:30:00Z" } },
+  };
+  assert.equal(claudeUsageChanged(previous.usage.claude, {
+    u: { sd: 43 }, t: previous.usage.claude.t,
+  }), true);
+  assert.equal(claudeUsageChanged(previous.usage.claude, {
+    u: previous.usage.claude.u, t: "2026-10-01T18:31:00Z",
+  }), true);
+  assert.equal(snapshotNeedsRender(previous, {
+    generated_at: previous.generated_at,
+    usage: { claude: { u: { sd: 43 }, t: previous.usage.claude.t } },
+  }, previous.generated_at), true);
+  assert.equal(snapshotNeedsRender(previous, {
+    generated_at: previous.generated_at,
+    usage: { claude: { u: { sd: 42 }, t: previous.usage.claude.t } },
+  }, previous.generated_at), false);
+});
+
+test("same-timestamp snapshots re-render when the validated Muse panel sample changes", () => {
+  const previous = {
+    generated_at: "2026-10-01T19:00:00Z",
+    usage: { muse_panel: {
+      used_percent: 15,
+      sampled_at: "2026-09-29T20:55:00-07:00",
+      source: "Muse account panel",
+      source_url: "https://github.com/nateprich-projects/command-center/issues/1673#issuecomment-5903766309",
+    } },
+  };
+  assert.equal(snapshotNeedsRender(previous, {
+    generated_at: previous.generated_at,
+    usage: { muse_panel: { ...previous.usage.muse_panel, used_percent: 16 } },
+  }, previous.generated_at), true);
+  assert.equal(snapshotNeedsRender(previous, {
+    generated_at: previous.generated_at,
+    usage: { muse_panel: { ...previous.usage.muse_panel } },
+  }, previous.generated_at), false);
+});
+
+test("same-timestamp snapshots re-render when the Muse estimate changes", () => {
+  const previous = {
+    generated_at: "2026-10-01T19:00:00Z",
+    usage: { muse: {
+      source: "Local Muse session journal estimate",
+      captured_at: 1_790_000_000,
+      spent_dollars: 14.3,
+      cap_dollars: 200,
+      used_percent: 7.15,
+    } },
+  };
+  assert.equal(snapshotNeedsRender(previous, {
+    generated_at: previous.generated_at,
+    usage: { muse: { ...previous.usage.muse, captured_at: 1_790_000_001 } },
+  }, previous.generated_at), true);
+  assert.equal(snapshotNeedsRender(previous, {
+    generated_at: previous.generated_at,
+    usage: { muse: { ...previous.usage.muse } },
+  }, previous.generated_at), false);
 });
 
 test("the usage line renders from the snapshot root, with no 24-hour companion", async () => {

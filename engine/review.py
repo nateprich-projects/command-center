@@ -89,6 +89,10 @@ FROZEN_PARSERS = (
 #: measurement of the freeze's own project).
 FREEZE_PARENT_NUMBERS = (794, 1044)
 
+# Rollback switch for scoped re-reviews. When false, packets keep the prior
+# rejection as context but direct the judge back to the ordinary full diff.
+SCOPED_REREVIEW_ENABLED = True
+
 #: Per-repo path rules that outrank the ticket's own Risk marker (#724,
 #: enforced as a pre-check row per #794's disposition table, which superseded
 #: the funnel.py routing change). Table shape, not an inline literal, so
@@ -265,6 +269,34 @@ PARENT_REJECTED_TRUNCATION_MARKER = "…[truncated]"
 DIFF_LIMIT_BYTES = 150 * 1024
 DIFF_TOO_LARGE_REASON = (
     "diff too large to review: deliver the ticket in smaller slices")
+#: Generated fixture bytes do not spend the review cap; the diff remains
+#: present for the judges. Keep this an explicit path list, not a pattern.
+DIFF_CAP_EXEMPT_PATHS = frozenset({
+    "dashboard/fixtures/execution_metrics.json",
+})
+#: Frozen v2 calibration packets remain identified individually: a path
+#: outside this exact set is ordinary reviewable diff, even in this directory.
+FROZEN_PACKET_PATHS = frozenset({
+    "data/review_packets/v2/bad_01.json",
+    "data/review_packets/v2/bad_02.json",
+    "data/review_packets/v2/bad_03.json",
+    "data/review_packets/v2/bad_04.json",
+    "data/review_packets/v2/bad_05.json",
+    "data/review_packets/v2/bad_06.json",
+    "data/review_packets/v2/bad_07.json",
+    "data/review_packets/v2/bad_08.json",
+    "data/review_packets/v2/bad_09.json",
+    "data/review_packets/v2/good_01.json",
+    "data/review_packets/v2/good_02.json",
+    "data/review_packets/v2/good_03.json",
+    "data/review_packets/v2/good_04.json",
+    "data/review_packets/v2/good_05.json",
+    "data/review_packets/v2/good_06.json",
+    "data/review_packets/v2/good_07.json",
+    "data/review_packets/v2/good_08.json",
+    "data/review_packets/v2/good_09.json",
+})
+FROZEN_PACKET_MANIFEST_PATH = "data/review_packets/v2/manifest.json"
 
 #: How many of the files a diff could not show its rejection names; the rest
 #: are counted. The reason is recorded in the verdict comment twice (its JSON
@@ -347,14 +379,14 @@ query($owner: String!, $name: String!, $number: Int!,
   repository(owner: $owner, name: $name) {
     pullRequest(number: $number) {
       issueComments: comments(first: 100, after: $issueCursor) {
-        nodes { author { login } body createdAt }
+        nodes { author { login } body createdAt url }
         pageInfo { hasNextPage endCursor }
       }
       reviewThreads(first: 100, after: $threadCursor) {
         nodes {
           id
           comments(first: 100) {
-            nodes { author { login } body createdAt }
+            nodes { author { login } body createdAt url }
             pageInfo { hasNextPage endCursor }
           }
         }
@@ -371,7 +403,7 @@ query($threadId: ID!, $cursor: String) {
   node(id: $threadId) {
     ... on PullRequestReviewThread {
       comments(first: 100, after: $cursor) {
-        nodes { author { login } body createdAt }
+        nodes { author { login } body createdAt url }
         pageInfo { hasNextPage endCursor }
       }
     }
@@ -764,15 +796,19 @@ def ticket_comments(rows: Optional[Sequence[dict]]) -> List[Dict]:
         elif not isinstance(author, str):
             author = None
         if not funnel.trusted_comment(row):
-            shaped.append({
+            entry = {
                 "author": author,
                 "created_at": row.get("createdAt") or row.get("created_at"),
                 "voice": "unknown",
                 "body": funnel.untrusted_comment_placeholder(row),
-            })
+            }
+            url = row.get("url")
+            if isinstance(url, str) and url.strip():
+                entry["url"] = url.strip()
+            shaped.append(entry)
             continue
         body = row.get("body") or ""
-        provenance = funnel.parse_provenance(body)
+        provenance = funnel.parse_provenance(row)
         voice = provenance.get("voice") if provenance else "unknown"
         for _, block in funnel._marked_json_blocks(
                 body, funnel.PROVENANCE_MARKER):
@@ -782,12 +818,16 @@ def ticket_comments(rows: Optional[Sequence[dict]]) -> List[Dict]:
             body = body[:TICKET_COMMENT_BODY_LIMIT] + (
                 "\n…[truncated {} chars]".format(
                     len(body) - TICKET_COMMENT_BODY_LIMIT))
-        shaped.append({
+        entry = {
             "author": author,
             "created_at": row.get("createdAt") or row.get("created_at"),
             "voice": voice,
             "body": body,
-        })
+        }
+        url = row.get("url")
+        if isinstance(url, str) and url.strip():
+            entry["url"] = url.strip()
+        shaped.append(entry)
     shaped.sort(key=lambda entry: entry.get("created_at") or "")
     kept = shaped[-TICKET_COMMENT_LIMIT:]
     # Keep the latest rows, but preserve Nate's decisions even when older
@@ -961,8 +1001,12 @@ def _overlap_facts(packet: dict) -> Dict[str, object]:
     """The shared inputs row 5 and the re-run decision both read."""
     ci = packet.get("ci") or {}
     seed = ci.get("latest_run_id")
+    mergeable = str(packet.get("mergeable") or "").upper()
+    merge_state = str(packet.get("merge_state_status") or "").upper()
     return {
-        "clean": str(packet.get("mergeable") or "").upper() == "MERGEABLE",
+        "clean": mergeable == "MERGEABLE",
+        "conflicting": (mergeable == "CONFLICTING" or
+                        merge_state == "DIRTY"),
         "green_dt": parse_ci_time(ci.get("green_run_at")),
         "runs": [run for run in (ci.get("runs") or [])
                  if isinstance(run, dict)],
@@ -974,14 +1018,16 @@ def _overlap_facts(packet: dict) -> Dict[str, object]:
 def _overlap_hold(entry: dict, facts: Dict[str, object]) -> str:
     """One overlap's standing: covered, rerun, wait, or blocked.
 
-    Covered needs a green run newer than the merge. A clean branch with
-    older green runs is rerun when a finished run seeds it, wait when a
-    newer attempt is already in flight. Everything else blocks: a
-    conflicting or uncomputed branch, an unorderable merge, and an
-    uncovered overlap with no run to re-run all reject as stale.
+    A branch GitHub has not established as mergeable waits unless it is
+    explicitly conflicting. Covered needs a green run newer than the merge.
+    A clean branch with older green runs is rerun when a finished run seeds
+    it, or waits when a newer attempt is already in flight. Conflicts, an
+    unorderable merge, and an uncovered overlap with no run to re-run block.
     """
-    if not facts["clean"]:
+    if facts["conflicting"]:
         return "blocked"
+    if not facts["clean"]:
+        return "wait"
     merged_dt = parse_ci_time(entry.get("merged_at"))
     if merged_dt is None:
         return "blocked"
@@ -1274,7 +1320,9 @@ def precheck_pr_open(packet: dict) -> List[str]:
 
 
 def precheck_ci(packet: dict) -> List[str]:
-    """Row 3: green passes; pending/red fail; startup stops stand down."""
+    """Row 3: a waiting head stands down; otherwise green passes and red fails."""
+    if (packet.get("standing") or {}).get("state") == "wait":
+        return []
     ci = packet.get("ci") or {}
     if ci.get("state") in ("green", funnel.CI_COULD_NOT_RUN):
         # ``could-not-run`` is not approval evidence, but it is also not a
@@ -1289,9 +1337,9 @@ def precheck_ci(packet: dict) -> List[str]:
     return ["ci: CI not green (state {}){}".format(ci.get("state"), detail)]
 
 
-def precheck_verdict(packet: dict) -> List[str]:
-    """Row 4: a verdict already covering this head needs no new review."""
-    comments_section = packet.get("pr_comments")
+def _review_standing_comments(pr_comments: object):
+    """Restore GitHub comment rows for the shared standing predicate."""
+    comments_section = pr_comments
     comments = (
         comments_section.get("comments")
         if isinstance(comments_section, dict)
@@ -1308,8 +1356,14 @@ def precheck_verdict(packet: dict) -> List[str]:
              "createdAt": entry.get("created_at")}
             for entry in comments if isinstance(entry, dict)
         ]
+    return comments
+
+
+def precheck_verdict(packet: dict) -> List[str]:
+    """Row 4: a verdict already covering this head needs no new review."""
     if not funnel.verdict_covers_head(
-        packet.get("verdict"), packet.get("head_sha"), comments
+        packet.get("verdict"), packet.get("head_sha"),
+        _review_standing_comments(packet.get("pr_comments")),
     ):
         return []
     return ["verdict: a verdict already covers head {}".format(
@@ -1325,8 +1379,9 @@ def precheck_merged_overlap(packet: dict) -> List[str]:
     a main containing the overlap (#1019, Nate 2026-09-17). A clean branch
     whose green runs all predate the merge is not rejected here: the
     runner re-runs CI once and waits (see ``decide_ci_rerun``), so the
-    engineer needs no rebase. Anything else — conflicting, uncomputed, or
-    uncovered with no run to re-run — rejects as stale, as before.
+    engineer needs no rebase. A branch GitHub has not computed waits; only
+    a conflict, unorderable merge, or uncovered overlap with no run to
+    re-run rejects as stale.
     """
     overlaps = [entry for entry in (packet.get("merged_overlap") or [])
                 if isinstance(entry, dict)]
@@ -1404,13 +1459,16 @@ def precheck_diff(packet: dict) -> List[str]:
     ``diff_truncated``: every files-API rebuild sets that flag, including
     the clipped-compare fallback that leaves nothing out. Binaries and
     generated lockfiles are named in the diff, not omitted, so they never
-    count. The reason names the files, which reach only the verdict
+    count as missing text. The named generated fixture stays in the diff
+    for review, but its bytes do not spend the size cap. The reason names
+    omitted files, which reach only the verdict
     comment on the PR in its own repository; the runner's heartbeat note,
     the public record, carries the reason count alone.
     """
     reasons = []
     diff = packet.get("diff")
-    if isinstance(diff, str) and len(diff.encode("utf-8")) > DIFF_LIMIT_BYTES:
+    if isinstance(diff, str) \
+            and _diff_bytes_for_cap(diff) > DIFF_LIMIT_BYTES:
         reasons.append(DIFF_TOO_LARGE_REASON)
     omitted = packet.get("diff_omitted_files")
     if isinstance(omitted, int) and not isinstance(omitted, bool) \
@@ -1428,6 +1486,105 @@ def precheck_diff(packet: dict) -> List[str]:
             files = ", ".join(named)
         reasons.append("diff incomplete: {}".format(files))
     return reasons
+
+
+def _diff_bytes_for_cap(diff: str) -> int:
+    """Count bytes outside the exact cap-exempt and frozen packet paths.
+
+    Bytes outside a recognized file section stay counted. If a section header
+    cannot be parsed, that section stays counted too, so malformed input cannot
+    hide reviewable diff bytes.
+    """
+    counted = 0
+    exempt_section = False
+    for line in diff.splitlines(keepends=True):
+        if line.startswith("diff --git "):
+            old_path, new_path = _diff_header_paths(line.rstrip("\r\n"))
+            exempt_section = any(
+                path in DIFF_CAP_EXEMPT_PATHS or path in FROZEN_PACKET_PATHS
+                for path in (old_path, new_path) if path is not None)
+        if not exempt_section:
+            counted += len(line.encode("utf-8"))
+    return counted
+
+
+def _fetch_review_packet_manifest(repo: str, diff: str,
+                                  head_sha: str) -> Optional[dict]:
+    """Read the v2 manifest at the reviewed head when a frozen path is used."""
+    has_frozen_packet = False
+    for line in (diff or "").splitlines():
+        if not line.startswith("diff --git "):
+            continue
+        old_path, new_path = _diff_header_paths(line)
+        if any(path in FROZEN_PACKET_PATHS
+               for path in (old_path, new_path) if path is not None):
+            has_frozen_packet = True
+            break
+    if not has_frozen_packet:
+        return None
+
+    data = _read_file_at(repo, FROZEN_PACKET_MANIFEST_PATH, head_sha)
+    if data is None:
+        raise funnel.GitHubError(
+            "could not read {} at PR head {} for frozen packet stubs".format(
+                FROZEN_PACKET_MANIFEST_PATH, head_sha or "unknown"))
+    try:
+        manifest = json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise funnel.GitHubError(
+            "could not parse {} at PR head {} for frozen packet stubs: {}".format(
+                FROZEN_PACKET_MANIFEST_PATH, head_sha or "unknown", exc))
+    if not isinstance(manifest, dict) or not isinstance(
+            manifest.get("packets"), dict):
+        raise funnel.GitHubError(
+            "{} at PR head {} has no packet manifest".format(
+                FROZEN_PACKET_MANIFEST_PATH, head_sha or "unknown"))
+    return manifest
+
+
+def _stub_frozen_packet_sections(diff: str,
+                                 manifest: Optional[dict]) -> str:
+    """Replace only the named frozen v2 packet sections with one-line stubs."""
+    if not isinstance(manifest, dict):
+        return diff
+    packet_rows = manifest.get("packets")
+    if not isinstance(packet_rows, dict):
+        return diff
+
+    def stub(section: List[str]) -> str:
+        if not section or not section[0].startswith("diff --git "):
+            return "".join(section)
+        old_path, new_path = _diff_header_paths(
+            section[0].rstrip("\r\n"))
+        paths = {path for path in (old_path, new_path)
+                 if path in FROZEN_PACKET_PATHS}
+        if len(paths) != 1:
+            return "".join(section)
+        path = next(iter(paths))
+        name = os.path.splitext(os.path.basename(path))[0]
+        row = packet_rows.get(name)
+        digest = row.get("sha256") if isinstance(row, dict) else None
+        if not isinstance(digest, str) or not re.fullmatch(
+                r"[0-9a-f]{64}", digest):
+            digest = "not in manifest"
+        added_bytes = len("".join(section).encode("utf-8"))
+        return ("FROZEN PACKET: {} added_bytes={} sha256={}\n".format(
+            path, added_bytes, digest))
+
+    output: List[str] = []
+    section: List[str] = []
+    for line in diff.splitlines(keepends=True):
+        if line.startswith("diff --git "):
+            if section:
+                output.append(stub(section))
+            section = [line]
+        elif section:
+            section.append(line)
+        else:
+            output.append(line)
+    if section:
+        output.append(stub(section))
+    return "".join(output)
 
 
 def precheck(packet: dict) -> Dict[str, object]:
@@ -2530,14 +2687,25 @@ def _shape_pr_comment(row: dict, kind: str) -> Dict[str, Any]:
     login = author.get("login") if isinstance(author, dict) else None
     if not isinstance(login, str) or not login:
         login = "unknown"
+    url = row.get("url")
+    comment_url = url.strip() if isinstance(url, str) and url.strip() else None
     if not funnel.trusted_comment(row):
-        return {
+        shaped = {
             "kind": kind,
             "author": login,
             "created_at": created_at,
             "body": funnel.untrusted_comment_placeholder(row, created_at),
+            "voice": "unknown",
             "withheld": True,
         }
+        if comment_url is not None:
+            shaped["url"] = comment_url
+        return shaped
+    provenance = funnel.parse_provenance(row)
+    voice = provenance.get("voice") if provenance else "unknown"
+    for _, block in funnel._marked_json_blocks(
+            body, funnel.PROVENANCE_MARKER):
+        body = body.replace(block, "")
     body = body.strip()
     if len(body) > PR_COMMENT_BODY_LIMIT:
         body = body[:PR_COMMENT_BODY_LIMIT] + (
@@ -2547,7 +2715,10 @@ def _shape_pr_comment(row: dict, kind: str) -> Dict[str, Any]:
         "author": login,
         "created_at": created_at,
         "body": body,
+        "voice": voice,
     }
+    if comment_url is not None:
+        shaped["url"] = comment_url
     if RUN_EVIDENCE_MARKER in body:
         payload = parse_run_evidence_comment(body)
         shaped["run_evidence"] = (
@@ -2677,7 +2848,8 @@ def packet_evidence(inner: Optional[str], head_sha: object) -> str:
     which strips them from everything it writes (#1805). The block's own
     header line is replaced by ``EVIDENCE_LABEL``, which says whose report
     it is. Prior-fix rewrite lines are runner facts too and pass through to
-    the review packet unchanged.
+    the review packet unchanged, in either form: ``rewrites #N's prior fix``
+    and the ``rewrites prior fix: #N`` finish wrote before #2069.
     """
     if inner is None or not isinstance(head_sha, str) or not head_sha:
         return EVIDENCE_UNAVAILABLE
@@ -2946,10 +3118,34 @@ def _changed_test_functions(changed: Sequence[str], context: Sequence[str],
     return changes
 
 
+_CLOSING_REFERENCE_RE = re.compile(
+    r"(?<![A-Za-z0-9_])"
+    r"(?:fix|fixes|fixed|close|closes|closed|resolve|resolves|resolved)"
+    r"\b\s*:?\s+"
+    r"(?P<reference>"
+    r"https?://(?:www\.)?github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/"
+    r"(?:issues|pull)/[0-9]+"
+    r"|[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#[0-9]+"
+    r"|#?[0-9]+"
+    r")"
+    r"(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+
+
+def neutralize_closing_reference_line(line: str) -> str:
+    """Keep issue identity while removing closing-keyword citation shapes."""
+    return _CLOSING_REFERENCE_RE.sub(
+        lambda match: "Prior ticket: {}".format(match.group("reference")),
+        line,
+    )
+
+
 def _test_weakening_report(items: Sequence[str]) -> Dict[str, Any]:
     count = len(items)
     return {"count": count,
-            "items": list(items[:TEST_WEAKENING_ITEM_LIMIT]),
+            "items": [neutralize_closing_reference_line(item)
+                      for item in items[:TEST_WEAKENING_ITEM_LIMIT]],
             "truncated": count > TEST_WEAKENING_ITEM_LIMIT}
 
 
@@ -3036,7 +3232,9 @@ def build_packet(*, repo: str, pr_number: int, pr_view: dict, diff: str,
                  tickets: Optional[Sequence[Optional[dict]]] = None,
                  changed_files: Optional[Sequence[str]] = None,
                  merge_base: Optional[str] = None,
-                 scope_source: str = "pr") -> Dict:
+                 scope_source: str = "pr",
+                 scoped_rereview: Optional[Dict] = None,
+                 review_packet_manifest: Optional[dict] = None) -> Dict:
     """Assemble the packet from already-fetched pieces. Pure: no IO.
 
     Every field the review question needs, in one JSON-serialisable dict.
@@ -3086,8 +3284,13 @@ def build_packet(*, repo: str, pr_number: int, pr_view: dict, diff: str,
     PR fallback), ``pr_base_sha`` is the PR's recorded base, and
     ``scope_source`` names which scope the packet carries (``"compare"`` or
     ``"pr"``), so a reviewer can see when the two bases differ.
+    ``review_packet_manifest`` carries the v2 packet checksums at the PR head;
+    the precheck uses the complete diff, then only the judge-facing diff stubs
+    those exact frozen packet sections.
     """
     pr_view = pr_view or {}
+    standing = funnel.review_standing(
+        repo, pr_view, verdict, _review_standing_comments(pr_comments))
     if changed_files is None:
         changed_files = sorted({
             entry.get("path") for entry in (pr_view.get("files") or [])
@@ -3123,7 +3326,9 @@ def build_packet(*, repo: str, pr_number: int, pr_view: dict, diff: str,
         "merged_at": pr_view.get("mergedAt") or pr_view.get("merged_at"),
         "closed_at": pr_view.get("closedAt") or pr_view.get("closed_at"),
         "mergeable": pr_view.get("mergeable"),
+        "merge_state_status": pr_view.get("mergeStateStatus"),
         "head_sha": pr_view.get("headRefOid"),
+        "standing": {"state": standing.state, "reason": standing.reason},
         "head_date": head,
         "ticket": ticket_packet,
         "tickets": tickets_packet,
@@ -3137,6 +3342,9 @@ def build_packet(*, repo: str, pr_number: int, pr_view: dict, diff: str,
         "merge_base": merge_base,
         "pr_base_sha": pr_view.get("baseRefOid"),
         "scope_source": scope_source,
+        "scoped_rereview": (scoped_rereview
+                             if scoped_rereview is not None
+                             else empty_scoped_rereview()),
         "ci": {"state": ci_state(rollup),
                "checks": checks,
                "annotation": could_not_run[0] if could_not_run else None,
@@ -3177,6 +3385,8 @@ def build_packet(*, repo: str, pr_number: int, pr_view: dict, diff: str,
         assembled["ci_rerun"] = decide_ci_rerun(assembled)
     else:
         assembled["ci_rerun"] = None
+    assembled["diff"] = _stub_frozen_packet_sections(
+        diff, review_packet_manifest)
     return assembled
 
 
@@ -3193,7 +3403,7 @@ def fetch_pr(repo: str, pr_number: int) -> dict:
     data = funnel._gh_json(
         "gh", "pr", "view", str(pr_number), "--repo", repo, "--json",
         "number,title,body,headRefName,headRefOid,baseRefName,baseRefOid,"
-        "state,mergeable,"
+        "state,mergeable,mergeStateStatus,"
         "mergedAt,mergedBy,closedAt,"
         "statusCheckRollup,commits,files,closingIssuesReferences,"
         + funnel.PR_TRUST_JSON_FIELDS)
@@ -3487,6 +3697,320 @@ def fetch_scope(repo: str, base_ref: str,
     return (changed, diff, merge_sha)
 
 
+# Stable packet labels for the stopping-rule categories recorded by ticket
+# #2001. The source verification is recorded separately in issue #2214.
+SCOPED_REREVIEW_KINDS = {
+    "code_defect",
+    "missing_requirement_or_accept_test",
+    "merged_main_suite_failure",
+}
+
+# A review cannot prove its own verdict or a later merge. These are process
+# gates checked after the reviewer answers, not defects in the PR's code.
+_REVIEW_PROCESS_GATE = re.compile(
+    r"\b(?:pass(?:es|ed)?|receiv(?:e|es|ed)|obtain(?:s|ed)?|await(?:s|ed)?|"
+    r"requir(?:e|es|ed))\s+(?:an?\s+)?(?:independent\s+)?(?:escalated\s+)?"
+    r"(?:current[- ]head\s+)?(?:code\s+)?review\b|"
+    r"\b(?:independent|escalated|current[- ]head)\s+review\s+"
+    r"(?:has\s+not\s+yet\s+)?approv(?:al|ed)\b|"
+    r"\bcurrent[- ]head\s+approval\b|"
+    r"\b(?:pr|pull request)\s+(?:is\s+)?merged\b",
+    re.IGNORECASE,
+)
+_ONLY_REVIEW_PROCESS_GATE = re.compile(
+    r"^(?:(?:accept(?:ance)?|requirement)\s*:\s*)?(?:the\s+)?"
+    r"(?:(?:pr|pull request)\s+)?(?:pass(?:es|ed)?|receiv(?:e|es|ed)|"
+    r"obtain(?:s|ed)?|await(?:s|ed)?|requir(?:e|es|ed))\s+"
+    r"(?:an?\s+)?(?:independent\s+)?(?:escalated\s+)?"
+    r"(?:current[- ]head\s+)?(?:code\s+)?review"
+    r"(?:\s+(?:approval|verdict))?[.!]?\s*$|"
+    r"^(?:the\s+)?(?:independent|escalated|current[- ]head)\s+review\s+"
+    r"approv(?:es|ed)\s+(?:this\s+)?(?:pr|pull request)[.!]?\s*$|"
+    r"^(?:the\s+)?(?:pr|pull request)\s+(?:is\s+)?merged[.!]?\s*$",
+    re.IGNORECASE,
+)
+
+
+def _review_process_prerequisite(item: object) -> bool:
+    return isinstance(item, str) and bool(_REVIEW_PROCESS_GATE.search(item))
+
+
+def omit_review_process_requirements(requirements: Sequence[str]) -> List[str]:
+    """Omit only standalone self-review gates; refuse ambiguous mixed rows."""
+    kept = []
+    for requirement in _canonical_requirements(requirements):
+        if not _review_process_prerequisite(requirement):
+            kept.append(requirement)
+        elif not _ONLY_REVIEW_PROCESS_GATE.fullmatch(requirement):
+            raise ReviewJudgeError(
+                "review or merge gate mixed with a checkable requirement")
+    return kept
+
+def empty_scoped_rereview() -> Dict[str, object]:
+    """The explicit no-prior-rejection packet shape."""
+    return {
+        "enabled": SCOPED_REREVIEW_ENABLED,
+        "active": False,
+        "prior_rejected_head": None,
+        "prior_blocking_items": [],
+        "interdiff": None,
+        "full_review_fallback": False,
+        "fallback_reasons": [],
+    }
+
+
+def _stopping_rule_kind(item: object) -> Optional[str]:
+    """Classify a recorded blocker only when it names a stopping-rule kind.
+
+    Review records are prose lists, not a typed schema. Recognize the three
+    categories required by ticket #2001, including the historical "Test gap
+    only" label. Muse requirement rows carry their source in the text:
+    ticket requirements can scope a re-review, while "Does not break:" rows
+    and other unknown entries force a full review.
+    """
+    if not isinstance(item, str) or not item.strip():
+        return None
+    text = re.sub(r"\s+", " ", item.casefold()).strip()
+    if text.startswith("unsure:"):
+        return None
+    if _review_process_prerequisite(text):
+        return None
+
+    for prefix in ("requirement unmet:", "requirement unsure:"):
+        if text.startswith(prefix):
+            requirement = text[len(prefix):].strip()
+            if requirement.startswith("does not break:"):
+                return None
+            return "missing_requirement_or_accept_test"
+
+    failure = bool(re.search(
+        r"\b(?:fail|failure|failing|failed|red)\b", text))
+    merged_main = ("merged-main" in text or "merged main" in text
+                   or ("merged-suite" in text and "main" in text))
+    if merged_main and failure and ("suite" in text or "test" in text):
+        return "merged_main_suite_failure"
+
+    if any(term in text for term in (
+            "test gap", "accept test", "acceptance test", "missing do",
+            "missing requirement", "passes on base", "pass on base",
+            "tautolog")):
+        return "missing_requirement_or_accept_test"
+
+    if (re.search(r"\b(defect|bug|regression)\b", text)
+            and not re.search(
+                r"\b(no|not|isn't|is not)\s+(?:a\s+)?(?:code\s+)?"
+                r"(defect|bug|regression)\b", text)):
+        return "code_defect"
+    return None
+
+
+def _prior_rejected_verdict(pr_comments: object,
+                            current_head: str) -> Tuple[Optional[Dict], bool]:
+    """Find the newest trusted rejected head in the PR's complete comment list.
+
+    ``fetch_pr_comments`` is paginated and includes the runner's GitHub issue
+    comments. A current-head rejection is not a re-review; otherwise the most
+    recent earlier rejection remains the anchor even if a later head was
+    approved before another push.
+    """
+    if not isinstance(pr_comments, dict):
+        return None, False
+    status = pr_comments.get("status")
+    comments = pr_comments.get("comments")
+    if status not in ("available", "empty") or not isinstance(comments, list):
+        return None, False
+
+    rejected: List[Tuple[str, int, Dict]] = []
+    current_rejection = False
+    for index, comment in enumerate(comments):
+        if not isinstance(comment, dict):
+            return None, False
+        if comment.get("kind") != "issue" or comment.get("withheld") is True:
+            continue
+        author = comment.get("author")
+        if not isinstance(author, str) or not author:
+            continue
+        record = funnel._verdict_from_comment({
+            "author": {"login": author},
+            "body": comment.get("body"),
+            "created_at": comment.get("created_at"),
+        })
+        if not isinstance(record, dict) or record.get("verdict") != "rejected":
+            continue
+        head = record.get("head_sha")
+        if not isinstance(head, str) or not head:
+            continue
+        if head == current_head:
+            current_rejection = True
+            continue
+        created = record.get("comment_created_at")
+        if not isinstance(created, str) or not created:
+            # Without the timestamp the runner cannot establish which
+            # rejected head is most recent.
+            return None, False
+        rejected.append((created, index, record))
+
+    if current_rejection or not rejected:
+        return None, True
+    return max(rejected, key=lambda entry: (entry[0], entry[1]))[2], True
+
+
+def fetch_branch_head(repo: str, branch: str) -> str:
+    """Read and validate one branch tip so both PR diffs share the same base."""
+    if not isinstance(branch, str) or not branch.strip():
+        raise funnel.GitHubError("base branch was unreadable")
+    endpoint = "repos/{}/git/ref/heads/{}".format(
+        repo, quote(branch, safe=""))
+    data = funnel._gh_json("gh", "api", endpoint)
+    obj = data.get("object") if isinstance(data, dict) else None
+    sha = obj.get("sha") if isinstance(obj, dict) else None
+    if not isinstance(sha, str) or not sha:
+        raise funnel.GitHubError(
+            "could not read base branch {} in {}".format(branch, repo))
+    return sha
+
+
+def _diff_line_count(diff: object, *, interdiff: bool = False) -> int:
+    """Count changed lines in a PR diff or its diff-of-diffs."""
+    if not isinstance(diff, str):
+        return 0
+    lines = diff.splitlines()
+    in_hunk = False
+    changed = 0
+    for line in lines:
+        if line.startswith("@@"):
+            in_hunk = True
+            continue
+        if not interdiff and line.startswith("diff --git "):
+            in_hunk = False
+            continue
+        if not in_hunk:
+            continue
+        if line.startswith(("+", "-")):
+            changed += 1
+    return changed
+
+
+def _diff_of_diffs(prior_diff: str, current_diff: str) -> str:
+    """Return the unified interdiff between two merge-base PR diffs."""
+    return "".join(difflib.unified_diff(
+        prior_diff.splitlines(keepends=True),
+        current_diff.splitlines(keepends=True),
+        fromfile="prior-pr-diff", tofile="current-pr-diff"))
+
+
+def build_scoped_rereview(
+        repo: str, pr_number: int, base_ref: str, current_head: str,
+        pr_comments: object
+        ) -> Tuple[Dict[str, object],
+                   Optional[Tuple[List[str], str, Optional[str]]]]:
+    """Build prior rejection evidence and a safely bounded interdiff.
+
+    The current and rejected PR diffs use one captured base-branch SHA. Each
+    compare is three-dot, so changes introduced by a main merge stay outside
+    both PR diffs. If any source is incomplete, the packet asks for a full read.
+    The optional tuple replaces collect()'s ordinary current diff when the
+    pinned compare succeeded.
+    """
+    packet = empty_scoped_rereview()
+    rejected, readable = _prior_rejected_verdict(pr_comments, current_head)
+    if not readable:
+        packet["full_review_fallback"] = True
+        packet["fallback_reasons"] = ["review_history_unavailable"]
+        return packet, None
+    if rejected is None:
+        return packet, None
+
+    packet["active"] = True
+    packet["prior_rejected_head"] = rejected["head_sha"]
+    raw_blocking = rejected.get("blocking")
+    raw_blocking = raw_blocking if isinstance(raw_blocking, list) else []
+    classified = []
+    unclassified = False
+    process_gate = False
+    seen_findings = set()
+    for item in raw_blocking:
+        if _review_process_prerequisite(item):
+            process_gate = True
+            continue
+        kind = _stopping_rule_kind(item)
+        if kind is None or kind not in SCOPED_REREVIEW_KINDS:
+            unclassified = True
+            continue
+        key = (kind, item)
+        if key in seen_findings:
+            continue
+        seen_findings.add(key)
+        classified.append({"kind": kind, "finding": item})
+    packet["prior_blocking_items"] = classified
+    fallback_reasons: List[str] = []
+
+    if not SCOPED_REREVIEW_ENABLED:
+        packet["enabled"] = False
+        fallback_reasons.append("scoped_rereview_disabled")
+        packet["full_review_fallback"] = True
+        packet["fallback_reasons"] = fallback_reasons
+        return packet, None
+
+    current_scope = None
+    try:
+        base_sha = fetch_branch_head(repo, base_ref)
+    except (funnel.GitHubError, OSError, TypeError, ValueError):
+        fallback_reasons.append("base_branch_unavailable")
+        packet["full_review_fallback"] = True
+        packet["fallback_reasons"] = fallback_reasons
+        return packet, None
+
+    try:
+        try:
+            current_scope = fetch_scope(repo, base_sha, current_head)
+        except CompareClipped as clipped:
+            current_diff = fetch_files_diff(
+                repo, pr_number, base_sha=clipped.merge_base,
+                head_sha=current_head)
+            current_scope = (list(current_diff.changed_files), current_diff,
+                             clipped.merge_base)
+    except (CompareClipped, funnel.GitHubError, OSError, TypeError, ValueError):
+        fallback_reasons.append("current_diff_unavailable")
+        packet["full_review_fallback"] = True
+        packet["fallback_reasons"] = fallback_reasons
+        return packet, None
+
+    try:
+        _, prior_diff, prior_merge_base = fetch_scope(
+            repo, base_sha, str(rejected["head_sha"]))
+    except (CompareClipped, funnel.GitHubError, OSError, TypeError, ValueError):
+        fallback_reasons.append("prior_diff_unavailable")
+        packet["full_review_fallback"] = True
+        packet["fallback_reasons"] = fallback_reasons
+        return packet, current_scope
+
+    current_diff = current_scope[1]
+    current_merge_base = current_scope[2]
+    if (not current_merge_base or not prior_merge_base):
+        fallback_reasons.append("merge_base_unavailable")
+    if any(getattr(diff, "omitted_patches", 0)
+           for diff in (current_diff, prior_diff)):
+        fallback_reasons.append("diff_truncated")
+
+    interdiff = _diff_of_diffs(str(prior_diff), str(current_diff))
+    packet["interdiff"] = interdiff
+    if process_gate:
+        fallback_reasons.append("prior_review_process_gate")
+    if not raw_blocking or unclassified:
+        fallback_reasons.append("prior_blockers_unclassified")
+
+    prior_churn = _diff_line_count(interdiff, interdiff=True)
+    current_churn = _diff_line_count(str(current_diff))
+    if ((current_churn == 0 and prior_churn > 0)
+            or (current_churn > 0 and prior_churn * 2 >= current_churn)):
+        fallback_reasons.append("large_rewrite")
+
+    packet["full_review_fallback"] = bool(fallback_reasons)
+    packet["fallback_reasons"] = fallback_reasons
+    return packet, current_scope
+
+
 _ISSUE_URL = re.compile(r"github\.com/([^/\s]+/[^/\s]+)/issues/\d+")
 _ISSUE_NUMBER = re.compile(r"/issues/(\d+)")
 
@@ -3615,11 +4139,54 @@ def _atx_heading(line: str) -> Optional[Tuple[int, str]]:
     return len(match.group("level")), title
 
 
+def _parent_rejected_label_region(
+        body: str, line_count: int) -> Optional[Tuple[int, int]]:
+    """The first label-form ``Rejected:`` region's lines, or None (#2195).
+
+    The region is the one #2180's plan scan ignores, read through its own
+    definition in funnel.py and on the same lines, quoted regions blank, so
+    a label in fenced code or a block quote is not one: a plain or bold
+    ``Rejected:`` line on its own and its list, ended by
+    ``funnel._plan_label_list_end``. A label whose list has no clear end is
+    skipped, as the scan cannot read it either. A label with its text on
+    the same line counts only where it starts a paragraph, and covers that
+    line alone, since the next line can already be another statement. A
+    body with a line break Markdown does not share has no label region, as
+    in ``funnel.plan_scan_text``.
+    """
+    if funnel._PLAN_NON_MARKDOWN_BREAK_RE.search(body):
+        return None
+    lines = funnel._plan_scan_unquoted(
+        funnel._strip_plan_code_blocks(body)).splitlines()
+    if len(lines) > line_count:
+        return None
+    lines.extend([""] * (line_count - len(lines)))
+    label = funnel._plan_label_re("Rejected")
+    for index, line in enumerate(lines):
+        if label.match(line):
+            end = funnel._plan_label_list_end(lines, index)
+            if end is not None:
+                return index, end
+            continue
+        # The label's colon is the line's first, inside or before the
+        # closing bold marker: the text after the label must not be blank.
+        # The line must start a paragraph, so a hard-wrapped line of a list
+        # item that happens to start `Rejected:` is not one (#1125's body).
+        colon = line.find(":")
+        if colon >= 0 and (index == 0 or not lines[index - 1].strip()) and any(
+                label.match(line[:cut]) and line[cut:].strip()
+                for cut in (colon + 3, colon + 1)):
+            return index, index + 1
+    return None
+
+
 def _bounded_parent_rejected_excerpt(
         body: object,
         limit: int = PARENT_REJECTED_EXCERPT_LIMIT) -> Tuple[str, bool]:
-    """Return the first bounded parent ``Rejected`` section and its cut flag.
+    """Return the first bounded parent ``Rejected`` region and its cut flag.
 
+    A region is an ATX ``Rejected`` heading's section or a label-form
+    ``Rejected:`` list or line (#2195); the first in body order wins.
     Markdown headings inside fenced code are ignored. A same-or-higher ATX
     heading ends the section; deeper headings remain part of it. The visible
     truncation marker counts inside ``limit``, which is at most
@@ -3665,6 +4232,10 @@ def _bounded_parent_rejected_excerpt(
             end = index
             break
 
+    label_region = _parent_rejected_label_region(body, len(lines))
+    if label_region is not None and (start is None
+                                     or label_region[0] < start):
+        start, end = label_region
     if start is None:
         return "", False
 
@@ -3825,7 +4396,7 @@ def fetch_ticket(repo: str, number: int) -> dict:
     """
     data = funnel._gh_json(
         "gh", "issue", "view", str(number), "--repo", repo, "--json",
-        "number,title,url,body,parent,comments")
+        "number,title,url,body,parent,comments,state")
     if not data:
         raise funnel.GitHubError(
             "could not read ticket {}#{}".format(repo, number))
@@ -3891,12 +4462,12 @@ def fetch_ci_runs(repo: str, branch: str,
 
     The merged-overlap row's coverage evidence: a green run on this head
     that started after an overlapping merge tested a merge commit built
-    against a main containing it. An unreadable answer — Actions off, a
-    transient API failure — reads as no runs, which fails closed: an
-    overlap then rejects as stale exactly as before #1019, and a PR with
-    no overlap is unaffected. Event and head are filtered again in
-    ``summarize_runs`` so a surprising server answer cannot smuggle a push
-    run, or another head's runs, into coverage.
+    against a main containing it. A failed or malformed answer raises
+    ``GitHubError``, as ``fetch_merged_prs`` does, and stops the packet
+    (#2194): read as no runs, one bad read rejected a covered overlap as
+    stale. An empty list is still no runs. Event and head are filtered
+    again in ``summarize_runs`` so a surprising server answer cannot
+    smuggle a push run, or another head's runs, into coverage.
     """
     if not branch:
         return []
@@ -3906,7 +4477,8 @@ def fetch_ci_runs(repo: str, branch: str,
         "--json", "databaseId,event,headSha,headBranch,conclusion,status,"
                   "createdAt,startedAt,updatedAt")
     if rows is None or not isinstance(rows, list):
-        return []
+        raise funnel.GitHubError(
+            "could not read the CI runs for {} in {}".format(branch, repo))
     shaped = []
     newest = True
     for row in rows:
@@ -3925,7 +4497,11 @@ def fetch_ci_runs(repo: str, branch: str,
 
 
 def fetch_verdict(repo: str, pr_number: int) -> Optional[dict]:
-    """The newest review verdict on the PR, or None. Newest wins."""
+    """The newest review verdict on the PR, or None. Newest wins.
+
+    An unreadable comment read raises ``GitHubError`` and stops the packet
+    rather than reading as no verdict (#2194).
+    """
     return funnel.latest_verdict(repo, pr_number)
 
 
@@ -3968,6 +4544,8 @@ def collect(repo: Optional[str], pr_number: int, *,
     the packet falls back to the PR reads with ``scope_source`` ``"pr"``.
     A compare that lists 300 files may be clipped, so the scope and the
     diff then come from the PR files API, also as ``"pr"`` (#1800).
+    An unreadable verdict or CI-run read raises ``GitHubError`` here rather
+    than reading as none, so the runner records no verdict (#2194).
     """
     resolved = funnel.resolve_repo(repo)
     pr_view = fetch_pr(resolved, pr_number)
@@ -3991,12 +4569,22 @@ def collect(repo: Optional[str], pr_number: int, *,
     if ticket is not None:
         tickets.append(ticket)
         seen.add((resolved, ticket.get("number")))
+    pr_open = str(pr_view.get("state") or "").upper() == "OPEN"
     for closing_repo, closing_number in closing_ticket_refs(
             pr_view, resolved):
         if (closing_repo, closing_number) in seen:
             continue
         seen.add((closing_repo, closing_number))
-        tickets.append(fetch_ticket(closing_repo, closing_number))
+        closing = fetch_ticket(closing_repo, closing_number)
+        # An open PR cannot close a closed issue, so a closed one is never
+        # its spec. Evidence lines written before #2069, such as "rewrites
+        # prior fix: #N", are GitHub closing keywords, and judging the PR
+        # against that earlier ticket's Accept rejected PR #2047 for #1964's
+        # work (#2068). Merged and closed PRs keep their full list, so
+        # replays read as before.
+        if pr_open and str(closing.get("state") or "").upper() == "CLOSED":
+            continue
+        tickets.append(closing)
 
     # The PR supplies the bounded ticket refs. Reuse the existing by-ref
     # Project loader, then read the filtered regression set for the packet's
@@ -4056,6 +4644,15 @@ def collect(repo: Optional[str], pr_number: int, *,
             scope_source = "compare"
     if scope_diff is None:
         scope_diff = fetch_diff(resolved, pr_number)
+    pr_comments = fetch_pr_comments(resolved, pr_number)
+    verdict = fetch_verdict(resolved, pr_number)
+    scoped_rereview, pinned_scope = build_scoped_rereview(
+        resolved, pr_number, base_ref, head_sha, pr_comments)
+    if pinned_scope is not None:
+        scope_files, scope_diff, merge_base = pinned_scope
+        scope_source = "compare"
+    review_packet_manifest = _fetch_review_packet_manifest(
+        resolved, scope_diff, head_sha)
     packet = build_packet(
         repo=resolved,
         pr_number=pr_number,
@@ -4071,10 +4668,12 @@ def collect(repo: Optional[str], pr_number: int, *,
         open_prs=fetch_open_prs(resolved),
         merged_prs=fetch_merged_prs(resolved),
         ci_runs=fetch_ci_runs(resolved, branch) if branch else [],
-        verdict=fetch_verdict(resolved, pr_number),
-        pr_comments=fetch_pr_comments(resolved, pr_number),
+        verdict=verdict,
+        pr_comments=pr_comments,
         stop_counter=fetch_stop_counter(lambda: loaded_items, now),
         collected_at=(now or datetime.now(timezone.utc)).isoformat(),
+        scoped_rereview=scoped_rereview,
+        review_packet_manifest=review_packet_manifest,
     )
     # Keep build_packet pure; unrunnability depends on fresh GitHub state.
     packet = annotate_unrunnable_premises(packet)

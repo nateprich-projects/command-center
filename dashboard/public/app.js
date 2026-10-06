@@ -183,11 +183,23 @@ function shortRepo(value) {
 function pipState(ticket) {
   if (!ticket || typeof ticket !== "object") return "open";
   if (ticket.state !== "OPEN") return "closed";
+  if (ticket.pr_stale === true) return "stale";
+  if (ticket.pr_unknown === true || ticket.pr === "unknown") return "unknown";
   if (ticket.pr === "approved") return "approved";
   if (ticket.pr === "changes requested") return "changes-requested";
   if (ticket.pr === "submitted" || ticket.pr === "merged") return "submitted";
   if (ticket.blocked) return ticket.blocked_by_siblings ? "queued" : "blocked";
   return "open";
+}
+
+function priorPrAgeLabel(ticket) {
+  if (ticket?.pr_stale !== true || typeof ticket.pr_stale_age !== "string") {
+    return null;
+  }
+  const state = typeof ticket.pr_stale_state === "string"
+    ? ` ${ticket.pr_stale_state}`
+    : " PR fact";
+  return element("span", "pr-stale-age", `stale${state} · ${ticket.pr_stale_age}`);
 }
 
 function rowTier(tickets) {
@@ -271,6 +283,16 @@ function pips(item, tickets, closed, total) {
     }
   }
   if (bar.childElementCount) wrap.append(bar);
+  const staleAges = [];
+  for (const ticket of rows) {
+    if (!ticket || ticket.pr_stale !== true) continue;
+    if (typeof ticket.pr_stale_age === "string") {
+      staleAges.push(ticket.pr_stale_age);
+    }
+  }
+  if (staleAges.length) {
+    wrap.append(element("span", "pr-stale-age pr-stale-summary", `stale ${staleAges.join(", ")}`));
+  }
   if (Number.isFinite(closed) && Number.isFinite(total) && total > 0) {
     wrap.append(element("span", "pip-count", `${closed}/${total}`));
   }
@@ -412,12 +434,17 @@ function classChip(value) {
 }
 
 function ticketRow(ticket) {
-  const row = gridRow("div", `ticket ticket-${pipState(ticket)}`);
-  row.append(cell("cell-twisty", element("i", `pip pip-${pipState(ticket)}`)));
+  const state = pipState(ticket);
+  const row = gridRow("div", `ticket ticket-${state}`);
+  const pip = element("i", `pip pip-${state}`);
+  const staleLabel = priorPrAgeLabel(ticket);
+  if (staleLabel) pip.title = staleLabel.textContent;
+  row.append(cell("cell-twisty", pip));
 
   const title = element("div", "cell cell-title cell-child");
   title.append(element("span", "child-rule"));
   title.append(link(`#${ticket.number} ${ticket.title || ""}`, ticket.url, "ticket-title"));
+  if (staleLabel) title.append(staleLabel);
   if (ticket.blocked) title.append(blockedChip(ticket));
   const hold = holdChip(ticket);
   if (hold) title.append(hold);
@@ -572,6 +599,8 @@ function phoneRow(item, inheritedClass) {
   const title = element("span", "phone-title");
   if (state) title.append(element("i", `pip pip-${state}`));
   title.append(link(phoneTitle(item), item && item.url, "phone-title-link"));
+  const staleLabel = priorPrAgeLabel(item);
+  if (staleLabel) title.append(staleLabel);
   summary.append(title);
   summary.append(element("span", "phone-repo", phoneRepo(item) || "—"));
   const classCell = element("span", "phone-class");
@@ -852,20 +881,189 @@ function museUsageText(muse) {
   return `Muse 7-day spend $${parsed.spent.toFixed(2)} of $${parsed.cap.toFixed(2)} (${parsed.percent.toFixed(1)}%)`;
 }
 
-function renderUsage(usage) {
+function usageTimestampMs(timestamp) {
+  if (typeof timestamp === "number" && Number.isFinite(timestamp)) {
+    return timestamp < 1e12 ? timestamp * 1000 : timestamp;
+  }
+  if (typeof timestamp !== "string" || !timestamp.trim()) return null;
+  const trimmed = timestamp.trim();
+  if (/^-?\d+(?:\.\d+)?$/.test(trimmed)) {
+    const numeric = Number(trimmed);
+    return numeric < 1e12 ? numeric * 1000 : numeric;
+  }
+  const parsed = Date.parse(trimmed);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function safeGitHubUrl(value) {
+  if (typeof value !== "string") return null;
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "https:" || url.hostname !== "github.com") return null;
+    return url.href;
+  } catch {
+    return null;
+  }
+}
+
+function musePanelUsage(panel, nowMs = Date.now()) {
+  const percent = panel && panel.used_percent;
+  const sampledAt = panel && panel.sampled_at;
+  const sampledAtMs = usageTimestampMs(sampledAt);
+  const source = panel && typeof panel.source === "string" ? panel.source.trim() : "";
+  const sourceUrl = safeGitHubUrl(panel && panel.source_url);
+  if (
+    typeof percent !== "number" || !Number.isFinite(percent) ||
+    percent < 0 || percent > 100 || !Number.isFinite(sampledAtMs) ||
+    !source || !sourceUrl
+  ) {
+    return { state: "unavailable" };
+  }
+  const freshness = claudeUsage({ u: { sd: percent }, t: sampledAt }, nowMs);
+  if (freshness.state === "unavailable") return freshness;
+  return { ...freshness, source, sourceUrl, sampledAt };
+}
+
+function museEstimate(muse, nowMs = Date.now()) {
+  const parsed = museUsage(muse);
+  const capturedAtMs = usageTimestampMs(muse && muse.captured_at);
+  const source = muse && typeof muse.source === "string" ? muse.source.trim() : "";
+  if (!parsed || !Number.isFinite(capturedAtMs) || !source) {
+    return { state: "unavailable" };
+  }
+  const freshness = claudeUsage({ u: { sd: parsed.percent }, t: muse.captured_at }, nowMs);
+  if (freshness.state === "unavailable") return freshness;
+  const sampledAt = new Date(capturedAtMs).toISOString();
+  if (freshness.state === "stale") {
+    return { ...freshness, source, sampledAt };
+  }
+  return { ...freshness, source, sampledAt, ...parsed };
+}
+
+function claudeUsage(claude, nowMs = Date.now()) {
+  const percent = claude && claude.u && claude.u.sd;
+  const sampleMs = usageTimestampMs(claude && claude.t);
+  if (typeof percent !== "number" || !Number.isFinite(percent) || percent < 0 ||
+      !Number.isFinite(sampleMs)) {
+    return { state: "unavailable" };
+  }
+  const sampledAt = new Date(sampleMs);
+  if (!Number.isFinite(sampledAt.getTime())) return { state: "unavailable" };
+  const ageMs = Math.max(0, nowMs - sampleMs);
+  const ageText = age(sampledAt.toISOString(), nowMs);
+  if (ageMs > 90 * 60 * 1000) return { state: "stale", ageText };
+  return { state: "live", percent, ageText };
+}
+
+function claudeUsageChanged(previous, current) {
+  return previous?.u?.sd !== current?.u?.sd || previous?.t !== current?.t;
+}
+
+function musePanelUsageChanged(previous, current) {
+  return previous?.used_percent !== current?.used_percent ||
+    previous?.sampled_at !== current?.sampled_at ||
+    previous?.source !== current?.source ||
+    previous?.source_url !== current?.source_url;
+}
+
+function museEstimateChanged(previous, current) {
+  return previous?.spent_dollars !== current?.spent_dollars ||
+    previous?.cap_dollars !== current?.cap_dollars ||
+    previous?.used_percent !== current?.used_percent ||
+    previous?.captured_at !== current?.captured_at ||
+    previous?.source !== current?.source;
+}
+
+function snapshotNeedsRender(previous, next, previousGeneratedAt) {
+  const generatedAt = next && (next.generated_at || next.brief?.generated_at);
+  if (!previous || !generatedAt || generatedAt !== previousGeneratedAt) return true;
+  return claudeUsageChanged(previous.usage?.claude, next.usage?.claude) ||
+    musePanelUsageChanged(previous.usage?.muse_panel, next.usage?.muse_panel) ||
+    museEstimateChanged(previous.usage?.muse, next.usage?.muse);
+}
+
+function renderUsage(usage, nowMs = Date.now()) {
   const container = document.querySelector("#usage");
   container.replaceChildren();
-  const parsed = museUsage(usage && usage.muse);
-  if (!parsed) return;
+  const panel = musePanelUsage(usage && usage.muse_panel, nowMs);
+  const panelRow = element("div", "usage");
+  panelRow.append(element("span", "usage-label", "Muse account-panel usage"));
+  if (panel.state === "live") {
+    const bar = element("div", "usage-bar");
+    const fill = element("i", `usage-fill${panel.percent >= 100 ? " over" : ""}`);
+    fill.setAttribute("style", `width: ${Math.min(100, panel.percent).toFixed(1)}%`);
+    bar.append(fill);
+    panelRow.append(bar);
+    panelRow.append(element("span", "usage-percent", `${panel.percent}%`));
+  } else {
+    const state = panel.state === "stale"
+      ? `Stale · ${panel.ageText}`
+      : "Unavailable";
+    panelRow.append(element("span", `usage-state ${panel.state}`, state));
+  }
+  const panelSource = element("a", "usage-label", panel.source || "Muse account panel");
+  if (panel.sourceUrl) {
+    panelSource.setAttribute("href", panel.sourceUrl);
+    panelSource.setAttribute("target", "_blank");
+    panelSource.setAttribute("rel", "noreferrer");
+  }
+  panelRow.append(panelSource);
+  if (panel.sampledAt) {
+    const sampledAt = element("time", "usage-age", `Sampled ${panel.sampledAt} · ${panel.ageText}`);
+    sampledAt.setAttribute("datetime", panel.sampledAt);
+    panelRow.append(sampledAt);
+  }
+  const refreshLink = element("a", "usage-age", "Measurement refresh: #2123");
+  refreshLink.setAttribute("href", "https://github.com/nateprich-projects/command-center/issues/2123");
+  refreshLink.setAttribute("target", "_blank");
+  refreshLink.setAttribute("rel", "noreferrer");
+  panelRow.append(refreshLink);
+  container.append(panelRow);
+
+  const estimate = museEstimate(usage && usage.muse, nowMs);
+  const estimateRow = element("div", "usage");
+  if (estimate.state === "live") {
+    estimateRow.append(element("span", "usage-label",
+      `Muse 7-day spend estimate $${estimate.spent.toFixed(2)} of $${estimate.cap.toFixed(2)}`));
+    const bar = element("div", "usage-bar");
+    const fill = element("i", `usage-fill${estimate.percent >= 100 ? " over" : ""}`);
+    fill.setAttribute("style", `width: ${Math.min(100, estimate.percent).toFixed(1)}%`);
+    bar.append(fill);
+    estimateRow.append(bar);
+    estimateRow.append(element("span", "usage-percent", `${estimate.percent.toFixed(1)}%`));
+  } else {
+    estimateRow.append(element("span", "usage-label", "Muse 7-day spend estimate"));
+    const state = estimate.state === "stale"
+      ? `Stale · ${estimate.ageText}`
+      : "Unavailable";
+    estimateRow.append(element("span", `usage-state ${estimate.state}`, state));
+  }
+  estimateRow.append(element("span", "usage-label",
+    estimate.source || "Local Muse session journal estimate"));
+  if (estimate.sampledAt) {
+    const sampledAt = element("time", "usage-age", `Sampled ${estimate.sampledAt} · ${estimate.ageText}`);
+    sampledAt.setAttribute("datetime", estimate.sampledAt);
+    estimateRow.append(sampledAt);
+  }
+  container.append(estimateRow);
+
+  const claude = claudeUsage(usage && usage.claude, nowMs);
   const wrap = element("div", "usage");
-  wrap.append(element("span", "usage-label",
-    `Muse 7-day spend $${parsed.spent.toFixed(2)} of $${parsed.cap.toFixed(2)}`));
-  const bar = element("div", "usage-bar");
-  const fill = element("i", `usage-fill${parsed.percent >= 100 ? " over" : ""}`);
-  fill.setAttribute("style", `width: ${Math.min(100, parsed.percent).toFixed(1)}%`);
-  bar.append(fill);
-  wrap.append(bar);
-  wrap.append(element("span", "usage-percent", `${parsed.percent.toFixed(1)}%`));
+  wrap.append(element("span", "usage-label", "Claude weekly usage"));
+  if (claude.state === "live") {
+    const bar = element("div", "usage-bar");
+    const fill = element("i", `usage-fill${claude.percent >= 100 ? " over" : ""}`);
+    fill.setAttribute("style", `width: ${Math.min(100, claude.percent).toFixed(1)}%`);
+    bar.append(fill);
+    wrap.append(bar);
+    wrap.append(element("span", "usage-percent", `${claude.percent}%`));
+    wrap.append(element("span", "usage-age", claude.ageText));
+  } else {
+    const state = claude.state === "stale"
+      ? `Stale · ${claude.ageText}`
+      : "Unavailable";
+    wrap.append(element("span", `usage-state ${claude.state}`, state));
+  }
   container.append(wrap);
 }
 
@@ -2038,7 +2236,13 @@ async function loadSnapshot({ force = false } = {}) {
     status.textContent = generatedAt ? `Snapshot ${age(generatedAt)}` : "Snapshot age unknown";
     if (failure) status.textContent += " · last brief failed";
     status.classList.toggle("failed", Boolean(failure));
-    if (!force && generatedAt && generatedAt === lastGeneratedAt) return;
+    if (!force && !snapshotNeedsRender(lastSnapshot, snapshot, lastGeneratedAt)) {
+      lastSnapshot = snapshot;
+      // The original sample's age changes on every poll even when the
+      // publisher and brief timestamps stay still.
+      renderUsage(snapshot.usage || {});
+      return;
+    }
     lastGeneratedAt = generatedAt || null;
     lastSnapshot = snapshot;
     renderAll(snapshot);
@@ -2121,7 +2325,9 @@ if (typeof document !== "undefined") {
 
 export {
   STAGES, age, boardColumns, boardTabCounts, boardTabFromUrl, boardTabUrl, tabColumns,
-  failureState, museUsageText, nextOwner, ownerCell,
+  failureState, museUsageText, musePanelUsage, museEstimate,
+  claudeUsage, claudeUsageChanged, snapshotNeedsRender,
+  renderUsage, nextOwner, ownerCell,
   phoneState, pipState, projectBlocked, projectHold, holdChip, localTime,
   renderPhoneBoard, ticketHold, unblocksChip,
   repoLabels, repoOf, repoOptions, rowTier, shortRepo, visible,

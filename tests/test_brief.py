@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 
@@ -12,6 +13,8 @@ import pytest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 import funnel  # noqa: E402
+
+_LIVE_RECENT_RESEND_RATIO = funnel.recent_resend_ratio
 
 
 #: Comment markers count only from the owner account (#1788).
@@ -24,7 +27,12 @@ FIXTURE = pathlib.Path(__file__).parent / "fixtures" / "project_items.json"
 @pytest.fixture(autouse=True)
 def no_resend_network(monkeypatch):
     """Brief fixture tests should not read live heartbeat or outcome branches."""
+    import heartbeat
+
     funnel.reset_api_usage()
+    monkeypatch.setattr(
+        heartbeat, "read_brief", lambda agent, timeout=None: []
+    )
     monkeypatch.setattr(funnel, "recent_resend_ratio", lambda now: {})
     monkeypatch.setattr(funnel, "_read_outcome_signals", lambda now: None)
     monkeypatch.setattr(funnel, "_read_portfolio_metrics", lambda items, now: None)
@@ -933,22 +941,24 @@ def test_brief_surfaces_parked_items_with_their_reason(monkeypatch, capsys):
     nodes = json.loads(FIXTURE.read_text())
     items = fixture_items()
     parked_node = next(node for node in nodes if node.get("park_comment"))
-    calls = []
+    batches = []
+    full_reads = []
 
-    def gh_json(*args):
-        calls.append(args)
-        if args[3] == "14":
-            return {"comments": []}
-        assert args == (
-            "gh", "issue", "view", "15", "--repo", "nateprich/beta",
-            "--json", "comments",
-        )
-        return {"comments": [
-            {"author": OWNER, "body": "An unrelated comment."},
-            {"author": OWNER, "body": parked_node["park_comment"]},
-        ]}
+    def batched_tails(candidates):
+        # The brief's shared batched comment-tail read (#2133).
+        batches.append([item.ref for item in candidates])
+        return {
+            item.ref: [
+                {"author": OWNER, "body": "An unrelated comment."},
+                {"author": OWNER, "body": parked_node["park_comment"]},
+            ] if item.ref == "nateprich/beta#15" else []
+            for item in candidates
+        }
 
-    monkeypatch.setattr(funnel, "_gh_json", gh_json)
+    monkeypatch.setattr(funnel, "_batched_issue_comments", batched_tails)
+    monkeypatch.setattr(
+        funnel, "_issue_comments", lambda item: full_reads.append(item.ref)
+    )
     monkeypatch.setattr(funnel, "unattended_merges", lambda now: [])
 
     assert funnel.cmd_brief(items, NOW) == 0
@@ -962,8 +972,8 @@ def test_brief_surfaces_parked_items_with_their_reason(monkeypatch, capsys):
         "reason": "The rewrite no longer earns its maintenance cost.",
     }]
     assert brief["pending_wakes"] == []
-    assert len(calls) == 1
-    assert calls[0][3] == "15"
+    assert ["nateprich/beta#15"] in batches
+    assert full_reads == []
 
 
 def test_brief_reports_wakes_for_parked_items_until_they_resume(
@@ -994,12 +1004,20 @@ def test_brief_reports_wakes_for_parked_items_until_they_resume(
         ),
     }
     comment_reads = []
+    full_reads = []
 
-    def issue_comments(item):
-        comment_reads.append(item.number)
-        return [{"author": OWNER, "body": comment_bodies[item.number]}]
+    def batched_tails(candidates):
+        # The brief's shared batched comment-tail read (#2133).
+        comment_reads.append([item.number for item in candidates])
+        return {
+            item.ref: [{"author": OWNER, "body": comment_bodies[item.number]}]
+            for item in candidates
+        }
 
-    monkeypatch.setattr(funnel, "_issue_comments", issue_comments)
+    monkeypatch.setattr(funnel, "_batched_issue_comments", batched_tails)
+    monkeypatch.setattr(
+        funnel, "_issue_comments", lambda item: full_reads.append(item.ref)
+    )
     monkeypatch.setattr(funnel, "unattended_merges", lambda now: [])
 
     assert funnel.cmd_brief([future, no_wake, resumed], NOW) == 0
@@ -1012,7 +1030,9 @@ def test_brief_reports_wakes_for_parked_items_until_they_resume(
         "wake_date": "2026-09-10",
         "wake_status": "Building",
     }]
-    assert comment_reads == [31, 32]
+    # The parked section reads its two candidates' tails, not the resumed one.
+    assert [31, 32] in comment_reads
+    assert full_reads == []
 
 
 def test_brief_does_not_treat_ready_as_a_human_decision(monkeypatch, capsys):
@@ -1078,15 +1098,18 @@ def test_parked_items_are_newest_first_and_missing_reason_is_null(monkeypatch):
         status_since=datetime(2026, 9, 4, tzinfo=timezone.utc),
     )
 
-    def gh_json(*args):
-        if args[3] == "21":
-            return {"comments": [{"author": OWNER, "body": "No marker here."}]}
-        return {"comments": [{
-            "author": OWNER,
-            "body": funnel.PARK_COMMENT_PREFIX + "Older reason",
-        }]}
+    def batched_tails(candidates):
+        # The brief's shared batched comment-tail read (#2133).
+        return {
+            item.ref: [{"author": OWNER, "body": "No marker here."}]
+            if item.number == 21 else [{
+                "author": OWNER,
+                "body": funnel.PARK_COMMENT_PREFIX + "Older reason",
+            }]
+            for item in candidates
+        }
 
-    monkeypatch.setattr(funnel, "_gh_json", gh_json)
+    monkeypatch.setattr(funnel, "_batched_issue_comments", batched_tails)
 
     assert funnel.parked_json([older, newer]) == [
         {
@@ -1181,7 +1204,7 @@ def test_brief_surfaces_blocked_projects_and_tickets_oldest_first(
     silent_project = funnel.Item(
         repo="nateprich/beta", number=31, title="Silent project",
         url="https://example.invalid/31", state="OPEN", status="Ready",
-        status_since=datetime(2026, 9, 3, tzinfo=timezone.utc),
+        needs="none", status_since=datetime(2026, 9, 3, tzinfo=timezone.utc),
         labels=["blocked"], block_reason="Nate needs to decide.",
     )
     named_ticket = funnel.Item(
@@ -1357,7 +1380,7 @@ def test_brief_keeps_every_other_blocked_project_as_blocked_work(
         block_references=["#70"], block_reason="Wait for #70.",
     )
     silent = _finished_project(
-        61, labels=["blocked"],
+        61, needs="none", labels=["blocked"],
         status_since=datetime(2026, 9, 2, tzinfo=timezone.utc),
         block_reason="Nate needs to decide.",
     )
@@ -1577,6 +1600,93 @@ def test_brief_surfaces_open_human_steps_outside_the_decision_queue(
     assert funnel.awaiting_decision([human_step]) == []
 
 
+def test_parked_parent_steps_are_withheld_from_every_step_section(
+    monkeypatch, capsys
+):
+    parked_parent = funnel.Item(
+        repo="nateprich/beta", number=1904, title="Parked project",
+        url="https://example.invalid/1904", state="OPEN", status="Parked",
+        klass="Broken",
+    )
+    human = funnel.Item(
+        repo="nateprich/beta", number=1926, title="Human step",
+        url="https://example.invalid/1926", state="OPEN",
+        parent=parked_parent.ref, needs="human",
+    )
+    blocked_human = funnel.Item(
+        repo="nateprich/beta", number=1927, title="Blocked human step",
+        url="https://example.invalid/1927", state="OPEN",
+        parent=parked_parent.ref, needs="human", labels=["blocked"],
+    )
+    machine_local = funnel.Item(
+        repo="nateprich/beta", number=1932, title="Machine-local step",
+        url="https://example.invalid/1932", state="OPEN",
+        parent=parked_parent.ref, needs="claude-code-environment",
+    )
+    blocked_machine_local = funnel.Item(
+        repo="nateprich/beta", number=1933, title="Blocked machine-local step",
+        url="https://example.invalid/1933", state="OPEN",
+        parent=parked_parent.ref, needs="claude-code-environment",
+        labels=["blocked"],
+    )
+    items = [
+        parked_parent, human, blocked_human, machine_local,
+        blocked_machine_local,
+    ]
+
+    assert funnel.human_step_items(items) == []
+    assert funnel.blocked_human_step_items(items) == []
+    assert funnel.machine_local_step_items(items) == []
+    assert funnel.blocked_machine_local_step_items(items) == []
+
+    monkeypatch.setattr(funnel, "unattended_merges", lambda now: [])
+    assert funnel.cmd_brief(items, NOW) == 0
+    brief = json.loads(capsys.readouterr().out)
+    assert brief["human_steps"] == []
+    assert brief["blocked_human_steps"] == []
+    assert brief["machine_local_steps"] == []
+    assert brief["blocked_machine_local_steps"] == []
+
+
+def test_non_parked_parent_steps_still_split_by_blocked_status():
+    parent = funnel.Item(
+        repo="nateprich/beta", number=1904, title="Building project",
+        url="https://example.invalid/1904", state="OPEN", status="Building",
+        klass="Broken",
+    )
+    human = funnel.Item(
+        repo="nateprich/beta", number=1926, title="Human step",
+        url="https://example.invalid/1926", state="OPEN",
+        parent=parent.ref, needs="human",
+    )
+    blocked_human = funnel.Item(
+        repo="nateprich/beta", number=1927, title="Blocked human step",
+        url="https://example.invalid/1927", state="OPEN",
+        parent=parent.ref, needs="human", labels=["blocked"],
+    )
+    machine_local = funnel.Item(
+        repo="nateprich/beta", number=1932, title="Machine-local step",
+        url="https://example.invalid/1932", state="OPEN",
+        parent=parent.ref, needs="claude-code-environment",
+    )
+    blocked_machine_local = funnel.Item(
+        repo="nateprich/beta", number=1933, title="Blocked machine-local step",
+        url="https://example.invalid/1933", state="OPEN",
+        parent=parent.ref, needs="claude-code-environment",
+        labels=["blocked"],
+    )
+    items = [
+        parent, human, blocked_human, machine_local, blocked_machine_local,
+    ]
+
+    assert funnel.human_step_items(items) == [human]
+    assert funnel.blocked_human_step_items(items) == [blocked_human]
+    assert funnel.machine_local_step_items(items) == [machine_local]
+    assert funnel.blocked_machine_local_step_items(items) == [
+        blocked_machine_local
+    ]
+
+
 def test_brief_separates_blocked_human_and_machine_local_steps(
     monkeypatch, capsys
 ):
@@ -1723,7 +1833,10 @@ def test_brief_surfaces_agent_health_without_counting_it_as_a_decision(
     )
     health = [{
         "agent": "codex",
-        "condition": "`codex` errored 3 times this week. Most recent: reserve",
+        "condition": (
+            "`codex` degraded: errored 3 times consecutively. "
+            "Latest: begin-timeout: reserve"
+        ),
     }]
     monkeypatch.setattr(funnel, "agent_health", lambda now: health)
     monkeypatch.setattr(funnel, "unattended_merges", lambda now: [])
@@ -1792,6 +1905,8 @@ def test_brief_marks_an_unreadable_comment_section_instead_of_empty_result(
         status_since=NOW,
     )
     monkeypatch.setattr(funnel, "_gh_json", lambda *args: None)
+    # The batched comment-tail read answers without the issue (#2133).
+    monkeypatch.setattr(funnel, "gh_graphql", lambda query, **kwargs: {})
 
     assert funnel.cmd_brief([parked], NOW) == 0
     brief = json.loads(capsys.readouterr().out)
@@ -1977,6 +2092,48 @@ def test_brief_surfaces_recent_effective_dated_price_changes(
     assert brief["price_changes"][0]["old_rate"] == 0.1
     assert brief["price_changes"][0]["new_rate"] == 0.02
     assert brief["price_changes"][0]["effective_date"] == "2026-07-30T00:00:00Z"
+
+
+def test_brief_surfaces_recent_model_watch_releases_and_faults(
+    monkeypatch, capsys, tmp_path
+):
+    record = tmp_path / "model-watch.jsonl"
+    record.write_text(json.dumps({
+        "recorded_at": (NOW - timedelta(days=1)).isoformat(),
+        "model_releases": [{
+            "provider": "openai",
+            "current_model": "gpt-5.6-sol",
+            "newer_model": "gpt-5.7-sol",
+        }],
+        "watch_faults": [{
+            "source": "release",
+            "provider": "anthropic",
+            "kind": "could-not-check",
+            "reason": "no model catalogue response",
+        }],
+    }) + "\n")
+    monkeypatch.setattr(funnel.nightly_watch, "WATCH_RECORD_PATH", record)
+    _make_brief_readers_safe(monkeypatch)
+    monkeypatch.setattr(funnel, "connector_gate_answers", lambda *args, **kwargs: [])
+    monkeypatch.setattr(funnel, "api_cost", lambda: {})
+    monkeypatch.setattr(funnel, "graphql_caller_spend", lambda: {})
+
+    assert funnel.cmd_brief([], NOW) == 0
+    brief = json.loads(capsys.readouterr().out)
+
+    assert brief["model_releases"] == [{
+        "provider": "openai",
+        "current_model": "gpt-5.6-sol",
+        "newer_model": "gpt-5.7-sol",
+        "recorded_at": (NOW - timedelta(days=1)).isoformat().replace("+00:00", "Z"),
+    }]
+    assert brief["watch_faults"] == [{
+        "source": "release",
+        "provider": "anthropic",
+        "kind": "could-not-check",
+        "reason": "no model catalogue response",
+        "recorded_at": (NOW - timedelta(days=1)).isoformat().replace("+00:00", "Z"),
+    }]
 
 
 def test_brief_places_measured_api_cost_in_documented_timings_map(monkeypatch, capsys):
@@ -2430,48 +2587,10 @@ def test_ticket_pr_facts_section_succeeds_under_the_raised_budget(
     assert degraded == []
 
 
-def test_main_brief_retries_a_pr_facts_timeout_once_within_deadline(
+def test_main_brief_pr_facts_timeout_is_not_retried(
     monkeypatch, capsys
 ):
-    """A first-attempt timeout is retried once sharing the section deadline;
-    when the retry succeeds the dependent sections render instead of
-    reporting missing (#1210)."""
-    item = funnel.Item(
-        repo="nateprich/beta", number=92, title="A ticket",
-        url="https://example.invalid/92", state="OPEN",
-        parent="nateprich/beta#1",
-    )
-    monkeypatch.setattr(funnel, "load_items", lambda: [item])
-    calls = []
-
-    def flaky(_items):
-        calls.append(1)
-        if len(calls) == 1:
-            raise funnel.BriefSectionTimeout(
-                "ticket_pr_facts", "section read timed out"
-            )
-        return {}
-
-    monkeypatch.setattr(funnel, "ticket_pr_facts", flaky)
-
-    assert funnel.main(["brief"]) == 0
-    brief = json.loads(capsys.readouterr().out)
-
-    assert len(calls) == 2
-    assert brief["stranded"] is not None
-    assert brief["in_motion"] is not None
-    assert brief["stale_locks_taken_over"] is not None
-    assert [
-        entry for entry in brief["missing"]
-        if entry["section"] in funnel.BRIEF_PR_FACT_SECTIONS
-    ] == []
-
-
-def test_main_brief_retry_exhausted_still_reports_degraded(
-    monkeypatch, capsys
-):
-    """Two timeouts (first attempt plus the one shared-deadline retry) leave
-    the dependent sections missing and record the degraded section (#1210)."""
+    """A timed-out PR read marks dependent sections unknown on its first try."""
     item = funnel.Item(
         repo="nateprich/beta", number=92, title="A ticket",
         url="https://example.invalid/92", state="OPEN",
@@ -2491,7 +2610,7 @@ def test_main_brief_retry_exhausted_still_reports_degraded(
     assert funnel.main(["brief"]) == 0
     brief = json.loads(capsys.readouterr().out)
 
-    assert len(calls) == 2
+    assert len(calls) == 1
     assert brief["stranded"] is None
     assert brief["in_motion"] is None
     assert brief["stale_locks_taken_over"] is None
@@ -2543,6 +2662,170 @@ def test_a_timed_out_cleared_blocks_section_reads_as_unread_not_empty(
 
     assert brief["cleared_blocks"] is None
     assert [row["section"] for row in brief["missing"]] == ["cleared_blocks"]
+
+
+def test_cmd_brief_heartbeat_timeouts_publish_dependent_sections_as_unknown(
+    monkeypatch, capsys
+):
+    import heartbeat
+
+    calls = []
+
+    def timed_out(agent, timeout=None):
+        calls.append(agent)
+        raise subprocess.TimeoutExpired(["gh", "api", agent], timeout)
+
+    monkeypatch.setattr(heartbeat, "read_brief", timed_out)
+    monkeypatch.setattr(
+        funnel, "recent_resend_ratio", _LIVE_RECENT_RESEND_RATIO
+    )
+
+    assert funnel.cmd_brief([], NOW) == 0
+    brief = json.loads(capsys.readouterr().out)
+
+    dependent = (
+        "agent_health",
+        "run_summary",
+        "unattended_merges",
+        "resend_ratio",
+        "working_tree_touched",
+    )
+    assert {section: brief[section] for section in dependent} == {
+        section: None for section in dependent
+    }
+    assert set(dependent) <= {
+        entry["section"] for entry in brief["missing"]
+    }
+    assert calls == sorted(heartbeat.PROVIDERS)
+
+
+def test_cmd_brief_raised_heartbeat_reads_name_the_unavailable_agent(
+    monkeypatch, capsys
+):
+    import heartbeat
+
+    calls = []
+
+    def unavailable(agent, timeout=None):
+        calls.append(agent)
+        raise heartbeat.HeartbeatError("GitHub connection failed")
+
+    monkeypatch.setattr(heartbeat, "read_brief", unavailable)
+    monkeypatch.setattr(
+        funnel, "recent_resend_ratio", _LIVE_RECENT_RESEND_RATIO
+    )
+
+    assert funnel.cmd_brief([], NOW) == 0
+    brief = json.loads(capsys.readouterr().out)
+
+    dependent = (
+        "agent_health",
+        "run_summary",
+        "unattended_merges",
+        "resend_ratio",
+        "working_tree_touched",
+    )
+    assert all(brief[section] is None for section in dependent)
+    assert calls == sorted(heartbeat.PROVIDERS)
+    for section in dependent:
+        entries = [
+            entry for entry in brief["missing"]
+            if entry["section"] == section
+        ]
+        assert entries
+        assert all(entry.get("agent") for entry in entries)
+
+
+def test_cmd_brief_reads_each_provider_once_and_reuses_the_rows(
+    monkeypatch, capsys
+):
+    import heartbeat
+
+    calls = []
+
+    def read(agent, timeout=None):
+        calls.append(agent)
+        return []
+
+    monkeypatch.setattr(heartbeat, "read_brief", read)
+    monkeypatch.setattr(
+        funnel, "recent_resend_ratio", _LIVE_RECENT_RESEND_RATIO
+    )
+
+    assert funnel.cmd_brief([], NOW) == 0
+    capsys.readouterr()
+
+    assert calls == sorted(heartbeat.PROVIDERS)
+
+
+def _brief_with_one_unread_heartbeat(monkeypatch, capsys, failing, error):
+    """Publish the brief with every heartbeat readable except ``failing``."""
+    import heartbeat
+
+    def read(agent, timeout=None):
+        if agent == failing:
+            raise error
+        return []
+
+    monkeypatch.setattr(heartbeat, "read_brief", read)
+    monkeypatch.setattr(
+        funnel, "recent_resend_ratio", _LIVE_RECENT_RESEND_RATIO
+    )
+
+    assert funnel.cmd_brief([], NOW) == 0
+    return json.loads(capsys.readouterr().out)
+
+
+def test_cmd_brief_an_unread_muse_heartbeat_reaches_every_section_reading_muse(
+    monkeypatch, capsys
+):
+    """#2132 reviewer probe: a section given the wrong provider list (say
+    agent_health with only codex and zcode) would publish a reading that
+    never saw Muse."""
+    import heartbeat
+
+    brief = _brief_with_one_unread_heartbeat(
+        monkeypatch, capsys, "muse",
+        heartbeat.HeartbeatError("error connecting to api.github.com"),
+    )
+
+    # resend_ratio reads only the metered agents, codex and zcode.
+    assert brief["resend_ratio"] is not None
+    for section in (
+        "agent_health",
+        "run_summary",
+        "unattended_merges",
+        "working_tree_touched",
+    ):
+        assert brief[section] is None, section
+        entries = [
+            entry for entry in brief["missing"]
+            if entry["section"] == section
+        ]
+        assert [entry.get("agent") for entry in entries] == ["muse"], entries
+
+
+def test_cmd_brief_an_unread_retired_zcode_heartbeat_still_unknowns_its_readers(
+    monkeypatch, capsys
+):
+    """#2132 reviewer probe: health and run summary skip a retired agent,
+    but the sections that read retired zcode's history must not."""
+    import heartbeat
+
+    assert "zcode" in heartbeat.RETIRED_AGENTS
+    brief = _brief_with_one_unread_heartbeat(
+        monkeypatch, capsys, "zcode",
+        subprocess.TimeoutExpired(["gh", "api", "zcode"], 4.0),
+    )
+
+    assert brief["agent_health"] is not None
+    assert brief["run_summary"] is not None
+    for section in (
+        "resend_ratio",
+        "unattended_merges",
+        "working_tree_touched",
+    ):
+        assert brief[section] is None, section
 
 
 def test_genuinely_empty_sections_still_read_as_empty(capsys):

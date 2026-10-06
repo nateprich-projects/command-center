@@ -23,6 +23,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 import heartbeat  # noqa: E402
+from engine import reviewer_b  # noqa: E402
 
 spec = importlib.util.spec_from_file_location(
     "watchdog", ROOT / ".github" / "scripts" / "watchdog.py"
@@ -116,6 +117,28 @@ def test_read_github_strict_refuses_malformed_jsonl(monkeypatch):
 
     with pytest.raises(heartbeat.HeartbeatError, match="unreadable record"):
         heartbeat.read_github_strict("codex")
+
+
+def test_read_brief_treats_only_missing_remote_and_local_files_as_empty(
+        monkeypatch, tmp_path):
+    def missing(*args, **kwargs):
+        raise heartbeat.HeartbeatError("gh: HTTP 404: Not Found")
+
+    monkeypatch.setattr(heartbeat, "gh", missing)
+    monkeypatch.setattr(heartbeat, "SPOOL_DIR", str(tmp_path))
+
+    assert heartbeat.read_brief("codex") == []
+
+    spooled = {"agent": "codex", "phase": "finish", "run": "local"}
+    heartbeat._spool("codex", spooled)
+    assert heartbeat.read_brief("codex") == [spooled]
+
+    def unavailable(*args, **kwargs):
+        raise heartbeat.HeartbeatError("GitHub connection failed")
+
+    monkeypatch.setattr(heartbeat, "gh", unavailable)
+    with pytest.raises(heartbeat.HeartbeatError, match="connection failed"):
+        heartbeat.read_brief("codex")
 
 
 def test_muse_auth_outage_state_opens_only_for_auth_failure_and_closes_on_probe():
@@ -231,7 +254,7 @@ def test_unreadable_records_do_not_refuse_an_explicit_id():
 
 def test_finish_accepts_skipped_blocked(monkeypatch):
     records = []
-    monkeypatch.setattr(heartbeat, "read", lambda agent: [])
+    monkeypatch.setattr(heartbeat, "read", lambda agent, **kwargs: [])
     monkeypatch.setattr(heartbeat, "usage_snapshot", lambda agent: None)
     monkeypatch.setattr(heartbeat, "repo_state", lambda: None)
     monkeypatch.setattr(heartbeat, "detect_model", lambda agent: {})
@@ -251,7 +274,7 @@ def test_finish_accepts_skipped_blocked(monkeypatch):
 
 def test_finish_records_structured_issue_outcomes(monkeypatch):
     records = []
-    monkeypatch.setattr(heartbeat, "read", lambda agent: [])
+    monkeypatch.setattr(heartbeat, "read", lambda agent, **kwargs: [])
     monkeypatch.setattr(heartbeat, "usage_snapshot", lambda agent: None)
     monkeypatch.setattr(heartbeat, "repo_state", lambda: None)
     monkeypatch.setattr(heartbeat, "detect_model", lambda agent: {})
@@ -275,7 +298,7 @@ def test_finish_records_structured_issue_outcomes(monkeypatch):
 
 def test_finish_records_every_muse_call_id_and_keeps_uncaptured_slots(monkeypatch):
     records = []
-    monkeypatch.setattr(heartbeat, "read", lambda agent: [])
+    monkeypatch.setattr(heartbeat, "read", lambda agent, **kwargs: [])
     monkeypatch.setattr(heartbeat, "usage_snapshot", lambda agent: None)
     monkeypatch.setattr(heartbeat, "repo_state", lambda: None)
     monkeypatch.setattr(heartbeat, "detect_model", lambda agent: {})
@@ -300,7 +323,7 @@ def test_finish_records_every_muse_call_id_and_keeps_uncaptured_slots(monkeypatc
 
 def test_finish_keeps_single_id_bound_and_omits_token_snapshot(monkeypatch):
     records = []
-    monkeypatch.setattr(heartbeat, "read", lambda agent: [])
+    monkeypatch.setattr(heartbeat, "read", lambda agent, **kwargs: [])
     monkeypatch.setattr(heartbeat, "usage_snapshot", lambda agent: None)
     monkeypatch.setattr(heartbeat, "repo_state", lambda: None)
     monkeypatch.setattr(heartbeat, "detect_model", lambda agent: {})
@@ -378,7 +401,7 @@ def test_start_and_finish_record_separate_usage_readings(monkeypatch):
         seen_agents.append(agent)
         return readings.pop(0)
 
-    monkeypatch.setattr(heartbeat, "read", lambda agent: records)
+    monkeypatch.setattr(heartbeat, "read", lambda agent, **kwargs: records)
     monkeypatch.setattr(heartbeat, "session_id", lambda agent: "session-1")
     monkeypatch.setattr(heartbeat, "usage_snapshot", usage_read)
     monkeypatch.setattr(heartbeat, "close_rebegun_starts", lambda *args: None)
@@ -539,7 +562,7 @@ def test_usage_snapshot_fails_closed_for_unreadable_or_unknown_usage(
 
 def test_finish_accepts_skipped_human_step(monkeypatch):
     records = []
-    monkeypatch.setattr(heartbeat, "read", lambda agent: [])
+    monkeypatch.setattr(heartbeat, "read", lambda agent, **kwargs: [])
     monkeypatch.setattr(heartbeat, "usage_snapshot", lambda agent: None)
     monkeypatch.setattr(heartbeat, "repo_state", lambda: None)
     monkeypatch.setattr(heartbeat, "detect_model", lambda agent: {})
@@ -584,7 +607,7 @@ def test_merged_suite_timeout_stays_unclassified_with_mixed_output_markers():
 def test_errored_finish_records_its_class_and_runtime_head(monkeypatch):
     records = []
     runtime = {"root": "/runtime/checkout", "head": "0123456789ab"}
-    monkeypatch.setattr(heartbeat, "read", lambda agent: [])
+    monkeypatch.setattr(heartbeat, "read", lambda agent, **kwargs: [])
     monkeypatch.setattr(heartbeat, "usage_snapshot", lambda agent: None)
     monkeypatch.setattr(heartbeat, "repo_state", lambda: None)
     monkeypatch.setattr(heartbeat, "runtime_state", lambda: runtime)
@@ -610,7 +633,7 @@ def test_errored_finish_records_its_class_and_runtime_head(monkeypatch):
 
 def test_finish_records_input_usage_when_harness_exposes_both_counts(monkeypatch):
     records = []
-    monkeypatch.setattr(heartbeat, "read", lambda agent: [])
+    monkeypatch.setattr(heartbeat, "read", lambda agent, **kwargs: [])
     monkeypatch.setattr(heartbeat, "usage_snapshot", lambda agent: None)
     monkeypatch.setattr(heartbeat, "input_usage", lambda agent: {
         "total_input_tokens": 100,
@@ -646,7 +669,7 @@ def test_finish_records_input_usage_when_harness_exposes_both_counts(monkeypatch
 def test_finish_omits_input_usage_when_harness_does_not_expose_both_counts(
         monkeypatch):
     records = []
-    monkeypatch.setattr(heartbeat, "read", lambda agent: [])
+    monkeypatch.setattr(heartbeat, "read", lambda agent, **kwargs: [])
     monkeypatch.setattr(heartbeat, "usage_snapshot", lambda agent: None)
     monkeypatch.setattr(heartbeat, "input_usage", lambda agent: None)
     monkeypatch.setattr(heartbeat, "repo_state", lambda: None)
@@ -689,7 +712,7 @@ def test_finish_records_four_token_kinds_from_the_bound_session(monkeypatch):
     monkeypatch.setattr(
         heartbeat.session_usage, "usage_for_session", usage_for_session
     )
-    monkeypatch.setattr(heartbeat, "read", lambda agent: records)
+    monkeypatch.setattr(heartbeat, "read", lambda agent, **kwargs: records)
     monkeypatch.setattr(heartbeat, "usage_snapshot", lambda agent: None)
     monkeypatch.setattr(heartbeat, "repo_state", lambda: None)
     monkeypatch.setattr(heartbeat, "runtime_state", lambda: None)
@@ -747,7 +770,7 @@ def test_finish_sums_api_cost_events_from_two_funnel_commands(monkeypatch):
         api_event("run-id", 5, 3),
     ]
     written = []
-    monkeypatch.setattr(heartbeat, "read", lambda agent: records)
+    monkeypatch.setattr(heartbeat, "read", lambda agent, **kwargs: records)
     monkeypatch.setattr(heartbeat, "usage_snapshot", lambda agent: None)
     monkeypatch.setattr(heartbeat, "repo_state", lambda: None)
     monkeypatch.setattr(heartbeat, "detect_model", lambda agent: {})
@@ -1090,7 +1113,7 @@ def test_graphql_points_with_known_reset_and_null_cost_stay_unknown():
 def test_finish_reports_null_api_cost_without_funnel_commands(monkeypatch):
     records = [start("run-id", NOW)]
     written = []
-    monkeypatch.setattr(heartbeat, "read", lambda agent: records)
+    monkeypatch.setattr(heartbeat, "read", lambda agent, **kwargs: records)
     monkeypatch.setattr(heartbeat, "usage_snapshot", lambda agent: None)
     monkeypatch.setattr(heartbeat, "repo_state", lambda: None)
     monkeypatch.setattr(heartbeat, "detect_model", lambda agent: {})
@@ -1115,7 +1138,7 @@ def test_finish_reports_null_api_cost_without_funnel_commands(monkeypatch):
 def test_finish_keeps_only_unreadable_api_cost_field_null(monkeypatch):
     records = [start("run-id", NOW), api_event("run-id", None, 2)]
     written = []
-    monkeypatch.setattr(heartbeat, "read", lambda agent: records)
+    monkeypatch.setattr(heartbeat, "read", lambda agent, **kwargs: records)
     monkeypatch.setattr(heartbeat, "usage_snapshot", lambda agent: None)
     monkeypatch.setattr(heartbeat, "repo_state", lambda: None)
     monkeypatch.setattr(heartbeat, "detect_model", lambda agent: {})
@@ -1271,7 +1294,7 @@ def test_finish_accepts_named_skips(monkeypatch, outcome):
     system working correctly.
     """
     records = []
-    monkeypatch.setattr(heartbeat, "read", lambda agent: [])
+    monkeypatch.setattr(heartbeat, "read", lambda agent, **kwargs: [])
     monkeypatch.setattr(heartbeat, "usage_snapshot", lambda agent: None)
     monkeypatch.setattr(heartbeat, "repo_state", lambda: None)
     monkeypatch.setattr(heartbeat, "detect_model", lambda agent: {})
@@ -1303,3 +1326,118 @@ def test_budget_exhausted_is_a_named_non_skipped_finish():
 
 def test_heartbeat_retains_about_three_days_of_records():
     assert heartbeat.KEEP == 10000
+
+
+def _reviewer_b_pair(pair_id, *, kind="live", repo="owner/repo", pr=1,
+                     head=None, sample=None, run=None, start=100,
+                     finish=112, start_spent=2.0, finish_spent=2.025,
+                     stable=True, b_verdict="rejected"):
+    head = head or "a" * 40
+    run = run or "run-" + pair_id
+    identity = {
+        "run": run,
+        "agent": "muse",
+        "trial_id": reviewer_b.TRIAL_ID,
+        "pair_id": pair_id,
+        "kind": kind,
+        "repo": repo,
+        "pr": pr,
+        "head_sha": head,
+        "sample_name": sample,
+        "a_verdict": "approved",
+    }
+    return [
+        dict(identity, phase="shadow_pair_start", ts=start,
+             usage={"seven_day": {"resets_at": 500, "spent_dollars": start_spent}}),
+        dict(identity, phase="shadow_pair_finish", ts=finish, stable=stable,
+             b_verdict=b_verdict,
+             usage={"seven_day": {"resets_at": 500, "spent_dollars": finish_spent}}),
+    ]
+
+
+def test_reviewer_b_measurement_uses_paired_heartbeat_usage_and_timestamps():
+    rows = _reviewer_b_pair("pair-1", start=100, finish=112,
+                            start_spent=2.0, finish_spent=2.025)
+
+    pair = reviewer_b.pair_rows(rows)[0]
+    assert pair["cost_dollars"] == 0.025
+    assert pair["latency_seconds"] == 12
+    assert pair["a_verdict"] == "approved"
+    assert pair["b_verdict"] == "rejected"
+
+
+def test_reviewer_b_trial_stops_after_thirty_live_and_twenty_calibration_pairs():
+    records = []
+    for index in range(30):
+        records.extend(_reviewer_b_pair(
+            "live-{}".format(index), pr=index + 1,
+            head="{:040x}".format(index + 1), start=100 + index,
+            finish=110 + index))
+    for index, name in enumerate(reviewer_b.CALIBRATION_NAMES):
+        records.extend(_reviewer_b_pair(
+            "cal-{}".format(index), kind=reviewer_b.CALIBRATION_SIDES[name],
+            repo="nateprich-projects/command-center", pr=1000 + index,
+            head="{:040x}".format(1000 + index), sample=name,
+            start=200 + index, finish=210 + index))
+
+    state = reviewer_b.trial_state(records, now=NOW)
+    assert state["live_count"] == 30
+    assert state["calibration_count"] == 20
+    assert state["next_calibration"] is None
+    assert state["sampling_open"] is False
+    assert reviewer_b.reserve_decision(
+        records, run="next", pair_id="next", kind="live",
+        repo="owner/repo", pr=99, head_sha="b" * 40, now=NOW
+    ) == "closed"
+
+
+def test_reviewer_b_reservations_consume_a_slot_until_the_outer_run_finishes():
+    records = []
+    for index in range(29):
+        records.extend(_reviewer_b_pair(
+            "live-{}".format(index), pr=index + 1,
+            head="{:040x}".format(index + 1), start=100 + index,
+            finish=110 + index))
+    records.append({
+        "run": "active-run", "agent": "muse", "trial_id": reviewer_b.TRIAL_ID,
+        "pair_id": "reservation", "kind": "live", "repo": "owner/repo",
+        "pr": 30, "head_sha": "{:040x}".format(30), "sample_name": None,
+        "phase": "shadow_reservation", "ts": NOW,
+    })
+
+    state = reviewer_b.trial_state(records, now=NOW + 60)
+    assert state["live_count"] == 29
+    assert state["live_reserved"] == 1
+    assert state["live_used_count"] == 30
+    assert reviewer_b.reserve_decision(
+        records, run="next", pair_id="next", kind="live",
+        repo="owner/repo", pr=31, head_sha="{:040x}".format(31),
+        now=NOW + 60
+    ) == "closed"
+
+
+def test_reviewer_b_discards_stale_head_and_invalid_usage_pairs():
+    stale = _reviewer_b_pair("stale", stable=False)
+    bad_usage = _reviewer_b_pair("reset", start_spent=2.0, finish_spent=1.0)
+    bad_usage[1]["usage"]["seven_day"]["resets_at"] = 501
+
+    assert reviewer_b.pair_rows(stale + bad_usage) == []
+
+
+def test_reviewer_b_prompt_answer_and_note_are_notes_only():
+    answer = reviewer_b.validate_answer(
+        '{"verdict":"rejected","findings":["concrete issue"]}')
+    assert answer == {"verdict": "rejected", "findings": ["concrete issue"]}
+    note = reviewer_b.render_note({
+        "pair_id": "pair-1", "kind": "live", "repo": "owner/repo",
+        "pr": 1, "head_sha": "a" * 40, "a_verdict": "approved",
+        "b_verdict": "rejected", "cost_dollars": 0.025,
+        "latency_seconds": 12, "findings": ["<script>text</script>"],
+    })
+    assert "Reviewer A: `approved`" in note
+    assert "Reviewer B: `rejected`" in note
+    assert "Head SHA: `{}".format("a" * 40) in note
+    assert "own-card usage delta" in note
+    assert "12.000 seconds" in note
+    assert "&lt;script&gt;text&lt;/script&gt;" in note
+    assert "does not approve, reject, or block" in note

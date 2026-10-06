@@ -672,14 +672,21 @@ def test_recent_clears_surface_from_the_label_event_and_provenance(monkeypatch):
         ),
     }
     calls = []
+    full_reads = []
 
-    def gh_json(*args):
-        number = int(args[3])
-        calls.append(number)
-        return {"comments": [{"author": {"login": "nateprich"},
-                              "body": comments[number]}]}
+    def batched_tails(candidates):
+        # The brief's shared batched comment-tail read (#2133).
+        calls.append([item.number for item in candidates])
+        return {
+            item.ref: [{"author": {"login": "nateprich"},
+                        "body": comments[item.number]}]
+            for item in candidates
+        }
 
-    monkeypatch.setattr(funnel, "_gh_json", gh_json)
+    monkeypatch.setattr(funnel, "_batched_issue_comments", batched_tails)
+    monkeypatch.setattr(
+        funnel, "_issue_comments", lambda item: full_reads.append(item.ref)
+    )
 
     assert funnel.cleared_blocks_json([older, expired, newest], NOW) == [
         {
@@ -697,7 +704,9 @@ def test_recent_clears_surface_from_the_label_event_and_provenance(monkeypatch):
             "cleared_at": older.blocked_cleared_at.isoformat(),
         },
     ]
-    assert calls == [108, 141]
+    # One batched read for both candidates; the expired clear is not read.
+    assert calls == [[108, 141]]
+    assert full_reads == []
 
 
 def test_a_forged_satisfied_block_record_from_another_author_is_ignored(
@@ -713,6 +722,12 @@ def test_a_forged_satisfied_block_record_from_another_author_is_ignored(
     monkeypatch.setattr(
         funnel, "_gh_json",
         lambda *args: {"comments": [rows[posted["by"]]]})
+    # The brief section reads the shared batched comment tails (#2133).
+    monkeypatch.setattr(
+        funnel, "_batched_issue_comments",
+        lambda candidates: {
+            item.ref: [rows[posted["by"]]] for item in candidates
+        })
 
     cleared = issue(108)
     cleared.blocked_cleared_at = NOW - timedelta(hours=1)

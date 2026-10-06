@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import re
 import stat
 import sys
 from types import SimpleNamespace
@@ -340,16 +341,23 @@ def test_packet_cli_prints_valid_json(monkeypatch, capsys):
 
 def test_packet_asks_for_seams_a_reproduction_and_sequenced_wide_changes(
         monkeypatch, capsys):
-    """The printed packet, read from the real skill, carries what the
-    implementer routines act on (#1807): named seams and a `Reproduction:`
-    first Accept item. It also carries the expand-migrate-contract and
-    prefactor rules with their brake on small work (#1808). Read from the
-    packet, not the skill file: skill text outside the sizing slice never
-    reaches the model."""
-    monkeypatch.setattr(breakdown, "fetch_plan", lambda repo, n: plan())
+    """The printed packet's sizing standard carries what the implementer
+    routines act on (#1807): named seams and a `Reproduction:` first Accept
+    item. It also carries the expand-migrate-contract and prefactor rules with
+    their brake on small work (#1808), and routes each review-focus bullet
+    into its owning ticket's Accept. Read from the packet, not the skill file:
+    skill text outside the sizing slice never reaches the model."""
+    focus = "A timed-out retry keeps the same request identity."
+    followup = "A disabled fallback preserves the prior shaping behavior."
+    body = ("# Plan\n\nDo the thing.\n\n## Review focus\n\n- {}\n- {}"
+            .format(focus, followup))
+    monkeypatch.setattr(
+        breakdown, "fetch_plan", lambda repo, n: plan(body=body))
     monkeypatch.setattr(breakdown, "fetch_siblings", lambda repo, n: [])
     assert breakdown.packet_main(["owner/repo#1"]) == 0
-    sizing = json.loads(capsys.readouterr().out)["sizing_standard"]
+    found = json.loads(capsys.readouterr().out)
+    assert found["project"]["body"] == body
+    sizing = found["sizing_standard"]
     normalized = " ".join(sizing.replace("**", "").split())
 
     assert ("A ticket's `Accept` names the one to three seams its tests go "
@@ -366,6 +374,9 @@ def test_packet_asks_for_seams_a_reproduction_and_sequenced_wide_changes(
             "own ticket, first" in normalized)
     assert ("Neither is a reason to split small work: what fits one run "
             "stays one ticket" in normalized)
+    assert ("For each `## Review focus` bullet, put one `Accept` test in the "
+            "ticket that owns that behavior. Copy the bullet's text verbatim, "
+            "exactly once." in normalized)
 
 
 def test_breakdown_packet_failure_stops_before_siblings_or_output(
@@ -441,6 +452,33 @@ def test_non_list_tickets_are_rejected():
     errors, normalized, _ = validate({"tickets": "one"})
     assert normalized is None
     assert any("must be a list" in error for error in errors)
+
+
+def test_exact_containment_line_limits_breakdown_to_one_ticket():
+    body = "# Plan\n\n## Hotspot routing\n\nContainment: one ticket\n"
+    assert breakdown.has_one_ticket_containment(body)
+    assert not breakdown.has_one_ticket_containment(
+        "Containment: one ticket may be useful")
+    errors, normalized = breakdown.validate_answer(
+        {"tickets": [raw_ticket(), raw_ticket(title="second")]},
+        lambda ref: None, max_tickets=1)
+    assert normalized is None
+    assert errors == ["the plan allows at most one ticket"]
+
+
+def test_apply_rechecks_containment_before_project_writes(monkeypatch):
+    monkeypatch.setattr(
+        breakdown, "fetch_plan",
+        lambda repo, number: {
+            "state": "OPEN", "body": "Containment: one ticket"})
+    monkeypatch.setattr(
+        breakdown, "fetch_project_risk",
+        lambda ref: (_ for _ in ()).throw(
+            AssertionError("containment must be checked before Project reads")))
+    with pytest.raises(breakdown.BreakdownError, match="at most one ticket"):
+        breakdown.apply(
+            "owner/repo", 1,
+            {"tickets": [{}, {}], "needs_decision": None})
 
 
 def test_a_non_object_ticket_is_rejected():
@@ -1542,6 +1580,172 @@ def test_apply_main_reports_an_unreadable_project_risk(
     assert calls["created"] == []
 
 
+# -- one routing record per ticket (#2140) ------------------------------------
+#
+# apply_create wrote each ticket's Origin, Risk and Needs fields and then built
+# its coverage row from a second copy of the same expressions; #1292 (resume,
+# already-exists add) and #1757 (the project's Risk) each patched that loop.
+# What GitHub holds and what the coverage comment names must be one reading.
+
+COVERAGE_ROW = re.compile(
+    r"^- (?P<ref>\S+): .* \(Risk: (?P<risk>standard|escalated)"
+    r"(?P<inherited>, inherited from the project)?, "
+    r"Needs: (?P<needs>[a-z-]+)")
+
+
+def coverage_rows(body):
+    """Each coverage-comment row as {ref: {Risk, Needs, inherited}}."""
+    rows = {}
+    for line in body.splitlines()[1:]:
+        match = COVERAGE_ROW.match(line)
+        assert match, line
+        rows[match.group("ref")] = {
+            "Risk": match.group("risk"),
+            "Needs": match.group("needs"),
+            "inherited": bool(match.group("inherited")),
+        }
+    return rows
+
+
+def field_writes_by_ref(calls):
+    """Every funnel.write_project_select call, grouped by ticket ref.
+
+    Each field may be written once per ticket, always to the same item.
+    """
+    written = {}
+    for item_id, field, value, ref in calls["fields"]:
+        row = written.setdefault(ref, {"item": item_id})
+        assert row["item"] == item_id, (ref, field)
+        assert field not in row, (ref, field)
+        row[field] = value
+    return written
+
+
+def stub_routing_apply(monkeypatch, **kw):
+    """stub_apply with Needs going through funnel.write_project_select.
+
+    stub_apply replaces write_needs with its own recorder; these tests need
+    all three fields on one writer to compare them with the coverage rows.
+    """
+    real_write_needs = breakdown.write_needs
+    calls = stub_apply(monkeypatch, **kw)
+    monkeypatch.setattr(breakdown, "write_needs", real_write_needs)
+    return calls
+
+
+@pytest.mark.parametrize("project_risk", ["escalated", "standard", None])
+def test_field_writes_equal_the_coverage_rows_on_every_path(
+        monkeypatch, project_risk):
+    # "resumed" survived an earlier half-applied run (#1292 ticket 2);
+    # "on the board" is created but its Project add answers already-exists
+    # (#1292 ticket 1); "fresh" is a plain create.
+    calls = stub_routing_apply(
+        monkeypatch, project_risk=project_risk,
+        siblings=[sibling(201, title="resumed")],
+        project_add_error_on="101",
+        project_add_error=(
+            "GraphQL: Content already exists in this project "
+            "(addProjectV2Item)"))
+    monkeypatch.setattr(funnel, "load_items", lambda include_details=True: [
+        SimpleNamespace(url="https://github.com/owner/repo/issues/101",
+                        item_id="existing-item-101")])
+    errors, normalized, _ = validate({"tickets": [
+        raw_ticket(title="resumed", risk="standard", needs="human"),
+        raw_ticket(title="on the board", risk="escalated",
+                   needs="claude-code-environment"),
+        raw_ticket(title="fresh", risk="standard", needs="none"),
+    ]})
+    assert errors == []
+    assert normalized is not None
+
+    result = breakdown.apply(REPO, 1, normalized)
+
+    assert [row["ticket"]["title"] for row in calls["created"]] == [
+        "on the board", "fresh"]
+    # #1757: an escalated project escalates every ticket; a standard or
+    # unset one keeps each ticket's own Risk.
+    inherited = project_risk == "escalated"
+    expected_risk = {
+        "owner/repo#201": "escalated" if inherited else "standard",
+        "owner/repo#101": "escalated",
+        "owner/repo#102": "escalated" if inherited else "standard",
+    }
+    expected_needs = {
+        "owner/repo#201": "human",
+        "owner/repo#101": "claude-code-environment",
+        "owner/repo#102": "none",
+    }
+    written = field_writes_by_ref(calls)
+    assert written == {
+        ref: {"item": item, "Origin": "agent", "Risk": expected_risk[ref],
+              "Needs": expected_needs[ref]}
+        for ref, item in (("owner/repo#201", "item-201"),
+                          ("owner/repo#101", "existing-item-101"),
+                          ("owner/repo#102", "item-102"))}
+
+    assert len(calls["comments"]) == 1
+    rows = coverage_rows(calls["comments"][0][2])
+    assert rows == {
+        ref: {"Risk": fields["Risk"], "Needs": fields["Needs"],
+              "inherited": inherited}
+        for ref, fields in written.items()}
+    assert {row["ref"]: {"Risk": row["risk"], "Needs": row["needs"],
+                         "inherited": row["risk_inherited"]}
+            for row in result["created"]} == rows
+
+
+@pytest.mark.parametrize("project_risk, ticket_risk, risk, inherited", [
+    ("escalated", "standard", "escalated", True),
+    ("escalated", "escalated", "escalated", True),
+    ("standard", "standard", "standard", False),
+    ("standard", "escalated", "escalated", False),
+    (None, "standard", "standard", False),
+    (None, "escalated", "escalated", False),
+])
+def test_one_routing_record_per_ticket(
+        project_risk, ticket_risk, risk, inherited):
+    ticket = {"title": "t", "body": "b", "risk": ticket_risk,
+              "needs": "human", "depends_on": []}
+    assert breakdown.ticket_routing(ticket, project_risk) == {
+        "origin": "agent", "risk": risk, "risk_inherited": inherited,
+        "needs": "human"}
+
+
+def test_field_writes_and_coverage_rows_both_read_the_routing_record(
+        monkeypatch):
+    calls = stub_routing_apply(monkeypatch, project_risk="standard",
+                               siblings=[sibling(201, title="resumed")])
+    seen = []
+
+    def routing(ticket, project_risk):
+        seen.append((ticket["title"], project_risk))
+        # No answer and no standard project produces this record, so a
+        # consumer that recomputed its own reading would disagree with it.
+        return {"origin": "Nate", "risk": "escalated",
+                "risk_inherited": True, "needs": "human"}
+
+    monkeypatch.setattr(breakdown, "ticket_routing", routing)
+    errors, normalized, _ = validate({"tickets": [
+        raw_ticket(title="resumed"), raw_ticket(title="fresh"),
+    ]})
+    assert errors == []
+    assert normalized is not None
+
+    breakdown.apply(REPO, 1, normalized)
+
+    # Created and resumed tickets pass through the same step, once each.
+    assert seen == [("resumed", "standard"), ("fresh", "standard")]
+    written = field_writes_by_ref(calls)
+    assert {ref: (row["Origin"], row["Risk"], row["Needs"])
+            for ref, row in written.items()} == {
+        "owner/repo#201": ("Nate", "escalated", "human"),
+        "owner/repo#101": ("Nate", "escalated", "human"),
+    }
+    assert coverage_rows(calls["comments"][0][2]) == {
+        ref: {"Risk": "escalated", "Needs": "human", "inherited": True}
+        for ref in ("owner/repo#201", "owner/repo#101")}
+
+
 def test_apply_main_rejects_an_invalid_answer_with_exit_2(
         monkeypatch, tmp_path, capsys):
     def fail_if_called(*args, **kwargs):
@@ -1554,6 +1758,23 @@ def test_apply_main_rejects_an_invalid_answer_with_exit_2(
     assert breakdown.apply_main(
         ["owner/repo#1", "--answer", str(answer)]) == 2
     assert "risk 'wild'" in capsys.readouterr().err
+
+
+def test_apply_main_reads_containment_before_accepting_multiple_tickets(
+        monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(
+        breakdown, "fetch_plan_body",
+        lambda repo, number: "Containment: one ticket\n")
+    monkeypatch.setattr(
+        breakdown, "fetch_issue_state",
+        lambda ref: (_ for _ in ()).throw(
+            AssertionError("ticket count should fail before dependency reads")))
+    answer = tmp_path / "answer.json"
+    answer.write_text(json.dumps({"tickets": [
+        raw_ticket(), raw_ticket(title="second")]}))
+    assert breakdown.apply_main(
+        ["owner/repo#1", "--answer", str(answer)]) == 2
+    assert "at most one ticket" in capsys.readouterr().err
 
 
 def test_apply_main_rejects_unparsable_json_with_exit_2(

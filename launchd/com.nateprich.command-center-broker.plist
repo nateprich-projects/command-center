@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Nate-owned, credentialed broker listener for the isolated Codex automation
+  user. It serves only the two reviewed begin and finish verbs and launches no
+  model prompt. Install and load only during #1999 after broker review, access
+  setup, and the #1998 direct-call proof. The canonical copy stays in Git.
+  The versioned installer copies it but does not load it; launchd refuses a
+  symlinked plist. The run keeper may heal an installed, unloaded label.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.nateprich.command-center-broker</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/python3</string>
+        <string>/Users/nateprich/.claude/command-center-broker/credential_broker.py</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/Users/nateprich/Library/Logs/command-center-broker.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/nateprich/Library/Logs/command-center-broker.err.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>DEVELOPER_DIR</key>
+        <string>/Library/Developer/CommandLineTools</string>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>HOME</key>
+        <string>/Users/nateprich</string>
+    </dict>
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>

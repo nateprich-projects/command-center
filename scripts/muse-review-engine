@@ -1229,8 +1229,8 @@ run_calibration_reviewer_b() {
   kind="$(shadow_pair_packet_value "$packet" side)"
   if [[ "$kind" != "bad" && "$kind" != "good" ]]; then
     case "$sample" in
-      must_reject) kind="bad" ;;
-      must_approve) kind="good" ;;
+      must_reject|bad_[0-9][0-9]) kind="bad" ;;
+      must_approve|good_[0-9][0-9]) kind="good" ;;
       *) echo "muse-review-engine: calibration packet has no declared side" >&2; return 0 ;;
     esac
   fi

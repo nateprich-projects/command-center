@@ -1759,6 +1759,56 @@ def test_calibration_pair_runs_when_its_pr_head_moved_after_freezing(tmp_path):
     assert frozen in b_prompt
 
 
+@pytest.mark.parametrize("sample,kind", [
+    ("bad_01", "bad"), ("bad_09", "bad"),
+    ("good_01", "good"), ("good_09", "good"),
+])
+def test_numbered_calibration_samples_pair_with_their_side(tmp_path, sample, kind):
+    """#2337: no fixed packet declares a side, so the fallback must map
+    every CALIBRATION_NAMES entry, not only must_reject and must_approve."""
+    from engine import reviewer_b
+    assert reviewer_b.CALIBRATION_SIDES[sample] == kind
+    shadow_state = {
+        "live_used_count": 30,
+        "live_count": 30,
+        "calibration_used_count": 1,
+        "calibration_count": 1,
+        "next_calibration": sample,
+        "pairs": [],
+    }
+    answers = _review_answers(_judge_answer(evidence="live A")) + (
+        _requirements_answer(),
+        _judge_answer(evidence="calibration A"),
+        json.dumps({"verdict": "approved", "findings": []}),
+    )
+    live_repo = "nateprich-projects/command-center"
+    begin = _begin()
+    begin["work"]["repo"] = live_repo
+    repo, env = _stub_repo(
+        tmp_path, begin, _packet(repo=live_repo, head_sha="a" * 40),
+        answers=answers,
+        extra_env={
+            "MUSE_SHADOW_STATE": json.dumps(shadow_state),
+            "MUSE_SHADOW_AUTO_STATE": "1",
+            "MUSE_SHADOW_RESERVE_RESULT": "reserved",
+        })
+    (repo / "engine" / "review_packets.py").write_text(
+        (ROOT / "engine" / "review_packets.py").read_text())
+    shutil.copytree(ROOT / "data" / "review_packets",
+                    repo / "data" / "review_packets")
+    proc = subprocess.run(
+        ["/bin/bash", str(SCRIPT)], env=env, stdin=subprocess.DEVNULL,
+        capture_output=True, text=True, timeout=60)
+
+    assert proc.returncode == 0, proc.stderr
+    assert "calibration packet has no declared side" not in proc.stderr
+    reserves = [line for line in _heartbeat(repo).splitlines()
+                if line.startswith("shadow-reserve ")]
+    assert len(reserves) == 1, proc.stderr
+    assert "--sample {}".format(sample) in reserves[0]
+    assert "--kind {}".format(kind) in reserves[0]
+
+
 def test_paired_table_update_failure_does_not_block_reviewer_a(tmp_path):
     shadow_state = {
         "live_used_count": 0,

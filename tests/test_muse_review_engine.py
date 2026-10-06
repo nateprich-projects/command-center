@@ -1015,8 +1015,8 @@ def test_the_review_prompt_is_judgement_text_under_500_words():
 
 def test_out_of_focus_edges_are_notes_but_stopping_rules_still_block():
     prompt = " ".join(ROUTINE.read_text().split()).lower()
-    assert ("reproducible defects, missing/tautological accept tests, "
-            "merged-main failures block; other out-of-focus edges: notes."
+    assert ("out-of-focus: block reproducible defects, missing/tautological "
+            "accept tests, merged-main failures; note remaining edges."
             in prompt)
 
 

@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 import heartbeat
+import muse_measurements
 
 
 LIVE_SPOOL_DIR = Path("~/.claude/command-center-heartbeat").expanduser()
@@ -48,6 +49,18 @@ def heartbeat_isolation(monkeypatch, tmp_path, offline_bin):
         str(tmp_path / "dashboard-spool"),
     )
     monkeypatch.setenv("COMMAND_CENTER_HEARTBEAT_SPOOL", str(test_spool))
+
+    # Muse estimate cache writes use the same runtime root in production, but
+    # the suite must never update the machine's live last-published estimate.
+    real_buffer_root = muse_measurements.runtime_buffer_root
+    monkeypatch.setattr(
+        muse_measurements,
+        "runtime_buffer_root",
+        lambda runtime_root=None: (
+            tmp_path / "muse-estimate" if runtime_root is None
+            else real_buffer_root(runtime_root)
+        ),
+    )
 
     monkeypatch.setattr(heartbeat, "SPOOL_DIR", str(test_spool))
 

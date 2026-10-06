@@ -886,6 +886,11 @@ test("the Muse estimate remains a bar when its meter capture is old", () => {
     cap_dollars: 200,
     used_percent: 7.15,
     calls: 42,
+    measurement_failure: {
+      source: "https://github.com/nateprich-projects/command-center/issues/2123",
+      observed_at: "2026-09-29T22:26:00Z",
+      reason: "owner_measurement_feed_unavailable",
+    },
   };
 
   const row = usageRow(renderUsageFixture({ muse: estimate }, now),

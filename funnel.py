@@ -13799,19 +13799,6 @@ def _dashboard_muse_owner_comments() -> Optional[List[Dict[str, object]]]:
     return comments if isinstance(comments, list) else None
 
 
-def _dashboard_muse_write_pairing_record(measurement: Mapping) -> bool:
-    """Write a single source-linked pairing record, never a refresh log."""
-    import muse_measurements
-
-    result = _run_gh(
-        ["gh", "issue", "comment", "2123", "--repo",
-         "nateprich-projects/command-center", "--body",
-         muse_measurements.pairing_record_comment(measurement)],
-        capture_output=True, text=True,
-    )
-    return result.returncode == 0
-
-
 def _dashboard_muse_usage(now_epoch: float) -> Optional[Dict[str, object]]:
     """Return the dashboard-only seven-day Muse estimate.
 
@@ -13903,16 +13890,6 @@ def _dashboard_muse_usage(now_epoch: float) -> Optional[Dict[str, object]]:
 
     adjusted = muse_measurements.adjusted_estimate(measurement, reading)
     if adjusted is None:
-        return row
-
-    record_written = True
-    if (comments is not None
-            and not muse_measurements.pairing_record_exists(comments, measurement)):
-        try:
-            record_written = _dashboard_muse_write_pairing_record(measurement)
-        except Exception:
-            record_written = False
-    if not record_written:
         return row
 
     row.update({

@@ -119,20 +119,6 @@ def test_adjusted_estimate_anchors_panel_percent_then_adds_meter_delta():
     assert "sampled_at" not in estimate
 
 
-def test_pairing_record_links_the_owner_report_without_claiming_a_sample_time():
-    measurement = muse_measurements.latest_usable_owner_measurement(
-        [source_comment()], meter_reader=meter_reading
-    )
-
-    body = muse_measurements.pairing_record_comment(measurement)
-
-    assert muse_measurements.PAIRING_RECORD_MARKER in body
-    assert SOURCE_URL in body
-    assert '"provenance": "owner-reported"' in body
-    assert '"approximate_observation_time": "2026-10-03T22:23:07Z"' in body
-    assert "sampled_at" not in body
-
-
 def test_valid_36_percent_report_preserves_provenance_and_pairs_at_report_time(
     monkeypatch,
 ):

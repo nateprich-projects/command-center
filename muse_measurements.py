@@ -10,7 +10,6 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, timezone
-import json
 import math
 import os
 from pathlib import Path
@@ -31,7 +30,6 @@ SIGNAL_CONTRACTS = {
         "paired_meter": "usage.read_muse own-card meter",
     }
 }
-PAIRING_RECORD_MARKER = "<!-- command-center-muse-measurement-pairing-v1 -->"
 FEED_DISABLED_ENV = "COMMAND_CENTER_MUSE_ESTIMATE_FEED_DISABLED"
 _REPORTED_AT = re.compile(
     r"^Nate reported at (?P<time>\d{4}-\d{2}-\d{2} "
@@ -345,38 +343,6 @@ def adjusted_estimate(measurement: object, current_meter: object) -> Optional[di
         "calls": calls,
         "measurement": dict(measurement),
     }
-
-
-def pairing_record_comment(measurement: Mapping) -> str:
-    """Render one durable, source-linked pairing record for GitHub history."""
-    payload = json.dumps(dict(measurement), indent=2, sort_keys=True)
-    return (
-        "Validated Muse account-panel measurement pairing (schema v1).\n\n"
-        "This records the owner-reported percentage with its approximate "
-        "observation time and same-window own-card meter pairing. The source "
-        "comment remains the authority for the reported value. No provider "
-        "sample timestamp is asserted.\n\n"
-        + PAIRING_RECORD_MARKER
-        + "\n\n```json\n"
-        + payload
-        + "\n```\n"
-    )
-
-
-def pairing_record_exists(comments: object, measurement: Mapping) -> bool:
-    """Return whether issue history already records this source pairing."""
-    source_url = measurement.get("source_record_url")
-    if not isinstance(source_url, str) or not source_url:
-        return False
-    if not isinstance(comments, Sequence) or isinstance(comments, (str, bytes)):
-        return False
-    return any(
-        isinstance(comment, Mapping)
-        and isinstance(comment.get("body"), str)
-        and PAIRING_RECORD_MARKER in comment["body"]
-        and source_url in comment["body"]
-        for comment in comments
-    )
 
 
 def feed_enabled() -> bool:

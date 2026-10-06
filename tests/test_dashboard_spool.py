@@ -569,10 +569,7 @@ def test_dashboard_muse_usage_disable_flag_skips_owner_report_feed(
     assert "measurement" not in estimate
 
 
-def test_dashboard_muse_estimate_uses_owner_report_and_records_pair_once(
-    monkeypatch,
-):
-    import muse_measurements
+def test_dashboard_muse_estimate_adjusts_owner_report_by_meter_delta(monkeypatch):
     import usage
 
     monkeypatch.delenv("COMMAND_CENTER_MUSE_ESTIMATE_FEED_DISABLED", raising=False)
@@ -591,28 +588,64 @@ def test_dashboard_muse_estimate_uses_owner_report_and_records_pair_once(
         ),
     )
     monkeypatch.setattr(funnel, "_dashboard_muse_owner_comments", lambda: comments)
-    writes = []
-
-    def write_pairing(measurement):
-        writes.append(dict(measurement))
-        comments.append({
-            "body": muse_measurements.pairing_record_comment(measurement),
-        })
-        return True
-
-    monkeypatch.setattr(funnel, "_dashboard_muse_write_pairing_record", write_pairing)
-    first = funnel._dashboard_muse_usage(current_at)
-    second = funnel._dashboard_muse_usage(current_at)
+    estimate = funnel._dashboard_muse_usage(current_at)
 
     # Independent arithmetic: 36% of the $200 cap is $72, plus a $3.50
     # meter delta.
-    assert first["spent_dollars"] == 75.5
-    assert first["used_percent"] == 37.75
-    assert first["measurement"]["reported_at"] == "2026-10-03T22:23:07Z"
-    assert first["measurement"]["source_record_url"] == source_url
-    assert pace_inputs == [72.0, 72.0]
-    assert len(writes) == 1
-    assert second["spent_dollars"] == first["spent_dollars"]
+    assert estimate["spent_dollars"] == 75.5
+    assert estimate["used_percent"] == 37.75
+    assert estimate["measurement"]["reported_at"] == "2026-10-03T22:23:07Z"
+    assert estimate["measurement"]["source_record_url"] == source_url
+    assert estimate["captured_at"] == current_at
+
+
+def test_dashboard_muse_owner_feed_does_not_write_pairing_comments(monkeypatch):
+    import usage
+
+    monkeypatch.delenv("COMMAND_CENTER_MUSE_ESTIMATE_FEED_DISABLED", raising=False)
+    report_at, _, _, comments, report_meter, current_meter = (
+        _owner_report_dashboard_fixture()
+    )
+    monkeypatch.setattr(
+        usage, "read_muse",
+        lambda at: report_meter if at == report_at else current_meter,
+    )
+    monkeypatch.setattr(usage, "pace", lambda *args, **kwargs: {"windows": []})
+    monkeypatch.setattr(funnel, "_dashboard_muse_owner_comments", lambda: comments)
+    commands = []
+    monkeypatch.setattr(
+        funnel, "_run_gh",
+        lambda argv, **kwargs: commands.append(list(argv)),
+    )
+
+    funnel._dashboard_muse_usage(current_meter["captured_at"])
+
+    assert commands == []
+
+
+def test_dashboard_muse_owner_feed_keeps_pace_on_local_meter(monkeypatch):
+    import usage
+
+    monkeypatch.delenv("COMMAND_CENTER_MUSE_ESTIMATE_FEED_DISABLED", raising=False)
+    report_at, current_at, _, comments, report_meter, current_meter = (
+        _owner_report_dashboard_fixture()
+    )
+    monkeypatch.setattr(
+        usage, "read_muse",
+        lambda at: report_meter if at == report_at else current_meter,
+    )
+    pace_inputs = []
+    monkeypatch.setattr(
+        usage, "pace",
+        lambda reading, _now, provider=None: (
+            pace_inputs.append(reading["spent_dollars"]) or {"windows": []}
+        ),
+    )
+    monkeypatch.setattr(funnel, "_dashboard_muse_owner_comments", lambda: comments)
+
+    funnel._dashboard_muse_usage(current_at)
+
+    assert pace_inputs == [72.0]
 
 
 def test_dashboard_muse_usage_does_not_apply_a_prior_window_report(monkeypatch):
@@ -634,18 +667,12 @@ def test_dashboard_muse_usage_does_not_apply_a_prior_window_report(monkeypatch):
     )
     monkeypatch.setattr(usage, "pace", lambda *args, **kwargs: {"windows": []})
     monkeypatch.setattr(funnel, "_dashboard_muse_owner_comments", lambda: comments)
-    writes = []
-    monkeypatch.setattr(
-        funnel, "_dashboard_muse_write_pairing_record",
-        lambda measurement: writes.append(dict(measurement)) or True,
-    )
 
     estimate = funnel._dashboard_muse_usage(current_at)
 
     assert estimate["source"] == "Local Muse session journal estimate"
     assert estimate["spent_dollars"] == current_meter["spent_dollars"]
     assert "measurement" not in estimate
-    assert writes == []
 
 
 def test_snapshot_keeps_report_observation_separate_from_publication_time(

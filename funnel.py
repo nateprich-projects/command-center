@@ -13789,18 +13789,29 @@ def dashboard_board(
     return {"columns": columns}
 
 
-def _dashboard_muse_usage(now_epoch: float) -> Optional[Dict[str, object]]:
-    """Return the compact Muse local-spend estimate for the dashboard.
+def _dashboard_muse_owner_comments() -> Optional[List[Dict[str, object]]]:
+    """Read the source issue history for owner-supplied panel readings."""
+    data = _gh_json(
+        "gh", "issue", "view", "2123", "--repo",
+        "nateprich-projects/command-center", "--json", "comments",
+    )
+    comments = data.get("comments") if isinstance(data, dict) else None
+    return comments if isinstance(comments, list) else None
 
-    Rolling seven-day dollars against the cap only; the 2026-09-18 decision
-    declined a 24-hour companion line. Best effort like the rest of the
-    snapshot: an unreadable reader yields None and the page shows unavailable,
-    never a failed brief.
+
+def _dashboard_muse_usage(now_epoch: float) -> Optional[Dict[str, object]]:
+    """Return the dashboard-only seven-day Muse estimate.
+
+    The local own-card meter still computes pacing and the fallback estimate.
+    A validated owner report may adjust only the display estimate in the same
+    seven-day window. GitHub comments remain the durable source record.
     """
     try:
+        import muse_measurements
         import usage
     except Exception:
         return None
+
     try:
         reading = usage.read_muse(now_epoch)
     except Exception:
@@ -13833,12 +13844,9 @@ def _dashboard_muse_usage(now_epoch: float) -> Optional[Dict[str, object]]:
         return None
     if cap <= 0 or spent < 0:
         return None
-    if (
-        not isinstance(calls, int)
-        or isinstance(calls, bool)
-        or calls < 0
-    ):
+    if not isinstance(calls, int) or isinstance(calls, bool) or calls < 0:
         return None
+
     row: Dict[str, object] = {
         "source": "Local Muse session journal estimate",
         "captured_at": float(captured_at),
@@ -13847,9 +13855,8 @@ def _dashboard_muse_usage(now_epoch: float) -> Optional[Dict[str, object]]:
         "used_percent": float(percent),
         "calls": calls,
     }
-    # #1199: the pace signal, when the reader carries one, so the run-out time
-    # is on the page days ahead instead of discovered at the wall. Best effort
-    # like the rest of the row: a missing or odd value is simply left out.
+    # The dashboard carries pacing as display metadata; the adjusted owner
+    # reading never enters this calculation.
     try:
         verdict = usage.pace(
             reading, now_epoch, provider=usage.provider_of("muse"))
@@ -13864,6 +13871,34 @@ def _dashboard_muse_usage(now_epoch: float) -> Optional[Dict[str, object]]:
             if isinstance(value, (int, float)) and not isinstance(value, bool):
                 row[key] = float(value)
         break
+
+    if not muse_measurements.feed_enabled():
+        return row
+
+    try:
+        comments = _dashboard_muse_owner_comments()
+    except Exception:
+        comments = None
+    measurement = None
+    if comments is not None:
+        measurement = muse_measurements.latest_usable_owner_measurement(
+            comments, meter_reader=usage.read_muse,
+        )
+
+    if measurement is None:
+        return row
+
+    adjusted = muse_measurements.adjusted_estimate(measurement, reading)
+    if adjusted is None:
+        return row
+
+    row.update({
+        key: adjusted[key]
+        for key in (
+            "source", "captured_at", "spent_dollars", "cap_dollars",
+            "used_percent", "calls", "measurement",
+        )
+    })
     return row
 
 

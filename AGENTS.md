@@ -137,27 +137,27 @@ wrong.
   be versioned and drift-checked, unlike zcode's prompt, which lives in an app UI where
   nothing can see it (#52).
 
-  **Codex implements both tiers and Muse judges, since 2026-09-22** (Nate, #1315).
+  **Codex took both implement tiers on 2026-09-22 while Muse judged** (Nate, #1315).
   Codex works tickets from its in-app automations on GPT-6 Luna at `max`:
   `command-center-tickets-hourly` (standard, every ten minutes) and
   `command-center-tickets-weekday-mornings` (escalated, hourly; the keeper reads its
   `BYHOUR=` rule as the escalated tier). The other three escalated windows are retired
   and stay paused. Muse runs review, breakdown and shape on `muse-spark-1.3` at `max`
   (the standard tier ran on z.ai from 2026-09-23 until 2026-09-27 06:00 PDT; see below) and
-  implements nothing: `AGENTS_BY_ROLE` names Codex alone, and `begin` refuses an implement
-  caller the roster does not name. Two checks watch the app-held state:
+  has historically implemented both tiers. The prepared reversal puts Muse back in
+  `AGENTS_BY_ROLE` beside Codex and restores two versioned implement plists. This makes
+  Muse eligible in code; it does not install or load either job, prove a selected run,
+  or retire Codex. `begin` still refuses an implement caller the roster does not name.
+  Two checks watch the app-held Codex state:
   - every Codex run checks its own model, effort and sandbox against `codex_run.py` and
     stops on any difference (`config-drift`);
   - `funnel doctor` checks the automation files themselves.
 
-  The way back is a change in the repository, not a file copy:
-  - put `muse` back on the roster;
-  - restore the two implement plists to `launchd/` and `scripts/install.sh` from git
-    history, and drop the test that pins their absence.
-
   `scripts/muse-implement` is unchanged. The copies in `~/Library/LaunchAgents-retired/`
   are only a local record: jobs copied back from there would not be refreshed or
-  drift-checked by the keeper. From
+  drift-checked by the keeper. The restored repository plists require a separate
+  console installation and launchd readback after Nate's plan and runner-exposure
+  decisions. From
   2026-09-18 to 2026-09-22 Muse implemented both tiers, because Codex's Plus week was
   nearly spent. _(confirmed by Nate 2026-09-22)_
 

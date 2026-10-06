@@ -1494,15 +1494,16 @@ TIERS = ("standard", "escalated")
 #:
 #: From 2026-09-18 to 2026-09-22 Muse implemented both tiers too, while
 #: Codex's Plus week was nearly spent.
-#: Who may implement at which tier. Codex implements both tiers from its
-#: in-app automations; Muse judges and no longer implements (Nate,
-#: 2026-09-22, #1315). `scripts/muse-implement` stays as the reversal path:
-#: putting `muse` back here is the switch.
+#: Who may implement at which tier. Codex keeps its in-app automations for
+#: fallback; Muse also implements both tiers through its separate Mac jobs.
+#: Each Muse runner names ``--role implement`` so review jobs keep their
+#: independent review path.
 #: Claude implements on Saturday mornings only (#1557); `begin` enforces the
 #: window. It takes the whole shared order, so ``None`` (untiered) is allowed.
 AGENTS_BY_ROLE = {
     "implement": {
         "codex": frozenset(TIERS),
+        "muse": frozenset(TIERS),
         "claude": frozenset(TIERS + (None,)),
     },
 }

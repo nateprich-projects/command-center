@@ -27,14 +27,11 @@ REVIEWER_NAMES = [
     "com.nateprich.command-center-muse-review.plist",           # escalated, hourly
     "com.nateprich.command-center-muse-review-standard.plist",  # standard, /5
 ]
-#: Muse's implement schedules, retired when implementation moved to Codex
-#: (Nate, 2026-09-22, #1315, #1322). `scripts/muse-implement` stays as the
-#: reversal path; restoring these files is how Muse would implement again.
-RETIRED_IMPLEMENTER_NAMES = [
+IMPLEMENTER_NAMES = [
     "com.nateprich.command-center-muse-implement.plist",
     "com.nateprich.command-center-muse-implement-standard.plist",
 ]
-MUSE_SCHEDULE_NAMES = REVIEWER_NAMES
+MUSE_SCHEDULE_NAMES = REVIEWER_NAMES + IMPLEMENTER_NAMES
 KEEPER_NAME = "com.nateprich.command-center-run-keeper.plist"
 BROKER_NAME = "com.nateprich.command-center-broker.plist"
 #: The Remote Control listener. Not a schedule; see the carve-out in `AGENTS.md`.
@@ -117,11 +114,8 @@ def test_the_plist_points_at_the_stable_path(name):
         plist = plistlib.load(handle)
     args = plist["ProgramArguments"]
     assert args[0] == "/bin/bash"
-    # Both review tiers run the engine: standard since 2026-09-20 (#813),
-    # escalated since 2026-09-21 on Nate's override of #806's shadow gate.
-    # The shadow plist is retired with them, and the implement plists
-    # since 2026-09-22 (#1322).
-    script = "muse-review-engine"
+    script = ("muse-implement" if name in IMPLEMENTER_NAMES
+              else "muse-review-engine")
     assert any(a.endswith("/scripts/{}".format(script)) for a in args), args
     # Checked against the arguments, not the file text: the header explains the
     # TCC blocker and has to name `/Volumes/External SSD` to do so. Asserting on
@@ -170,7 +164,8 @@ def test_each_schedule_asks_for_its_own_tier_and_effort():
 
     Both review schedules run `max` (Nate, 2026-09-22, #1315): judgement
     runs on the private model at max effort, and the review tiers now differ
-    in queue and cadence, not in effort. Muse no longer implements (#1322).
+    in queue and cadence, not in effort. The restored implement schedules
+    preserve the earlier standard `high` and escalated `max` split.
     History: standard ran `high` from #1191 (Nate, 2026-09-21, #1189); the
     standard reviewer briefly took the engine's default `max` at its
     2026-09-20 cutover.
@@ -183,15 +178,20 @@ def test_each_schedule_asks_for_its_own_tier_and_effort():
 
     assert args(NAMES[0]) == ["escalated", "max"]
     assert args(NAMES[1]) == ["standard", "max"]
+    assert args(IMPLEMENTER_NAMES[0]) == ["escalated", "max"]
+    assert args(IMPLEMENTER_NAMES[1]) == ["standard", "high"]
 
 
-def test_muse_has_no_implement_schedule():
-    """Implementation moved to Codex (Nate, 2026-09-22, #1315). The keeper
-    never uninstalls a plist removed from the repository, so the installed
-    copies are moved out of LaunchAgents by hand (#1323); the runner script
-    stays as the way back."""
-    for name in RETIRED_IMPLEMENTER_NAMES:
-        assert not (ROOT / "launchd" / name).exists(), name
+def test_restored_muse_implement_schedules_keep_the_old_intervals():
+    """Only the prior bounded tier cadences are restored here."""
+    import plistlib
+
+    for name, seconds in zip(IMPLEMENTER_NAMES, (900, 600)):
+        with (ROOT / "launchd" / name).open("rb") as handle:
+            plist = plistlib.load(handle)
+        assert plist["StartInterval"] == seconds
+        assert "StartCalendarInterval" not in plist
+        assert plist["RunAtLoad"] is False
     assert (ROOT / "scripts" / "muse-implement").exists()
 
 

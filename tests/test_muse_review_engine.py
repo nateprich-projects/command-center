@@ -989,13 +989,12 @@ def _timing_lines(stderr):
 
 # -- the prompt ---------------------------------------------------------------
 
-def test_the_review_prompt_is_judgement_text_under_522_words():
-    """#794's Phase 1 bar, with #2024's stopping-rule wording added.
-    The routine contains the question, schema,
+def test_the_review_prompt_is_judgement_text_under_500_words():
+    """#794's Phase 1 bar for the routine file: the question, the schema,
     the packet placeholder — and no protocol, because the model has no tool
     to execute one with."""
     body = review_prompts.load_active_prompt(ROOT).routine
-    assert len(body.split()) < 522
+    assert len(body.split()) < 500
     assert "\n---\n" in ROUTINE.read_text(), \
         "the baseline routine retains its human and prompt separator"
     prompt = body
@@ -1004,7 +1003,7 @@ def test_the_review_prompt_is_judgement_text_under_522_words():
     assert "does this diff do what its tickets ask" in normalized
     assert "avoid what the plan rejected" in normalized
     assert '"verdict": "approved" | "rejected"' in prompt
-    assert "exactly one json object and nothing else, unfenced" in normalized
+    assert "exactly one json object and nothing else" in normalized
     assert "non-empty `unsure` is recorded as rejected" in normalized
     assert "an approval carries no blocking items" in normalized
     for protocol in ("funnel.py", "heartbeat.py", "review-apply",
@@ -1012,16 +1011,6 @@ def test_the_review_prompt_is_judgement_text_under_522_words():
         assert protocol not in prompt, (
             "judgement text only: {!r} is unreachable without tools".format(
                 protocol))
-
-
-def test_the_review_prompt_limits_blocking_to_the_three_stopping_kinds():
-    prompt = review_prompts.load_active_prompt(ROOT).routine
-    normalized = " ".join(prompt.split()).lower()
-
-    assert ("a real defect with a realistic reproduction blocks even outside "
-            "the plan's review focus" in normalized)
-    assert ("so do a missing or tautological `accept` test and a merged-main "
-            "failure" in normalized)
 
 
 def test_the_review_prompt_requires_a_per_requirement_pass():

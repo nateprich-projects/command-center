@@ -113,11 +113,11 @@ def test_trial_profile_rejects_a_sample_rule_that_drifts_from_2072():
         review_prompts._validate_manifest(manifest)
 
 
-def test_baseline_prompt_matches_its_ticketed_digest():
+def test_baseline_prompt_is_byte_identical_to_the_pretrial_prompt():
     prompt = review_prompts.load_active_prompt(ROOT)
 
     assert hashlib.sha256(prompt.routine.encode()).hexdigest() == (
-        "16947bc6479f64e12ad6d8431d4b262566c972508402e6f5998c3a0d1414d435"
+        "455cbbeaf7415cd028be865328c2a4888260b729c46ff80484fe5dd5faf87b04"
     )
 
 

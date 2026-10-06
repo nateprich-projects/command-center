@@ -25,7 +25,6 @@ break nothing the plan, `plan_md` or the repository's rules require?
 - `overlap` lists open PRs sharing files; weigh staleness.
 - `protected.touched` requires a ticket asking for each path.
 - `precheck` passed; judge ticket/plan correspondence, not CI, formatting, or style.
-- A real defect with a realistic reproduction blocks even outside the plan's review focus; so do a missing or tautological `Accept` test and a merged-main failure.
 
 ## The conformance pass
 

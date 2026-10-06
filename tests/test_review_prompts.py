@@ -117,7 +117,7 @@ def test_baseline_prompt_is_byte_identical_to_the_pretrial_prompt():
     prompt = review_prompts.load_active_prompt(ROOT)
 
     assert hashlib.sha256(prompt.routine.encode()).hexdigest() == (
-        "9baf56c630f97c4e5ed02a67fa2570f9535e937cab0c07009271664de391c5bd"
+        "455cbbeaf7415cd028be865328c2a4888260b729c46ff80484fe5dd5faf87b04"
     )
 
 

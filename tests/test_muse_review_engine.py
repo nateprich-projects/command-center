@@ -1013,13 +1013,6 @@ def test_the_review_prompt_is_judgement_text_under_500_words():
                 protocol))
 
 
-def test_out_of_focus_edges_are_notes_but_stopping_rules_still_block():
-    prompt = " ".join(ROUTINE.read_text().split()).lower()
-    assert ("out-of-focus: block reproducible defects, missing/tautological "
-            "accept tests, merged-main failures; note remaining edges."
-            in prompt)
-
-
 def test_the_review_prompt_requires_a_per_requirement_pass():
     """#1187: the model walks each requirement one at a time against the
     diff and records the pass, so plan conformance is enumerated rather

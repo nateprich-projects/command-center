@@ -15,7 +15,6 @@ import math
 import os
 from pathlib import Path
 import re
-import tempfile
 from typing import Optional
 from urllib.parse import urlsplit
 
@@ -384,90 +383,3 @@ def feed_enabled() -> bool:
     """Allow the display-only feed to be disabled without changing the meter."""
     value = os.environ.get(FEED_DISABLED_ENV, "").strip().lower()
     return value not in {"1", "true", "yes", "on"}
-
-
-def _runtime_buffer_path(runtime_root: Optional[Path | str] = None) -> Path:
-    return runtime_buffer_root(runtime_root) / "latest.json"
-
-
-def load_runtime_buffer(runtime_root: Optional[Path | str] = None) -> Optional[dict]:
-    """Read the one-slot local recovery buffer; it is never a source of truth."""
-    try:
-        with _runtime_buffer_path(runtime_root).open(encoding="utf-8") as stream:
-            value = json.load(stream)
-    except (OSError, ValueError):
-        return None
-    if not isinstance(value, dict) or value.get("schema_version") != SCHEMA_VERSION:
-        return None
-    measurement = value.get("measurement")
-    estimate = value.get("estimate")
-    failure = value.get("last_failure")
-    if ((measurement is None) != (estimate is None)
-            or (measurement is not None and not isinstance(measurement, dict))
-            or (estimate is not None and not isinstance(estimate, dict))
-            or (measurement is None and estimate is None
-                and not isinstance(failure, dict))):
-        return None
-    return value
-
-
-def _write_runtime_buffer(value: Mapping, runtime_root: Optional[Path | str]) -> bool:
-    path = _runtime_buffer_path(runtime_root)
-    temporary_path = None
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        path.parent.chmod(0o700)
-        fd, name = tempfile.mkstemp(prefix=".latest-", suffix=".tmp", dir=path.parent)
-        temporary_path = Path(name)
-        os.fchmod(fd, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as stream:
-            json.dump(dict(value), stream, indent=2, sort_keys=True)
-            stream.write("\n")
-        os.replace(temporary_path, path)
-        path.chmod(0o600)
-        return True
-    except OSError:
-        if temporary_path is not None:
-            try:
-                temporary_path.unlink()
-            except OSError:
-                pass
-        return False
-
-
-def save_runtime_buffer(
-    measurement: Mapping,
-    estimate: Mapping,
-    *,
-    runtime_root: Optional[Path | str] = None,
-) -> bool:
-    """Keep only the latest accepted pairing and estimate for read failures."""
-    return _write_runtime_buffer({
-        "schema_version": SCHEMA_VERSION,
-        "measurement": dict(measurement),
-        "estimate": dict(estimate),
-        "last_failure": None,
-    }, runtime_root)
-
-
-def record_runtime_failure(
-    source: str,
-    reason: str,
-    observed_at: str,
-    *,
-    runtime_root: Optional[Path | str] = None,
-) -> bool:
-    """Record a bounded failure reason internally without creating a log."""
-    buffer = load_runtime_buffer(runtime_root)
-    if buffer is None:
-        buffer = {
-            "schema_version": SCHEMA_VERSION,
-            "measurement": None,
-            "estimate": None,
-        }
-    buffer["last_failure"] = {
-        "source": source,
-        "reason": reason,
-        "observed_at": observed_at,
-    }
-    return _write_runtime_buffer(buffer, runtime_root)

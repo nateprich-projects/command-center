@@ -19,15 +19,10 @@ NOW = datetime(2026, 9, 13, 12, 0, tzinfo=timezone.utc)
 
 
 @pytest.fixture(autouse=True)
-def _no_live_claude_sample(monkeypatch, tmp_path):
+def _no_live_claude_sample(monkeypatch):
     import usage
-    import muse_measurements
 
     monkeypatch.setenv("COMMAND_CENTER_MUSE_ESTIMATE_FEED_DISABLED", "1")
-    monkeypatch.setattr(
-        muse_measurements, "runtime_buffer_root",
-        lambda _runtime_root=None: tmp_path / "muse-estimate",
-    )
     monkeypatch.setattr(
         usage, "read_claude_plan_weekly_sample", lambda _now: None
     )
@@ -534,18 +529,13 @@ def _owner_report_dashboard_fixture():
 
 
 def test_dashboard_muse_usage_keeps_local_estimate_without_owner_report(
-    monkeypatch, tmp_path,
+    monkeypatch,
 ):
-    import muse_measurements
     import usage
 
     monkeypatch.delenv("COMMAND_CENTER_MUSE_ESTIMATE_FEED_DISABLED", raising=False)
     monkeypatch.setattr(usage, "read_muse", lambda now: _muse_reading())
     monkeypatch.setattr(funnel, "_dashboard_muse_owner_comments", lambda: [])
-    monkeypatch.setattr(
-        muse_measurements, "runtime_buffer_root",
-        lambda _runtime_root=None: tmp_path / "muse-estimate",
-    )
 
     assert funnel._dashboard_muse_usage(1_788_000_000.0) == {
         "source": "Local Muse session journal estimate",
@@ -558,18 +548,13 @@ def test_dashboard_muse_usage_keeps_local_estimate_without_owner_report(
 
 
 def test_dashboard_muse_usage_disable_flag_skips_owner_report_feed(
-    monkeypatch, tmp_path,
+    monkeypatch,
 ):
-    import muse_measurements
     import usage
 
     monkeypatch.setenv("COMMAND_CENTER_MUSE_ESTIMATE_FEED_DISABLED", "1")
     monkeypatch.setattr(usage, "read_muse", lambda _now: _muse_reading())
     monkeypatch.setattr(usage, "pace", lambda *args, **kwargs: {"windows": []})
-    monkeypatch.setattr(
-        muse_measurements, "runtime_buffer_root",
-        lambda _runtime_root=None: tmp_path / "muse-estimate",
-    )
 
     def unexpected_history_read():
         raise AssertionError("disabled feed must not read owner history")
@@ -584,72 +569,8 @@ def test_dashboard_muse_usage_disable_flag_skips_owner_report_feed(
     assert "measurement" not in estimate
 
 
-def test_dashboard_muse_usage_uses_cached_pair_when_issue_history_read_raises(
-    monkeypatch, tmp_path,
-):
-    import muse_measurements
-    import usage
-
-    monkeypatch.delenv("COMMAND_CENTER_MUSE_ESTIMATE_FEED_DISABLED", raising=False)
-    report_at = 1_791_066_187.0
-    current_at = report_at + 3600
-    reset_at = 1_791_158_400.0
-    source_url = (
-        "https://github.com/nateprich-projects/command-center/issues/2123"
-        "#issuecomment-5974149725"
-    )
-    report_meter = {
-        "source": "muse", "captured_at": report_at,
-        "spent_dollars": 68.50, "cap_dollars": 200.0,
-        "windows": {"seven_day": {
-            "used_percent": 34.25, "spent_dollars": 68.50,
-            "cap_dollars": 200.0, "resets_at": reset_at,
-        }},
-    }
-    current_meter = {
-        "source": "muse", "captured_at": current_at,
-        "spent_dollars": 72.0, "cap_dollars": 200.0,
-        "windows": {"seven_day": {
-            "used_percent": 36.0, "spent_dollars": 72.0,
-            "cap_dollars": 200.0, "calls": 43, "resets_at": reset_at,
-        }},
-    }
-    report = {
-        "used_percent": 36.0,
-        "unit": "percent",
-        "source": "Nate's live reading at Meta",
-        "provenance": "owner-reported",
-        "reported_at": "2026-10-03T22:23:07Z",
-        "source_record_url": source_url,
-    }
-    measurement = muse_measurements.ingest_owner_report(
-        report, meter_reader=lambda _as_of: report_meter,
-    )["measurement"]
-    previous = muse_measurements.adjusted_estimate(measurement, current_meter)
-    monkeypatch.setattr(
-        muse_measurements, "runtime_buffer_root",
-        lambda _runtime_root=None: tmp_path / "muse-estimate",
-    )
-    assert muse_measurements.save_runtime_buffer(measurement, previous)
-    monkeypatch.setattr(usage, "read_muse", lambda _as_of: current_meter)
-    monkeypatch.setattr(usage, "pace", lambda *args, **kwargs: {"windows": []})
-
-    def read_history():
-        raise OSError("temporary GitHub read failure")
-
-    monkeypatch.setattr(funnel, "_dashboard_muse_owner_comments", read_history)
-
-    estimate = funnel._dashboard_muse_usage(current_at)
-    buffer = muse_measurements.load_runtime_buffer()
-
-    assert estimate["spent_dollars"] == previous["spent_dollars"]
-    assert estimate["measurement"]["source_record_url"] == source_url
-    assert buffer["last_failure"]["reason"] == "owner_report_history_unavailable"
-    assert buffer["last_failure"]["observed_at"]
-
-
 def test_dashboard_muse_estimate_uses_owner_report_and_records_pair_once(
-    monkeypatch, tmp_path,
+    monkeypatch,
 ):
     import muse_measurements
     import usage
@@ -680,11 +601,6 @@ def test_dashboard_muse_estimate_uses_owner_report_and_records_pair_once(
         return True
 
     monkeypatch.setattr(funnel, "_dashboard_muse_write_pairing_record", write_pairing)
-    monkeypatch.setattr(
-        muse_measurements, "runtime_buffer_root",
-        lambda _runtime_root=None: tmp_path / "muse-estimate",
-    )
-
     first = funnel._dashboard_muse_usage(current_at)
     second = funnel._dashboard_muse_usage(current_at)
 
@@ -699,51 +615,37 @@ def test_dashboard_muse_estimate_uses_owner_report_and_records_pair_once(
     assert second["spent_dollars"] == first["spent_dollars"]
 
 
-def test_dashboard_muse_usage_rejects_new_unpairable_report_and_keeps_cache(
-    monkeypatch, tmp_path,
-):
-    import muse_measurements
+def test_dashboard_muse_usage_does_not_apply_a_prior_window_report(monkeypatch):
     import usage
 
     monkeypatch.delenv("COMMAND_CENTER_MUSE_ESTIMATE_FEED_DISABLED", raising=False)
-    report_at, current_at, source_url, comments, report_meter, current_meter = (
+    report_at, _, _, comments, report_meter, current_meter = (
         _owner_report_dashboard_fixture()
     )
-    measurement = muse_measurements.latest_usable_owner_measurement(
-        comments,
-        meter_reader=lambda at: report_meter if at == report_at else current_meter,
+    prior_reset = report_meter["windows"]["seven_day"]["resets_at"]
+    current_at = prior_reset + 3600
+    current_meter["captured_at"] = current_at
+    current_meter["windows"]["seven_day"]["resets_at"] = (
+        prior_reset + 7 * 24 * 60 * 60
     )
-    previous = muse_measurements.adjusted_estimate(measurement, current_meter)
-    monkeypatch.setattr(
-        muse_measurements, "runtime_buffer_root",
-        lambda _runtime_root=None: tmp_path / "muse-estimate",
-    )
-    assert muse_measurements.save_runtime_buffer(measurement, previous)
     monkeypatch.setattr(
         usage, "read_muse",
         lambda at: report_meter if at == report_at else current_meter,
     )
     monkeypatch.setattr(usage, "pace", lambda *args, **kwargs: {"windows": []})
     monkeypatch.setattr(funnel, "_dashboard_muse_owner_comments", lambda: comments)
-    comments[:] = [
-        {
-            "author": {"login": "nateprich"},
-            "url": source_url.replace("5974149725", "5975000000"),
-            "body": (
-                "Nate reported at 2026-10-04 00:00:00 UTC (17:00:00 PDT).\n\n"
-                "Reported panel value: 38% used. Source: Nate's live reading at Meta."
-            ),
-        },
-        {"body": muse_measurements.pairing_record_comment(measurement)},
-    ]
+    writes = []
+    monkeypatch.setattr(
+        funnel, "_dashboard_muse_write_pairing_record",
+        lambda measurement: writes.append(dict(measurement)) or True,
+    )
 
     estimate = funnel._dashboard_muse_usage(current_at)
-    buffer = muse_measurements.load_runtime_buffer()
 
-    assert estimate["spent_dollars"] == previous["spent_dollars"]
-    assert estimate["measurement"]["source_record_url"] == source_url
-    assert buffer["last_failure"]["reason"] == "owner_report_unusable"
-    assert buffer["last_failure"]["observed_at"]
+    assert estimate["source"] == "Local Muse session journal estimate"
+    assert estimate["spent_dollars"] == current_meter["spent_dollars"]
+    assert "measurement" not in estimate
+    assert writes == []
 
 
 def test_snapshot_keeps_report_observation_separate_from_publication_time(

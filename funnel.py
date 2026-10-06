@@ -13812,18 +13812,12 @@ def _dashboard_muse_write_pairing_record(measurement: Mapping) -> bool:
     return result.returncode == 0
 
 
-def _dashboard_muse_buffer_estimate(buffer: Optional[Mapping]):
-    estimate = buffer.get("estimate") if isinstance(buffer, Mapping) else None
-    return dict(estimate) if isinstance(estimate, Mapping) else None
-
-
 def _dashboard_muse_usage(now_epoch: float) -> Optional[Dict[str, object]]:
     """Return the dashboard-only seven-day Muse estimate.
 
     The local own-card meter still computes pacing and the fallback estimate.
     A validated owner report may adjust only the display estimate in the same
-    seven-day window. GitHub comments remain the source; the one-slot runtime
-    buffer only carries the last accepted pairing across read failures.
+    seven-day window. GitHub comments remain the durable source record.
     """
     try:
         import muse_measurements
@@ -13831,26 +13825,16 @@ def _dashboard_muse_usage(now_epoch: float) -> Optional[Dict[str, object]]:
     except Exception:
         return None
 
-    buffer = muse_measurements.load_runtime_buffer()
-    observed_at = datetime.fromtimestamp(now_epoch, timezone.utc).isoformat()
     try:
         reading = usage.read_muse(now_epoch)
     except Exception:
-        reading = None
+        return None
     if not isinstance(reading, dict):
-        muse_measurements.record_runtime_failure(
-            "usage.read_muse", "own_card_meter_unavailable",
-            observed_at,
-        )
-        return _dashboard_muse_buffer_estimate(buffer)
+        return None
     windows = reading.get("windows")
     window = windows.get("seven_day") if isinstance(windows, dict) else None
     if not isinstance(window, dict):
-        muse_measurements.record_runtime_failure(
-            "usage.read_muse", "own_card_meter_window_unavailable",
-            observed_at,
-        )
-        return _dashboard_muse_buffer_estimate(buffer)
+        return None
     spent = reading.get("spent_dollars")
     cap = reading.get("cap_dollars")
     percent = window.get("used_percent")
@@ -13863,18 +13847,18 @@ def _dashboard_muse_usage(now_epoch: float) -> Optional[Dict[str, object]]:
             or value != value
             or value in (float("inf"), float("-inf"))
         ):
-            return _dashboard_muse_buffer_estimate(buffer)
+            return None
     if (
         not isinstance(captured_at, (int, float))
         or isinstance(captured_at, bool)
         or not math.isfinite(captured_at)
         or captured_at < 0
     ):
-        return _dashboard_muse_buffer_estimate(buffer)
+        return None
     if cap <= 0 or spent < 0:
-        return _dashboard_muse_buffer_estimate(buffer)
+        return None
     if not isinstance(calls, int) or isinstance(calls, bool) or calls < 0:
-        return _dashboard_muse_buffer_estimate(buffer)
+        return None
 
     row: Dict[str, object] = {
         "source": "Local Muse session journal estimate",
@@ -13909,33 +13893,17 @@ def _dashboard_muse_usage(now_epoch: float) -> Optional[Dict[str, object]]:
     except Exception:
         comments = None
     measurement = None
-    owner_report_unusable = False
     if comments is not None:
-        owner_reports = muse_measurements.owner_reports_from_comments(comments)
         measurement = muse_measurements.latest_usable_owner_measurement(
             comments, meter_reader=usage.read_muse,
         )
-        owner_report_unusable = bool(owner_reports) and measurement is None
-    if measurement is None and isinstance(buffer, Mapping):
-        cached_measurement = buffer.get("measurement")
-        if isinstance(cached_measurement, Mapping):
-            measurement = dict(cached_measurement)
 
     if measurement is None:
-        if comments is None:
-            muse_measurements.record_runtime_failure(
-                "command-center#2123", "owner_report_history_unavailable",
-                observed_at,
-            )
         return row
 
     adjusted = muse_measurements.adjusted_estimate(measurement, reading)
     if adjusted is None:
-        muse_measurements.record_runtime_failure(
-            "muse_measurements", "measurement_not_usable_for_window",
-            observed_at,
-        )
-        return _dashboard_muse_buffer_estimate(buffer) or row
+        return row
 
     record_written = True
     if (comments is not None
@@ -13945,11 +13913,7 @@ def _dashboard_muse_usage(now_epoch: float) -> Optional[Dict[str, object]]:
         except Exception:
             record_written = False
     if not record_written:
-        muse_measurements.record_runtime_failure(
-            "command-center#2123", "pairing_record_write_failed",
-            observed_at,
-        )
-        return _dashboard_muse_buffer_estimate(buffer) or row
+        return row
 
     row.update({
         key: adjusted[key]
@@ -13958,17 +13922,6 @@ def _dashboard_muse_usage(now_epoch: float) -> Optional[Dict[str, object]]:
             "used_percent", "calls", "measurement",
         )
     })
-    muse_measurements.save_runtime_buffer(measurement, row)
-    if comments is None:
-        muse_measurements.record_runtime_failure(
-            "command-center#2123", "owner_report_history_unavailable",
-            observed_at,
-        )
-    elif owner_report_unusable:
-        muse_measurements.record_runtime_failure(
-            "command-center#2123", "owner_report_unusable",
-            observed_at,
-        )
     return row
 
 

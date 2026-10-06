@@ -1011,7 +1011,7 @@ function renderUsage(usage, nowMs = Date.now()) {
   panelRow.append(refreshLink);
   container.append(panelRow);
 
-  const estimate = museEstimate(usage && usage.muse, nowMs);
+  const estimate = museEstimate(usage && usage.muse);
   const estimateRow = element("div", "usage");
   if (estimate.state === "estimate") {
     estimateRow.append(element("span", "usage-label",

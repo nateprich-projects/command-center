@@ -679,11 +679,10 @@ def _rework_owner(monkeypatch, *, tier_body, agents, roster=None):
 
 @pytest.mark.parametrize("tier_body", ["Risk: standard",
                                        "Risk: escalated — concurrency"])
-def test_muse_authored_rework_goes_to_codex(monkeypatch, tier_body):
-    """Muse no longer implements (#1322): a rejected PR it wrote is
-    reworked by the roster's implementer."""
+def test_muse_authored_rework_stays_with_muse(monkeypatch, tier_body):
+    """A rejected Muse PR returns to Muse when it is on the roster."""
     assert _rework_owner(monkeypatch, tier_body=tier_body,
-                         agents={"muse"}) == "Codex"
+                         agents={"muse"}) == "Muse"
 
 
 def test_a_roster_naming_muse_alone_gives_muse_its_work_back(monkeypatch):

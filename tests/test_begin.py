@@ -2665,15 +2665,15 @@ def test_queue_and_begin_share_one_startable_view_for_the_165_regression(
     ]
 
 
-def test_muse_escalated_begin_no_longer_claims_a_ticket(monkeypatch, capsys):
-    """Muse judges and Codex implements (Nate, 2026-09-22, #1315, #1322):
-    an escalated Muse begin with no role takes the review path."""
+def test_muse_escalated_review_role_does_not_claim_a_ticket(monkeypatch, capsys):
+    """The review job names its role and never takes an implement ticket."""
     project, ticket = _ticket(
         12, 13, body="Risk: escalated — concurrency"
     )
 
     result, writes = _implementing_begin(
-        monkeypatch, capsys, [project, ticket], agent="muse", tier="escalated"
+        monkeypatch, capsys, [project, ticket], agent="muse", tier="escalated",
+        caller_role="review",
     )
 
     assert result["do"] != "ticket"
@@ -2681,9 +2681,7 @@ def test_muse_escalated_begin_no_longer_claims_a_ticket(monkeypatch, capsys):
 
 
 def test_muse_back_on_the_roster_claims_a_ticket_again(monkeypatch, capsys):
-    """The reversal path: the roster is the switch."""
-    monkeypatch.setitem(funnel.AGENTS_BY_ROLE["implement"], "muse",
-                        frozenset(funnel.TIERS))
+    """The prepared roster permits an explicit Muse implement caller."""
     project, ticket = _ticket(
         12, 13, body="Risk: escalated — concurrency"
     )
@@ -2704,6 +2702,7 @@ def test_an_implement_caller_off_the_roster_is_refused(monkeypatch, capsys,
     """`--role implement` used to route by the declaration alone, so taking
     Muse off the roster would not have stopped `scripts/muse-implement`
     (#1322). The refusal comes before any claim."""
+    monkeypatch.delitem(funnel.AGENTS_BY_ROLE["implement"], "muse")
     project, ticket = _ticket(
         14, 15, body="Risk: escalated — concurrency"
     )
@@ -2724,6 +2723,7 @@ def test_an_implement_caller_off_the_roster_is_refused(monkeypatch, capsys,
 
 
 def test_the_role_refusal_comes_before_the_project_read(monkeypatch, capsys):
+    monkeypatch.delitem(funnel.AGENTS_BY_ROLE["implement"], "muse")
     monkeypatch.setattr(funnel, "_start_begin_heartbeat",
                         lambda agent: "run-id")
     monkeypatch.setattr(usage, "read_agent", lambda *args: {"windows": {}})
@@ -2739,9 +2739,10 @@ def test_the_role_refusal_comes_before_the_project_read(monkeypatch, capsys):
     assert result["gate"] == "role"
 
 
-def test_codex_implements_both_tiers_and_muse_reviews():
+def test_codex_and_muse_implement_both_tiers_and_muse_reviews():
     assert funnel.AGENTS_BY_ROLE["implement"] == {
         "codex": frozenset(funnel.TIERS),
+        "muse": frozenset(funnel.TIERS),
         "claude": frozenset(funnel.TIERS + (None,)),
     }
     assert funnel._begin_role_refusal("codex", "standard", "implement") is None
@@ -3195,7 +3196,8 @@ def test_review_lane_skips_a_backed_off_shape_and_says_so(monkeypatch, capsys):
     monkeypatch.setattr(funnel, "reconcile_approved_merges", lambda *args: [])
 
     assert funnel.cmd_begin(
-        [stuck, next_idea], NOW, "muse", "escalated", False, True
+        [stuck, next_idea], NOW, "muse", "escalated", False, True,
+        caller_role="review",
     ) == 0
     result = json.loads(capsys.readouterr().out)
 

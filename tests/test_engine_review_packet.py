@@ -3300,9 +3300,10 @@ def test_collect_without_closing_refs_fetches_only_the_branch_ticket(
     assert [entry["number"] for entry in found["tickets"]] == [9]
 
 
-def test_the_review_question_names_the_tickets_union_as_the_spec():
+def test_the_review_question_names_all_pr_closed_tickets_and_branch_ticket():
     text = (ROOT / "routines" / "muse-review.md").read_text()
-    assert "tickets" in text and "union" in text
+    assert "`tickets` lists all PR-closed tickets" in text
+    assert "`ticket` is its branch ticket" in text
     assert "authorised" in text
     assert "branch ticket" in text
 

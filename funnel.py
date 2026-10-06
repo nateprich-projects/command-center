@@ -13813,6 +13813,14 @@ def _dashboard_muse_usage(now_epoch: float) -> Optional[Dict[str, object]]:
         return None
 
     try:
+        buffer = muse_measurements.read_runtime_buffer()
+    except Exception:
+        buffer = {}
+    buffered_measurement = (
+        buffer.get("measurement") if isinstance(buffer, Mapping) else None
+    )
+
+    try:
         reading = usage.read_muse(now_epoch)
     except Exception:
         return None
@@ -13881,15 +13889,52 @@ def _dashboard_muse_usage(now_epoch: float) -> Optional[Dict[str, object]]:
         comments = None
     measurement = None
     if comments is not None:
-        measurement = muse_measurements.latest_usable_owner_measurement(
+        attempt = muse_measurements.latest_owner_measurement_attempt(
             comments, meter_reader=usage.read_muse,
         )
+        measurement = attempt.get("measurement")
+        failure = attempt.get("failure")
+        if measurement is None:
+            measurement = buffered_measurement
+    else:
+        measurement = buffered_measurement
+        try:
+            observed_at = datetime.fromtimestamp(
+                float(now_epoch), timezone.utc,
+            ).isoformat().replace("+00:00", "Z")
+        except (OverflowError, OSError, TypeError, ValueError):
+            observed_at = str(now_epoch)
+        failure = {
+            "source": (
+                "https://github.com/nateprich-projects/command-center/issues/2123"
+            ),
+            "observed_at": observed_at,
+            "reason": "owner_measurement_feed_unavailable",
+        }
 
     if measurement is None:
+        if isinstance(failure, Mapping):
+            row["measurement_failure"] = dict(failure)
         return row
 
     adjusted = muse_measurements.adjusted_estimate(measurement, reading)
     if adjusted is None:
+        if not isinstance(failure, Mapping):
+            observed_at = (
+                measurement.get("approximate_observation_time")
+                or measurement.get("reported_at")
+            )
+            if not isinstance(observed_at, str) or not observed_at.strip():
+                observed_at = datetime.fromtimestamp(
+                    float(now_epoch), timezone.utc,
+                ).isoformat().replace("+00:00", "Z")
+            failure = {
+                "source": measurement.get("source")
+                or "owner-reported Muse panel reading",
+                "observed_at": observed_at,
+                "reason": "measurement_adjustment_unavailable",
+            }
+        row["measurement_failure"] = dict(failure)
         return row
 
     row.update({
@@ -13899,6 +13944,8 @@ def _dashboard_muse_usage(now_epoch: float) -> Optional[Dict[str, object]]:
             "used_percent", "calls", "measurement",
         )
     })
+    if isinstance(failure, Mapping):
+        row["measurement_failure"] = dict(failure)
     return row
 
 
@@ -13971,6 +14018,19 @@ def write_dashboard_snapshot(
             pass
         raise
     _prune_dashboard_spool(spool_dir, keep=target.name)
+    try:
+        import muse_measurements
+
+        muse_row = payload["usage"].get("muse")
+        if isinstance(muse_row, Mapping):
+            muse_measurements.publish_runtime_estimate(
+                muse_row,
+                feed_enabled=muse_measurements.feed_enabled(),
+            )
+    except Exception:
+        # The estimate buffer is best-effort. A published snapshot remains
+        # usable if this local cache cannot be updated.
+        pass
     return target
 
 
@@ -24597,6 +24657,18 @@ def main(argv: Optional[Sequence[str]] = None, *,
                 except Exception as exc:
                     # The dashboard is downstream instrumentation. A missing
                     # or unwritable spool must never gate the live brief.
+                    try:
+                        import muse_measurements
+
+                        muse_measurements.record_runtime_failure({
+                            "source": "Command Center dashboard snapshot",
+                            "observed_at": generated_at,
+                            "reason": "dashboard_snapshot_publication_failed",
+                        })
+                    except Exception:
+                        # Recording this internal diagnostic is best-effort;
+                        # the live brief remains independent of its display.
+                        pass
                     print(
                         "funnel: could not spool dashboard brief: {}".format(exc),
                         file=sys.stderr,

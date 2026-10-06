@@ -990,7 +990,7 @@ def _timing_lines(stderr):
 # -- the prompt ---------------------------------------------------------------
 
 def test_the_review_prompt_is_judgement_text_under_522_words():
-    """#794's Phase 1 bar, with 22 words for #2024's stopping-rule bullet.
+    """#794's Phase 1 bar, with #2024's stopping-rule wording added.
     The routine contains the question, schema,
     the packet placeholder — and no protocol, because the model has no tool
     to execute one with."""
@@ -1018,10 +1018,10 @@ def test_the_review_prompt_limits_blocking_to_the_three_stopping_kinds():
     prompt = review_prompts.load_active_prompt(ROOT).routine
     normalized = " ".join(prompt.split()).lower()
 
-    assert "only real defects with realistic reproductions" in normalized
-    assert "missing or tautological `accept` tests" in normalized
-    assert "merged-main failures block" in normalized
-    assert "other out-of-focus edge cases are notes" in normalized
+    assert ("a real defect with a realistic reproduction blocks even outside "
+            "the plan's review focus" in normalized)
+    assert ("so do a missing or tautological `accept` test and a merged-main "
+            "failure" in normalized)
 
 
 def test_the_review_prompt_requires_a_per_requirement_pass():

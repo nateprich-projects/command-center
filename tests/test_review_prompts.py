@@ -117,7 +117,7 @@ def test_baseline_prompt_matches_its_ticketed_digest():
     prompt = review_prompts.load_active_prompt(ROOT)
 
     assert hashlib.sha256(prompt.routine.encode()).hexdigest() == (
-        "d2b7d48b40c710f2fed8dce73a607c2536b33492212c779b6513eb5801a7f039"
+        "16947bc6479f64e12ad6d8431d4b262566c972508402e6f5998c3a0d1414d435"
     )
 
 

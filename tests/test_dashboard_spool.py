@@ -378,9 +378,37 @@ def test_the_spooled_board_shows_the_bug_turns_begin_takes(
 def test_spool_write_failure_preserves_brief_output_and_exit_code(
     monkeypatch, tmp_path, capsys
 ):
+    import muse_measurements
+
     monkeypatch.setenv(funnel.DASHBOARD_SPOOL_ENV, str(tmp_path / "spool"))
     expected = _brief_output()
     monkeypatch.setattr(funnel, "load_items", lambda: [])
+    previous_measurement = {
+        "schema_version": 1,
+        "signal": "panel_used_percent",
+        "value": 36.0,
+        "provenance": "owner-reported",
+        "reported_at": "2026-10-03T22:23:07Z",
+        "approximate_observation_time": "2026-10-03T22:23:07Z",
+    }
+    previous_estimate = {
+        "source": "Muse estimate anchored to owner-reported account-panel reading",
+        "captured_at": 1_791_069_787.0,
+        "spent_dollars": 75.5,
+        "cap_dollars": 200.0,
+        "used_percent": 37.75,
+        "calls": 43,
+    }
+    muse_measurements.write_runtime_buffer({
+        "schema_version": muse_measurements.RUNTIME_BUFFER_SCHEMA_VERSION,
+        "measurement": previous_measurement,
+        "estimate": previous_estimate,
+        "last_failure": None,
+    })
+    monkeypatch.setattr(
+        funnel, "_dashboard_muse_usage",
+        lambda _now: dict(previous_estimate, measurement=previous_measurement),
+    )
 
     def fake_cmd_brief(items, now, **kwargs):
         print(expected)
@@ -397,6 +425,17 @@ def test_spool_write_failure_preserves_brief_output_and_exit_code(
     captured = capsys.readouterr()
     assert captured.out == expected + "\n"
     assert "could not spool dashboard brief: disk full" in captured.err
+    assert "freshness" not in captured.out.lower()
+    buffer = muse_measurements.read_runtime_buffer()
+    assert buffer["measurement"] == previous_measurement
+    assert buffer["estimate"] == previous_estimate
+    assert buffer["last_failure"]["source"] == (
+        "Command Center dashboard snapshot"
+    )
+    assert buffer["last_failure"]["observed_at"]
+    assert buffer["last_failure"]["reason"] == (
+        "dashboard_snapshot_publication_failed"
+    )
 
 
 def test_nonzero_brief_is_not_spooled(monkeypatch, tmp_path, capsys):
@@ -646,6 +685,74 @@ def test_dashboard_muse_owner_feed_keeps_pace_on_local_meter(monkeypatch):
     funnel._dashboard_muse_usage(current_at)
 
     assert pace_inputs == [72.0]
+
+
+def test_dashboard_muse_feed_failure_keeps_last_published_estimate_and_retries(
+    monkeypatch,
+):
+    import usage
+    import muse_measurements
+
+    monkeypatch.delenv("COMMAND_CENTER_MUSE_ESTIMATE_FEED_DISABLED", raising=False)
+    report_at, current_at, source_url, comments, report_meter, current_meter = (
+        _owner_report_dashboard_fixture()
+    )
+    monkeypatch.setattr(
+        usage, "read_muse",
+        lambda at: report_meter if at == report_at else current_meter,
+    )
+    pace_inputs = []
+    monkeypatch.setattr(
+        usage, "pace",
+        lambda reading, _now, provider=None: (
+            pace_inputs.append(reading["spent_dollars"]) or {"windows": []}
+        ),
+    )
+    responses = [comments, OSError("GitHub comments unavailable"), comments]
+
+    def owner_comments():
+        response = responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+    monkeypatch.setattr(funnel, "_dashboard_muse_owner_comments", owner_comments)
+
+    first = funnel._dashboard_muse_usage(current_at)
+    assert first["spent_dollars"] == 75.5
+    funnel.write_dashboard_snapshot(
+        {"n": 1}, {"columns": []}, "2026-10-04T10:00:00Z",
+        usage={"muse": first},
+    )
+
+    failed = funnel._dashboard_muse_usage(current_at)
+    assert failed["spent_dollars"] == 75.5
+    assert failed["measurement"]["source_record_url"] == source_url
+    assert failed["measurement_failure"]["source"].endswith("/issues/2123")
+    assert failed["measurement_failure"]["observed_at"]
+    assert failed["measurement_failure"]["reason"] == (
+        "owner_measurement_feed_unavailable"
+    )
+    assert pace_inputs == [72.0, 72.0]
+    funnel.write_dashboard_snapshot(
+        {"n": 2}, {"columns": []}, "2026-10-04T10:01:00Z",
+        usage={"muse": failed},
+    )
+    assert muse_measurements.read_runtime_buffer()["last_failure"] == {
+        "source": "https://github.com/nateprich-projects/command-center/issues/2123",
+        "observed_at": failed["measurement_failure"]["observed_at"],
+        "reason": "owner_measurement_feed_unavailable",
+    }
+
+    retried = funnel._dashboard_muse_usage(current_at)
+    assert retried["spent_dollars"] == 75.5
+    assert retried["measurement"]["source_record_url"] == source_url
+    assert "measurement_failure" not in retried
+    funnel.write_dashboard_snapshot(
+        {"n": 3}, {"columns": []}, "2026-10-04T10:02:00Z",
+        usage={"muse": retried},
+    )
+    assert muse_measurements.read_runtime_buffer()["last_failure"] is None
 
 
 def test_dashboard_muse_usage_does_not_apply_a_prior_window_report(monkeypatch):

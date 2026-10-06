@@ -2,7 +2,8 @@
 
 GitHub issue history remains the durable source record. This module is a
 versioned, display-independent measurement adapter: it does not acquire panel
-data, write state, or change the pace meter. Report time is used as an
+data or change the pace meter. It keeps only a temporary owner-only buffer of
+the last published estimate and internal failure. Report time is used as an
 approximate observation time, with the owner's stated timing range retained.
 """
 
@@ -10,10 +11,12 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, timezone
+import json
 import math
 import os
 from pathlib import Path
 import re
+import tempfile
 from typing import Optional
 from urllib.parse import urlsplit
 
@@ -21,6 +24,8 @@ import usage
 
 
 SCHEMA_VERSION = 1
+RUNTIME_BUFFER_SCHEMA_VERSION = 1
+RUNTIME_BUFFER_FILENAME = "latest.json"
 PANEL_USED_PERCENT = "panel_used_percent"
 OBSERVATION_AGE_SECONDS = {"minimum": 60, "maximum": 120, "direction": "before_report"}
 SIGNAL_CONTRACTS = {
@@ -48,6 +53,134 @@ def runtime_buffer_root(runtime_root: Optional[Path | str] = None) -> Path:
     root = (Path(runtime_root) if runtime_root is not None else
             Path.home() / ".claude" / "command-center-heartbeat")
     return root / "muse-estimate"
+
+
+def read_runtime_buffer(runtime_root: Optional[Path | str] = None) -> dict:
+    """Read the last published estimate and its latest internal failure.
+
+    GitHub comments remain the source of truth. This owner-only buffer keeps a
+    published estimate available during a transient feed failure; callers
+    retry the source on every cycle and validate a buffered measurement against
+    the current meter before using it.
+    """
+    empty = {
+        "schema_version": RUNTIME_BUFFER_SCHEMA_VERSION,
+        "measurement": None,
+        "estimate": None,
+        "last_failure": None,
+    }
+    path = runtime_buffer_root(runtime_root) / RUNTIME_BUFFER_FILENAME
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return empty
+    if (not isinstance(value, Mapping)
+            or value.get("schema_version") != RUNTIME_BUFFER_SCHEMA_VERSION):
+        return empty
+    return {
+        "schema_version": RUNTIME_BUFFER_SCHEMA_VERSION,
+        "measurement": (dict(value["measurement"])
+                        if isinstance(value.get("measurement"), Mapping)
+                        else None),
+        "estimate": (dict(value["estimate"])
+                     if isinstance(value.get("estimate"), Mapping) else None),
+        "last_failure": (dict(value["last_failure"])
+                         if isinstance(value.get("last_failure"), Mapping)
+                         else None),
+    }
+
+
+def write_runtime_buffer(value: Mapping,
+                         runtime_root: Optional[Path | str] = None) -> Path:
+    """Atomically write the temporary estimate buffer with owner-only access."""
+    if not isinstance(value, Mapping):
+        raise TypeError("Muse runtime buffer must be a mapping")
+    payload = {
+        "schema_version": RUNTIME_BUFFER_SCHEMA_VERSION,
+        "measurement": (dict(value["measurement"])
+                        if isinstance(value.get("measurement"), Mapping)
+                        else None),
+        "estimate": (dict(value["estimate"])
+                     if isinstance(value.get("estimate"), Mapping) else None),
+        "last_failure": (dict(value["last_failure"])
+                         if isinstance(value.get("last_failure"), Mapping)
+                         else None),
+    }
+    directory = runtime_buffer_root(runtime_root)
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(directory, 0o700)
+    target = directory / RUNTIME_BUFFER_FILENAME
+    temporary_path = None
+    try:
+        fd, temporary_name = tempfile.mkstemp(
+            prefix=".latest-", suffix=".tmp", dir=str(directory))
+        temporary_path = Path(temporary_name)
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(json.dumps(payload, indent=2, allow_nan=False) + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(temporary_path, 0o600)
+        os.replace(temporary_path, target)
+        os.chmod(target, 0o600)
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+    return target
+
+
+def record_runtime_failure(failure: Mapping,
+                           runtime_root: Optional[Path | str] = None) -> None:
+    """Record a failure without replacing the last published estimate."""
+    if not isinstance(failure, Mapping):
+        return
+    source = failure.get("source")
+    observed_at = failure.get("observed_at")
+    reason = failure.get("reason")
+    if not all(isinstance(value, str) and value.strip()
+               for value in (source, observed_at, reason)):
+        return
+    buffer = read_runtime_buffer(runtime_root)
+    buffer["last_failure"] = {
+        "source": source.strip(),
+        "observed_at": observed_at.strip(),
+        "reason": reason.strip(),
+    }
+    write_runtime_buffer(buffer, runtime_root)
+
+
+def publish_runtime_estimate(
+    estimate: Mapping,
+    *,
+    feed_enabled: bool = True,
+    runtime_root: Optional[Path | str] = None,
+) -> None:
+    """Remember a successfully published estimate, keeping source history in GitHub."""
+    if not isinstance(estimate, Mapping):
+        return
+    buffer = read_runtime_buffer(runtime_root)
+    failure = estimate.get("measurement_failure")
+    if isinstance(failure, Mapping):
+        buffer["last_failure"] = dict(failure)
+    elif feed_enabled:
+        buffer["last_failure"] = None
+
+    measurement = estimate.get("measurement")
+    if isinstance(measurement, Mapping):
+        buffer["measurement"] = dict(measurement)
+        buffer["estimate"] = {
+            key: estimate[key]
+            for key in (
+                "source", "captured_at", "spent_dollars", "cap_dollars",
+                "used_percent", "calls",
+            )
+            if key in estimate
+        }
+    elif feed_enabled and not isinstance(failure, Mapping):
+        # A successful source read in a new window with no usable report must
+        # not let an old window's owner calibration become the next estimate.
+        buffer["measurement"] = None
+        buffer["estimate"] = None
+    write_runtime_buffer(buffer, runtime_root)
 
 
 def _finite_number(value: object) -> Optional[float]:
@@ -138,17 +271,40 @@ def latest_usable_owner_measurement(
     meter_reader: Optional[Callable[[float], Optional[Mapping]]] = None,
 ) -> Optional[dict]:
     """Choose the newest report that validates against its own-card window."""
+    return latest_owner_measurement_attempt(
+        comments, meter_reader=meter_reader,
+    )["measurement"]
+
+
+def latest_owner_measurement_attempt(
+    comments: object,
+    *,
+    meter_reader: Optional[Callable[[float], Optional[Mapping]]] = None,
+) -> dict:
+    """Return the newest usable reading plus any newer rejected report.
+
+    A bad recent report is diagnostic only: an older usable report remains the
+    measurement, and the failure retains its source and approximate observation
+    time for the local runtime buffer.
+    """
     reports = owner_reports_from_comments(comments)
     reports.sort(
         key=lambda report: _parse_report_time(report["reported_at"])
         or datetime.min.replace(tzinfo=timezone.utc),
         reverse=True,
     )
+    failure = None
     for report in reports:
         result = ingest_owner_report(report, meter_reader=meter_reader)
         if result.get("status") == "accepted":
-            return result.get("measurement")
-    return None
+            return {"measurement": result.get("measurement"), "failure": failure}
+        if failure is None and result.get("status") == "rejected":
+            failure = {
+                "source": result.get("source") or "owner-reported Muse panel reading",
+                "observed_at": result.get("reported_at"),
+                "reason": result.get("reason") or "measurement_rejected",
+            }
+    return {"measurement": None, "failure": failure}
 
 
 def _result(status: str, reason: Optional[str] = None, *,

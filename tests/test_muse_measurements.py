@@ -99,6 +99,28 @@ def test_latest_owner_report_reads_the_source_comment_and_pairs_at_report_time()
     assert "sampled_at" not in measurement
 
 
+def test_newer_invalid_report_keeps_last_measurement_and_records_failure():
+    newer_body = source_comment()["body"].replace(
+        "2026-10-03 22:23:07", "2026-10-03 22:24:07",
+    ).replace("36% used", "101% used")
+    invalid_newer = source_comment(
+        url=SOURCE_URL.replace("5974149725", "5974149726"),
+        body=newer_body,
+    )
+
+    attempt = muse_measurements.latest_owner_measurement_attempt(
+        [invalid_newer, source_comment()], meter_reader=meter_reading,
+    )
+
+    assert attempt["measurement"]["value"] == 36.0
+    assert attempt["measurement"]["reported_at"] == REPORT_TEXT
+    assert attempt["failure"] == {
+        "source": "Nate's live reading at Meta",
+        "observed_at": "2026-10-03T22:24:07Z",
+        "reason": "used_percent_must_be_finite_percent",
+    }
+
+
 def test_adjusted_estimate_anchors_panel_percent_then_adds_meter_delta():
     measurement = muse_measurements.latest_usable_owner_measurement(
         [source_comment()], meter_reader=meter_reading

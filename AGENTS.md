@@ -157,8 +157,26 @@ wrong.
   are only a local record: jobs copied back from there would not be refreshed or
   drift-checked by the keeper. The restored repository plists require a separate
   console installation and launchd readback after Nate's plan and runner-exposure
-  decisions. From
-  2026-09-18 to 2026-09-22 Muse implemented both tiers, because Codex's Plus week was
+  decisions.
+
+  **Reversible Codex fallback after a tier cutover:** first let an in-flight
+  `scripts/muse-implement` run finish. If it cannot finish, reconcile its
+  heartbeat, Project claim, ticket branch and PR under the ordinary claim rules
+  before offering that ticket again. In the logged-in Mac Aqua console, stop new
+  Muse starts for the affected tier: use
+  `launchctl bootout gui/$(id -u)/com.nateprich.command-center-muse-implement-standard`
+  for standard or
+  `launchctl bootout gui/$(id -u)/com.nateprich.command-center-muse-implement`
+  for escalated. Read back the matching label with `launchctl print` and confirm
+  the job is absent. Resume
+  `command-center-tickets-hourly` (standard) or
+  `command-center-tickets-weekday-mornings` (escalated) through the Codex
+  Scheduled native control and read back its ACTIVE state. Keep the Codex
+  roster entry and settings for that fallback. Do not force-reset a claim,
+  delete work or jobs, or run duplicate ticket writers. These steps do not
+  change credentials, ACLs, accounts or broker access.
+
+  From 2026-09-18 to 2026-09-22 Muse implemented both tiers, because Codex's Plus week was
   nearly spent. _(confirmed by Nate 2026-09-22)_
 
   **z.ai judged the standard tier from 2026-09-23 until 2026-09-27 06:00 PDT** (Nate,

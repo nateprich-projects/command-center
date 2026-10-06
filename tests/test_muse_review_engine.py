@@ -2964,6 +2964,8 @@ def test_the_breakdown_prompt_is_judgement_text_under_500_words():
     assert '"risk": "standard" | "escalated"' in prompt
     assert '"needs": "none" | "human" | "claude-code-environment"' in prompt
     assert "exactly one json object and nothing else" in normalized
+    assert ("for each `## review focus` bullet, put one `accept` test in its "
+            "owning ticket; copy the text verbatim once" in normalized)
     for protocol in ("funnel.py", "heartbeat.py", "breakdown-apply",
                      "breakdown-packet", "gh issue create", "```bash"):
         assert protocol not in prompt, (
@@ -3031,6 +3033,12 @@ def test_the_shape_prompt_is_judgement_text_under_500_words():
             '"measured" | "documented" | "inferred"}]') in prompt
     assert "omit them from `plan_markdown`" in normalized
     assert "exactly one json object and nothing else" in normalized
+    assert '"failure_modes": [...]' in prompt
+    assert '"hotspot_targets": [{"repo_path": ..., "function": ...}]' in prompt
+    assert '"redesign_remainder": ...' in prompt
+    assert "omission equals `[]`" in normalized
+    assert "exact `{repo_path, function}` pairs from packet hotspots" in normalized
+    assert "targets require non-empty markdown `redesign_remainder`" in normalized
     for protocol in ("funnel.py", "heartbeat.py", "shape-apply",
                      "shape-packet", "gh issue", "```bash"):
         assert protocol not in prompt, (

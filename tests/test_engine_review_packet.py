@@ -1868,7 +1868,9 @@ def test_packet_without_a_ticket_branch_has_no_ticket_body():
         "ref": None, "number": None, "title": None, "url": None,
         "body": None, "risk": None, "parent": None, "comments": [],
         "parent_rejected_excerpt": "",
-        "parent_rejected_excerpt_truncated": False}
+        "parent_rejected_excerpt_truncated": False,
+        "parent_review_focus": "",
+        "parent_review_focus_truncated": False}
 
 
 def test_packet_marks_a_missing_plan():
@@ -2350,6 +2352,46 @@ def test_shape_ticket_extracts_only_the_first_parent_rejected_section():
     )
     assert shaped["parent_rejected_excerpt_truncated"] is False
     assert "body" not in shaped["parent"]
+
+
+def test_shape_ticket_carries_only_a_complete_explicit_review_focus():
+    body = (
+        "# Parent plan\n"
+        "```markdown\n## Review focus\n- quoted example\n```\n"
+        "## Review focus\n- Count each daily summary path.\n"
+        "### Detail\nThis detail belongs to the focus.\n"
+        "## Next section\nThis text must not narrow the review.\n"
+    )
+    shaped = review.shape_ticket(ticket(parent={"body": body, "comments": []}))
+    assert shaped["parent_review_focus"] == (
+        "## Review focus\n- Count each daily summary path.\n"
+        "### Detail\nThis detail belongs to the focus.\n"
+    )
+    assert shaped["parent_review_focus_truncated"] is False
+    assert "body" not in shaped["parent"]
+
+
+def test_missing_or_over_budget_review_focus_never_narrows_review():
+    missing = review.shape_ticket(ticket(parent={
+        "body": "# Parent plan\n## Accept\n- Required test.\n",
+        "comments": [],
+    }))
+    assert missing["parent_review_focus"] == ""
+    assert missing["parent_review_focus_truncated"] is False
+
+    oversized = review.shape_ticket(ticket(parent={
+        "body": "## Review focus\n- " + "x" * review.PARENT_REVIEW_FOCUS_LIMIT,
+        "comments": [],
+    }))
+    assert oversized["parent_review_focus"] == ""
+    assert oversized["parent_review_focus_truncated"] is True
+
+    no_budget = review.shape_ticket(ticket(
+        body="x" * review.TICKET_BODY_LIMIT,
+        parent={"body": "## Review focus\n- One case.\n", "comments": []},
+    ))
+    assert no_budget["parent_review_focus"] == ""
+    assert no_budget["parent_review_focus_truncated"] is True
 
 
 def test_shape_ticket_returns_an_empty_rejected_excerpt_when_missing():
@@ -3302,8 +3344,8 @@ def test_collect_without_closing_refs_fetches_only_the_branch_ticket(
 
 def test_the_review_question_names_all_pr_closed_tickets_and_branch_ticket():
     text = (ROOT / "routines" / "muse-review.md").read_text()
-    assert "`tickets` lists all PR-closed tickets" in text
-    assert "`ticket` is its branch ticket" in text
+    assert "`tickets` is the union of tickets the PR closes" in text
+    assert "`ticket`, its branch ticket" in text
     assert "authorised" in text
     assert "branch ticket" in text
 

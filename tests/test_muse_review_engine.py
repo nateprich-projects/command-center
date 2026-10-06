@@ -4820,6 +4820,30 @@ def test_the_count_rule_keeps_its_full_paragraph():
             "when asked once is `unmet`.") in prompt
 
 
+def test_focus_present_and_absent_packets_keep_count_requirements_blocking(tmp_path):
+    """Both split calls receive the conditional scope and the count rule."""
+    for suffix, focus in (("present", "## Review focus\n- Check a daily run.\n"),
+                          ("absent", "")):
+        packet = _packet(ticket={
+            "ref": "owner/repo#6", "number": 6,
+            "body": "Accept: write one summary line per day.",
+            "parent_review_focus": focus,
+            "parent_review_focus_truncated": False,
+        })
+        proc, repo = _stubbed_runner(
+            tmp_path / suffix, _begin(), packet,
+            answers=_review_answers(_judge_answer()))
+        assert proc.returncode == 0, proc.stderr
+        lister = _lister_framing(repo)
+        judge = _judge_framing(repo)
+        assert "Keep every ticket count requirement" in lister
+        assert "do not infer a focus or narrow the review" in lister
+        assert "an effect performed twice when the ticket asks for once" in judge
+        assert "Focus never softens an assigned ticket Do or Accept row" in judge
+        assert '"parent_review_focus": ' in (repo / "muse.prompt.1").read_text()
+        assert '"parent_review_focus": ' in (repo / "muse.prompt.2").read_text()
+
+
 def test_the_judges_ask_for_cited_met_results_and_concrete_blocks(tmp_path):
     """#1852 rule R3 reaches every judge call through the judge header."""
     proc, repo = _stubbed_runner(

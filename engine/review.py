@@ -252,12 +252,12 @@ EVIDENCE_SHA_RE = re.compile(r"- sha: ([0-9a-f]{40})")
 #: remains a separate field, so carrying it does not add unbounded context.
 TICKET_BODY_LIMIT = PR_BODY_LIMIT
 
-# A parent plan's rejected alternatives are the only prose from its body that
-# enters the review packet (#2020). Keep the excerpt bounded with a visible
-# marker, at a whole line, and charge it to the remaining TICKET_BODY_LIMIT
-# budget so a large parent body cannot restore #1474's unbounded packet growth.
+# A parent plan contributes only its rejected alternatives and complete Review
+# focus section. Charge both to the remaining TICKET_BODY_LIMIT budget so a
+# large parent body cannot restore #1474's unbounded packet growth.
 PARENT_REJECTED_EXCERPT_LIMIT = 2000
 PARENT_REJECTED_TRUNCATION_MARKER = "…[truncated]"
+PARENT_REVIEW_FOCUS_LIMIT = 1000
 
 #: The diff a review judges, at most (#1801). Measured on the diff alone, in
 #: UTF-8 bytes, as ``LARGE_PACKET_BYTES`` in scripts/muse-review-engine
@@ -4074,10 +4074,10 @@ def shape_ticket(ticket: Optional[dict]) -> Dict[str, Optional[object]]:
 
     Shared by the single branch ``ticket`` and every entry of the
     ``tickets`` list, so both carry the same fields: the parent with its
-    comments shaped and its bounded Rejected excerpt, and the ticket's newest
-    comments with their recorded voices. None reads as the empty ticket a
-    ticketless branch gets.
-    The body and parent's Rejected excerpt share TICKET_BODY_LIMIT while
+    comments shaped and its bounded Rejected and Review focus excerpts, and
+    the ticket's newest comments with their recorded voices. None reads as the
+    empty ticket a ticketless branch gets.
+    The body and parent's excerpts share TICKET_BODY_LIMIT while
     staying in separate fields; each comment list is bounded by
     ``ticket_comments``. The context every ticket adds is bounded and marked
     where cut (#1801); none of it can fail the precheck.
@@ -4088,10 +4088,14 @@ def shape_ticket(ticket: Optional[dict]) -> Dict[str, Optional[object]]:
             "body": None, "risk": None, "parent": None, "comments": [],
             "parent_rejected_excerpt": "",
             "parent_rejected_excerpt_truncated": False,
+            "parent_review_focus": "",
+            "parent_review_focus_truncated": False,
         }
     parent = ticket.get("parent")
     parent_rejected_excerpt = ""
     parent_rejected_excerpt_truncated = False
+    parent_review_focus = ""
+    parent_review_focus_truncated = False
     ticket_body = ticket.get("body")
     ticket_body_budget = (
         min(len(ticket_body), TICKET_BODY_LIMIT)
@@ -4104,8 +4108,14 @@ def shape_ticket(ticket: Optional[dict]) -> Dict[str, Optional[object]]:
              parent.get("body"), limit=max(
                  0, min(PARENT_REJECTED_EXCERPT_LIMIT,
                         TICKET_BODY_LIMIT - ticket_body_budget)))
-        # Keep the full parent body out of the packet per #1474; only this
-        # bounded Rejected excerpt is carried as parent-plan prose.
+        (parent_review_focus,
+         parent_review_focus_truncated) = _bounded_parent_review_focus(
+             parent.get("body"), limit=max(
+                 0, min(PARENT_REVIEW_FOCUS_LIMIT,
+                        TICKET_BODY_LIMIT - ticket_body_budget
+                        - len(parent_rejected_excerpt))))
+        # Keep the full parent body out of the packet per #1474; only these
+        # bounded excerpts are carried as parent-plan prose.
         parent.pop("body", None)
         parent.pop("body_unavailable", None)
     return {
@@ -4120,6 +4130,8 @@ def shape_ticket(ticket: Optional[dict]) -> Dict[str, Optional[object]]:
         "parent_rejected_excerpt": parent_rejected_excerpt,
         "parent_rejected_excerpt_truncated": (
             parent_rejected_excerpt_truncated),
+        "parent_review_focus": parent_review_focus,
+        "parent_review_focus_truncated": parent_review_focus_truncated,
     }
 
 
@@ -4260,6 +4272,55 @@ def _bounded_parent_rejected_excerpt(
 
     separator = "\n" if excerpt and not excerpt.endswith(("\n", "\r")) else ""
     return excerpt + separator + marker, True
+
+
+def _bounded_parent_review_focus(
+        body: object, limit: int = PARENT_REVIEW_FOCUS_LIMIT
+        ) -> Tuple[str, bool]:
+    """Carry a complete explicit Review focus section, or no focus at all.
+
+    A partial section cannot safely narrow a review. Ignore headings inside
+    fenced code and stop at the next heading of the same or higher level.
+    """
+    if not isinstance(body, str):
+        return "", False
+    lines = body.splitlines(keepends=True)
+    start = None
+    level = None
+    end = len(lines)
+    fence = None
+    for index, source_line in enumerate(lines):
+        line = source_line.rstrip("\r\n")
+        if fence is not None:
+            closing = _FENCE_CLOSE_RE.match(line)
+            if closing:
+                marker = closing.group("marker")
+                if marker[0] == fence[0] and len(marker) >= len(fence):
+                    fence = None
+            continue
+        opening = _FENCE_OPEN_RE.match(line)
+        if opening:
+            marker = opening.group("marker")
+            info = opening.group("info")
+            if marker[0] != "`" or "`" not in info:
+                fence = marker
+            continue
+        heading = _atx_heading(line)
+        if heading is None:
+            continue
+        heading_level, title = heading
+        if start is None:
+            if heading_level == 2 and title == "Review focus":
+                start, level = index, heading_level
+        elif heading_level <= level:
+            end = index
+            break
+    if start is None:
+        return "", False
+    section = "".join(lines[start:end])
+    if len(section) > max(0, min(PARENT_REVIEW_FOCUS_LIMIT, limit)):
+        return "", True
+    return section, False
 
 
 def parent_repo_from_row(parent: dict) -> Optional[str]:

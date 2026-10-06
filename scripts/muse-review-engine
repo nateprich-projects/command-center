@@ -212,8 +212,8 @@ if [[ ! -r "$REPO/routines/muse-review.md" ]]; then
   echo "muse-review-engine: cannot read $REPO/routines/muse-review.md — refusing to run without a prompt" >&2
   exit 1
 fi
-if ! REVIEW_PROMPT_JSON="$(python3 "$REPO/engine/review_prompts.py" active 2>&1)"; then
-  echo "muse-review-engine: cannot load the active reviewer prompt: $REVIEW_PROMPT_JSON" >&2
+if ! REVIEW_PROMPT_JSON="$(python3 "$REPO/engine/review_prompts.py" active)"; then
+  echo "muse-review-engine: cannot load the active reviewer prompt" >&2
   exit 1
 fi
 if ! PROMPT_REVIEW="$(printf '%s' "$REVIEW_PROMPT_JSON" | python3 -c 'import json,sys; sys.stdout.write(json.load(sys.stdin)["routine"])')"; then
@@ -2763,6 +2763,19 @@ the ticket or the plan wherever it states one. Every later judge reads this
 list and nothing else, so a requirement missing here is never checked, and a
 vague one cannot be answered.
 
+Keep every ticket count requirement (one, once, per day, exactly, at most) as
+an explicit checkable row. Preserve its count and the effect it counts across
+success, error, trap, hook and retry paths. Do not treat a path that performs
+the effect twice as an additional edge outside the review focus.
+
+Use `parent_review_focus` only when it contains a complete `## Review focus`
+section and `parent_review_focus_truncated` is false. It bounds additional
+edge-case searching, never the ticket's Do or Accept, a stated plan rule, or
+the stopping rule's three kinds. If the field is empty, missing or truncated,
+do not infer a focus or narrow the review. An additional edge outside an
+explicit focus is a note unless it is a real defect with a realistic
+reproduction, a missing or tautological Accept test, or a merged-main failure.
+
 Do not list a requirement that this PR pass this independent review, receive
 the current-head review verdict or approval, or be merged. Those are later
 process gates, not facts this review can establish about its own diff. Keep
@@ -3105,6 +3118,17 @@ ordinary diff rule above.
 A `Does not break:` requirement is met unless a diff line breaks or
 contradicts the rule. That the diff does not implement the rule is never a
 reason for unmet or unsure.
+
+For an assigned count requirement (one, once, per day, exactly, at most),
+trace every effect call site through success, error, trap, hook and retry
+paths. Put per-path counts in `evidence`; an effect performed twice when the
+ticket asks for once is `unmet`, even when a Review focus exists.
+
+Treat an additional edge outside an explicit, complete `parent_review_focus`
+as a note unless it is a real defect with a realistic reproduction, a missing
+or tautological Accept test, or a merged-main failure. An empty, missing or
+truncated focus field never narrows review. Focus never softens an assigned
+ticket Do or Accept row, a stated plan rule, or these three stopping kinds.
 
 For a deferred-premise requirement, inspect the entry's `label`, `evidence`,
 and `deferred_answer` fields, and verify that the matching packet entry is

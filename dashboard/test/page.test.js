@@ -877,7 +877,7 @@ test("the Muse derived-spend estimate labels its source without a sample age", (
   assert.equal(row.querySelectorAll(".usage-age").some((node) => node.tagName === "time"), false);
 });
 
-test("the Muse estimate remains a bar when its meter capture is old", () => {
+test("the Muse estimate remains a bar when its owner feed fails", () => {
   const now = Date.parse("2026-09-29T22:26:00-07:00");
   const estimate = {
     source: "Local Muse session journal estimate",
@@ -898,7 +898,31 @@ test("the Muse estimate remains a bar when its meter capture is old", () => {
 
   assert.ok(row.querySelector(".usage-fill"));
   assert.equal(row.querySelector(".usage-percent").textContent, "7.2%");
-  assert.doesNotMatch(row.textContent, /stale|unavailable|sampled|old/i);
+  assert.doesNotMatch(row.textContent, /stale|unavailable|sampled|old|fresh/i);
+});
+
+test("an invalid owner reading keeps the Muse estimate bar free of freshness copy", () => {
+  const now = Date.parse("2026-10-03T22:24:07Z");
+  const estimate = {
+    source: "Local Muse session journal estimate",
+    captured_at: Date.parse("2026-10-03T20:55:00Z") / 1000,
+    spent_dollars: 14.3,
+    cap_dollars: 200,
+    used_percent: 7.15,
+    calls: 42,
+    measurement_failure: {
+      source: "Nate's live reading at Meta",
+      observed_at: "2026-10-03T22:24:07Z",
+      reason: "used_percent_must_be_finite_percent",
+    },
+  };
+
+  const row = usageRow(renderUsageFixture({ muse: estimate }, now),
+    "Muse 7-day spend estimate");
+
+  assert.ok(row.querySelector(".usage-fill"));
+  assert.equal(row.querySelector(".usage-percent").textContent, "7.2%");
+  assert.doesNotMatch(row.textContent, /stale|unavailable|sampled|old|fresh/i);
 });
 
 test("the Muse estimate omits availability and freshness copy without a value", () => {

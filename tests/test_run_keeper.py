@@ -26,9 +26,9 @@ SCRIPT = ROOT / "scripts" / "run-keeper"
 BEGIN_LINE = "funnel.py begin --agent codex --tier standard"
 SEPARATOR = "\n---\n"
 
-DAY_NAME = "command-center-test-day"
+DAY_NAME = "command-center-tickets-test-day"
 DAY_RRULE = "FREQ=HOURLY;INTERVAL=1;BYMINUTE=0"
-NIGHT_NAME = "command-center-test-night"
+NIGHT_NAME = "command-center-tickets-test-night"
 NIGHT_RRULE = "FREQ=WEEKLY;BYDAY=SA;BYHOUR=2;BYMINUTE=1"
 PUBLISHER_PLIST = "com.nateprich.command-center-funnel-publisher.plist"
 PUBLISHER_LABEL = "com.nateprich.command-center-funnel-publisher"
@@ -474,6 +474,11 @@ def test_keeper_installs_prompts_when_the_routine_changed(tmp_path):
     routine = checkout / "routines" / "codex-work.md"
     day = write_current_automation(home, routine, DAY_NAME, DAY_RRULE)
     night = write_current_automation(home, routine, NIGHT_NAME, NIGHT_RRULE)
+    watch = write_stale_automation(
+        home, "command-center-funnel-watch-github-writer", DAY_RRULE,
+        prompt="Check GitHub watch receipts, not implementation tickets",
+    )
+    watch_before = watch.read_bytes()
     before = {DAY_NAME: installed_prompt(day), NIGHT_NAME: installed_prompt(night)}
     install_launchd_copies(seed, home)
 
@@ -492,6 +497,8 @@ def test_keeper_installs_prompts_when_the_routine_changed(tmp_path):
         assert installed_prompt(path) == wanted_prompt(routine, rrule)
         assert installed_prompt(path) != before[name]
         assert path.with_suffix(".toml.bak").is_file()
+    assert watch.read_bytes() == watch_before
+    assert not watch.with_suffix(".toml.bak").exists()
     # Each lane's tier and idle flag follow when it fires: the all-day lane
     # takes the cheap continuous tier with the presence proxy, the
     # hour-restricted one the escalated tier without it.
@@ -519,6 +526,32 @@ def test_keeper_installs_prompts_when_the_routine_changed(tmp_path):
         "reload_pending": "-",
     }
     assert len(show_heartbeat_file(bare, "sentinel.log").splitlines()) == 1
+
+
+def test_keeper_check_ignores_stale_watch_prompt_without_a_routine_change(tmp_path):
+    bare, checkout, seed = make_install_remote(tmp_path)
+    home = tmp_path / "home"
+    routine = checkout / "routines" / "codex-work.md"
+    day = write_current_automation(home, routine, DAY_NAME, DAY_RRULE)
+    watch = write_stale_automation(
+        home, "command-center-funnel-watch-github-writer", DAY_RRULE,
+        prompt="Check GitHub watch receipts, not implementation tickets",
+    )
+    watch_before = watch.read_bytes()
+    install_launchd_copies(seed, home)
+
+    tools, _ = make_tools(tmp_path)
+    result = run_keeper(checkout, home, tools, tools / "launchctl")
+    assert result.returncode == 0, result.stderr
+    assert installed_prompt(day) == wanted_prompt(routine, DAY_RRULE)
+    assert watch.read_bytes() == watch_before
+    assert one_readiness_record(bare) == {
+        "timestamp": "Sat_Sep_12_21:00:00_2026",
+        "prompts": "yes",
+        "plists": "yes",
+        "files": "-",
+        "reload_pending": "-",
+    }
 
 
 def test_keeper_treats_the_stripped_trailing_newline_as_current(tmp_path):

@@ -170,7 +170,10 @@ import time
 
 ROUTINE = pathlib.Path(os.environ["KEEPER_ROUTINE"])
 AUTOMATIONS = pathlib.Path(os.environ["KEEPER_AUTOMATIONS"])
-GLOB = "command-center-*/automation.toml"
+# Only the implementation lanes use ROUTINE.  Other Command Center tasks,
+# including the GitHub funnel-watch writer, own different prompts and must
+# never be replaced with an implementer prompt on a routine change.
+GLOB = "command-center-tickets-*/automation.toml"
 
 #: Everything above this line in the routine is setup documentation for Nate;
 #: below it is what the agent runs.
@@ -234,6 +237,7 @@ def current(text):
 
 
 def main(mode):
+    # Both `install` and the every-run `check` use this one selection.
     files = sorted(AUTOMATIONS.glob(GLOB))
     if not files:
         print(

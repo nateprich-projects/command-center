@@ -147,6 +147,7 @@ def test_later_run_binding_still_supersedes_the_first_claim(monkeypatch):
             "run": "first-run", "agent": "codex", "phase": "bind",
             "ts": int(NOW.timestamp()), "do": "ticket", "work": ticket.ref,
         }],
+        "muse": [],
         "claude": [{
             "run": "later-run", "agent": "claude", "phase": "bind",
             "ts": int(NOW.timestamp()) + 1, "do": "ticket",

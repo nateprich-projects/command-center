@@ -237,6 +237,7 @@ def current(text):
 
 
 def main(mode):
+    # Both `install` and the every-run `check` use this one selection.
     files = sorted(AUTOMATIONS.glob(GLOB))
     if not files:
         print(

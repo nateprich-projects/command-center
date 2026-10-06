@@ -528,6 +528,32 @@ def test_keeper_installs_prompts_when_the_routine_changed(tmp_path):
     assert len(show_heartbeat_file(bare, "sentinel.log").splitlines()) == 1
 
 
+def test_keeper_check_ignores_stale_watch_prompt_without_a_routine_change(tmp_path):
+    bare, checkout, seed = make_install_remote(tmp_path)
+    home = tmp_path / "home"
+    routine = checkout / "routines" / "codex-work.md"
+    day = write_current_automation(home, routine, DAY_NAME, DAY_RRULE)
+    watch = write_stale_automation(
+        home, "command-center-funnel-watch-github-writer", DAY_RRULE,
+        prompt="Check GitHub watch receipts, not implementation tickets",
+    )
+    watch_before = watch.read_bytes()
+    install_launchd_copies(seed, home)
+
+    tools, _ = make_tools(tmp_path)
+    result = run_keeper(checkout, home, tools, tools / "launchctl")
+    assert result.returncode == 0, result.stderr
+    assert installed_prompt(day) == wanted_prompt(routine, DAY_RRULE)
+    assert watch.read_bytes() == watch_before
+    assert one_readiness_record(bare) == {
+        "timestamp": "Sat_Sep_12_21:00:00_2026",
+        "prompts": "yes",
+        "plists": "yes",
+        "files": "-",
+        "reload_pending": "-",
+    }
+
+
 def test_keeper_treats_the_stripped_trailing_newline_as_current(tmp_path):
     """The Codex app strips the final newline when it saves an automation.
     That alone must not read as drift."""

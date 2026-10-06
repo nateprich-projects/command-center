@@ -12,10 +12,11 @@ packet alone; ask for nothing more.
 Does this diff do what its tickets ask, avoid what the plan rejected, and
 break nothing the plan, `plan_md` or the repository's rules require?
 
-- `tickets` is the union of tickets the PR closes; `ticket`, its branch ticket. A change any ticket asks for is authorised.
-- `ticket.comments` and each `tickets` entry's comments (newest 30, oldest first) carry `voice`: `nate-direct` and `nate-relayed` amend the body; `agent` and `unknown` need diff evidence.
+- `tickets` lists all PR-closed tickets; `ticket` is its branch ticket. Ticket-requested changes are authorised.
+- `ticket.comments` and each `tickets` comment list (newest 30, oldest first) carry `voice`: `nate-direct`/`nate-relayed` amend ticket bodies; `agent`/`unknown` require diff evidence.
 - Check each `parent.comments` for Accept artifacts.
-- `plan_md` and the plan bind only as rules the diff must not break; if `plan_md_missing`, judge against tickets alone.
+- `plan_md` and plan bind only as rules the diff must not break; if `plan_md_missing`, judge tickets alone.
+- Outside Review focus, edge cases are notes; block only for a real defect with realistic reproduction, a missing or tautological Accept test, or merged-main failure.
 - `diff` and `changed_files` are the change at `head_sha`.
 - `pr_body` and `pr_departures` are the implementer's own claims: cite them, weigh them against the diff. Description records are read from `pr_body`. A departure never meets its requirement by itself.
 - `evidence`, the implement run's report at `head_sha`, adds findings, never meets a requirement by itself. A merged-suite failure absent on main is blocking. `reproduction: passes-on-base` does not meet a first Accept item beginning `Reproduction:` unless a Departure explains why that seam cannot show the symptom (then weigh it). `no signal`, `unsupported`, `not run` and `over budget` are weighed, not blocking. Look hardest at `pr_body`'s `Risks:`. If `unavailable`, say so; judge as usual.

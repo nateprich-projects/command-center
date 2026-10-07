@@ -206,6 +206,25 @@ def test_each_difference_is_drift(tmp_path, overrides, fragment):
     assert any(fragment in line for line in drift), drift
 
 
+@pytest.mark.parametrize(("field", "value", "expected"), [
+    ("model", "gpt-6-luna",
+     "command-center-funnel-watch-github-writer: model expected gpt-6.1-sol, "
+     "found gpt-6-luna"),
+    ("effort", "max",
+     "command-center-funnel-watch-github-writer: reasoning_effort expected "
+     "high, found max"),
+])
+def test_watch_model_and_effort_drift_are_not_ticket_lane_drift(
+        tmp_path, field, value, expected):
+    _manifest_set(tmp_path, **{
+        "command-center-funnel-watch-github-writer": {field: value}})
+
+    drift = codex_run.automation_findings(str(tmp_path))["drift"]
+
+    assert drift == [expected]
+    assert "escalated" not in drift[0]
+
+
 def test_an_automation_outside_the_manifest_is_drift(tmp_path):
     _manifest_set(tmp_path)
     _automation(tmp_path, "command-center-tickets-new")

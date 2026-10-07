@@ -537,10 +537,15 @@ muse_pid=$!
 
 (
   trap - EXIT
+  monitor_pid=""
+  trap 'if [[ -n "$monitor_pid" ]]; then kill "$monitor_pid" 2>/dev/null || true; wait "$monitor_pid" 2>/dev/null || true; fi; exit 0' TERM
   python3 "$REPO/muse_implement_handoff.py" watch \
     "$MUSE_JSON_FILE" "${MUSE_SESSION_ID:-}" "$ANSWER_FILE" \
-    "$muse_pid" "$BOUND_SECONDS" >/dev/null 2>&1
+    "$muse_pid" "$BOUND_SECONDS" >/dev/null 2>&1 &
+  monitor_pid=$!
+  wait "$monitor_pid"
   watch_status=$?
+  trap - TERM
   case "$watch_status" in
     0)
       echo "muse-implement: completed run has a valid answer; stopping its lingering process group" >&2

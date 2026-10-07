@@ -187,13 +187,24 @@ MUSE_STUB = (
     "accepted_stream = {'kind': 'session', 'id': session_id}\n"
     "terminal_stream = (accepted_stream if mode != 'foreign' else\n"
     "                   {'kind': 'session', 'id': 'another-run'})\n"
-    "accepted = {'record_type': 'event', 'payload_type': 'run.model.configured',\n"
-    "            'sequence': 1, 'stream': accepted_stream, 'payload': {}}\n"
+    "command_id = 'this-command'\n"
+    "accepted = {'record_type': 'reconciliation', 'payload_type': 'runtime.command.accepted',\n"
+    "            'sequence': 1, 'stream': accepted_stream,\n"
+    "            'payload': {'kind': 'command_accepted', 'command_id': command_id}}\n"
+    "configured = {'record_type': 'event', 'payload_type': 'run.model.configured',\n"
+    "              'sequence': 2, 'stream': accepted_stream,\n"
+    "              'payload': {'record': {'command_id': command_id,\n"
+    "                                     'run_stream': {'kind': 'run', 'id': command_id}}}}\n"
     "terminal = {'record_type': 'event',\n"
-    "            'payload_type': 'run.terminal.completed', 'sequence': 2,\n"
+    "            'payload_type': 'run.terminal.completed', 'sequence': 3,\n"
     "            'stream': terminal_stream,\n"
-    "            'payload': {'terminal': 'completed', 'text': 'done'}}\n"
-    "events = [terminal] if mode == 'unpaired' else [accepted, terminal]\n"
+    "            'payload': {'command_id': command_id, 'terminal': 'completed',\n"
+    "                        'text': 'done'}}\n"
+    "if mode == 'foreign_command':\n"
+    "    terminal['payload']['command_id'] = 'another-command'\n"
+    "events = [accepted, configured, terminal]\n"
+    "if mode == 'unpaired': events = [terminal]\n"
+    "if mode == 'no_acceptance': events = [configured, terminal]\n"
     "for event in events: print(json.dumps(event), flush=True)\n"
     "PY\n"
     "fi\n"
@@ -697,7 +708,8 @@ def test_accepted_completion_with_a_valid_answer_stops_lingering_work(
 
 @pytest.mark.parametrize(
     ("event_mode", "answer", "missing_answer"),
-    (("unpaired", ANSWER, False), ("foreign", ANSWER, False),
+    (("unpaired", ANSWER, False), ("no_acceptance", ANSWER, False),
+     ("foreign", ANSWER, False), ("foreign_command", ANSWER, False),
      ("paired", '{"done": true,', False), ("paired", ANSWER, True)),
 )
 def test_incomplete_or_unpaired_completion_cannot_handoff_early(
@@ -789,8 +801,9 @@ def test_bound_watcher_disarms_exit_before_monitoring_the_run(
 
     assert parent_trap in source
     if script == "scripts/muse-implement":
-        watcher = '(\n{}trap - EXIT\n{}python3 "$REPO/muse_implement_handoff.py" watch'.format(
+        watcher = '(\n{}trap - EXIT\n{}monitor_pid=""'.format(
             indent, indent)
+        assert 'trap \'if [[ -n "$monitor_pid" ]]' in source
     else:
         watcher = "(\n{}trap - EXIT\n{}sleep \"$BOUND_SECONDS\" &".format(
             indent, indent)
@@ -881,7 +894,7 @@ def test_watcher_killed_after_fake_job_exit_does_not_run_parent_cleanup(
     cleanup_end = source.index("\n}", cleanup_start) + 2
     cleanup = source[cleanup_start:cleanup_end]
     watcher_start = source.index(
-        '\n(\n  trap - EXIT\n  python3 "$REPO/muse_implement_handoff.py" watch',
+        '\n(\n  trap - EXIT\n  monitor_pid=""',
         source.index('killed_marker='),
     )
     watcher_end = source.index("\n) &", watcher_start) + len("\n) &")

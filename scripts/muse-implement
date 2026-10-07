@@ -385,7 +385,31 @@ fi
 TICKET_BRANCH="ticket/$TICKET_NUMBER"
 
 release_ticket() {
-  if ! python3 "$REPO/funnel.py" release "$BEGIN_REF"; then
+  # Release only this run's own claim (#2368): cleanup from an old run must
+  # never clear a successor claim. release_claim reads the live claim and
+  # releases only when it is still this run's own; an absent, foreign, or
+  # unreadable claim is left untouched and cleanup continues.
+  if ! REPO="$REPO" MUSE_RELEASE_REF="$BEGIN_REF" \
+      MUSE_RELEASE_RUN="$BEGIN_RUN" python3 - <<'EOF'; then
+import os
+import sys
+
+sys.path.insert(0, os.environ["REPO"])
+
+from engine.implement import SupersededRunError, release_claim
+
+ref = os.environ["MUSE_RELEASE_REF"]
+run = os.environ["MUSE_RELEASE_RUN"]
+try:
+    release_claim(ref, run=run, agent="muse")
+except SupersededRunError as exc:
+    print("muse-implement: not releasing {}: {}".format(ref, exc.reason),
+          file=sys.stderr)
+except Exception as exc:
+    print("muse-implement: could not verify and release {}: {}".format(
+        ref, exc), file=sys.stderr)
+    raise SystemExit(1)
+EOF
     echo "muse-implement: could not release $BEGIN_REF" >&2
   fi
 }

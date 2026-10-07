@@ -134,6 +134,36 @@ GH_STUB = (
     "git clone --quiet \"$CLONE_SOURCE\" \"$4\"\n"
 )
 
+# The runner releases through engine/implement.release_claim, which reads the
+# live claim and releases only its own (#2368). The stub scripts that
+# ownership read through MUSE_RELEASE_STATE: owned releases (recording the
+# funnel release the real helper performs), empty no-ops, other/unknown
+# refuse without releasing, and anything else explodes.
+ENGINE_IMPLEMENT_STUB = (
+    "import os, pathlib\n"
+    "root = pathlib.Path(__file__).parent.parent\n"
+    "class SupersededRunError(Exception):\n"
+    "    def __init__(self, ref, reason):\n"
+    "        self.ref = ref\n"
+    "        self.reason = reason\n"
+    "        super().__init__('superseded {}: {}'.format(ref, reason))\n"
+    "def release_claim(ref, *, run=None, agent='muse'):\n"
+    "    with (root / 'release_claim.calls').open('a') as fh:\n"
+    "        fh.write('{} run={} agent={}\\n'.format(ref, run, agent))\n"
+    "    state = os.environ.get('MUSE_RELEASE_STATE', 'owned')\n"
+    "    if state == 'owned':\n"
+    "        with (root / 'funnel.calls').open('a') as fh:\n"
+    "            fh.write('release {}\\n'.format(ref))\n"
+    "    elif state == 'empty':\n"
+    "        pass\n"
+    "    elif state == 'other':\n"
+    "        raise SupersededRunError(ref, 'another run holds the claim')\n"
+    "    elif state == 'unknown':\n"
+    "        raise SupersededRunError(ref, 'claim holder is unknown')\n"
+    "    else:\n"
+    "        raise RuntimeError('release_claim stub exploded')\n"
+)
+
 MUSE_STUB = (
     "#!/bin/bash\n"
     "count_file=\"$MUSE_COUNT\"\n"
@@ -252,6 +282,12 @@ def _stubbed_runner(tmp_path, begin, *, packet=None, bound_seconds=20,
     (repo / "muse_model.py").write_text(
         muse_model_body if muse_model_body is not None
         else (ROOT / "muse_model.py").read_text())
+    # The release-ownership helper is stubbed: the runner's bridge imports
+    # engine.implement from the claimed repo, and the stub scripts the live
+    # claim's ownership answer through MUSE_RELEASE_STATE.
+    (repo / "engine").mkdir(exist_ok=True)
+    (repo / "engine" / "__init__.py").write_text("")
+    (repo / "engine" / "implement.py").write_text(ENGINE_IMPLEMENT_STUB)
 
     remote = _seed_remote(tmp_path, ticket_branch=ticket_branch)
 
@@ -603,6 +639,81 @@ def test_a_model_failure_releases_and_finishes_errored(tmp_path):
         "muse exec failed (exit 3) on example/widgets#42\n"
     )
     assert "release example/widgets#42" in (repo / "funnel.calls").read_text()
+
+
+def _release_claim_calls(repo):
+    calls = repo / "release_claim.calls"
+    return calls.read_text().splitlines() if calls.exists() else []
+
+
+def test_release_ticket_releases_only_its_own_claim(tmp_path):
+    """Cleanup releases on exact own-claim match, naming its run (#2373)."""
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), extra_env={"MUSE_STATUS": "3"})
+
+    assert proc.returncode == 1
+    assert _release_claim_calls(repo) == [
+        "example/widgets#42 run=writer-run agent=muse"]
+    assert "release example/widgets#42" in (repo / "funnel.calls").read_text()
+
+
+@pytest.mark.parametrize("state,reason", (
+    ("other", "another run holds the claim"),
+    ("unknown", "claim holder is unknown"),
+))
+def test_release_ticket_keeps_a_claim_it_does_not_own(tmp_path, state,
+                                                       reason):
+    """A live claim newer or different from this run's own is never cleared:
+    cleanup performs no funnel release, and the errored finish still lands
+    (#2373)."""
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(),
+        extra_env={"MUSE_STATUS": "3", "MUSE_RELEASE_STATE": state})
+
+    assert proc.returncode == 1
+    assert _release_claim_calls(repo) == [
+        "example/widgets#42 run=writer-run agent=muse"]
+    assert "release example/widgets#42" not in (
+        repo / "funnel.calls").read_text()
+    assert "muse-implement: not releasing example/widgets#42: {}".format(
+        reason) in proc.stderr
+    assert _heartbeat(repo) == (
+        "finish --agent muse --run writer-run --outcome errored --note "
+        "muse exec failed (exit 3) on example/widgets#42\n"
+    )
+
+
+def test_release_ticket_noops_when_the_claim_is_absent(tmp_path):
+    """An already-released claim needs no funnel release (#2373)."""
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(),
+        extra_env={"MUSE_STATUS": "3", "MUSE_RELEASE_STATE": "empty"})
+
+    assert proc.returncode == 1
+    assert _release_claim_calls(repo) == [
+        "example/widgets#42 run=writer-run agent=muse"]
+    assert "release example/widgets#42" not in (
+        repo / "funnel.calls").read_text()
+    assert _heartbeat(repo) == (
+        "finish --agent muse --run writer-run --outcome errored --note "
+        "muse exec failed (exit 3) on example/widgets#42\n"
+    )
+
+
+def test_a_broken_ownership_read_still_finishes_errored(tmp_path):
+    """An ownership read that explodes warns but never breaks cleanup (#2373)."""
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(),
+        extra_env={"MUSE_STATUS": "3", "MUSE_RELEASE_STATE": "broken"})
+
+    assert proc.returncode == 1
+    assert "release example/widgets#42" not in (
+        repo / "funnel.calls").read_text()
+    assert "muse-implement: could not release example/widgets#42" in proc.stderr
+    assert _heartbeat(repo) == (
+        "finish --agent muse --run writer-run --outcome errored --note "
+        "muse exec failed (exit 3) on example/widgets#42\n"
+    )
 
 
 def test_a_missing_answer_releases_and_finishes_errored(tmp_path):

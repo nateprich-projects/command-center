@@ -162,3 +162,83 @@ def test_later_run_binding_still_supersedes_the_first_claim(monkeypatch):
         implement._require_current_claim(ticket.ref, "first-run", "codex")
 
     assert refusal.value.reason == "another run holds the claim"
+
+
+def test_owned_release_cli_cannot_clear_a_newer_runs_claim(
+        monkeypatch, capsys,
+):
+    rows, ticket = _claim_rows()
+    ticket.in_motion_since = NOW
+    claim_ts = int(NOW.timestamp())
+    records = {
+        "muse": [{
+            "run": "old-muse", "agent": "muse", "phase": "bind",
+            "ts": claim_ts - 1, "do": "ticket", "work": ticket.ref,
+        }],
+        "codex": [{
+            "run": "new-codex", "agent": "codex", "phase": "bind",
+            "ts": claim_ts + 1, "do": "ticket", "work": ticket.ref,
+        }],
+        "claude": [],
+    }
+    writes = []
+    monkeypatch.setattr(
+        funnel, "load_project_items_by_refs", lambda _refs: [ticket]
+    )
+    monkeypatch.setattr(
+        heartbeat, "read_github_strict",
+        lambda agent: records.get(agent, []),
+    )
+    monkeypatch.setattr(
+        funnel, "write_lock",
+        lambda *args: writes.append(args),
+    )
+
+    result = funnel.main(
+        ["release", ticket.ref, "--run", "old-muse", "--agent", "muse"],
+        _items_loader=lambda **_kwargs: rows,
+        _reset_api_usage=False,
+    )
+
+    assert result != 0
+    assert "another run holds the claim" in capsys.readouterr().err
+    assert writes == []
+    assert ticket.in_motion_since == NOW
+
+
+def test_owned_release_cli_releases_its_own_claim(monkeypatch):
+    rows, ticket = _claim_rows()
+    ticket.in_motion_since = NOW
+    records = {
+        "muse": [{
+            "run": "own-muse", "agent": "muse", "phase": "bind",
+            "ts": int(NOW.timestamp()) + 1,
+            "do": "ticket", "work": ticket.ref,
+        }],
+        "codex": [],
+        "claude": [],
+    }
+    writes = []
+
+    def write_lock(item, value):
+        writes.append((item.ref, value))
+        item.in_motion_since = funnel.parse_time(value) if value else None
+
+    monkeypatch.setattr(
+        funnel, "load_project_items_by_refs", lambda _refs: [ticket]
+    )
+    monkeypatch.setattr(
+        heartbeat, "read_github_strict",
+        lambda agent: records.get(agent, []),
+    )
+    monkeypatch.setattr(funnel, "write_lock", write_lock)
+
+    result = funnel.main(
+        ["release", ticket.ref, "--run", "own-muse", "--agent", "muse"],
+        _items_loader=lambda **_kwargs: rows,
+        _reset_api_usage=False,
+    )
+
+    assert result == 0
+    assert writes == [(ticket.ref, "")]
+    assert ticket.in_motion_since is None

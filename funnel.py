@@ -311,9 +311,9 @@ PROJECT_ID = "PVT_kwHOD7A-N84BihDg"
 #: single ticket should honestly take.
 LOCK_TTL = timedelta(hours=2)
 
-#: A run that has not pushed its deterministic ticket branch within this
-#: window has left no durable work to protect. Branch absence is established
-#: from one bounded repository scan, never from a per-ticket lookup.
+#: The branchless grace for abandoned-claim reconciliation. A stopped run's
+#: branch absence is established from one bounded repository scan, never from
+#: a per-ticket lookup.
 CLAIM_BRANCH_GRACE = timedelta(minutes=30)
 
 #: A ``begin`` can spend long enough reading and reconciling the Project for a
@@ -20612,20 +20612,19 @@ def reconcile_abandoned_claims(
     items: Sequence[Item], now: datetime,
     pr_facts: Optional[Dict[str, Optional[Dict[str, object]]]] = None,
 ) -> List[Dict[str, object]]:
-    """Release heartbeat-bound claims that never produced a ticket branch.
+    """Release stopped heartbeat-bound claims that never produced a branch.
 
     A slow ``begin`` can outlive the Codex exec tool's first output wait. If
     the caller walks away, that process may still claim and bind a ticket but
-    no implementation ever reaches the deterministic remote branch. The bind
-    identifies which open heartbeat start owns the claim; explicit branch
-    absence after the normal 30-minute grace makes the abandoned work safe to
-    release. Unknown branch state fails closed.
+    no implementation ever reaches the deterministic remote branch. An open
+    heartbeat start is still active; only a terminal finish proves that its
+    run stopped. Unreadable or unresolved heartbeat state fails closed. A
+    stopped run is releasable after the normal 30-minute grace only when its
+    branch is explicitly absent and it still owns the Project claim.
 
-    The abandoned start is finished as ``errored`` as part of the same
-    reconciliation. Otherwise the claim would recover while the watchdog kept
-    reporting a start with no matching finish. Both writes are append-only or
-    derived from GitHub state, and a later pass is idempotent because the
-    Project claim is empty.
+    A terminal heartbeat is already recorded for a stopped run, so
+    reconciliation only releases its still-owned claim. A later pass is
+    idempotent because the Project claim is empty.
     """
     try:
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -20642,10 +20641,21 @@ def reconcile_abandoned_claims(
             records = heartbeat.read(agent)
         except Exception:
             continue
-        bound = heartbeat.bindings(records)
-        for start in heartbeat.open_starts(records):
-            run = start.get("run")
-            binding = bound.get(run)
+        if getattr(records, "unreadable", 0):
+            continue
+        for view in heartbeat.run_views(records).values():
+            start = view.get("start")
+            if not isinstance(start, dict):
+                continue
+            # An open start is active by the durable heartbeat contract. An
+            # unresolved close cannot identify which run stopped, so both it
+            # and a missing start leave liveness unknown.
+            if view.get("pairing") not in (
+                heartbeat.PAIRING_FINISHED,
+                heartbeat.PAIRING_REBEGUN,
+            ):
+                continue
+            binding = view.get("binding")
             if not binding or binding.get("do") != "ticket":
                 continue
             ref = str(binding.get("work"))
@@ -20657,7 +20667,7 @@ def reconcile_abandoned_claims(
                 or now - item.in_motion_since < CLAIM_BRANCH_GRACE
             ):
                 continue
-            candidates.append((agent, start, ref, item))
+            candidates.append((agent, view, ref, item))
 
     if not candidates:
         return []
@@ -20671,39 +20681,27 @@ def reconcile_abandoned_claims(
 
     reconciled: List[Dict[str, object]] = []
     released: Set[str] = set()
-    for agent, start, ref, item in candidates:
+    for agent, view, ref, item in candidates:
         if ref in released or _ticket_branch_exists(item, pr_facts) is not False:
             continue
-        write_lock(item, "")
+        run = view.get("run")
+        if not isinstance(run, str) or not run:
+            continue
+        try:
+            cmd_release(items, now, ref, run=run, agent=agent)
+        except GitHubError:
+            # A changed, unreadable, or successor claim is not this run's to
+            # release. The next reconciliation can inspect the live state.
+            continue
         item.in_motion_since = None
         released.add(ref)
 
-        run = start.get("run")
-        record = {
-            "run": run,
-            "agent": agent,
-            "phase": "finish",
-            "ts": int(now.timestamp()),
-            "outcome": "errored",
-            "note": (
-                "reconciled: released {} after no ticket branch activity "
-                "within 30 minutes"
-            ).format(ref),
-            "reconciled_claim": ref,
-        }
-        result: Dict[str, object] = {
+        reconciled.append({
             "run": run,
             "agent": agent,
             "ref": ref,
             "result": "released",
-        }
-        try:
-            result["kept"] = heartbeat.append(agent, record)
-        except Exception as exc:
-            # Instrumentation cannot put the already-released GitHub claim
-            # back. Report the missing finish explicitly in begin's JSON.
-            result["finish_error"] = str(exc)
-        reconciled.append(result)
+        })
     return reconciled
 
 
@@ -23390,7 +23388,17 @@ def cmd_answer(items: List[Item], now: datetime, verb: str, ref: str,
     return 0
 
 
-def cmd_release(items: List[Item], now: datetime, ref: str) -> int:
+def cmd_release(items: List[Item], now: datetime, ref: str,
+                run: Optional[str] = None, agent: Optional[str] = None) -> int:
+    if bool(run) != bool(agent):
+        raise GitHubError("release requires --run and --agent together")
+    if run is not None and agent is not None:
+        from engine import implement
+        try:
+            implement.release_claim(ref, run=run, agent=agent)
+        except implement.ImplementError as exc:
+            raise GitHubError(str(exc)) from exc
+        return 0
     write_lock(find(items, ref), "")
     return 0
 
@@ -23760,6 +23768,11 @@ def main(argv: Optional[Sequence[str]] = None, *,
     )
     release = sub.add_parser("release", help="give up the lock on a ticket")
     release.add_argument("ref", help="issue number, owner/repo#number, or URL")
+    release.add_argument("--run", default=None,
+                         help="bound heartbeat run for an ownership-checked release")
+    release.add_argument("--agent", default=None,
+                         choices=tuple(AGENTS_BY_ROLE["implement"]),
+                         help="implementing agent that owns the run")
     for verb, help_text in (
         ("pin", "pin a project: it leads Nate's queue at its gate and its tickets lead the engineers' queue"),
         ("unpin", "clear a project's pin"),
@@ -23997,6 +24010,9 @@ def main(argv: Optional[Sequence[str]] = None, *,
         if args.proof and not args.blocked_on:
             parser.error("--proof requires --blocked-on")
     if (args.command == "claim"
+            and bool(args.run) != bool(args.agent)):
+        parser.error("--run and --agent must be supplied together")
+    if (args.command == "release"
             and bool(args.run) != bool(args.agent)):
         parser.error("--run and --agent must be supplied together")
     if (args.command == "capture" and args.origin == "agent"
@@ -24339,7 +24355,8 @@ def main(argv: Optional[Sequence[str]] = None, *,
                 run=args.run, agent=args.agent,
             )
         if args.command == "release":
-            return cmd_release(items, now, args.ref)
+            return cmd_release(items, now, args.ref,
+                               run=args.run, agent=args.agent)
         if args.command == "pin":
             return cmd_pin(items, now, args.ref, args.confirmed,
                            args.run, args.agent)

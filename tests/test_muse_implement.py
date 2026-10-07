@@ -561,7 +561,10 @@ def test_a_clone_failure_finishes_errored_and_never_launches_muse(tmp_path):
         "finish --agent muse --run writer-run --outcome errored --note "
         "could not clone example/widgets into the fresh implementation workspace\n"
     )
-    assert "release example/widgets#42" in (repo / "funnel.calls").read_text()
+    assert (
+        "release example/widgets#42 --run writer-run --agent muse"
+        in (repo / "funnel.calls").read_text()
+    )
     assert not list((tmp_path / "workspaces").iterdir())
 
 

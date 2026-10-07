@@ -562,6 +562,17 @@ AUTOMATIONS_EXPECTED = {
     "command-center-tickets-weekday-mornings": "escalated",
 }
 
+# #2296's native GitHub watch is not an implement lane. Its BYHOUR rule must
+# not be interpreted as an escalated ticket tier.
+AUTOMATIONS_WATCH_EXPECTED = {
+    "command-center-funnel-watch-github-writer": {
+        "model": "gpt-6.1-sol",
+        "reasoning_effort": "high",
+        "status": "ACTIVE",
+        "rrule": "RRULE:FREQ=DAILY;BYHOUR=4,16;BYMINUTE=13",
+    },
+}
+
 #: Retired by #1315. Kept on disk, paused, because it is not established
 #: that the app tolerates an automation directory removed by hand. One that
 #: is present must not be active; one that is gone is not drift.
@@ -640,9 +651,11 @@ def automation_findings(root: Optional[str] = None) -> Dict[str, List[str]]:
             found[name] = {}
             unreadable.add(name)
     for name in sorted(set(found) - set(AUTOMATIONS_EXPECTED)
+                       - set(AUTOMATIONS_WATCH_EXPECTED)
                        - AUTOMATIONS_RETIRED):
         drift.append("{}: not in the manifest".format(name))
-    for name in sorted(set(AUTOMATIONS_EXPECTED) - set(found)):
+    for name in sorted((set(AUTOMATIONS_EXPECTED)
+                        | set(AUTOMATIONS_WATCH_EXPECTED)) - set(found)):
         drift.append("{}: missing".format(name))
     for name, fields in sorted(found.items()):
         status = fields.get("status")
@@ -670,6 +683,11 @@ def automation_findings(root: Optional[str] = None) -> Dict[str, List[str]]:
                 drift.append("{}: escalated, but its rrule has no {} so the "
                              "keeper installs it as standard".format(
                                  name, BYHOUR))
+        elif name in AUTOMATIONS_WATCH_EXPECTED:
+            for field, expected in AUTOMATIONS_WATCH_EXPECTED[name].items():
+                if fields.get(field) != expected:
+                    drift.append("{}: {} expected {}, found {}".format(
+                        name, field, expected, fields.get(field)))
         memory = os.path.join(root, name, MEMORY_FILE)
         try:
             size = "{:,} bytes".format(os.path.getsize(memory))

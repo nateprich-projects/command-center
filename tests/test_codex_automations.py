@@ -49,7 +49,7 @@ def _automation(root, name, *, model="gpt-6-luna", effort="max",
 
 
 def _manifest_set(root, **overrides):
-    """The set the manifest expects: two implementers, one watch, three retired."""
+    """The set the manifest expects: two implement, one watch, three retired."""
     specs = {
         "command-center-tickets-hourly": {"rrule": ALL_DAY},
         "command-center-tickets-weekday-mornings": {"rrule": EVERY_HOUR},
@@ -108,7 +108,7 @@ def _write_automation_window(root, *, errors=0):
 # --- the manifest -----------------------------------------------------------
 
 
-def test_the_manifest_separates_two_implementers_one_watch_and_three_retired():
+def test_the_manifest_names_two_implement_automations_one_watch_and_three_retired():
     assert codex_run.AUTOMATIONS_EXPECTED == {
         "command-center-tickets-hourly": "standard",
         "command-center-tickets-weekday-mornings": "escalated",

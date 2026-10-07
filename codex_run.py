@@ -562,8 +562,8 @@ AUTOMATIONS_EXPECTED = {
     "command-center-tickets-weekday-mornings": "escalated",
 }
 
-# A native GitHub watch is not a ticket implement lane. Its schedule may
-# contain BYHOUR without making it an escalated ticket automation.
+# #2296's native GitHub watch is not an implement lane. Its BYHOUR rule must
+# not be interpreted as an escalated ticket tier.
 AUTOMATIONS_WATCH_EXPECTED = {
     "command-center-funnel-watch-github-writer": {
         "model": "gpt-6.1-sol",

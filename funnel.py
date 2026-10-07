@@ -32,6 +32,7 @@ import os
 import pathlib
 import random
 import re
+import shlex
 import secrets
 import socket
 import socketserver
@@ -311,9 +312,9 @@ PROJECT_ID = "PVT_kwHOD7A-N84BihDg"
 #: single ticket should honestly take.
 LOCK_TTL = timedelta(hours=2)
 
-#: The branchless grace for abandoned-claim reconciliation. A stopped run's
-#: branch absence is established from one bounded repository scan, never from
-#: a per-ticket lookup.
+#: A run that has not pushed its deterministic ticket branch within this
+#: window has left no durable work to protect. Branch absence is established
+#: from one bounded repository scan, never from a per-ticket lookup.
 CLAIM_BRANCH_GRACE = timedelta(minutes=30)
 
 #: A ``begin`` can spend long enough reading and reconciling the Project for a
@@ -3723,8 +3724,9 @@ def in_motion(
 ) -> List[Item]:
     """Every ticket currently claimed, oldest claim first.
 
-    The claim covers the opening before a branch exists. After the grace
-    period, only a confirmed remote branch keeps it live until the hard TTL.
+    The claim covers the opening before a branch exists. A missing branch
+    alone cannot prove that its runner stopped; only the hard TTL or verified
+    abandoned-run reconciliation releases it.
     """
     rows = list(items)
     stale = {item.ref for item in stale_locks(rows, now, pr_facts=pr_facts)}
@@ -3763,11 +3765,11 @@ def stale_locks(
     now: datetime,
     pr_facts: Optional[Dict[str, Optional[Dict[str, object]]]] = None,
 ) -> List[Item]:
-    """Claims past the TTL or branchless after the opening grace period.
+    """Claims past the hard TTL, regardless of branch state.
 
-    Branch absence has to be explicit. Missing or truncated facts preserve the
-    claim, so a run that pushed anything can never lose its lock because a scan
-    could not see far enough.
+    The 30-minute branchless recovery belongs to ``reconcile_abandoned_claims``
+    because only that path can verify the run has stopped and still owns the
+    Project lock. Queue selection must preserve an unverified live claim.
     """
     return sorted(
         (
@@ -3775,13 +3777,7 @@ def stale_locks(
             for i in items
             if i.state == "OPEN"
             and i.in_motion_since is not None
-            and (
-                now - i.in_motion_since >= LOCK_TTL
-                or (
-                    now - i.in_motion_since >= CLAIM_BRANCH_GRACE
-                    and _ticket_branch_exists(i, pr_facts) is False
-                )
-            )
+            and now - i.in_motion_since >= LOCK_TTL
         ),
         key=lambda i: i.in_motion_since or now,
     )
@@ -20617,10 +20613,14 @@ def reconcile_abandoned_claims(
     A slow ``begin`` can outlive the Codex exec tool's first output wait. If
     the caller walks away, that process may still claim and bind a ticket but
     no implementation ever reaches the deterministic remote branch. An open
-    heartbeat start is still active; only a terminal finish proves that its
-    run stopped. Unreadable or unresolved heartbeat state fails closed. A
-    stopped run is releasable after the normal 30-minute grace only when its
-    branch is explicitly absent and its binding still owns the Project claim.
+    heartbeat start is still active by the durable heartbeat contract: a
+    start without a terminal finish is never finished here as errored and
+    never released, however long past the grace it stands. Only a terminal
+    finish proves that its run stopped. Unreadable spool state, a missing
+    start, or an unresolved close leaves liveness unknown and fails closed.
+    A stopped run is releasable after the normal 30-minute grace only when
+    its branch is explicitly absent and its binding still owns the Project
+    claim, so an old run never releases a newer or different claim.
 
     A terminal heartbeat is already recorded for a stopped run, so
     reconciliation only releases its still-owned claim. A later pass is
@@ -20688,68 +20688,11 @@ def reconcile_abandoned_claims(
         if not isinstance(run, str) or not run:
             continue
         try:
-            live_items = load_project_items_by_refs([ref])
-            if (
-                live_items is None
-                or len(live_items) != 1
-                or live_items[0].ref != ref
-            ):
-                live_items = load_items(include_details=False)
-            live_item = find(live_items, ref)
-        except Exception:
-            continue
-        if (
-            live_item is None
-            or live_item.state != "OPEN"
-            or live_item.in_motion_since is None
-            or now - live_item.in_motion_since < CLAIM_BRANCH_GRACE
-            or _ticket_branch_exists(live_item, pr_facts) is not False
-        ):
-            continue
-
-        # The Project field records only a timestamp. Resolve its current
-        # owner from fresh durable bindings; a later or ambiguous binding must
-        # not let an old stopped run clear a successor's claim.
-        try:
-            binding_records = []
-            for owner_agent in AGENTS_BY_ROLE.get("implement", {}):
-                binding_records.extend(
-                    heartbeat.read_github_strict(owner_agent)
-                )
-            owner_views = heartbeat.run_views(binding_records)
-            claim_ts = int(live_item.in_motion_since.timestamp())
-        except Exception:
-            continue
-        claim_owners = []
-        for bound_run, owner_view in owner_views.items():
-            binding = owner_view.get("binding")
-            bound_ts = binding.get("ts") if isinstance(binding, dict) else None
-            if (
-                binding
-                and binding.get("do") == "ticket"
-                and str(binding.get("work")) == ref
-                and isinstance(bound_ts, int)
-                and not isinstance(bound_ts, bool)
-                and bound_ts >= claim_ts
-            ):
-                claim_owners.append((bound_ts, bound_run, owner_view.get("agent")))
-        if not claim_owners:
-            continue
-        latest_ts = max(bound_ts for bound_ts, _, _ in claim_owners)
-        holders = {
-            (bound_run, owner_agent)
-            for bound_ts, bound_run, owner_agent in claim_owners
-            if bound_ts == latest_ts
-        }
-        if len(holders) != 1 or next(iter(holders)) != (run, agent):
-            continue
-
-        try:
-            cmd_release(live_items, now, ref)
+            cmd_release(items, now, ref, run=run, agent=agent)
         except GitHubError:
-            # A changed or unreadable claim is not this run's to release.
+            # The Project lock or heartbeat owner changed after the snapshot,
+            # or cannot be read. Neither case licenses a stale run's release.
             continue
-        live_item.in_motion_since = None
         item.in_motion_since = None
         released.add(ref)
 
@@ -20760,6 +20703,7 @@ def reconcile_abandoned_claims(
             "result": "released",
         })
     return reconciled
+
 
 def reconcile_approved_merges(
     items: List[Item], now: datetime,
@@ -23444,7 +23388,74 @@ def cmd_answer(items: List[Item], now: datetime, verb: str, ref: str,
     return 0
 
 
-def cmd_release(items: List[Item], now: datetime, ref: str) -> int:
+def claim_state(ref: str, run: Optional[str], agent: str
+                ) -> Tuple[str, List[Item]]:
+    """Read the current Project claim and its latest heartbeat binding.
+
+    Funnel owns the Project write path, so both the runner and the CLI can
+    verify ownership without making funnel import its engine consumer.
+    """
+    try:
+        items = load_project_items_by_refs([ref])
+        if items is None or len(items) != 1 or items[0].ref != ref:
+            items = load_items(include_details=False)
+        item = find(items, ref)
+    except Exception as exc:
+        raise GitHubError("claim could not be read") from exc
+    lock = item.in_motion_since
+    if lock is None:
+        return "empty", items
+    if not run:
+        return "unknown", items
+    try:
+        import heartbeat
+
+        records = []
+        for owner_agent in AGENTS_BY_ROLE.get("implement", {}):
+            records.extend(heartbeat.read_github_strict(owner_agent))
+        bindings = heartbeat.bindings(records)
+    except Exception as exc:
+        raise GitHubError("heartbeat bindings could not be read") from exc
+
+    try:
+        claim_ts = int(lock.timestamp())
+    except Exception as exc:
+        raise GitHubError("claim timestamp is unreadable") from exc
+    candidates = []
+    for bound_run, binding in bindings.items():
+        bound_ts = binding.get("ts")
+        if (
+            binding.get("do") == "ticket"
+            and str(binding.get("work")) == ref
+            and isinstance(bound_ts, int)
+            and not isinstance(bound_ts, bool)
+            and bound_ts >= claim_ts
+        ):
+            candidates.append((bound_ts, bound_run))
+    if not candidates:
+        return "unknown", items
+    latest_ts = max(ts for ts, _bound_run in candidates)
+    holders = {bound_run for ts, bound_run in candidates if ts == latest_ts}
+    if len(holders) != 1:
+        return "unknown", items
+    return ("owned" if next(iter(holders)) == run else "other"), items
+
+
+def cmd_release(items: List[Item], now: datetime, ref: str,
+                run: Optional[str] = None, agent: Optional[str] = None) -> int:
+    if bool(run) != bool(agent):
+        raise GitHubError("release requires --run and --agent together")
+    if run is not None and agent is not None:
+        state, current_items = claim_state(ref, run, agent)
+        if state == "empty":
+            return 0
+        if state != "owned":
+            raise GitHubError(
+                "another run holds the claim" if state == "other"
+                else "claim holder is unknown"
+            )
+        write_lock(find(current_items, ref), "")
+        return 0
     write_lock(find(items, ref), "")
     return 0
 
@@ -23814,6 +23825,11 @@ def main(argv: Optional[Sequence[str]] = None, *,
     )
     release = sub.add_parser("release", help="give up the lock on a ticket")
     release.add_argument("ref", help="issue number, owner/repo#number, or URL")
+    release.add_argument("--run", default=None,
+                         help="bound heartbeat run for an ownership-checked release")
+    release.add_argument("--agent", default=None,
+                         choices=tuple(AGENTS_BY_ROLE["implement"]),
+                         help="implementing agent that owns the run")
     for verb, help_text in (
         ("pin", "pin a project: it leads Nate's queue at its gate and its tickets lead the engineers' queue"),
         ("unpin", "clear a project's pin"),
@@ -24051,6 +24067,9 @@ def main(argv: Optional[Sequence[str]] = None, *,
         if args.proof and not args.blocked_on:
             parser.error("--proof requires --blocked-on")
     if (args.command == "claim"
+            and bool(args.run) != bool(args.agent)):
+        parser.error("--run and --agent must be supplied together")
+    if (args.command == "release"
             and bool(args.run) != bool(args.agent)):
         parser.error("--run and --agent must be supplied together")
     if (args.command == "capture" and args.origin == "agent"
@@ -24393,6 +24412,9 @@ def main(argv: Optional[Sequence[str]] = None, *,
                 run=args.run, agent=args.agent,
             )
         if args.command == "release":
+            if args.run is not None:
+                return cmd_release(items, now, args.ref,
+                                   run=args.run, agent=args.agent)
             return cmd_release(items, now, args.ref)
         if args.command == "pin":
             return cmd_pin(items, now, args.ref, args.confirmed,

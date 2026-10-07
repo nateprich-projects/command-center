@@ -162,3 +162,59 @@ def test_later_run_binding_still_supersedes_the_first_claim(monkeypatch):
         implement._require_current_claim(ticket.ref, "first-run", "codex")
 
     assert refusal.value.reason == "another run holds the claim"
+
+
+def test_owned_release_cli_refuses_an_old_run_without_writing(monkeypatch, capsys):
+    rows, ticket = _claim_rows()
+    ticket.in_motion_since = NOW
+    monkeypatch.setattr(
+        funnel, "claim_state",
+        lambda ref, run, agent: ("other", rows),
+    )
+    monkeypatch.setattr(
+        funnel, "write_lock",
+        lambda *args: pytest.fail("a superseded run cleared the newer claim"),
+    )
+
+    result = funnel.main(
+        ["release", ticket.ref, "--run", "old-run", "--agent", "muse"],
+        _items_loader=lambda **kwargs: rows,
+        _reset_api_usage=False,
+    )
+
+    assert result != 0
+    assert "another run holds the claim" in capsys.readouterr().err
+    assert ticket.in_motion_since == NOW
+
+
+def test_owned_release_cli_clears_only_its_own_claim(monkeypatch):
+    rows, ticket = _claim_rows()
+    ticket.in_motion_since = NOW
+    monkeypatch.setattr(
+        funnel, "claim_state",
+        lambda ref, run, agent: ("owned", rows)
+        if (ref, run, agent) == (ticket.ref, "owner-run", "muse")
+        else ("other", rows),
+    )
+    writes = []
+    monkeypatch.setattr(
+        funnel, "write_lock",
+        lambda item, value: writes.append((item.ref, value)),
+    )
+
+    assert funnel.cmd_release(
+        rows, NOW, ticket.ref, run="owner-run", agent="muse"
+    ) == 0
+    assert writes == [(ticket.ref, "")]
+
+
+def test_release_refuses_a_partial_owner_identity_before_writing(monkeypatch):
+    rows, ticket = _claim_rows()
+    monkeypatch.setattr(
+        funnel, "write_lock",
+        lambda *args: pytest.fail("partial identity cleared the claim"),
+    )
+
+    with pytest.raises(funnel.GitHubError,
+                       match="--run and --agent together"):
+        funnel.cmd_release(rows, NOW, ticket.ref, run="old-run")

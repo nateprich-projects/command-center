@@ -59,6 +59,7 @@ import contextlib
 import json
 import os
 import re
+import socket
 import glob
 import math
 from datetime import datetime, timezone
@@ -2842,6 +2843,8 @@ def main(argv=None) -> int:
         if args.command == "start":
             run_id = uuid.uuid4().hex[:12]
             current_session = session_id(args.agent)
+            runner_pid = (os.environ.get("MUSE_RUNNER_PID")
+                          if args.agent == "muse" else None)
             records, unread = _read_for_run(args.agent)
             if unread is not None and current_session:
                 # Without a session id no re-begin is checked, so an unread
@@ -2856,7 +2859,7 @@ def main(argv=None) -> int:
             close_rebegun_starts(
                 args.agent, records, run_id, current_session
             )
-            kept = append(args.agent, {
+            start_record = {
                 "run": run_id,
                 "agent": args.agent,
                 "phase": "start",
@@ -2870,7 +2873,11 @@ def main(argv=None) -> int:
                 "repo": repo_state(),
                 "runtime": runtime_state(),
                 **detect_model(args.agent),
-            })
+            }
+            if runner_pid and runner_pid.isdecimal() and int(runner_pid) > 0:
+                start_record["runner_pid"] = int(runner_pid)
+                start_record["runner_host"] = socket.gethostname()
+            kept = append(args.agent, start_record)
             _report(kept)
             print(run_id)
             return 0

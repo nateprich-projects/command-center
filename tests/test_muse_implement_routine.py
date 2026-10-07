@@ -41,6 +41,16 @@ def test_runtime_returns_one_structured_answer_as_a_file():
     assert "releases the claim, and finishes the run" in normalized
 
 
+def test_runtime_limits_model_tests_and_stops_them_before_the_final_answer():
+    runtime = routine().split("\n---\n", 1)[1]
+    normalized = " ".join(runtime.split()).lower()
+
+    assert "relevant" in normalized and "time-bounded tests" in normalized
+    assert "stop any outstanding test jobs" in normalized
+    assert "mandatory full checkout suite" in normalized
+    assert "finish-ticket" in normalized
+
+
 def test_runtime_names_no_protocol_the_runner_owns():
     runtime = routine().split("\n---\n", 1)[1]
     normalized = " ".join(runtime.split())

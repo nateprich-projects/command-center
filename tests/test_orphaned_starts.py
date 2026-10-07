@@ -5,6 +5,7 @@ from __future__ import annotations
 import pathlib
 import sys
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -188,17 +189,17 @@ def test_reconcile_releases_a_bound_claim_with_no_branch_after_30_minutes(
         )},
         {ticket.ref: None},
     )
-    writes = []
+    releases = []
     monkeypatch.setattr(
-        funnel, "write_lock",
-        lambda item, value: writes.append((item.ref, value)),
+        funnel, "cmd_release",
+        lambda items, now, ref, **kw: releases.append((ref, kw)) or 0,
     )
 
     result = funnel.reconcile_abandoned_claims(
         [project, ticket], NOW, pr_facts={ticket.ref: None}
     )
 
-    assert writes == [(ticket.ref, "")]
+    assert releases == [(ticket.ref, {"run": "abandoned", "agent": "codex"})]
     assert ticket.in_motion_since is None
     assert result == [{
         "run": "abandoned",
@@ -213,6 +214,147 @@ def test_reconcile_releases_a_bound_claim_with_no_branch_after_30_minutes(
     assert finish["phase"] == "finish"
     assert finish["outcome"] == "errored"
     assert finish["reconciled_claim"] == ticket.ref
+
+
+def test_reconcile_preserves_a_live_branchless_muse_run(monkeypatch):
+    project = _project(1)
+    claimed_at = NOW - funnel.CLAIM_BRANCH_GRACE - timedelta(seconds=1)
+    ticket = _ticket(9, project, in_motion_since=claimed_at)
+    start = _open_work_start("live", ticket.ref, ts=int(claimed_at.timestamp()),
+                             agent="muse")
+    start[0].update(session_id="session-live", runner_pid=1234)
+    appended = _wire(monkeypatch, {"muse": start}, {ticket.ref: None})
+    monkeypatch.setattr(funnel, "_muse_run_liveness", lambda record: True)
+    monkeypatch.setattr(
+        funnel, "cmd_release",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("a live run must retain its claim")),
+    )
+
+    assert funnel.reconcile_abandoned_claims(
+        [project, ticket], NOW, pr_facts={ticket.ref: None}
+    ) == []
+    assert ticket.in_motion_since == claimed_at
+    assert appended == []
+
+
+def test_reconcile_preserves_muse_claim_when_liveness_is_unknown(monkeypatch):
+    project = _project(1)
+    claimed_at = NOW - funnel.CLAIM_BRANCH_GRACE - timedelta(seconds=1)
+    ticket = _ticket(9, project, in_motion_since=claimed_at)
+    start = _open_work_start("unknown", ticket.ref,
+                             ts=int(claimed_at.timestamp()), agent="muse")
+    appended = _wire(monkeypatch, {"muse": start}, {ticket.ref: None})
+    monkeypatch.setattr(funnel, "_muse_run_liveness", lambda record: None)
+    monkeypatch.setattr(
+        funnel, "cmd_release",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("unknown liveness must preserve the claim")),
+    )
+
+    assert funnel.reconcile_abandoned_claims(
+        [project, ticket], NOW, pr_facts={ticket.ref: None}
+    ) == []
+    assert ticket.in_motion_since == claimed_at
+    assert appended == []
+
+
+def test_reconcile_releases_stopped_muse_run_but_not_a_successor(monkeypatch):
+    from engine import implement
+
+    project = _project(1)
+    claimed_at = NOW - funnel.CLAIM_BRANCH_GRACE - timedelta(seconds=1)
+    ticket = _ticket(9, project, in_motion_since=claimed_at)
+    old = _open_work_start("old", ticket.ref,
+                           ts=int(claimed_at.timestamp()) - 60, agent="muse")
+    old[0].update(session_id="session-stopped", runner_pid=1234)
+    appended = _wire(monkeypatch, {"muse": old}, {ticket.ref: None})
+    monkeypatch.setattr(funnel, "_muse_run_liveness", lambda record: False)
+    monkeypatch.setattr(implement, "_claim_state",
+                        lambda ref, run, agent: ("other", [ticket]))
+    monkeypatch.setattr(
+        funnel, "write_lock",
+        lambda *args: (_ for _ in ()).throw(
+            AssertionError("old run must not clear the successor claim")),
+    )
+
+    assert funnel.reconcile_abandoned_claims(
+        [project, ticket], NOW, pr_facts={ticket.ref: None}
+    ) == []
+    assert ticket.in_motion_since == claimed_at
+    assert appended == []
+
+
+def test_reconcile_releases_a_stopped_muse_run_that_still_owns_its_claim(
+    monkeypatch,
+):
+    from engine import implement
+
+    project = _project(1)
+    claimed_at = NOW - funnel.CLAIM_BRANCH_GRACE - timedelta(seconds=1)
+    ticket = _ticket(9, project, in_motion_since=claimed_at)
+    start = _open_work_start("stopped", ticket.ref,
+                             ts=int(claimed_at.timestamp()), agent="muse")
+    start[0].update(session_id="session-stopped", runner_pid=1234)
+    appended = _wire(monkeypatch, {"muse": start}, {ticket.ref: None})
+    monkeypatch.setattr(funnel, "_muse_run_liveness", lambda record: False)
+    monkeypatch.setattr(implement, "_claim_state",
+                        lambda ref, run, agent: ("owned", [ticket]))
+    writes = []
+    monkeypatch.setattr(funnel, "write_lock",
+                        lambda item, value: writes.append((item.ref, value)))
+
+    result = funnel.reconcile_abandoned_claims(
+        [project, ticket], NOW, pr_facts={ticket.ref: None}
+    )
+
+    assert writes == [(ticket.ref, "")]
+    assert ticket.in_motion_since is None
+    assert result[0]["run"] == "stopped"
+    assert result[0]["result"] == "released"
+    assert appended[0][1]["outcome"] == "errored"
+
+
+def test_muse_liveness_matches_only_the_recorded_runner_or_model(monkeypatch):
+    start = {"runner_pid": 1234, "session_id": "session-live",
+             "runner_host": funnel.socket.gethostname()}
+    commands = (
+        "1234 S /bin/bash /Users/nateprich/.claude/command-center-run/scripts/muse-implement standard high\n"
+        "5678 S /Users/nateprich/.local/bin/muse-bin-1.4.3 exec --session-id session-live --model muse\n"
+    )
+    monkeypatch.setattr(funnel.subprocess, "run",
+                        lambda *args, **kwargs: SimpleNamespace(
+                            returncode=0, stdout=commands))
+    assert funnel._muse_run_liveness(start) is True
+    assert funnel._muse_run_liveness({
+        "runner_host": funnel.socket.gethostname(),
+        "session_id": "session-live",
+    }) is True
+
+    other = (
+        "1234 S /bin/bash /tmp/unrelated\n"
+        "5678 S /Users/nateprich/.local/bin/muse-bin-1.4.3 exec --session-id other-session\n"
+    )
+    monkeypatch.setattr(funnel.subprocess, "run",
+                        lambda *args, **kwargs: SimpleNamespace(
+                            returncode=0, stdout=other))
+    assert funnel._muse_run_liveness(start) is False
+
+    monkeypatch.setattr(funnel.subprocess, "run",
+                        lambda *args, **kwargs: SimpleNamespace(
+                            returncode=1, stdout=""))
+    assert funnel._muse_run_liveness(start) is None
+    assert funnel._muse_run_liveness({}) is None
+
+    monkeypatch.setattr(
+        funnel.subprocess, "run",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("remote-host process must not be checked")),
+    )
+    assert funnel._muse_run_liveness({
+        "runner_host": "different-host", "runner_pid": 1234,
+        "session_id": "session-live",
+    }) is None
 
 
 def test_the_shared_begin_snapshot_gives_identical_reconciled_starts(monkeypatch):

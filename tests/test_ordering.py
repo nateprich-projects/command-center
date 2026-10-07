@@ -1174,12 +1174,14 @@ def test_a_claim_just_before_the_ttl_stays_live_with_a_ticket_branch():
     assert stale_locks([claimed_ticket], NOW, pr_facts=facts) == []
 
 
-def test_a_31_minute_claim_without_a_ticket_branch_is_stale():
+def test_a_31_minute_claim_without_a_ticket_branch_remains_live():
     claimed_ticket = ticket(1, 9, in_motion_since=claimed(31))
     facts = {claimed_ticket.ref: None}
 
-    assert funnel.in_motion([claimed_ticket], NOW, pr_facts=facts) == []
-    assert stale_locks([claimed_ticket], NOW, pr_facts=facts) == [claimed_ticket]
+    assert funnel.in_motion([claimed_ticket], NOW, pr_facts=facts) == [
+        claimed_ticket
+    ]
+    assert stale_locks([claimed_ticket], NOW, pr_facts=facts) == []
 
 
 def test_a_31_minute_claim_with_a_ticket_branch_is_live():
@@ -1210,17 +1212,17 @@ def test_the_two_hour_ttl_stays_stale_even_with_a_ticket_branch():
     assert stale_locks([claimed_ticket], NOW, pr_facts=facts) == [claimed_ticket]
 
 
-def test_the_five_ghost_claims_replay_as_five_takeovers():
+def test_five_unverified_branchless_claims_wait_for_reconciliation_or_ttl():
     claims = [
         ticket(number, 9, in_motion_since=claimed(31 + offset))
         for offset, number in enumerate((221, 214, 223, 224, 301))
     ]
     facts = {item.ref: None for item in claims}
 
-    assert {item.number for item in stale_locks(claims, NOW, pr_facts=facts)} == {
-        221, 214, 223, 224, 301,
-    }
-    assert funnel.in_motion(claims, NOW, pr_facts=facts) == []
+    assert stale_locks(claims, NOW, pr_facts=facts) == []
+    assert {item.number for item in funnel.in_motion(
+        claims, NOW, pr_facts=facts
+    )} == {221, 214, 223, 224, 301}
 
 
 def test_assignment_no_longer_has_anything_to_do_with_the_lock():

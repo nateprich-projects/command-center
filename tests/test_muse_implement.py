@@ -74,6 +74,8 @@ FUNNEL_STUB = (
     "with (root / 'funnel.calls').open('a') as fh:\n"
     "    fh.write(' '.join(sys.argv[1:]) + '\\n')\n"
     "if command == 'session-server':\n"
+    "    (root / 'server.session_id').write_text(os.environ.get('MUSE_SESSION_ID', ''))\n"
+    "    (root / 'server.runner_pid').write_text(os.environ.get('MUSE_RUNNER_PID', ''))\n"
     "    print('127.0.0.1:1:stub', flush=True)\n"
     "elif command == 'begin':\n"
     "    (root / 'begin.session_id').write_text(os.environ.get('MUSE_SESSION_ID', ''))\n"
@@ -344,6 +346,8 @@ def test_the_happy_path_runs_packet_model_and_finish_in_order(tmp_path):
     assert args[0] == "exec"
     session_id = (repo / "begin.session_id").read_text()
     assert str(uuid.UUID(session_id)) == session_id
+    assert (repo / "server.session_id").read_text() == session_id
+    assert (repo / "server.runner_pid").read_text().isdigit()
     assert args[args.index("--session-id") + 1] == session_id
     assert args[args.index("--model") + 1] == "muse-spark-1.3"
     assert args[args.index("--reasoning-effort") + 1] == "max"
@@ -561,7 +565,8 @@ def test_a_clone_failure_finishes_errored_and_never_launches_muse(tmp_path):
         "finish --agent muse --run writer-run --outcome errored --note "
         "could not clone example/widgets into the fresh implementation workspace\n"
     )
-    assert "release example/widgets#42" in (repo / "funnel.calls").read_text()
+    assert "release example/widgets#42 --run writer-run --agent muse" in (
+        repo / "funnel.calls").read_text()
     assert not list((tmp_path / "workspaces").iterdir())
 
 

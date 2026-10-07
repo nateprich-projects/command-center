@@ -2872,7 +2872,9 @@ def test_codex_begin_allows_broken_preemption_at_the_wip_limit(
     assert [ref for ref, value in writes if value] == [ticket.ref]
 
 
-def test_codex_begin_takes_over_the_five_branchless_claims(monkeypatch, capsys):
+def test_codex_begin_preserves_five_unverified_branchless_claims(
+    monkeypatch, capsys,
+):
     items = []
     claims = []
     for index, number in enumerate((221, 214, 223, 224, 301)):
@@ -2889,12 +2891,8 @@ def test_codex_begin_takes_over_the_five_branchless_claims(monkeypatch, capsys):
         monkeypatch, capsys, items, pr_facts=facts
     )
 
-    assert result["do"] == "ticket"
-    assert result["work"]["ref"] in facts
-    assert {ref for ref, value in writes if not value} == (
-        set(facts) - {result["work"]["ref"]}
-    )
-    assert [ref for ref, value in writes if value] == [result["work"]["ref"]]
+    assert result["do"] == "stop"
+    assert writes == []
 
 
 def test_codex_begin_reports_reconciled_abandoned_claims(

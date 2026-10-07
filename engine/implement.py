@@ -2770,57 +2770,11 @@ def post_agent_comment(repo: str, number: int, body: str, *,
 
 def _claim_state(ref: str, run: Optional[str], agent: str
                  ) -> Tuple[str, List[funnel.Item]]:
-    """Resolve the holder from the timestamped Project claim and heartbeat binds.
-
-    The Project field intentionally remains a timestamp. The run identity is
-    the latest heartbeat binding for this ticket at or after that timestamp.
-    A missing, conflicting, or unreadable binding is unknown and fails closed.
-    """
+    """Use funnel's Project ownership check for runner writes."""
     try:
-        items = funnel.load_project_items_by_refs([ref])
-        if items is None or len(items) != 1 or items[0].ref != ref:
-            items = funnel.load_items(include_details=False)
-        item = funnel.find(items, ref)
-    except Exception as exc:
-        raise SupersededRunError(ref, "claim could not be read") from exc
-    lock = item.in_motion_since
-    if lock is None:
-        # Empty and unparseable lock values have always meant unlocked.
-        return "empty", items
-    if not run:
-        return "unknown", items
-    try:
-        import heartbeat
-
-        records = []
-        for owner_agent in funnel.AGENTS_BY_ROLE.get("implement", {}):
-            records.extend(heartbeat.read_github_strict(owner_agent))
-        bindings = heartbeat.bindings(records)
-    except Exception as exc:
-        raise SupersededRunError(ref, "heartbeat bindings could not be read") from exc
-
-    try:
-        claim_ts = int(lock.timestamp())
-    except Exception as exc:
-        raise SupersededRunError(ref, "claim timestamp is unreadable") from exc
-    candidates = []
-    for bound_run, binding in bindings.items():
-        bound_ts = binding.get("ts")
-        if (
-            binding.get("do") == "ticket"
-            and str(binding.get("work")) == ref
-            and isinstance(bound_ts, int)
-            and not isinstance(bound_ts, bool)
-            and bound_ts >= claim_ts
-        ):
-            candidates.append((bound_ts, bound_run))
-    if not candidates:
-        return "unknown", items
-    latest_ts = max(ts for ts, _bound_run in candidates)
-    holders = {bound_run for ts, bound_run in candidates if ts == latest_ts}
-    if len(holders) != 1:
-        return "unknown", items
-    return ("owned" if next(iter(holders)) == run else "other"), items
+        return funnel.claim_state(ref, run, agent)
+    except funnel.GitHubError as exc:
+        raise SupersededRunError(ref, str(exc)) from exc
 
 
 def _require_current_claim(ref: str, run: Optional[str], agent: str) -> str:

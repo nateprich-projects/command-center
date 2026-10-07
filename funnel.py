@@ -32,6 +32,7 @@ import os
 import pathlib
 import random
 import re
+import shlex
 import secrets
 import socket
 import socketserver
@@ -3723,8 +3724,9 @@ def in_motion(
 ) -> List[Item]:
     """Every ticket currently claimed, oldest claim first.
 
-    The claim covers the opening before a branch exists. After the grace
-    period, only a confirmed remote branch keeps it live until the hard TTL.
+    The claim covers the opening before a branch exists. A missing branch
+    alone cannot prove that its runner stopped; only the hard TTL or verified
+    abandoned-run reconciliation releases it.
     """
     rows = list(items)
     stale = {item.ref for item in stale_locks(rows, now, pr_facts=pr_facts)}
@@ -3763,11 +3765,11 @@ def stale_locks(
     now: datetime,
     pr_facts: Optional[Dict[str, Optional[Dict[str, object]]]] = None,
 ) -> List[Item]:
-    """Claims past the TTL or branchless after the opening grace period.
+    """Claims past the hard TTL, regardless of branch state.
 
-    Branch absence has to be explicit. Missing or truncated facts preserve the
-    claim, so a run that pushed anything can never lose its lock because a scan
-    could not see far enough.
+    The 30-minute branchless recovery belongs to ``reconcile_abandoned_claims``
+    because only that path can verify the run has stopped and still owns the
+    Project lock. Queue selection must preserve an unverified live claim.
     """
     return sorted(
         (
@@ -3775,13 +3777,7 @@ def stale_locks(
             for i in items
             if i.state == "OPEN"
             and i.in_motion_since is not None
-            and (
-                now - i.in_motion_since >= LOCK_TTL
-                or (
-                    now - i.in_motion_since >= CLAIM_BRANCH_GRACE
-                    and _ticket_branch_exists(i, pr_facts) is False
-                )
-            )
+            and now - i.in_motion_since >= LOCK_TTL
         ),
         key=lambda i: i.in_motion_since or now,
     )
@@ -20616,10 +20612,10 @@ def reconcile_abandoned_claims(
 
     A slow ``begin`` can outlive the Codex exec tool's first output wait. If
     the caller walks away, that process may still claim and bind a ticket but
-    no implementation ever reaches the deterministic remote branch. The bind
-    identifies which open heartbeat start owns the claim; explicit branch
-    absence after the normal 30-minute grace makes the abandoned work safe to
-    release. Unknown branch state fails closed.
+    no implementation ever reaches the deterministic remote branch. Branch
+    absence after 30 minutes is insufficient for a Muse run: its Mac runner
+    can still be working. Preserve a live or uncheckable Muse run, and verify
+    the bound run still owns the Project claim before any release.
 
     The abandoned start is finished as ``errored`` as part of the same
     reconciliation. Otherwise the claim would recover while the watchdog kept
@@ -20674,11 +20670,18 @@ def reconcile_abandoned_claims(
     for agent, start, ref, item in candidates:
         if ref in released or _ticket_branch_exists(item, pr_facts) is not False:
             continue
-        write_lock(item, "")
+        if agent == "muse" and _muse_run_liveness(start) is not False:
+            continue
+        run = start.get("run")
+        try:
+            cmd_release(items, now, ref, run=run, agent=agent)
+        except GitHubError:
+            # The Project lock or heartbeat owner changed after the snapshot,
+            # or cannot be read. Neither case licenses a stale run's release.
+            continue
         item.in_motion_since = None
         released.add(ref)
 
-        run = start.get("run")
         record = {
             "run": run,
             "agent": agent,
@@ -20705,6 +20708,55 @@ def reconcile_abandoned_claims(
             result["finish_error"] = str(exc)
         reconciled.append(result)
     return reconciled
+
+
+def _muse_run_liveness(start: Mapping[str, object]) -> Optional[bool]:
+    """Read the exact local Muse runner/model for a heartbeat start.
+
+    ``None`` means the process check was unavailable or the old start lacks
+    identity. Both preserve the claim for the ordinary TTL recovery path.
+    """
+    pid = start.get("runner_pid")
+    runner_pid = (pid if isinstance(pid, int) and not isinstance(pid, bool)
+                  and pid > 0 else None)
+    session = start.get("session_id")
+    session_id = session.strip() if isinstance(session, str) else ""
+    # Another host cannot tell whether this Mac runner is still alive. Older
+    # starts lack a host marker and also stay with the ordinary TTL recovery.
+    if (start.get("runner_host") != socket.gethostname()
+            or not session_id):
+        return None
+    try:
+        process = subprocess.run(
+            ["ps", "-ww", "-axo", "pid=,stat=,command="],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if process.returncode != 0:
+        return None
+    for line in process.stdout.splitlines():
+        fields = line.split(None, 2)
+        if len(fields) != 3 or fields[1].startswith("Z"):
+            continue
+        try:
+            process_pid = int(fields[0])
+            argv = shlex.split(fields[2])
+        except (ValueError, IndexError):
+            continue
+        if not argv:
+            continue
+        if (runner_pid == process_pid and len(argv) >= 2
+                and os.path.basename(argv[0]) in ("bash", "sh")
+                and argv[1].endswith("/scripts/muse-implement")):
+            return True
+        if (session_id and len(argv) >= 4
+                and os.path.basename(argv[0]).startswith("muse-bin")
+                and argv[1] == "exec" and "--session-id" in argv):
+            at = argv.index("--session-id")
+            if at + 1 < len(argv) and argv[at + 1] == session_id:
+                return True
+    return False
 
 
 def reconcile_approved_merges(
@@ -23390,7 +23442,74 @@ def cmd_answer(items: List[Item], now: datetime, verb: str, ref: str,
     return 0
 
 
-def cmd_release(items: List[Item], now: datetime, ref: str) -> int:
+def claim_state(ref: str, run: Optional[str], agent: str
+                ) -> Tuple[str, List[Item]]:
+    """Read the current Project claim and its latest heartbeat binding.
+
+    Funnel owns the Project write path, so both the runner and the CLI can
+    verify ownership without making funnel import its engine consumer.
+    """
+    try:
+        items = load_project_items_by_refs([ref])
+        if items is None or len(items) != 1 or items[0].ref != ref:
+            items = load_items(include_details=False)
+        item = find(items, ref)
+    except Exception as exc:
+        raise GitHubError("claim could not be read") from exc
+    lock = item.in_motion_since
+    if lock is None:
+        return "empty", items
+    if not run:
+        return "unknown", items
+    try:
+        import heartbeat
+
+        records = []
+        for owner_agent in AGENTS_BY_ROLE.get("implement", {}):
+            records.extend(heartbeat.read_github_strict(owner_agent))
+        bindings = heartbeat.bindings(records)
+    except Exception as exc:
+        raise GitHubError("heartbeat bindings could not be read") from exc
+
+    try:
+        claim_ts = int(lock.timestamp())
+    except Exception as exc:
+        raise GitHubError("claim timestamp is unreadable") from exc
+    candidates = []
+    for bound_run, binding in bindings.items():
+        bound_ts = binding.get("ts")
+        if (
+            binding.get("do") == "ticket"
+            and str(binding.get("work")) == ref
+            and isinstance(bound_ts, int)
+            and not isinstance(bound_ts, bool)
+            and bound_ts >= claim_ts
+        ):
+            candidates.append((bound_ts, bound_run))
+    if not candidates:
+        return "unknown", items
+    latest_ts = max(ts for ts, _bound_run in candidates)
+    holders = {bound_run for ts, bound_run in candidates if ts == latest_ts}
+    if len(holders) != 1:
+        return "unknown", items
+    return ("owned" if next(iter(holders)) == run else "other"), items
+
+
+def cmd_release(items: List[Item], now: datetime, ref: str,
+                run: Optional[str] = None, agent: Optional[str] = None) -> int:
+    if bool(run) != bool(agent):
+        raise GitHubError("release requires --run and --agent together")
+    if run is not None and agent is not None:
+        state, current_items = claim_state(ref, run, agent)
+        if state == "empty":
+            return 0
+        if state != "owned":
+            raise GitHubError(
+                "another run holds the claim" if state == "other"
+                else "claim holder is unknown"
+            )
+        write_lock(find(current_items, ref), "")
+        return 0
     write_lock(find(items, ref), "")
     return 0
 
@@ -23760,6 +23879,11 @@ def main(argv: Optional[Sequence[str]] = None, *,
     )
     release = sub.add_parser("release", help="give up the lock on a ticket")
     release.add_argument("ref", help="issue number, owner/repo#number, or URL")
+    release.add_argument("--run", default=None,
+                         help="bound heartbeat run for an ownership-checked release")
+    release.add_argument("--agent", default=None,
+                         choices=tuple(AGENTS_BY_ROLE["implement"]),
+                         help="implementing agent that owns the run")
     for verb, help_text in (
         ("pin", "pin a project: it leads Nate's queue at its gate and its tickets lead the engineers' queue"),
         ("unpin", "clear a project's pin"),
@@ -23997,6 +24121,9 @@ def main(argv: Optional[Sequence[str]] = None, *,
         if args.proof and not args.blocked_on:
             parser.error("--proof requires --blocked-on")
     if (args.command == "claim"
+            and bool(args.run) != bool(args.agent)):
+        parser.error("--run and --agent must be supplied together")
+    if (args.command == "release"
             and bool(args.run) != bool(args.agent)):
         parser.error("--run and --agent must be supplied together")
     if (args.command == "capture" and args.origin == "agent"
@@ -24339,6 +24466,9 @@ def main(argv: Optional[Sequence[str]] = None, *,
                 run=args.run, agent=args.agent,
             )
         if args.command == "release":
+            if args.run is not None:
+                return cmd_release(items, now, args.ref,
+                                   run=args.run, agent=args.agent)
             return cmd_release(items, now, args.ref)
         if args.command == "pin":
             return cmd_pin(items, now, args.ref, args.confirmed,

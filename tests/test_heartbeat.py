@@ -389,6 +389,24 @@ def test_start_records_the_runtime_checkout(monkeypatch):
     }
 
 
+def test_muse_start_records_its_runner_pid_for_live_claim_checks(monkeypatch):
+    records = []
+    monkeypatch.setenv("MUSE_RUNNER_PID", "12345")
+    monkeypatch.setenv("MUSE_SESSION_ID", "session-1")
+    monkeypatch.setattr(heartbeat, "usage_snapshot", lambda agent: None)
+    monkeypatch.setattr(heartbeat, "repo_state", lambda: None)
+    monkeypatch.setattr(heartbeat, "runtime_state", lambda: None)
+    monkeypatch.setattr(heartbeat, "detect_model", lambda agent: {})
+    monkeypatch.setattr(heartbeat, "append",
+                        lambda agent, record: records.append(record) or "spooled")
+    monkeypatch.setattr(heartbeat, "_report", lambda kept: None)
+
+    assert heartbeat.main(["start", "--agent", "muse"]) == 0
+    assert records[0]["session_id"] == "session-1"
+    assert records[0]["runner_pid"] == 12345
+    assert records[0]["runner_host"] == heartbeat.socket.gethostname()
+
+
 def test_start_and_finish_record_separate_usage_readings(monkeypatch):
     records = []
     readings = [

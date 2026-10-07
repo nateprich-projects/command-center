@@ -92,7 +92,7 @@ def test_maintenance_load_counts_closed_projects_not_tickets():
     assert load["upkeep_share"] == round(3 / 5, 3)
 
 
-def test_brief_removes_a_branchless_takeover_from_in_motion(
+def test_brief_preserves_a_branchless_unverified_claim_in_motion(
     monkeypatch, capsys
 ):
     project = funnel.Item(
@@ -120,8 +120,8 @@ def test_brief_removes_a_branchless_takeover_from_in_motion(
     ) == 0
     brief = json.loads(capsys.readouterr().out)
 
-    assert brief["in_motion"] == [live.ref]
-    assert brief["stale_locks_taken_over"] == [ghost.ref]
+    assert brief["in_motion"] == [ghost.ref, live.ref]
+    assert brief["stale_locks_taken_over"] == []
 
 
 def _approval_item(number, at, *, previous="Shaped"):

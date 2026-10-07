@@ -74,6 +74,8 @@ FUNNEL_STUB = (
     "with (root / 'funnel.calls').open('a') as fh:\n"
     "    fh.write(' '.join(sys.argv[1:]) + '\\n')\n"
     "if command == 'session-server':\n"
+    "    (root / 'server.session_id').write_text(os.environ.get('MUSE_SESSION_ID', ''))\n"
+    "    (root / 'server.runner_pid').write_text(os.environ.get('MUSE_RUNNER_PID', ''))\n"
     "    print('127.0.0.1:1:stub', flush=True)\n"
     "elif command == 'begin':\n"
     "    (root / 'begin.session_id').write_text(os.environ.get('MUSE_SESSION_ID', ''))\n"
@@ -85,7 +87,15 @@ FUNNEL_STUB = (
     "        release = pathlib.Path(os.environ['SESSION_STOP_RELEASE'])\n"
     "        while not release.exists(): time.sleep(0.01)\n"
     "elif command == 'release':\n"
-    "    pass\n"
+    "    owner = os.environ.get('RELEASE_OWNER_RUN')\n"
+    "    if owner:\n"
+    "        args = sys.argv[2:]\n"
+    "        if ('--run' in args and args[args.index('--run') + 1] == owner\n"
+    "                and '--agent' in args\n"
+    "                and args[args.index('--agent') + 1] == 'muse'):\n"
+    "            (root / 'release.owned').write_text(owner)\n"
+    "        else:\n"
+    "            raise SystemExit('claim belongs to another run')\n"
     "else:\n"
     "    raise SystemExit('unexpected funnel command: ' + command)\n"
 )
@@ -344,6 +354,8 @@ def test_the_happy_path_runs_packet_model_and_finish_in_order(tmp_path):
     assert args[0] == "exec"
     session_id = (repo / "begin.session_id").read_text()
     assert str(uuid.UUID(session_id)) == session_id
+    assert (repo / "server.session_id").read_text() == session_id
+    assert (repo / "server.runner_pid").read_text().isdigit()
     assert args[args.index("--session-id") + 1] == session_id
     assert args[args.index("--model") + 1] == "muse-spark-1.3"
     assert args[args.index("--reasoning-effort") + 1] == "max"
@@ -552,7 +564,10 @@ def test_invalid_begin_work_finishes_errored_without_a_clone(tmp_path, begin):
 
 
 def test_a_clone_failure_finishes_errored_and_never_launches_muse(tmp_path):
-    proc, repo = _stubbed_runner(tmp_path, _begin(), gh_status=23)
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), gh_status=23,
+        extra_env={"RELEASE_OWNER_RUN": "writer-run"},
+    )
 
     assert proc.returncode == 1
     assert _muse_calls(repo) == 0
@@ -561,8 +576,24 @@ def test_a_clone_failure_finishes_errored_and_never_launches_muse(tmp_path):
         "finish --agent muse --run writer-run --outcome errored --note "
         "could not clone example/widgets into the fresh implementation workspace\n"
     )
-    assert "release example/widgets#42" in (repo / "funnel.calls").read_text()
+    assert "release example/widgets#42 --run writer-run --agent muse" in (
+        repo / "funnel.calls").read_text()
+    assert (repo / "release.owned").read_text() == "writer-run"
+    assert "could not release" not in proc.stderr
     assert not list((tmp_path / "workspaces").iterdir())
+
+
+def test_a_superseded_clone_failure_does_not_clear_the_successor_claim(tmp_path):
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), gh_status=23,
+        extra_env={"RELEASE_OWNER_RUN": "successor-run"},
+    )
+
+    assert proc.returncode == 1
+    assert "release example/widgets#42 --run writer-run --agent muse" in (
+        repo / "funnel.calls").read_text()
+    assert not (repo / "release.owned").exists()
+    assert "could not release example/widgets#42" in proc.stderr
 
 
 def test_a_packet_failure_finishes_errored_without_a_model_call(tmp_path):

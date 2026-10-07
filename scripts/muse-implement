@@ -385,8 +385,7 @@ fi
 TICKET_BRANCH="ticket/$TICKET_NUMBER"
 
 release_ticket() {
-  if ! python3 "$REPO/funnel.py" release "$BEGIN_REF" \
-      --run "$BEGIN_RUN" --agent muse; then
+  if ! python3 "$REPO/funnel.py" release "$BEGIN_REF"; then
     echo "muse-implement: could not release $BEGIN_REF" >&2
   fi
 }

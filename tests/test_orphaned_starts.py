@@ -33,12 +33,21 @@ def _ticket(number, parent, *, in_motion_since=None):
                 in_motion_since=in_motion_since)
 
 
-def _wire(monkeypatch, spools, facts):
+def _wire(monkeypatch, spools, facts, *, live_items=None):
     monkeypatch.setattr(heartbeat, "PROVIDERS",
                         {"claude": "anthropic", "codex": "openai",
                          "muse": "meta", "zcode": "zai"})
     monkeypatch.setattr(heartbeat, "RETIRED_AGENTS", frozenset({"zcode"}))
     monkeypatch.setattr(heartbeat, "read", lambda agent: list(spools.get(agent, [])))
+    monkeypatch.setattr(
+        heartbeat, "read_github_strict",
+        lambda agent: list(spools.get(agent, [])),
+    )
+    if live_items is not None:
+        monkeypatch.setattr(
+            funnel, "load_project_items_by_refs",
+            lambda refs: [item for item in live_items if item.ref in refs],
+        )
     appended = []
     monkeypatch.setattr(heartbeat, "append",
                         lambda agent, record: appended.append((agent, record)) or "pushed")
@@ -177,40 +186,39 @@ def test_no_candidates_means_no_pr_read(monkeypatch):
     assert reads == []
 
 
-def test_reconcile_releases_a_bound_claim_with_no_branch_after_30_minutes(
+def test_reconcile_releases_a_stopped_bound_claim_with_no_branch_after_30_minutes(
         monkeypatch,
 ):
     project = _project(1)
     claimed_at = NOW - funnel.CLAIM_BRANCH_GRACE - timedelta(seconds=1)
     ticket = _ticket(9, project, in_motion_since=claimed_at)
-    started = _open_work_start(
+    live_ticket = _ticket(9, project, in_motion_since=claimed_at)
+    stopped = _open_work_start(
         "abandoned", ticket.ref, ts=int(claimed_at.timestamp())
     )
-    started.append({
+    stopped.append({
         "run": "abandoned", "agent": "codex", "phase": "finish",
         "ts": int(NOW.timestamp()) - 1, "outcome": "errored",
     })
     appended = _wire(
         monkeypatch,
-        {"codex": started},
+        {"codex": stopped},
         {ticket.ref: None},
+        live_items=[live_ticket],
     )
-    releases = []
+    writes = []
     monkeypatch.setattr(
-        funnel, "cmd_release",
-        lambda items, now, ref, **kwargs: releases.append(
-            (ref, kwargs)
-        ) or 0,
+        funnel, "write_lock",
+        lambda item, value: writes.append((item.ref, value)),
     )
 
     result = funnel.reconcile_abandoned_claims(
         [project, ticket], NOW, pr_facts={ticket.ref: None}
     )
 
-    assert releases == [(
-        ticket.ref, {"run": "abandoned", "agent": "codex"},
-    )]
+    assert writes == [(ticket.ref, "")]
     assert ticket.in_motion_since is None
+    assert live_ticket.in_motion_since is None
     assert result == [{
         "run": "abandoned",
         "agent": "codex",
@@ -267,8 +275,8 @@ def test_reconcile_preserves_claim_when_heartbeat_liveness_is_unreadable(
         lambda agent: unreadable if agent == "codex" else heartbeat.Records(),
     )
     monkeypatch.setattr(
-        funnel, "cmd_release",
-        lambda *args, **kwargs: pytest.fail(
+        funnel, "write_lock",
+        lambda *args: pytest.fail(
             "unreadable heartbeat state cannot authorize a release"),
     )
 

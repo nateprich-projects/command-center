@@ -15,11 +15,18 @@ import codex_run  # noqa: E402
 import funnel  # noqa: E402
 
 
+# Literal values transcribed from the six native automation.toml records.
 ALL_DAY = ("RRULE:FREQ=HOURLY;INTERVAL=1;BYMINUTE=0,10,20,30,40,50;"
            "BYDAY=SU,MO,TU,WE,TH,FR,SA")
-EVERY_HOUR = ("RRULE:FREQ=WEEKLY;BYDAY=SU,MO,TU,WE,TH,FR,SA;BYHOUR="
-              + ",".join(str(hour) for hour in range(24))
-              + ";BYMINUTE=4;BYSECOND=0")
+EVERY_HOUR = (
+    "RRULE:FREQ=WEEKLY;BYDAY=SU,MO,TU,WE,TH,FR,SA;"
+    "BYHOUR=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23;"
+    "BYMINUTE=4;BYSECOND=0"
+)
+MON_FRI = ("RRULE:FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR;BYHOUR=0,1;"
+           "BYMINUTE=1;BYSECOND=0")
+SUN_THU = ("RRULE:FREQ=WEEKLY;BYDAY=SU,MO,TU,WE,TH;BYHOUR=22,23;"
+           "BYMINUTE=2;BYSECOND=0")
 WEEKEND = "RRULE:FREQ=WEEKLY;BYDAY=SA,SU;BYHOUR=2,3;BYMINUTE=4;BYSECOND=0"
 WATCH = "RRULE:FREQ=DAILY;BYHOUR=4,16;BYMINUTE=13"
 _NO_ERROR_FIELD = object()
@@ -49,19 +56,26 @@ def _automation(root, name, *, model="gpt-6-luna", effort="max",
 
 
 def _manifest_set(root, **overrides):
-    """The set the manifest expects: two implement, one watch, three retired."""
+    """Six native records, kept independent from the doctor manifest."""
     specs = {
-        "command-center-tickets-hourly": {"rrule": ALL_DAY},
-        "command-center-tickets-weekday-mornings": {"rrule": EVERY_HOUR},
+        "command-center-tickets-hourly": {
+            "rrule": ALL_DAY, "model": "gpt-6-luna", "effort": "max",
+            "status": "ACTIVE"},
+        "command-center-tickets-weekday-mornings": {
+            "rrule": EVERY_HOUR, "model": "gpt-6-luna", "effort": "max",
+            "status": "ACTIVE"},
         "command-center-funnel-watch-github-writer": {
             "rrule": WATCH, "model": "gpt-6.1-sol", "effort": "high",
             "status": "ACTIVE"},
         "command-center-tickets-mon-fri-after-midnight": {
-            "rrule": WEEKEND, "model": "gpt-5.6-sol", "effort": "high"},
+            "rrule": MON_FRI, "model": "gpt-5.6-sol", "effort": "high",
+            "status": "PAUSED"},
         "command-center-tickets-sun-thu-late-night": {
-            "rrule": WEEKEND, "model": "gpt-5.6-sol", "effort": "high"},
+            "rrule": SUN_THU, "model": "gpt-5.6-sol", "effort": "high",
+            "status": "PAUSED"},
         "command-center-tickets-weekend-early-mornings": {
-            "rrule": WEEKEND, "model": "gpt-5.6-sol", "effort": "high"},
+            "rrule": WEEKEND, "model": "gpt-5.6-sol", "effort": "high",
+            "status": "PAUSED"},
     }
     for name, spec in specs.items():
         spec = dict(spec, **overrides.get(name, {}))
@@ -147,7 +161,7 @@ def test_the_prompt_is_never_read_as_a_field():
 # --- findings ----------------------------------------------------------------
 
 
-def test_a_set_matching_the_manifest_has_no_drift(tmp_path):
+def test_a_fixture_matching_all_six_native_automations_has_no_drift(tmp_path):
     _manifest_set(tmp_path)
 
     findings = codex_run.automation_findings(str(tmp_path))
@@ -191,12 +205,6 @@ def test_today_s_automations_show_their_gpt5_6_pins(tmp_path):
     ({"command-center-tickets-sun-thu-late-night": {"status": "ACTIVE"}},
      "command-center-tickets-sun-thu-late-night: retired, but status is "
      "ACTIVE"),
-    ({"command-center-funnel-watch-github-writer": {"absent": True}},
-     "command-center-funnel-watch-github-writer: missing"),
-    ({"command-center-funnel-watch-github-writer": {"status": "PAUSED"}},
-     "command-center-funnel-watch-github-writer: status expected ACTIVE, found PAUSED"),
-    ({"command-center-funnel-watch-github-writer": {"rrule": ALL_DAY}},
-     "command-center-funnel-watch-github-writer: rrule expected " + WATCH),
 ])
 def test_each_difference_is_drift(tmp_path, overrides, fragment):
     _manifest_set(tmp_path, **overrides)
@@ -234,6 +242,26 @@ def test_watch_manifest_precedes_ticket_tier_classification(tmp_path, monkeypatc
     drift = codex_run.automation_findings(str(tmp_path))["drift"]
 
     assert drift == []
+
+
+@pytest.mark.parametrize(("override", "expected"), [
+    ({"absent": True}, "command-center-funnel-watch-github-writer: missing"),
+    ({"status": "PAUSED"},
+     "command-center-funnel-watch-github-writer: status expected ACTIVE, "
+     "found PAUSED"),
+    ({"rrule": ALL_DAY},
+     "command-center-funnel-watch-github-writer: rrule expected " + WATCH
+     + ", found " + ALL_DAY),
+])
+def test_watch_missing_paused_and_wrong_rrule_have_own_findings(
+        tmp_path, override, expected):
+    watch = "command-center-funnel-watch-github-writer"
+    _manifest_set(tmp_path, **{watch: override})
+
+    drift = codex_run.automation_findings(str(tmp_path))["drift"]
+
+    assert drift == [expected]
+    assert "escalated" not in drift[0]
 
 
 def test_an_automation_outside_the_manifest_is_drift(tmp_path):
@@ -319,7 +347,7 @@ def test_notes_report_status_and_memory_size(tmp_path):
 
     notes = codex_run.automation_findings(str(tmp_path))["notes"]
 
-    assert "command-center-tickets-hourly: PAUSED, memory 401,588 bytes" in \
+    assert "command-center-tickets-hourly: ACTIVE, memory 401,588 bytes" in \
         notes
     assert "command-center-tickets-sun-thu-late-night: PAUSED, memory none" \
         in notes
@@ -338,7 +366,7 @@ def test_a_matching_set_passes_with_its_notes(tmp_path):
 
     assert check.ok is True
     assert check.name == "codex automations"
-    assert "command-center-tickets-hourly: PAUSED" in check.found
+    assert "command-center-tickets-hourly: ACTIVE" in check.found
     expected_notes = codex_run.automation_findings(str(tmp_path))["notes"]
     assert check.found == "\n".join("  " + note for note in expected_notes)
     assert "rollout" not in check.found

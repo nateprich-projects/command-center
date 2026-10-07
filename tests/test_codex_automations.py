@@ -21,6 +21,7 @@ EVERY_HOUR = ("RRULE:FREQ=WEEKLY;BYDAY=SU,MO,TU,WE,TH,FR,SA;BYHOUR="
               + ",".join(str(hour) for hour in range(24))
               + ";BYMINUTE=4;BYSECOND=0")
 WEEKEND = "RRULE:FREQ=WEEKLY;BYDAY=SA,SU;BYHOUR=2,3;BYMINUTE=4;BYSECOND=0"
+WATCH = "RRULE:FREQ=DAILY;BYHOUR=4,16;BYMINUTE=13"
 _NO_ERROR_FIELD = object()
 
 
@@ -48,10 +49,13 @@ def _automation(root, name, *, model="gpt-6-luna", effort="max",
 
 
 def _manifest_set(root, **overrides):
-    """The set the manifest expects: two live, three retired and paused."""
+    """The set the manifest expects: two implementers, one watch, three retired."""
     specs = {
         "command-center-tickets-hourly": {"rrule": ALL_DAY},
         "command-center-tickets-weekday-mornings": {"rrule": EVERY_HOUR},
+        "command-center-funnel-watch-github-writer": {
+            "rrule": WATCH, "model": "gpt-6.1-sol", "effort": "high",
+            "status": "ACTIVE"},
         "command-center-tickets-mon-fri-after-midnight": {
             "rrule": WEEKEND, "model": "gpt-5.6-sol", "effort": "high"},
         "command-center-tickets-sun-thu-late-night": {
@@ -104,10 +108,16 @@ def _write_automation_window(root, *, errors=0):
 # --- the manifest -----------------------------------------------------------
 
 
-def test_the_manifest_names_two_live_automations_and_three_retired():
+def test_the_manifest_separates_two_implementers_one_watch_and_three_retired():
     assert codex_run.AUTOMATIONS_EXPECTED == {
         "command-center-tickets-hourly": "standard",
         "command-center-tickets-weekday-mornings": "escalated",
+    }
+    assert codex_run.AUTOMATIONS_WATCH_EXPECTED == {
+        "command-center-funnel-watch-github-writer": {
+            "model": "gpt-6.1-sol", "reasoning_effort": "high",
+            "status": "ACTIVE", "rrule": WATCH,
+        },
     }
     assert codex_run.AUTOMATIONS_RETIRED == {
         "command-center-tickets-mon-fri-after-midnight",
@@ -143,7 +153,7 @@ def test_a_set_matching_the_manifest_has_no_drift(tmp_path):
     findings = codex_run.automation_findings(str(tmp_path))
 
     assert findings["drift"] == []
-    assert len(findings["notes"]) == 5
+    assert len(findings["notes"]) == 6
 
 
 def test_today_s_automations_show_their_gpt5_6_pins(tmp_path):
@@ -181,6 +191,12 @@ def test_today_s_automations_show_their_gpt5_6_pins(tmp_path):
     ({"command-center-tickets-sun-thu-late-night": {"status": "ACTIVE"}},
      "command-center-tickets-sun-thu-late-night: retired, but status is "
      "ACTIVE"),
+    ({"command-center-funnel-watch-github-writer": {"absent": True}},
+     "command-center-funnel-watch-github-writer: missing"),
+    ({"command-center-funnel-watch-github-writer": {"status": "PAUSED"}},
+     "command-center-funnel-watch-github-writer: status expected ACTIVE, found PAUSED"),
+    ({"command-center-funnel-watch-github-writer": {"rrule": ALL_DAY}},
+     "command-center-funnel-watch-github-writer: rrule expected " + WATCH),
 ])
 def test_each_difference_is_drift(tmp_path, overrides, fragment):
     _manifest_set(tmp_path, **overrides)
@@ -188,6 +204,25 @@ def test_each_difference_is_drift(tmp_path, overrides, fragment):
     drift = codex_run.automation_findings(str(tmp_path))["drift"]
 
     assert any(fragment in line for line in drift), drift
+
+
+@pytest.mark.parametrize(("field", "value", "expected"), [
+    ("model", "gpt-6-luna",
+     "command-center-funnel-watch-github-writer: model expected gpt-6.1-sol, "
+     "found gpt-6-luna"),
+    ("effort", "max",
+     "command-center-funnel-watch-github-writer: reasoning_effort expected "
+     "high, found max"),
+])
+def test_watch_model_and_effort_drift_are_not_ticket_lane_drift(
+        tmp_path, field, value, expected):
+    _manifest_set(tmp_path, **{
+        "command-center-funnel-watch-github-writer": {field: value}})
+
+    drift = codex_run.automation_findings(str(tmp_path))["drift"]
+
+    assert drift == [expected]
+    assert "escalated" not in drift[0]
 
 
 def test_an_automation_outside_the_manifest_is_drift(tmp_path):

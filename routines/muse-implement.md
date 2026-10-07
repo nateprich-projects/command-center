@@ -24,8 +24,9 @@ Packet `agents_md` is canonical for target-repo rules; this prompt is runner-spe
 
 Implement only what the ticket and the plan require, and address every
 blocking item. Do not change project `Status` or `Class`, do not merge,
-and do not repair unrelated defects. Run the checkout's own test suite to
-verify your change.
+and do not repair unrelated defects. Run only relevant, time-bounded tests.
+Stop any outstanding test jobs you started before writing the final answer.
+Leave the mandatory full checkout suite to `finish-ticket`.
 
 Use the shell only for editing, local reads, and tests. Do not run
 `funnel.py` or `gh`, and do not push: the runner performs every remote

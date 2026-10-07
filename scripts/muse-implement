@@ -35,6 +35,11 @@ if [[ ! "$MUSE_LOG_CAP_BYTES" =~ ^[1-9][0-9]*$ ]]; then
   MUSE_LOG_CAP_BYTES=104857600
 fi
 MUSE_LOG_TRIMMED=0
+MUSE_JSON_FILE=""
+MUSE_JSON_TAIL_PID=""
+MUSE_COMPLETED_MARKER=""
+MUSE_MONITOR_ERROR_MARKER=""
+killed_marker=""
 
 muse_log_size_bytes() {
   if [[ "$(uname -s 2>/dev/null)" == "Darwin" ]]; then
@@ -163,13 +168,14 @@ fi
 PACKET_FILE="$(mktemp "${TMPDIR:-/tmp}/muse-implement-packet.XXXXXX")"
 PROMPT_FILE="$(mktemp "${TMPDIR:-/tmp}/muse-implement-prompt.XXXXXX")"
 DIAG_FILE="$(mktemp "${TMPDIR:-/tmp}/muse-implement-diag.XXXXXX")"
+MUSE_JSON_FILE="$(mktemp "${TMPDIR:-/tmp}/muse-implement-json.XXXXXX")"
 # The model's own stderr, kept so the failure path can tell a provider
 # refusal from a ticket that failed. It is replayed into the launchd log on
 # the way out, so the log keeps every line it used to carry; a live run can
 # be followed by tailing the path printed below.
 MUSE_STDERR_FILE="$(mktemp "${TMPDIR:-/tmp}/muse-implement-stderr.XXXXXX")"
 if [[ -z "$PACKET_FILE" || -z "$PROMPT_FILE" || -z "$DIAG_FILE" \
-  || -z "$MUSE_STDERR_FILE" ]]; then
+  || -z "$MUSE_JSON_FILE" || -z "$MUSE_STDERR_FILE" ]]; then
   echo "muse-implement: could not create scratch files" >&2
   exit 1
 fi
@@ -208,7 +214,14 @@ cleanup() {
   if [[ -n "$MUSE_STDERR_FILE" && -f "$MUSE_STDERR_FILE" ]]; then
     cat -- "$MUSE_STDERR_FILE" >&2 || true
   fi
-  rm -f -- "$PACKET_FILE" "$PROMPT_FILE" "$DIAG_FILE" "$MUSE_STDERR_FILE"
+  if [[ -n "${MUSE_JSON_TAIL_PID:-}" ]]; then
+    kill "$MUSE_JSON_TAIL_PID" 2>/dev/null || true
+    wait "$MUSE_JSON_TAIL_PID" 2>/dev/null || true
+  fi
+  rm -f -- "$PACKET_FILE" "$PROMPT_FILE" "$DIAG_FILE" \
+    "$MUSE_STDERR_FILE" "${MUSE_JSON_FILE:-}" \
+    "${MUSE_COMPLETED_MARKER:-}" "${MUSE_MONITOR_ERROR_MARKER:-}" \
+    "${killed_marker:-}"
   if [[ -n "$ANSWER_HANDOFF" ]]; then
     rm -f -- "$ANSWER_HANDOFF"
   fi
@@ -482,6 +495,33 @@ printf '%s' "$PROMPT" >"$PROMPT_FILE"
 #
 # `perl setpgrp` gives Muse and every shell child its own process group, so the
 # wall-clock bound can kill the entire tree without killing this runner.
+ANSWER_FILE="$WORKSPACE/$ANSWER_NAME"
+if ! killed_marker="$(mktemp "${TMPDIR:-/tmp}/muse-implement-killed.XXXXXX")"; then
+  echo "muse-implement: could not create the watchdog marker" >&2
+  release_ticket
+  python3 "$REPO/heartbeat.py" finish --agent muse --run "$BEGIN_RUN" \
+    --outcome errored --note "could not create implementation watchdog marker" >&2
+  exit 1
+fi
+if ! MUSE_COMPLETED_MARKER="$(mktemp "${TMPDIR:-/tmp}/muse-implement-completed.XXXXXX")"; then
+  echo "muse-implement: could not create the completion marker" >&2
+  release_ticket
+  python3 "$REPO/heartbeat.py" finish --agent muse --run "$BEGIN_RUN" \
+    --outcome errored --note "could not create implementation completion marker" >&2
+  exit 1
+fi
+if ! MUSE_MONITOR_ERROR_MARKER="$(mktemp "${TMPDIR:-/tmp}/muse-implement-monitor-error.XXXXXX")"; then
+  echo "muse-implement: could not create the monitor error marker" >&2
+  release_ticket
+  python3 "$REPO/heartbeat.py" finish --agent muse --run "$BEGIN_RUN" \
+    --outcome errored --note "could not create implementation monitor error marker" >&2
+  exit 1
+fi
+rm -f "$killed_marker" "$MUSE_COMPLETED_MARKER" "$MUSE_MONITOR_ERROR_MARKER"
+
+tail -f "$MUSE_JSON_FILE" &
+MUSE_JSON_TAIL_PID=$!
+
 perl -e 'setpgrp(0, 0); exec @ARGV or die "exec: $!"' "${MUSE_EXEC[@]}" \
   --model "$MUSE_MODEL" \
   --reasoning-effort "$EFFORT" \
@@ -492,28 +532,51 @@ perl -e 'setpgrp(0, 0); exec @ARGV or die "exec: $!"' "${MUSE_EXEC[@]}" \
   --no-foreign-personal-context \
   --workspace "$WORKSPACE" \
   --prompt-file "$PROMPT_FILE" \
-  --json 2>"$MUSE_STDERR_FILE" &
+  --json >"$MUSE_JSON_FILE" 2>"$MUSE_STDERR_FILE" &
 muse_pid=$!
-killed_marker="$(mktemp "${TMPDIR:-/tmp}/muse-implement-killed.XXXXXX")"
-rm -f "$killed_marker"
 
 (
   trap - EXIT
-  sleep "$BOUND_SECONDS" &
-  sleep_pid=$!
-  trap 'kill "$sleep_pid" 2>/dev/null; exit 0' TERM
-  wait "$sleep_pid"
-  if kill -0 "$muse_pid" 2>/dev/null; then
-    echo "muse-implement: killing run after ${BOUND_SECONDS}s ($TIER schedule)" >&2
-    : > "$killed_marker"
-    release_ticket
-    python3 "$REPO/heartbeat.py" finish --agent muse --run "$BEGIN_RUN" \
-      --outcome errored \
-      --note "killed after $((BOUND_SECONDS / 60)) minutes: $TIER implementation run exceeded the wall-clock bound (#392)" >&2
-    kill -TERM -- "-$muse_pid" 2>/dev/null
-    sleep 5
-    kill -KILL -- "-$muse_pid" 2>/dev/null
-  fi
+  python3 "$REPO/muse_implement_handoff.py" watch \
+    "$MUSE_JSON_FILE" "${MUSE_SESSION_ID:-}" "$ANSWER_FILE" \
+    "$muse_pid" "$BOUND_SECONDS" >/dev/null 2>&1
+  watch_status=$?
+  case "$watch_status" in
+    0)
+      echo "muse-implement: completed run has a valid answer; stopping its lingering process group" >&2
+      : > "$MUSE_COMPLETED_MARKER"
+      kill -TERM -- "-$muse_pid" 2>/dev/null || true
+      for _ in {1..50}; do
+        if ! kill -0 -- "-$muse_pid" 2>/dev/null; then break; fi
+        sleep 0.1
+      done
+      kill -KILL -- "-$muse_pid" 2>/dev/null || true
+      ;;
+    1)
+      exit 0
+      ;;
+    2)
+      echo "muse-implement: killing run after ${BOUND_SECONDS}s ($TIER schedule)" >&2
+      : > "$killed_marker"
+      release_ticket
+      python3 "$REPO/heartbeat.py" finish --agent muse --run "$BEGIN_RUN" \
+        --outcome errored \
+        --note "killed after $((BOUND_SECONDS / 60)) minutes: $TIER implementation run exceeded the wall-clock bound (#392)" >&2
+      kill -TERM -- "-$muse_pid" 2>/dev/null || true
+      sleep 5
+      kill -KILL -- "-$muse_pid" 2>/dev/null || true
+      ;;
+    *)
+      echo "muse-implement: could not monitor Muse completion for $BEGIN_REF" >&2
+      : > "$MUSE_MONITOR_ERROR_MARKER"
+      release_ticket
+      python3 "$REPO/heartbeat.py" finish --agent muse --run "$BEGIN_RUN" \
+        --outcome errored --note "could not monitor Muse completion for $BEGIN_REF" >&2
+      kill -TERM -- "-$muse_pid" 2>/dev/null || true
+      sleep 5
+      kill -KILL -- "-$muse_pid" 2>/dev/null || true
+      ;;
+  esac
 ) &
 bound_pid=$!
 
@@ -524,8 +587,17 @@ if [[ -e "$killed_marker" ]]; then
   rm -f "$killed_marker"
   exit 124
 fi
-kill "$bound_pid" 2>/dev/null
-wait "$bound_pid" 2>/dev/null
+if [[ -e "$MUSE_MONITOR_ERROR_MARKER" ]]; then
+  wait "$bound_pid" 2>/dev/null
+  rm -f "$MUSE_MONITOR_ERROR_MARKER"
+  exit 1
+elif [[ -e "$MUSE_COMPLETED_MARKER" ]]; then
+  wait "$bound_pid" 2>/dev/null
+  status=0
+else
+  kill "$bound_pid" 2>/dev/null
+  wait "$bound_pid" 2>/dev/null
+fi
 
 if (( status != 0 )); then
   # A spent provider window is not this ticket's failure. Record the hold,
@@ -545,7 +617,6 @@ if (( status != 0 )); then
   exit 1
 fi
 
-ANSWER_FILE="$WORKSPACE/$ANSWER_NAME"
 if [[ ! -f "$ANSWER_FILE" ]]; then
   echo "muse-implement: the model left no $ANSWER_NAME for $BEGIN_REF" >&2
   release_ticket

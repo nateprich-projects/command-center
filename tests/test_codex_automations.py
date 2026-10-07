@@ -15,6 +15,10 @@ import codex_run  # noqa: E402
 import funnel  # noqa: E402
 
 
+# Test-only successor to agent-origin #2365: #2365 is superseded by #2377.
+# Production watch registration and drift logic merged under #2366 in PR
+# #2367; rejected PR #2370 is source material only and its verdict is not
+# reused. This PR closes #2377 only.
 # Literal values transcribed from the six native automation.toml records.
 ALL_DAY = ("RRULE:FREQ=HOURLY;INTERVAL=1;BYMINUTE=0,10,20,30,40,50;"
            "BYDAY=SU,MO,TU,WE,TH,FR,SA")

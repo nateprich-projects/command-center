@@ -164,6 +164,10 @@ def test_the_prompt_is_never_read_as_a_field():
 def test_a_fixture_matching_all_six_native_automations_has_no_drift(tmp_path):
     _manifest_set(tmp_path)
 
+    watch = "command-center-funnel-watch-github-writer"
+    assert watch in codex_run.AUTOMATIONS_WATCH_EXPECTED
+    assert watch not in codex_run.AUTOMATIONS_EXPECTED
+
     findings = codex_run.automation_findings(str(tmp_path))
 
     assert findings["drift"] == []

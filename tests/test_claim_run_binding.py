@@ -187,6 +187,27 @@ def test_owned_release_cli_refuses_an_old_run_without_writing(monkeypatch, capsy
     assert ticket.in_motion_since == NOW
 
 
+def test_owned_release_cli_clears_only_its_own_claim(monkeypatch):
+    rows, ticket = _claim_rows()
+    ticket.in_motion_since = NOW
+    monkeypatch.setattr(
+        funnel, "claim_state",
+        lambda ref, run, agent: ("owned", rows)
+        if (ref, run, agent) == (ticket.ref, "owner-run", "muse")
+        else ("other", rows),
+    )
+    writes = []
+    monkeypatch.setattr(
+        funnel, "write_lock",
+        lambda item, value: writes.append((item.ref, value)),
+    )
+
+    assert funnel.cmd_release(
+        rows, NOW, ticket.ref, run="owner-run", agent="muse"
+    ) == 0
+    assert writes == [(ticket.ref, "")]
+
+
 def test_release_refuses_a_partial_owner_identity_before_writing(monkeypatch):
     rows, ticket = _claim_rows()
     monkeypatch.setattr(

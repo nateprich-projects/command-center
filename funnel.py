@@ -20724,7 +20724,7 @@ def _muse_run_liveness(start: Mapping[str, object]) -> Optional[bool]:
     # Another host cannot tell whether this Mac runner is still alive. Older
     # starts lack a host marker and also stay with the ordinary TTL recovery.
     if (start.get("runner_host") != socket.gethostname()
-            or (runner_pid is None and not session_id)):
+            or not session_id):
         return None
     try:
         process = subprocess.run(

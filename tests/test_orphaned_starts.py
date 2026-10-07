@@ -351,6 +351,11 @@ def test_muse_liveness_matches_only_the_recorded_runner_or_model(monkeypatch):
         "runner_host": "different-host", "runner_pid": 1234,
         "session_id": "session-live",
     }) is None
+    assert funnel._muse_run_liveness({
+        "runner_host": funnel.socket.gethostname(),
+        "runner_pid": 1234,
+        "session_id": None,
+    }) is None
 
 
 def test_the_shared_begin_snapshot_gives_identical_reconciled_starts(monkeypatch):

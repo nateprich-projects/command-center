@@ -87,7 +87,15 @@ FUNNEL_STUB = (
     "        release = pathlib.Path(os.environ['SESSION_STOP_RELEASE'])\n"
     "        while not release.exists(): time.sleep(0.01)\n"
     "elif command == 'release':\n"
-    "    pass\n"
+    "    owner = os.environ.get('RELEASE_OWNER_RUN')\n"
+    "    if owner:\n"
+    "        args = sys.argv[2:]\n"
+    "        if ('--run' in args and args[args.index('--run') + 1] == owner\n"
+    "                and '--agent' in args\n"
+    "                and args[args.index('--agent') + 1] == 'muse'):\n"
+    "            (root / 'release.owned').write_text(owner)\n"
+    "        else:\n"
+    "            raise SystemExit('claim belongs to another run')\n"
     "else:\n"
     "    raise SystemExit('unexpected funnel command: ' + command)\n"
 )
@@ -556,7 +564,10 @@ def test_invalid_begin_work_finishes_errored_without_a_clone(tmp_path, begin):
 
 
 def test_a_clone_failure_finishes_errored_and_never_launches_muse(tmp_path):
-    proc, repo = _stubbed_runner(tmp_path, _begin(), gh_status=23)
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), gh_status=23,
+        extra_env={"RELEASE_OWNER_RUN": "writer-run"},
+    )
 
     assert proc.returncode == 1
     assert _muse_calls(repo) == 0
@@ -567,7 +578,22 @@ def test_a_clone_failure_finishes_errored_and_never_launches_muse(tmp_path):
     )
     assert "release example/widgets#42 --run writer-run --agent muse" in (
         repo / "funnel.calls").read_text()
+    assert (repo / "release.owned").read_text() == "writer-run"
+    assert "could not release" not in proc.stderr
     assert not list((tmp_path / "workspaces").iterdir())
+
+
+def test_a_superseded_clone_failure_does_not_clear_the_successor_claim(tmp_path):
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), gh_status=23,
+        extra_env={"RELEASE_OWNER_RUN": "successor-run"},
+    )
+
+    assert proc.returncode == 1
+    assert "release example/widgets#42 --run writer-run --agent muse" in (
+        repo / "funnel.calls").read_text()
+    assert not (repo / "release.owned").exists()
+    assert "could not release example/widgets#42" in proc.stderr
 
 
 def test_a_packet_failure_finishes_errored_without_a_model_call(tmp_path):

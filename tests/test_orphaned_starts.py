@@ -6,6 +6,8 @@ import pathlib
 import sys
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
@@ -176,15 +178,56 @@ def test_no_candidates_means_no_pr_read(monkeypatch):
 
 
 def test_reconcile_releases_a_bound_claim_with_no_branch_after_30_minutes(
-    monkeypatch,
+        monkeypatch,
 ):
+    project = _project(1)
+    claimed_at = NOW - funnel.CLAIM_BRANCH_GRACE - timedelta(seconds=1)
+    ticket = _ticket(9, project, in_motion_since=claimed_at)
+    started = _open_work_start(
+        "abandoned", ticket.ref, ts=int(claimed_at.timestamp())
+    )
+    started.append({
+        "run": "abandoned", "agent": "codex", "phase": "finish",
+        "ts": int(NOW.timestamp()) - 1, "outcome": "errored",
+    })
+    appended = _wire(
+        monkeypatch,
+        {"codex": started},
+        {ticket.ref: None},
+    )
+    releases = []
+    monkeypatch.setattr(
+        funnel, "cmd_release",
+        lambda items, now, ref, **kwargs: releases.append(
+            (ref, kwargs)
+        ) or 0,
+    )
+
+    result = funnel.reconcile_abandoned_claims(
+        [project, ticket], NOW, pr_facts={ticket.ref: None}
+    )
+
+    assert releases == [(
+        ticket.ref, {"run": "abandoned", "agent": "codex"},
+    )]
+    assert ticket.in_motion_since is None
+    assert result == [{
+        "run": "abandoned",
+        "agent": "codex",
+        "ref": ticket.ref,
+        "result": "released",
+    }]
+    assert appended == []
+
+
+def test_reconcile_preserves_an_active_branchless_run(monkeypatch):
     project = _project(1)
     claimed_at = NOW - funnel.CLAIM_BRANCH_GRACE - timedelta(seconds=1)
     ticket = _ticket(9, project, in_motion_since=claimed_at)
     appended = _wire(
         monkeypatch,
         {"codex": _open_work_start(
-            "abandoned", ticket.ref, ts=int(claimed_at.timestamp())
+            "active", ticket.ref, ts=int(claimed_at.timestamp())
         )},
         {ticket.ref: None},
     )
@@ -198,21 +241,88 @@ def test_reconcile_releases_a_bound_claim_with_no_branch_after_30_minutes(
         [project, ticket], NOW, pr_facts={ticket.ref: None}
     )
 
-    assert writes == [(ticket.ref, "")]
-    assert ticket.in_motion_since is None
-    assert result == [{
-        "run": "abandoned",
-        "agent": "codex",
-        "ref": ticket.ref,
-        "result": "released",
-        "kept": "pushed",
-    }]
-    (agent, finish), = appended
-    assert agent == "codex"
-    assert finish["run"] == "abandoned"
-    assert finish["phase"] == "finish"
-    assert finish["outcome"] == "errored"
-    assert finish["reconciled_claim"] == ticket.ref
+    assert result == []
+    assert writes == []
+    assert ticket.in_motion_since == claimed_at
+    assert appended == []
+
+
+def test_reconcile_preserves_claim_when_heartbeat_liveness_is_unreadable(
+        monkeypatch,
+):
+    project = _project(1)
+    claimed_at = NOW - funnel.CLAIM_BRANCH_GRACE - timedelta(seconds=1)
+    ticket = _ticket(9, project, in_motion_since=claimed_at)
+    terminal_records = _open_work_start(
+        "uncertain", ticket.ref, ts=int(claimed_at.timestamp())
+    )
+    terminal_records.append({
+        "run": "uncertain", "agent": "codex", "phase": "finish",
+        "ts": int(NOW.timestamp()) - 1, "outcome": "errored",
+    })
+    _wire(monkeypatch, {"codex": []}, {ticket.ref: None})
+    unreadable = heartbeat.Records(terminal_records, unreadable=1)
+    monkeypatch.setattr(
+        heartbeat, "read",
+        lambda agent: unreadable if agent == "codex" else heartbeat.Records(),
+    )
+    monkeypatch.setattr(
+        funnel, "cmd_release",
+        lambda *args, **kwargs: pytest.fail(
+            "unreadable heartbeat state cannot authorize a release"),
+    )
+
+    result = funnel.reconcile_abandoned_claims(
+        [project, ticket], NOW, pr_facts={ticket.ref: None}
+    )
+
+    assert result == []
+    assert ticket.in_motion_since == claimed_at
+
+
+def test_reconcile_does_not_release_a_stopped_old_run_over_a_successor(
+        monkeypatch,
+):
+    project = _project(1)
+    claimed_at = NOW - funnel.CLAIM_BRANCH_GRACE - timedelta(seconds=1)
+    ticket = _ticket(9, project, in_motion_since=claimed_at)
+    old = _open_work_start(
+        "old-muse", ticket.ref,
+        ts=int(claimed_at.timestamp()) - 60, agent="muse",
+    )
+    old.append({
+        "run": "old-muse", "agent": "muse", "phase": "finish",
+        "ts": int(NOW.timestamp()) - 1, "outcome": "errored",
+    })
+    successor = _open_work_start(
+        "successor-codex", ticket.ref,
+        ts=int(claimed_at.timestamp()) + 1, agent="codex",
+    )
+    spools = {"muse": old, "codex": successor}
+    _wire(monkeypatch, spools, {ticket.ref: None})
+    owner_records = {
+        "muse": old,
+        "codex": successor,
+        "claude": [],
+    }
+    monkeypatch.setattr(
+        heartbeat, "read_github_strict",
+        lambda agent: owner_records.get(agent, []),
+    )
+    monkeypatch.setattr(
+        funnel, "load_project_items_by_refs", lambda _refs: [ticket]
+    )
+    monkeypatch.setattr(
+        funnel, "write_lock",
+        lambda *args: pytest.fail("the old run cannot clear the successor"),
+    )
+
+    result = funnel.reconcile_abandoned_claims(
+        [project, ticket], NOW, pr_facts={ticket.ref: None}
+    )
+
+    assert result == []
+    assert ticket.in_motion_since == claimed_at
 
 
 def test_the_shared_begin_snapshot_gives_identical_reconciled_starts(monkeypatch):

@@ -260,8 +260,6 @@ def test_reconcile_preserves_muse_claim_when_liveness_is_unknown(monkeypatch):
 
 
 def test_reconcile_releases_stopped_muse_run_but_not_a_successor(monkeypatch):
-    from engine import implement
-
     project = _project(1)
     claimed_at = NOW - funnel.CLAIM_BRANCH_GRACE - timedelta(seconds=1)
     ticket = _ticket(9, project, in_motion_since=claimed_at)
@@ -270,7 +268,7 @@ def test_reconcile_releases_stopped_muse_run_but_not_a_successor(monkeypatch):
     old[0].update(session_id="session-stopped", runner_pid=1234)
     appended = _wire(monkeypatch, {"muse": old}, {ticket.ref: None})
     monkeypatch.setattr(funnel, "_muse_run_liveness", lambda record: False)
-    monkeypatch.setattr(implement, "_claim_state",
+    monkeypatch.setattr(funnel, "claim_state",
                         lambda ref, run, agent: ("other", [ticket]))
     monkeypatch.setattr(
         funnel, "write_lock",
@@ -288,8 +286,6 @@ def test_reconcile_releases_stopped_muse_run_but_not_a_successor(monkeypatch):
 def test_reconcile_releases_a_stopped_muse_run_that_still_owns_its_claim(
     monkeypatch,
 ):
-    from engine import implement
-
     project = _project(1)
     claimed_at = NOW - funnel.CLAIM_BRANCH_GRACE - timedelta(seconds=1)
     ticket = _ticket(9, project, in_motion_since=claimed_at)
@@ -298,7 +294,7 @@ def test_reconcile_releases_a_stopped_muse_run_that_still_owns_its_claim(
     start[0].update(session_id="session-stopped", runner_pid=1234)
     appended = _wire(monkeypatch, {"muse": start}, {ticket.ref: None})
     monkeypatch.setattr(funnel, "_muse_run_liveness", lambda record: False)
-    monkeypatch.setattr(implement, "_claim_state",
+    monkeypatch.setattr(funnel, "claim_state",
                         lambda ref, run, agent: ("owned", [ticket]))
     writes = []
     monkeypatch.setattr(funnel, "write_lock",

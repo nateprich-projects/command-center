@@ -23442,16 +23442,73 @@ def cmd_answer(items: List[Item], now: datetime, verb: str, ref: str,
     return 0
 
 
+def claim_state(ref: str, run: Optional[str], agent: str
+                ) -> Tuple[str, List[Item]]:
+    """Read the current Project claim and its latest heartbeat binding.
+
+    Funnel owns the Project write path, so both the runner and the CLI can
+    verify ownership without making funnel import its engine consumer.
+    """
+    try:
+        items = load_project_items_by_refs([ref])
+        if items is None or len(items) != 1 or items[0].ref != ref:
+            items = load_items(include_details=False)
+        item = find(items, ref)
+    except Exception as exc:
+        raise GitHubError("claim could not be read") from exc
+    lock = item.in_motion_since
+    if lock is None:
+        return "empty", items
+    if not run:
+        return "unknown", items
+    try:
+        import heartbeat
+
+        records = []
+        for owner_agent in AGENTS_BY_ROLE.get("implement", {}):
+            records.extend(heartbeat.read_github_strict(owner_agent))
+        bindings = heartbeat.bindings(records)
+    except Exception as exc:
+        raise GitHubError("heartbeat bindings could not be read") from exc
+
+    try:
+        claim_ts = int(lock.timestamp())
+    except Exception as exc:
+        raise GitHubError("claim timestamp is unreadable") from exc
+    candidates = []
+    for bound_run, binding in bindings.items():
+        bound_ts = binding.get("ts")
+        if (
+            binding.get("do") == "ticket"
+            and str(binding.get("work")) == ref
+            and isinstance(bound_ts, int)
+            and not isinstance(bound_ts, bool)
+            and bound_ts >= claim_ts
+        ):
+            candidates.append((bound_ts, bound_run))
+    if not candidates:
+        return "unknown", items
+    latest_ts = max(ts for ts, _bound_run in candidates)
+    holders = {bound_run for ts, bound_run in candidates if ts == latest_ts}
+    if len(holders) != 1:
+        return "unknown", items
+    return ("owned" if next(iter(holders)) == run else "other"), items
+
+
 def cmd_release(items: List[Item], now: datetime, ref: str,
                 run: Optional[str] = None, agent: Optional[str] = None) -> int:
     if bool(run) != bool(agent):
         raise GitHubError("release requires --run and --agent together")
     if run is not None and agent is not None:
-        from engine import implement
-        try:
-            implement.release_claim(ref, run=run, agent=agent)
-        except implement.ImplementError as exc:
-            raise GitHubError(str(exc)) from exc
+        state, current_items = claim_state(ref, run, agent)
+        if state == "empty":
+            return 0
+        if state != "owned":
+            raise GitHubError(
+                "another run holds the claim" if state == "other"
+                else "claim holder is unknown"
+            )
+        write_lock(find(current_items, ref), "")
         return 0
     write_lock(find(items, ref), "")
     return 0
@@ -24409,8 +24466,10 @@ def main(argv: Optional[Sequence[str]] = None, *,
                 run=args.run, agent=args.agent,
             )
         if args.command == "release":
-            return cmd_release(items, now, args.ref,
-                               run=args.run, agent=args.agent)
+            if args.run is not None:
+                return cmd_release(items, now, args.ref,
+                                   run=args.run, agent=args.agent)
+            return cmd_release(items, now, args.ref)
         if args.command == "pin":
             return cmd_pin(items, now, args.ref, args.confirmed,
                            args.run, args.agent)

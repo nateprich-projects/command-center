@@ -168,7 +168,7 @@ def test_owned_release_cli_refuses_an_old_run_without_writing(monkeypatch, capsy
     rows, ticket = _claim_rows()
     ticket.in_motion_since = NOW
     monkeypatch.setattr(
-        implement, "_claim_state",
+        funnel, "claim_state",
         lambda ref, run, agent: ("other", rows),
     )
     monkeypatch.setattr(

@@ -665,6 +665,13 @@ def automation_findings(root: Optional[str] = None) -> Dict[str, List[str]]:
             if status != "PAUSED":
                 drift.append("{}: retired, but status is {}".format(
                     name, status))
+        elif name in AUTOMATIONS_WATCH_EXPECTED:
+            # A watch stays outside ticket-tier classification even if a stale
+            # or accidental lane entry uses the same directory name.
+            for field, expected in AUTOMATIONS_WATCH_EXPECTED[name].items():
+                if fields.get(field) != expected:
+                    drift.append("{}: {} expected {}, found {}".format(
+                        name, field, expected, fields.get(field)))
         elif name in AUTOMATIONS_EXPECTED:
             if fields.get("model") != MODEL:
                 drift.append("{}: model expected {}, found {}".format(
@@ -683,11 +690,6 @@ def automation_findings(root: Optional[str] = None) -> Dict[str, List[str]]:
                 drift.append("{}: escalated, but its rrule has no {} so the "
                              "keeper installs it as standard".format(
                                  name, BYHOUR))
-        elif name in AUTOMATIONS_WATCH_EXPECTED:
-            for field, expected in AUTOMATIONS_WATCH_EXPECTED[name].items():
-                if fields.get(field) != expected:
-                    drift.append("{}: {} expected {}, found {}".format(
-                        name, field, expected, fields.get(field)))
         memory = os.path.join(root, name, MEMORY_FILE)
         try:
             size = "{:,} bytes".format(os.path.getsize(memory))

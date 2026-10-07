@@ -225,6 +225,17 @@ def test_watch_model_and_effort_drift_are_not_ticket_lane_drift(
     assert "escalated" not in drift[0]
 
 
+def test_watch_manifest_precedes_ticket_tier_classification(tmp_path, monkeypatch):
+    """A native watch stays a watch if a stale ticket-tier entry overlaps."""
+    _manifest_set(tmp_path)
+    watch = "command-center-funnel-watch-github-writer"
+    monkeypatch.setitem(codex_run.AUTOMATIONS_EXPECTED, watch, "escalated")
+
+    drift = codex_run.automation_findings(str(tmp_path))["drift"]
+
+    assert drift == []
+
+
 def test_an_automation_outside_the_manifest_is_drift(tmp_path):
     _manifest_set(tmp_path)
     _automation(tmp_path, "command-center-tickets-new")

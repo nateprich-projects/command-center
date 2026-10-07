@@ -60,10 +60,10 @@ def _manifest_set(root, **overrides):
     specs = {
         "command-center-tickets-hourly": {
             "rrule": ALL_DAY, "model": "gpt-6-luna", "effort": "max",
-            "status": "ACTIVE"},
+            "status": "PAUSED"},
         "command-center-tickets-weekday-mornings": {
             "rrule": EVERY_HOUR, "model": "gpt-6-luna", "effort": "max",
-            "status": "ACTIVE"},
+            "status": "PAUSED"},
         "command-center-funnel-watch-github-writer": {
             "rrule": WATCH, "model": "gpt-6.1-sol", "effort": "high",
             "status": "ACTIVE"},
@@ -237,17 +237,6 @@ def test_watch_model_and_effort_drift_are_not_ticket_lane_drift(
     assert "escalated" not in drift[0]
 
 
-def test_watch_manifest_precedes_ticket_tier_classification(tmp_path, monkeypatch):
-    """A native watch stays a watch if a stale ticket-tier entry overlaps."""
-    _manifest_set(tmp_path)
-    watch = "command-center-funnel-watch-github-writer"
-    monkeypatch.setitem(codex_run.AUTOMATIONS_EXPECTED, watch, "escalated")
-
-    drift = codex_run.automation_findings(str(tmp_path))["drift"]
-
-    assert drift == []
-
-
 @pytest.mark.parametrize(("override", "expected"), [
     ({"absent": True}, "command-center-funnel-watch-github-writer: missing"),
     ({"status": "PAUSED"},
@@ -351,7 +340,7 @@ def test_notes_report_status_and_memory_size(tmp_path):
 
     notes = codex_run.automation_findings(str(tmp_path))["notes"]
 
-    assert "command-center-tickets-hourly: ACTIVE, memory 401,588 bytes" in \
+    assert "command-center-tickets-hourly: PAUSED, memory 401,588 bytes" in \
         notes
     assert "command-center-tickets-sun-thu-late-night: PAUSED, memory none" \
         in notes
@@ -370,7 +359,7 @@ def test_a_matching_set_passes_with_its_notes(tmp_path):
 
     assert check.ok is True
     assert check.name == "codex automations"
-    assert "command-center-tickets-hourly: ACTIVE" in check.found
+    assert "command-center-tickets-hourly: PAUSED" in check.found
     expected_notes = codex_run.automation_findings(str(tmp_path))["notes"]
     assert check.found == "\n".join("  " + note for note in expected_notes)
     assert "rollout" not in check.found

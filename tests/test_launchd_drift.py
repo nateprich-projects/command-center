@@ -138,6 +138,18 @@ def test_the_implementers_run_at_standard_priority(name):
     assert plist.get("ProcessType") == "Standard"
 
 
+@pytest.mark.parametrize("name", sorted(
+    path.name for path in (ROOT / "launchd").glob("*.plist")
+    if path.name not in IMPLEMENTER_NAMES))
+def test_every_other_job_stays_background(name):
+    """#2392 raised only the implementers, whose finish runs the full suite."""
+    import plistlib
+
+    with (ROOT / "launchd" / name).open("rb") as handle:
+        plist = plistlib.load(handle)
+    assert plist.get("ProcessType") == "Background"
+
+
 def test_the_keeper_points_at_the_stable_wrapper():
     """The keeper must run the checked-in wrapper from the maintained clone."""
     import plistlib

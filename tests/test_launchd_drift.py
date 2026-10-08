@@ -123,6 +123,33 @@ def test_the_plist_points_at_the_stable_path(name):
     assert not any(a.startswith("/Volumes/") for a in args), args
 
 
+@pytest.mark.parametrize("name", IMPLEMENTER_NAMES)
+def test_the_implementers_run_at_standard_priority(name):
+    """A Background job is throttled to 2.7x the suite's normal time (#2392).
+
+    Measured 2026-10-07: tests/test_muse_implement.py took 95.56s at normal
+    priority and 258.52s under `taskpolicy -b`. The finish step's merged suite
+    then ran out of its 45-minute bound at 43% and 49% of the way through.
+    """
+    import plistlib
+
+    with (ROOT / "launchd" / name).open("rb") as handle:
+        plist = plistlib.load(handle)
+    assert plist.get("ProcessType") == "Standard"
+
+
+@pytest.mark.parametrize("name", sorted(
+    path.name for path in (ROOT / "launchd").glob("*.plist")
+    if path.name not in IMPLEMENTER_NAMES))
+def test_every_other_job_stays_background(name):
+    """#2392 raised only the implementers, whose finish runs the full suite."""
+    import plistlib
+
+    with (ROOT / "launchd" / name).open("rb") as handle:
+        plist = plistlib.load(handle)
+    assert plist.get("ProcessType") == "Background"
+
+
 def test_the_keeper_points_at_the_stable_wrapper():
     """The keeper must run the checked-in wrapper from the maintained clone."""
     import plistlib

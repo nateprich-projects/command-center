@@ -74,6 +74,8 @@ FUNNEL_STUB = (
     "with (root / 'funnel.calls').open('a') as fh:\n"
     "    fh.write(' '.join(sys.argv[1:]) + '\\n')\n"
     "if command == 'session-server':\n"
+    "    (root / 'server.session_id').write_text(os.environ.get('MUSE_SESSION_ID', ''))\n"
+    "    (root / 'server.runner_pid').write_text(os.environ.get('MUSE_RUNNER_PID', ''))\n"
     "    print('127.0.0.1:1:stub', flush=True)\n"
     "elif command == 'begin':\n"
     "    (root / 'begin.session_id').write_text(os.environ.get('MUSE_SESSION_ID', ''))\n"
@@ -85,7 +87,15 @@ FUNNEL_STUB = (
     "        release = pathlib.Path(os.environ['SESSION_STOP_RELEASE'])\n"
     "        while not release.exists(): time.sleep(0.01)\n"
     "elif command == 'release':\n"
-    "    pass\n"
+    "    owner = os.environ.get('RELEASE_OWNER_RUN')\n"
+    "    if owner:\n"
+    "        args = sys.argv[2:]\n"
+    "        if ('--run' in args and args[args.index('--run') + 1] == owner\n"
+    "                and '--agent' in args\n"
+    "                and args[args.index('--agent') + 1] == 'muse'):\n"
+    "            (root / 'release.owned').write_text(owner)\n"
+    "        else:\n"
+    "            raise SystemExit('claim belongs to another run')\n"
     "else:\n"
     "    raise SystemExit('unexpected funnel command: ' + command)\n"
 )
@@ -164,6 +174,44 @@ MUSE_STUB = (
     "printf '%s' \"$MUSE_ANSWER\" > \"$workspace/answer.json\"; fi\n"
     "if [[ -n \"${MUSE_TOUCH:-}\" ]]; then "
     "printf 'changed' > \"$workspace/$MUSE_TOUCH\"; fi\n"
+    "if [[ -n \"${MUSE_EVENT_MODE:-}\" ]]; then\n"
+    "  session_id=''\n"
+    "  previous=''\n"
+    "  for argument in \"$@\"; do\n"
+    "    if [[ \"$previous\" == '--session-id' ]]; then session_id=\"$argument\"; break; fi\n"
+    "    previous=\"$argument\"\n"
+    "  done\n"
+    "  python3 - \"$session_id\" \"$MUSE_EVENT_MODE\" <<'PY'\n"
+    "import json, sys\n"
+    "session_id, mode = sys.argv[1:]\n"
+    "accepted_stream = {'kind': 'session', 'id': session_id}\n"
+    "terminal_stream = (accepted_stream if mode != 'foreign' else\n"
+    "                   {'kind': 'session', 'id': 'another-run'})\n"
+    "command_id = 'this-command'\n"
+    "accepted = {'record_type': 'reconciliation', 'payload_type': 'runtime.command.accepted',\n"
+    "            'sequence': 1, 'stream': accepted_stream,\n"
+    "            'payload': {'kind': 'command_accepted', 'command_id': command_id}}\n"
+    "configured = {'record_type': 'event', 'payload_type': 'run.model.configured',\n"
+    "              'sequence': 2, 'stream': accepted_stream,\n"
+    "              'payload': {'record': {'command_id': command_id,\n"
+    "                                     'run_stream': {'kind': 'run', 'id': command_id}}}}\n"
+    "terminal = {'record_type': 'event',\n"
+    "            'payload_type': 'run.terminal.completed', 'sequence': 3,\n"
+    "            'stream': terminal_stream,\n"
+    "            'payload': {'command_id': command_id, 'terminal': 'completed',\n"
+    "                        'text': 'done'}}\n"
+    "if mode == 'foreign_command':\n"
+    "    terminal['payload']['command_id'] = 'another-command'\n"
+    "events = [accepted, configured, terminal]\n"
+    "if mode == 'unpaired': events = [terminal]\n"
+    "if mode == 'no_acceptance': events = [configured, terminal]\n"
+    "for event in events: print(json.dumps(event), flush=True)\n"
+    "PY\n"
+    "fi\n"
+    "if [[ -n \"${MUSE_LINGER_AFTER_COMPLETION:-}\" ]]; then\n"
+    "  sleep \"$MUSE_LINGER_AFTER_COMPLETION\" &\n"
+    "  wait \"$!\"\n"
+    "fi\n"
     "exit \"${MUSE_STATUS:-0}\"\n"
 )
 
@@ -247,6 +295,8 @@ def _stubbed_runner(tmp_path, begin, *, packet=None, bound_seconds=20,
     (repo / "heartbeat.py").write_text(HEARTBEAT_STUB)
     (repo / "implement-packet").write_text(PACKET_STUB)
     (repo / "finish-ticket").write_text(FINISH_STUB)
+    (repo / "muse_implement_handoff.py").write_text(
+        (ROOT / "muse_implement_handoff.py").read_text())
     # The real module, not a stub: the point of the model tests below is
     # that the runner's argv comes from the real allowlist.
     (repo / "muse_model.py").write_text(
@@ -344,6 +394,8 @@ def test_the_happy_path_runs_packet_model_and_finish_in_order(tmp_path):
     assert args[0] == "exec"
     session_id = (repo / "begin.session_id").read_text()
     assert str(uuid.UUID(session_id)) == session_id
+    assert (repo / "server.session_id").read_text() == session_id
+    assert (repo / "server.runner_pid").read_text().isdigit()
     assert args[args.index("--session-id") + 1] == session_id
     assert args[args.index("--model") + 1] == "muse-spark-1.3"
     assert args[args.index("--reasoning-effort") + 1] == "max"
@@ -552,7 +604,10 @@ def test_invalid_begin_work_finishes_errored_without_a_clone(tmp_path, begin):
 
 
 def test_a_clone_failure_finishes_errored_and_never_launches_muse(tmp_path):
-    proc, repo = _stubbed_runner(tmp_path, _begin(), gh_status=23)
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), gh_status=23,
+        extra_env={"RELEASE_OWNER_RUN": "writer-run"},
+    )
 
     assert proc.returncode == 1
     assert _muse_calls(repo) == 0
@@ -561,8 +616,24 @@ def test_a_clone_failure_finishes_errored_and_never_launches_muse(tmp_path):
         "finish --agent muse --run writer-run --outcome errored --note "
         "could not clone example/widgets into the fresh implementation workspace\n"
     )
-    assert "release example/widgets#42" in (repo / "funnel.calls").read_text()
+    assert "release example/widgets#42 --run writer-run --agent muse" in (
+        repo / "funnel.calls").read_text()
+    assert (repo / "release.owned").read_text() == "writer-run"
+    assert "could not release" not in proc.stderr
     assert not list((tmp_path / "workspaces").iterdir())
+
+
+def test_a_superseded_clone_failure_does_not_clear_the_successor_claim(tmp_path):
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), gh_status=23,
+        extra_env={"RELEASE_OWNER_RUN": "successor-run"},
+    )
+
+    assert proc.returncode == 1
+    assert "release example/widgets#42 --run writer-run --agent muse" in (
+        repo / "funnel.calls").read_text()
+    assert not (repo / "release.owned").exists()
+    assert "could not release example/widgets#42" in proc.stderr
 
 
 def test_a_packet_failure_finishes_errored_without_a_model_call(tmp_path):
@@ -615,6 +686,49 @@ def test_a_missing_answer_releases_and_finishes_errored(tmp_path):
         "finish --agent muse --run writer-run --outcome errored --note "
         "the model left no answer.json for example/widgets#42\n"
     )
+    assert "release example/widgets#42" in (repo / "funnel.calls").read_text()
+
+
+def test_accepted_completion_with_a_valid_answer_stops_lingering_work(
+        tmp_path):
+    bound_seconds = 8
+    started = time.monotonic()
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), bound_seconds=bound_seconds,
+        extra_env={"MUSE_EVENT_MODE": "paired",
+                   "MUSE_LINGER_AFTER_COMPLETION": "30"},
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    assert time.monotonic() - started < bound_seconds
+    assert len(_calls(repo, "finish")) == 1
+    assert (repo / "finish.answer").read_text() == ANSWER
+    assert _heartbeat(repo) == ""
+
+
+@pytest.mark.parametrize(
+    ("event_mode", "answer", "missing_answer"),
+    (("unpaired", ANSWER, False), ("no_acceptance", ANSWER, False),
+     ("foreign", ANSWER, False), ("foreign_command", ANSWER, False),
+     ("paired", '{"done": true,', False), ("paired", ANSWER, True)),
+)
+def test_incomplete_or_unpaired_completion_cannot_handoff_early(
+        tmp_path, event_mode, answer, missing_answer):
+    extra_env = {
+        "MUSE_EVENT_MODE": event_mode,
+        "MUSE_ANSWER": answer,
+        "MUSE_LINGER_AFTER_COMPLETION": "30",
+    }
+    if missing_answer:
+        extra_env["MUSE_MISSING_ANSWER"] = "1"
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), bound_seconds=1,
+        extra_env=extra_env,
+    )
+
+    assert proc.returncode == 124, proc.stderr
+    assert _calls(repo, "finish") == []
+    assert "--outcome errored" in _heartbeat(repo)
     assert "release example/widgets#42" in (repo / "funnel.calls").read_text()
 
 
@@ -681,13 +795,19 @@ def test_the_wall_clock_bound_kills_the_process_group_and_finishes_errored(
         ("scripts/muse-review-engine", "    ", "trap cleanup EXIT"),
     ),
 )
-def test_bound_watcher_disarms_exit_before_starting_its_timer(
+def test_bound_watcher_disarms_exit_before_monitoring_the_run(
         script, indent, parent_trap):
     source = (ROOT / script).read_text()
 
     assert parent_trap in source
-    assert "(\n{}trap - EXIT\n{}sleep \"$BOUND_SECONDS\" &".format(
-        indent, indent) in source
+    if script == "scripts/muse-implement":
+        watcher = '(\n{}trap - EXIT\n{}monitor_pid=""'.format(
+            indent, indent)
+        assert 'trap \'if [[ -n "$monitor_pid" ]]' in source
+    else:
+        watcher = "(\n{}trap - EXIT\n{}sleep \"$BOUND_SECONDS\" &".format(
+            indent, indent)
+    assert watcher in source
     cleanup_start = source.index("cleanup() {")
     cleanup_body = source[cleanup_start + len("cleanup() {"):]
     first_statement = next(
@@ -774,7 +894,7 @@ def test_watcher_killed_after_fake_job_exit_does_not_run_parent_cleanup(
     cleanup_end = source.index("\n}", cleanup_start) + 2
     cleanup = source[cleanup_start:cleanup_end]
     watcher_start = source.index(
-        '\n(\n  trap - EXIT\n  sleep "$BOUND_SECONDS" &',
+        '\n(\n  trap - EXIT\n  monitor_pid=""',
         source.index('killed_marker='),
     )
     watcher_end = source.index("\n) &", watcher_start) + len("\n) &")
@@ -789,6 +909,8 @@ def test_watcher_killed_after_fake_job_exit_does_not_run_parent_cleanup(
         "    with pathlib.Path(os.environ['SESSION_STOP_LOG']).open('a') as f:\n"
         "        f.write('session-stop\\n')\n"
     )
+    (repo / "muse_implement_handoff.py").write_text(
+        "raise SystemExit(1)\n")
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     packet = tmp_path / "packet"
@@ -804,10 +926,15 @@ def test_watcher_killed_after_fake_job_exit_does_not_run_parent_cleanup(
         cleanup,
         "REPO={}".format(shlex.quote(str(repo))),
         "MUSE_STDERR_FILE={}".format(shlex.quote(str(stderr_file))),
+        "MUSE_JSON_FILE={}".format(shlex.quote(str(tmp_path / 'json'))),
+        "MUSE_SESSION_ID=''",
+        "MUSE_COMPLETED_MARKER={}".format(shlex.quote(str(tmp_path / "completed"))),
+        "MUSE_MONITOR_ERROR_MARKER={}".format(shlex.quote(str(tmp_path / "monitor-error"))),
         "PACKET_FILE={}".format(shlex.quote(str(packet))),
         "PROMPT_FILE={}".format(shlex.quote(str(prompt))),
         "DIAG_FILE={}".format(shlex.quote(str(diag))),
         "ANSWER_HANDOFF={}".format(shlex.quote(str(answer))),
+        "ANSWER_FILE={}".format(shlex.quote(str(answer))),
         "WORKSPACE={}".format(shlex.quote(str(workspace))),
         "BOUND_SECONDS=30",
         "TIER=standard",

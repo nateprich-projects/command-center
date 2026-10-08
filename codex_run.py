@@ -563,12 +563,13 @@ AUTOMATIONS_EXPECTED = {
 }
 
 # #2296's native GitHub watch is not an implement lane. Its BYHOUR rule must
-# not be interpreted as an escalated ticket tier.
+# not be interpreted as an escalated ticket tier. The writer stays PAUSED as
+# the #2296 rollback standby; an ACTIVE return is the drift this watch catches.
 AUTOMATIONS_WATCH_EXPECTED = {
     "command-center-funnel-watch-github-writer": {
         "model": "gpt-6.1-sol",
         "reasoning_effort": "high",
-        "status": "ACTIVE",
+        "status": "PAUSED",
         "rrule": "RRULE:FREQ=DAILY;BYHOUR=4,16;BYMINUTE=13",
     },
 }

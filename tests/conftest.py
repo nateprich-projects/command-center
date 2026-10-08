@@ -9,6 +9,8 @@ module-specific patch.
 from __future__ import annotations
 
 import os
+import shlex
+import sys
 from pathlib import Path
 
 import pytest
@@ -22,12 +24,22 @@ LIVE_SPOOL_DIR = Path("~/.claude/command-center-heartbeat").expanduser()
 
 @pytest.fixture(scope="session")
 def offline_bin(tmp_path_factory):
-    """A directory holding a ``gh`` that refuses, outside every tmp_path."""
+    """Offline gh and the suite's Python, outside every tmp_path.
+
+    Apple's /usr/bin/python3 launcher consults Xcode when a runner fixture
+    changes HOME. Reuse the interpreter already running pytest so each shell
+    helper avoids that launcher and retains the suite's Python environment.
+    Tests can still prepend their own executable doubles to PATH.
+    """
     directory = tmp_path_factory.mktemp("offline-bin")
     offline = directory / "gh"
     offline.write_text(
         "#!/bin/sh\necho 'gh is offline in tests' >&2\nexit 1\n")
     offline.chmod(0o755)
+    python = directory / "python3"
+    python.write_text(
+        '#!/bin/sh\nexec {} "$@"\n'.format(shlex.quote(sys.executable)))
+    python.chmod(0o755)
     return directory
 
 

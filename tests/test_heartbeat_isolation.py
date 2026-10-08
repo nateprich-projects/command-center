@@ -6,8 +6,10 @@ concurrently, so a size comparison cannot tell a leak from ordinary operation.
 
 from __future__ import annotations
 
+import json
 import os
 import pathlib
+import shutil
 import subprocess
 import sys
 import uuid
@@ -15,6 +17,44 @@ import uuid
 from conftest import LIVE_SPOOL_DIR
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
+
+
+def test_shell_python_on_the_test_path_is_the_suite_wrapper(offline_bin):
+    """A bare ``python3`` must not reach Apple's /usr/bin/python3 launcher.
+
+    Under a fixture HOME that launcher consults Xcode on every start, which
+    pushed the Mac suite past the 2700-second finish bound (#2387).
+    """
+    found = shutil.which("python3")
+    assert found is not None
+    assert pathlib.Path(found).parent == offline_bin
+
+
+def test_shell_python_uses_the_suite_interpreter_with_a_fixture_home(tmp_path):
+    result = subprocess.run(
+        ["python3", "-c",
+         "import json,sys; print(json.dumps([sys.executable,sys.prefix,sys.argv[1:]]))",
+         "argument with spaces", "$literal"],
+        env=dict(os.environ, HOME=str(tmp_path)),
+        capture_output=True, text=True, check=True, timeout=10,
+    )
+    executable, prefix, arguments = json.loads(result.stdout)
+    assert pathlib.Path(executable).resolve() == pathlib.Path(sys.executable).resolve()
+    assert prefix == sys.prefix
+    assert arguments == ["argument with spaces", "$literal"]
+    assert result.stderr == ""
+
+
+def test_shell_python_can_still_be_replaced_by_an_executable_double(tmp_path):
+    fake = tmp_path / "python3"
+    fake.write_text("#!/bin/sh\nprintf 'test double\\n'\n")
+    fake.chmod(0o755)
+    result = subprocess.run(
+        ["python3", "-c", "raise RuntimeError('must not run')"],
+        env=dict(os.environ, PATH=str(tmp_path) + os.pathsep + os.environ["PATH"]),
+        capture_output=True, text=True, check=True, timeout=10,
+    )
+    assert result.stdout == "test double\n"
 
 
 def test_a_fresh_interpreter_writes_to_the_inherited_test_spool(heartbeat_isolation):

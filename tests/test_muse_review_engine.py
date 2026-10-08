@@ -2973,6 +2973,45 @@ def test_the_breakdown_prompt_is_judgement_text_under_500_words():
                 protocol))
 
 
+def test_the_breakdown_prompt_keeps_every_pre_trim_normative_rule():
+    """The #2024 trim rewords routines/muse-breakdown.md to hold the 500-word
+    cap while adding the Review-focus Accept rule. Every normative rule the
+    file stated before the trim must still be stated after it: deleting any
+    one of them fails this test, as does dropping the new Review-focus
+    bullet (so it fails on main and passes on the branch)."""
+    prompt = ROUTINE_BREAKDOWN.read_text().split("\n---\n", 1)[1]
+    normalized = " ".join(prompt.split()).lower()
+    for rule in (
+            "`project.body` is the whole, canonical plan",
+            "current body supersedes `issue_thread`",
+            "`siblings` are filed tickets",
+            "cover only gaps",
+            "follow `sizing_standard`, the sizing authority",
+            "one run ending in one pull request",
+            "split by behaviour, never by layer",
+            "an extra pr is cheaper than a dead run",
+            "tickets deliver the stated outcome end to end",
+            "usable state, not one per heading",
+            "prefer tickets workable in any order",
+            "record it in `depends_on`",
+            "sequence expand, migrate, contract only for a genuinely wide change",
+            "make a needed refactor its own prefactor ticket, first",
+            "small work stays one ticket",
+            "one indivisible plan is one ticket",
+            "for each `## review focus` bullet, put one `accept` test in its "
+            "owning ticket; copy the text verbatim once",
+            "its accept names the one to three seams its tests go at",
+            "makes its first accept item `reproduction:",
+            "`risk` is `escalated` when the ticket needs the expensive reviewer",
+            "`depends_on` holds sibling indices",
+            "`needs` is `none` for any-agent work",
+            "ask `needs_decision` with no tickets when the plan leaves a "
+            "decision undecided",
+            "tickets or the question, never both",
+    ):
+        assert rule in normalized, rule
+
+
 def test_the_breakdown_prompt_keeps_nates_needs_list_open_and_whole():
     """The prompt is the only capability boundary Muse sees at breakdown, so
     Nate's list must read as examples, not a closed list, and must keep the
@@ -3036,6 +3075,7 @@ def test_the_shape_prompt_is_judgement_text_under_500_words():
     assert '"failure_modes": [...]' in prompt
     assert '"hotspot_targets": [{"repo_path": ..., "function": ...}]' in prompt
     assert '"redesign_remainder": ...' in prompt
+    assert "0\u20133 non-empty strings" in normalized
     assert "omission equals `[]`" in normalized
     assert "exact `{repo_path, function}` pairs from packet hotspots" in normalized
     assert "targets require non-empty markdown `redesign_remainder`" in normalized

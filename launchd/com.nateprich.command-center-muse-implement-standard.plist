@@ -69,6 +69,6 @@
     </dict>
 
     <key>ProcessType</key>
-    <string>Background</string>
+    <string>Standard</string>
 </dict>
 </plist>

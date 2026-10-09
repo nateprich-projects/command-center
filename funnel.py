@@ -1068,6 +1068,335 @@ def needs_class(item: Item) -> bool:
     return item.klass not in LADDER
 
 
+#: Probability at or above which a hypothesis without an explicit `likely`
+#: flag counts as likely for try-and-watch (#2407, #2427). Agent default:
+#: the plan names no threshold, so an explicit flag always wins and this
+#: only fills the gap when the overseer gave p but no likely judgement.
+HYPOTHESIS_LIKELY_P = 0.7
+
+#: Aliases for the decision flag. Positive names mean "an answer could
+#: change the decision"; inverted names mean the opposite.
+_HYPOTHESIS_DECISION_POSITIVE = (
+    "changes_decision", "would_change_decision", "changes_a_decision",
+    "would_change_a_decision", "decision_change",
+    "changes_decision_if_answered", "decision_relevant",
+    "matters_to_decision", "would_change",
+)
+_HYPOTHESIS_DECISION_INVERTED = (
+    "no_answer_changes_decision", "no_answer_would_change_decision",
+    "no_answer_changes", "changes_nothing", "decision_irrelevant",
+)
+
+
+@dataclass(frozen=True)
+class Hypothesis:
+    """An overseer's scored hypothesis (#2407, #2427).
+
+    ``impact``, ``p`` and ``cost`` are the value estimates; ``changes_decision``
+    is False when no answer would change the decision. ``likely``, ``cheap``
+    and ``reversible`` feed the try-and-watch flag; None means unstated.
+    Every estimate carries its reason so the domain record shows why.
+    """
+
+    key: str = ""
+    impact: float = 0.0
+    impact_reason: str = ""
+    p: float = 0.0
+    p_reason: str = ""
+    cost: float = 0.0
+    cost_reason: str = ""
+    changes_decision: bool = True
+    changes_decision_reason: str = ""
+    likely: Optional[bool] = None
+    likely_reason: str = ""
+    cheap: Optional[bool] = None
+    cheap_reason: str = ""
+    reversible: Optional[bool] = None
+    reversible_reason: str = ""
+
+    def to_dict(self) -> Dict[str, object]:
+        return {
+            "key": self.key, "impact": self.impact,
+            "impact_reason": self.impact_reason, "p": self.p,
+            "p_reason": self.p_reason, "cost": self.cost,
+            "cost_reason": self.cost_reason,
+            "changes_decision": self.changes_decision,
+            "changes_decision_reason": self.changes_decision_reason,
+            "likely": self.likely, "likely_reason": self.likely_reason,
+            "cheap": self.cheap, "cheap_reason": self.cheap_reason,
+            "reversible": self.reversible,
+            "reversible_reason": self.reversible_reason,
+        }
+
+
+@dataclass(frozen=True)
+class ScoredHypothesis:
+    """A hypothesis with its computed value and try-and-watch flag."""
+
+    key: str = ""
+    value: float = 0.0
+    try_and_watch: bool = False
+    impact: float = 0.0
+    impact_reason: str = ""
+    p: float = 0.0
+    p_reason: str = ""
+    cost: float = 0.0
+    cost_reason: str = ""
+    changes_decision: bool = True
+    changes_decision_reason: str = ""
+    likely: bool = False
+    likely_reason: str = ""
+    cheap: bool = False
+    cheap_reason: str = ""
+    reversible: bool = False
+    reversible_reason: str = ""
+
+    def to_dict(self) -> Dict[str, object]:
+        return {
+            "key": self.key, "value": self.value,
+            "try_and_watch": self.try_and_watch, "impact": self.impact,
+            "impact_reason": self.impact_reason, "p": self.p,
+            "p_reason": self.p_reason, "cost": self.cost,
+            "cost_reason": self.cost_reason,
+            "changes_decision": self.changes_decision,
+            "changes_decision_reason": self.changes_decision_reason,
+            "likely": self.likely, "likely_reason": self.likely_reason,
+            "cheap": self.cheap, "cheap_reason": self.cheap_reason,
+            "reversible": self.reversible,
+            "reversible_reason": self.reversible_reason,
+        }
+
+
+def _hypothesis_field(data: Any, names: Sequence[str], default: Any) -> Any:
+    for name in names:
+        if isinstance(data, Mapping):
+            if name in data and data[name] is not None:
+                return data[name]
+        else:
+            value = getattr(data, name, None)
+            if value is not None:
+                return value
+    return default
+
+
+def _hypothesis_nested(data: Any, outer: str, inners: Sequence[str],
+                       default: Any) -> Any:
+    if isinstance(data, Mapping):
+        inner = data.get(outer)
+        if isinstance(inner, Mapping):
+            for name in inners:
+                if name in inner and inner[name] is not None:
+                    return inner[name]
+    return default
+
+
+def _hypothesis_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _hypothesis_bool(value: Any, default: Any = False) -> Any:
+    if isinstance(value, bool) or value is None:
+        return value if isinstance(value, bool) else default
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        word = value.strip().lower()
+        if word in ("true", "yes", "y", "1", "t", "likely", "cheap",
+                    "reversible", "high", "very likely", "very-likely"):
+            return True
+        if word in ("false", "no", "n", "0", "f", "", "unlikely",
+                    "expensive", "irreversible", "low", "not likely"):
+            return False
+        return default
+    return bool(value)
+
+
+def _hypothesis_str(value: Any, default: str = "") -> str:
+    if value is None:
+        return default
+    return value if isinstance(value, str) else str(value)
+
+
+def normalize_hypothesis(data: Any = None, **kwargs: Any) -> Hypothesis:
+    """Coerce a mapping, object or kwargs to a ``Hypothesis``.
+
+    Missing numerics default to 0.0 so an incomplete hypothesis scores
+    zero and sorts last rather than raising. A missing decision flag
+    defaults to True: only an explicit "no answer changes anything"
+    zeroes the value.
+    """
+    if data is None:
+        data = kwargs if kwargs else {}
+    elif kwargs and isinstance(data, Mapping):
+        data = dict(data, **kwargs)
+    if isinstance(data, Hypothesis):
+        return data
+
+    def _num(names: Sequence[str], nested: Sequence[str]) -> float:
+        found = _hypothesis_field(data, names, None)
+        if found is None:
+            found = _hypothesis_nested(data, "estimates", nested, None)
+        return _hypothesis_float(found, 0.0)
+
+    def _why(names: Sequence[str], nested: Sequence[str]) -> str:
+        found = _hypothesis_field(data, names, None)
+        if found is None:
+            found = _hypothesis_nested(data, "reasons", nested, None)
+        return _hypothesis_str(found, "")
+
+    positive = _hypothesis_field(data, _HYPOTHESIS_DECISION_POSITIVE, None)
+    if positive is not None:
+        changes = bool(_hypothesis_bool(positive, True))
+    else:
+        inverted = _hypothesis_field(data, _HYPOTHESIS_DECISION_INVERTED,
+                                     None)
+        changes = (not _hypothesis_bool(inverted, False)
+                   if inverted is not None else True)
+
+    likely_raw = _hypothesis_field(data, ("likely", "is_likely"), None)
+    cheap_raw = _hypothesis_field(
+        data, ("cheap", "is_cheap", "cheap_to_try", "cheap_to_implement"),
+        None)
+    reversible_raw = _hypothesis_field(
+        data, ("reversible", "is_reversible"), None)
+
+    return Hypothesis(
+        key=_hypothesis_str(_hypothesis_field(
+            data, ("key", "id", "name", "ref", "hypothesis", "title",
+                   "label"), "")),
+        impact=_num(("impact",), ("impact",)),
+        impact_reason=_why(("impact_reason", "impact_why",
+                            "impact_rationale"), ("impact", "impact_reason")),
+        p=_num(("p", "prob", "probability"),
+               ("p", "prob", "probability")),
+        p_reason=_why(("p_reason", "prob_reason", "probability_reason",
+                       "p_why"),
+                      ("p", "prob", "probability", "p_reason")),
+        cost=_num(("cost", "test_cost", "cost_to_test"),
+                  ("cost", "test_cost")),
+        cost_reason=_why(("cost_reason", "test_cost_reason", "cost_why"),
+                         ("cost", "cost_reason")),
+        changes_decision=changes,
+        changes_decision_reason=_why(
+            ("changes_decision_reason", "decision_reason", "decision_why",
+             "would_change_reason"),
+            ("decision", "changes_decision", "decision_reason")),
+        likely=(_hypothesis_bool(likely_raw, None)
+                if likely_raw is not None else None),
+        likely_reason=_why(("likely_reason", "likelihood_reason"),
+                           ("likely", "likely_reason")),
+        cheap=(_hypothesis_bool(cheap_raw, None)
+               if cheap_raw is not None else None),
+        cheap_reason=_why(("cheap_reason",),
+                          ("cheap", "cheap_reason")),
+        reversible=(_hypothesis_bool(reversible_raw, None)
+                    if reversible_raw is not None else None),
+        reversible_reason=_why(("reversible_reason",),
+                               ("reversible", "reversible_reason")),
+    )
+
+
+def hypothesis_likely(data: Any = None, **kwargs: Any) -> bool:
+    """Resolved likely: the explicit flag, else p at or above the default."""
+    hypothesis = normalize_hypothesis(data, **kwargs)
+    if hypothesis.likely is not None:
+        return hypothesis.likely
+    return _hypothesis_float(hypothesis.p, 0.0) >= HYPOTHESIS_LIKELY_P
+
+
+def hypothesis_value(data: Any = None, **kwargs: Any) -> float:
+    """Value: impact x min(p, 1-p) / cost, else zero (#2407, #2427).
+
+    Zero when no answer would change the decision, when p is certain,
+    or when impact is not positive. A free test (cost <= 0) with a
+    decision on the line is infinite: it ranks first.
+    """
+    hypothesis = normalize_hypothesis(data, **kwargs)
+    if not hypothesis.changes_decision:
+        return 0.0
+    probability = min(max(_hypothesis_float(hypothesis.p, 0.0), 0.0), 1.0)
+    uncertainty = min(probability, 1.0 - probability)
+    impact = _hypothesis_float(hypothesis.impact, 0.0)
+    if uncertainty <= 0.0 or impact <= 0.0:
+        return 0.0
+    cost = _hypothesis_float(hypothesis.cost, 0.0)
+    if cost <= 0.0:
+        return float("inf")
+    return impact * uncertainty / cost
+
+
+def hypothesis_try_and_watch(data: Any = None, **kwargs: Any) -> bool:
+    """Whether a hypothesis belongs on the try-and-watch list.
+
+    Likely, cheap and reversible together. Likely falls back to p;
+    cheap and reversible are the overseer's implementation judgements
+    and never derive from the cost of testing.
+    """
+    hypothesis = normalize_hypothesis(data, **kwargs)
+    likely = (hypothesis.likely if hypothesis.likely is not None
+              else _hypothesis_float(hypothesis.p, 0.0)
+              >= HYPOTHESIS_LIKELY_P)
+    cheap = bool(hypothesis.cheap) if hypothesis.cheap is not None else False
+    reversible = (bool(hypothesis.reversible)
+                  if hypothesis.reversible is not None else False)
+    return bool(likely and cheap and reversible)
+
+
+def score_hypothesis(data: Any = None, **kwargs: Any) -> ScoredHypothesis:
+    """Score one hypothesis, keeping its estimates and reasons."""
+    hypothesis = normalize_hypothesis(data, **kwargs)
+    likely = (hypothesis.likely if hypothesis.likely is not None
+              else _hypothesis_float(hypothesis.p, 0.0)
+              >= HYPOTHESIS_LIKELY_P)
+    cheap = bool(hypothesis.cheap) if hypothesis.cheap is not None else False
+    reversible = (bool(hypothesis.reversible)
+                  if hypothesis.reversible is not None else False)
+    return ScoredHypothesis(
+        key=hypothesis.key, value=hypothesis_value(hypothesis),
+        try_and_watch=bool(likely and cheap and reversible),
+        impact=hypothesis.impact, impact_reason=hypothesis.impact_reason,
+        p=hypothesis.p, p_reason=hypothesis.p_reason,
+        cost=hypothesis.cost, cost_reason=hypothesis.cost_reason,
+        changes_decision=hypothesis.changes_decision,
+        changes_decision_reason=hypothesis.changes_decision_reason,
+        likely=bool(likely), likely_reason=hypothesis.likely_reason,
+        cheap=cheap, cheap_reason=hypothesis.cheap_reason,
+        reversible=reversible,
+        reversible_reason=hypothesis.reversible_reason,
+    )
+
+
+def order_hypotheses(hypotheses: Sequence[Any]) -> List[Any]:
+    """Admission order: highest value first, zero-value last, stable."""
+    return sorted(hypotheses, key=hypothesis_value, reverse=True)
+
+
+def score_hypotheses(hypotheses: Sequence[Any]) -> List[ScoredHypothesis]:
+    """Score every hypothesis and return them in admission order."""
+    scored = [score_hypothesis(item) for item in hypotheses]
+    return sorted(scored, key=lambda item: item.value, reverse=True)
+
+
+def try_and_watch_list(hypotheses: Sequence[Any]) -> List[ScoredHypothesis]:
+    """Scored try-and-watch hypotheses, highest value first."""
+    return [item for item in score_hypotheses(hypotheses)
+            if item.try_and_watch]
+
+
+#: Alias spellings for the scorer seam (#2427).
+is_try_and_watch = hypothesis_try_and_watch
+try_and_watch = hypothesis_try_and_watch
+hypothesis_score = score_hypothesis
+rank_hypotheses = order_hypotheses
+sort_hypotheses = order_hypotheses
+order_for_admission = order_hypotheses
+slot_admission_order = order_hypotheses
+admission_order = order_hypotheses
+
+
 def _item_blocked_until(item: Item) -> Optional[date]:
     """Return the trusted date condition stored on an Item, if any."""
     value = item.blocked_until

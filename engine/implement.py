@@ -2225,13 +2225,15 @@ def render_human_step_title(action: str, *, needs: str) -> str:
     The title is capped at ``HUMAN_STEP_TITLE_LIMIT`` characters so the
     filing never trips GitHub's title limit: only the action portion is
     shortened, at a word boundary, and the truncation marker shows the
-    title is display-only. The full action sentence stays in the issue
-    body and dedup still keys off the body's stable line (#2400).
+    title is display-only. A title reaching the cap is shortened too, so
+    every truncated title carries the marker. The full action sentence
+    stays in the issue body and dedup still keys off the body's stable
+    line (#2400).
     """
     prefix = ("Claude Code environment step"
               if needs == "claude-code-environment" else "Human step")
     full = "{}: {}".format(prefix, action)
-    if len(full) <= HUMAN_STEP_TITLE_LIMIT:
+    if len(full) < HUMAN_STEP_TITLE_LIMIT:
         return full
     head = "{}: ".format(prefix)
     if len(head) >= HUMAN_STEP_TITLE_LIMIT:

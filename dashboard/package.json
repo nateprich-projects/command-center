@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "check": "node --check worker.js && node --check public/app.js && node --check public/stages.js && node --check public/domains.js && node --check public/topstrip.js && node --check dev-server.js",
+    "check": "node --check worker.js && node --check public/app.js && node --check public/stages.js && node --check public/domains.js && node --check dev-server.js",
     "test": "npm run check && node --test test/*.test.js",
     "serve:fixture": "node dev-server.js"
   },

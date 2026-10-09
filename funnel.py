@@ -422,6 +422,42 @@ HOBBY_TIER = 3
 def repo_tier(repo: str) -> int:
     """A repository's tier; any repo not named in ``REPO_TIERS`` is a hobby."""
     return REPO_TIERS.get(repo.rsplit("/", 1)[-1], HOBBY_TIER)
+
+
+#: Domain single-select options (#2407, #2426). League and AFL are homed in
+#: Fantasy-GM; command-center includes github-runners; the rest are interim
+#: domains with no overseer.
+DOMAIN_OPTIONS = (
+    "League", "AFL", "command-center",
+    "workbench", "career-toolset", "jeffy-finance-agent",
+)
+
+#: Repositories whose Domain is not their own name. Fantasy-GM serves two
+#: leagues so it has no default; github-runners is command-center work.
+DOMAIN_DEFAULT_OVERRIDES = {
+    "github-runners": "command-center",
+}
+
+#: The one repository that must carry an explicit Domain. Its engine serves
+#: both leagues, so no default can choose between them (#2407).
+FANTASY_GM_REPO = "Fantasy-GM"
+
+
+def domain_default(repo: str) -> Optional[str]:
+    """A repository's default Domain, or None when it must be explicit.
+
+    Accepts the short or owner-qualified name. Fantasy-GM has no default:
+    its items must name League or AFL. Unknown repositories also return
+    None rather than guessing a domain.
+    """
+    short = repo.rsplit("/", 1)[-1]
+    if short == FANTASY_GM_REPO:
+        return None
+    if short in DOMAIN_DEFAULT_OVERRIDES:
+        return DOMAIN_DEFAULT_OVERRIDES[short]
+    if short in DOMAIN_OPTIONS:
+        return short
+    return None
 PREEMPTING = {"Broken", "Maintenance"}
 
 #: Existing-work classes and finite investigations may take the unattended
@@ -870,6 +906,10 @@ class Item:
     # lifts; ``external-event`` suppresses the unblock question only with a
     # parsed event condition.
     needs: Optional[str] = None
+    # The row's Domain single-select (#2407, #2426). One of DOMAIN_OPTIONS;
+    # Fantasy-GM rows must set it explicitly, every other member repo has a
+    # default from ``domain_default``. Tickets inherit their parent's.
+    domain: Optional[str] = None
     status_since: Optional[datetime] = None
     # When the Status field value was last written. ``status_since`` falls
     # back to it when the read timeline has no event into the current Status:
@@ -1066,6 +1106,37 @@ def needs_class(item: Item) -> bool:
     if item.status in ("Ideas", "Done", "Parked"):
         return False
     return item.klass not in LADDER
+
+
+def effective_domain(item: Item, by_ref: Dict[str, Item]) -> Optional[str]:
+    """An item's Domain: its parent's, else its own, else its repo default.
+
+    Tickets inherit like Class: sub-issues join the Project with blank
+    fields. A project with no explicit Domain falls back to
+    ``domain_default``; Fantasy-GM has no default, so its projects must set
+    one explicitly.
+    """
+    parent = by_ref.get(item.parent or "")
+    if parent is not None and parent.domain in DOMAIN_OPTIONS:
+        return parent.domain
+    if item.domain in DOMAIN_OPTIONS:
+        return item.domain
+    return domain_default(item.repo)
+
+
+def needs_domain(item: Item) -> bool:
+    """A project with no usable Domain. Fantasy-GM must be explicit.
+
+    Tickets are exempt because they inherit via ``effective_domain``;
+    closed items order nothing. Any stage counts, including Ideas: the
+    default comes from the repository, not from shaping, so an Ideas
+    project without one is already missing it.
+    """
+    if item.state == "CLOSED" or item.parent:
+        return False
+    if item.domain in DOMAIN_OPTIONS:
+        return False
+    return domain_default(item.repo) not in DOMAIN_OPTIONS
 
 
 def _item_blocked_until(item: Item) -> Optional[date]:
@@ -8002,6 +8073,7 @@ def check_project_fields() -> Check:
         ("Origin", ORIGIN_OPTIONS),
         ("Risk", RISK_OPTIONS),
         ("Needs", NEEDS_OPTIONS),
+        ("Domain", DOMAIN_OPTIONS),
     ):
         matching = by_name.get(field_name)
         if not matching:
@@ -8031,8 +8103,9 @@ def check_project_fields() -> Check:
 
     return Check(
         "Project fields", True,
-        "Project {}/{} has Status, Class, Origin, Risk, Needs and {} with "
-        "the required options".format(PROJECT_OWNER, PROJECT_NUMBER, LOCK_FIELD),
+        "Project {}/{} has Status, Class, Origin, Risk, Needs, Domain and {} "
+        "with the required options".format(
+            PROJECT_OWNER, PROJECT_NUMBER, LOCK_FIELD),
         "",
     )
 
@@ -10078,6 +10151,9 @@ ITEM_NODE_FIELDS = """\
           needs: fieldValueByName(name: "Needs") {
             ... on ProjectV2ItemFieldSingleSelectValue { name }
           }
+          domain: fieldValueByName(name: "Domain") {
+            ... on ProjectV2ItemFieldSingleSelectValue { name }
+          }
           content {
             ... on Issue {
               number title url body state stateReason createdAt closedAt
@@ -10111,6 +10187,7 @@ BEGIN_ITEM_NODE_FIELDS = ITEM_NODE_FIELDS.replace(
 # is also read for the settled ordering rule. Origin does not route ticket
 # work, but begin and merge decide a finished project's close from this view,
 # and without it every Improve project read as Nate's and never closed (#2147).
+# Domain is read for the Fantasy-GM explicit-domain requirement (#2426).
 STARTABLE_ITEM_NODE_FIELDS = """\
           id
           claim: fieldValueByName(name: "In motion since") {
@@ -10132,6 +10209,9 @@ STARTABLE_ITEM_NODE_FIELDS = """\
             ... on ProjectV2ItemFieldSingleSelectValue { name }
           }
           pinned: fieldValueByName(name: "Pinned") {
+            ... on ProjectV2ItemFieldSingleSelectValue { name }
+          }
+          domain: fieldValueByName(name: "Domain") {
             ... on ProjectV2ItemFieldSingleSelectValue { name }
           }
           startable: content {
@@ -11724,6 +11804,7 @@ def _from_node(node: dict) -> Optional[Item]:
         risk=(node.get("risk") or {}).get("name"),
         pinned=(node.get("pinned") or {}).get("name") == "Pinned",
         needs=(node.get("gate") or node.get("needs") or {}).get("name"),
+        domain=(node.get("domain") or {}).get("name"),
         labels=[n["name"] for n in labels.get("nodes", [])],
         assignees=[n["login"] for n in assignees.get("nodes", [])],
         parent=(

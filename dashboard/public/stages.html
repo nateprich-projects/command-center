@@ -39,6 +39,10 @@
         font-size: 0.9rem;
       }
       .domain-filters a[aria-current="true"] { font-weight: 700; text-decoration: underline; }
+      .trial-strip { display: grid; gap: 0.25rem; margin-top: 1rem; }
+      .trial-strip p { margin: 0; }
+      .trial-strip-waiting { font-weight: 700; }
+      .trial-strip-usage, .trial-strip-urgent { font-size: 0.9rem; opacity: 0.85; }
     </style>
     <script type="module" src="/stages.js"></script>
   </head>
@@ -51,6 +55,7 @@
         re-sorts; it shows each stage's items exactly as the snapshot lists
         them. <a href="/">Back to the current dashboard</a>.</p>
       <p id="stages-status" class="snapshot-status" role="status">Loading snapshot…</p>
+      <section id="trial-strip" class="trial-strip" aria-label="Waiting, usage and urgent work"></section>
       <nav id="stages-domains" class="domain-filters" aria-label="Filter by domain"></nav>
     </header>
     <main id="stages-board"></main>

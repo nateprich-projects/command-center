@@ -1,14 +1,17 @@
-// Trial stage board (parent plan #2409, tickets #2410, #2411): today's stage
-// board in the snapshot's own order. The published columns already embody
-// projected_pull_order — the current page renders board.columns as received
-// — so this page takes them as received too. There is deliberately no
-// sorting or reversing anywhere in this file: any client-side ordering here
-// would misrepresent the producer's rank. The one filter on this page
-// narrows rows to a single trial domain (see domains.js); it keeps every
-// kept row in the snapshot's order and drops nothing silently — repos with
-// no table entry appear under an interim domain named for the repo itself.
+// Trial stage board (parent plan #2409, tickets #2410, #2411, #2412):
+// today's stage board in the snapshot's own order. The published columns
+// already embody projected_pull_order — the current page renders
+// board.columns as received — so this page takes them as received too.
+// There is deliberately no sorting or reversing anywhere in this file: any
+// client-side ordering here would misrepresent the producer's rank. The one
+// filter on this page narrows rows to a single trial domain (see
+// domains.js); it keeps every kept row in the snapshot's order and drops
+// nothing silently — repos with no table entry appear under an interim
+// domain named for the repo itself. The top strip (see topstrip.js) reports
+// the same snapshot's waiting total, weekly usage pace and urgent counts.
 
 import { domainOf, listDomains } from "./domains.js";
+import { renderTopStrip, topStrip } from "./topstrip.js";
 
 function stagesBoard(snapshot) {
   const board = (snapshot && snapshot.board) || {};
@@ -131,6 +134,8 @@ async function loadStagesBoard() {
     return;
   }
   const snapshot = await response.json();
+  const strip = document.querySelector("#trial-strip");
+  if (strip) renderTopStrip(strip, topStrip(snapshot));
   const columns = stagesBoard(snapshot);
   const domains = listDomains(columns);
   const selected = filters

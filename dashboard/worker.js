@@ -286,6 +286,21 @@ async function handleRequest(request, env) {
     return jsonResponse({ requested_at: requestedAt }, 202);
   }
 
+  // Trial stage board (parent plan #2409): a second page beside the current
+  // one, served from a new file only. It stays behind the same Access check
+  // above and reuses the same snapshot; it only rearranges what the snapshot
+  // already holds.
+  if (url.pathname === "/stages") {
+    if (request.method !== "GET" && request.method !== "HEAD") {
+      return new Response("Method Not Allowed", { status: 405 });
+    }
+    if (!env.ASSETS || typeof env.ASSETS.fetch !== "function") {
+      return new Response("Assets unavailable", { status: 503 });
+    }
+    const assetRequest = new Request(new URL("/stages.html", url), request);
+    return withSecurityHeaders(await env.ASSETS.fetch(assetRequest));
+  }
+
   if (request.method !== "GET" && request.method !== "HEAD") {
     return new Response("Method Not Allowed", { status: 405 });
   }

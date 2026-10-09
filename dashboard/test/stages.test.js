@@ -4,7 +4,8 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import worker from "../worker.js";
-import { renderStagesBoard, stagesBoard } from "../public/stages.js";
+import { filterColumnsByDomain, renderStagesBoard, selectedDomainFromUrl, stagesBoard } from "../public/stages.js";
+import { domainOf, listDomains } from "../public/domains.js";
 
 function encodeJson(value) {
   return Buffer.from(JSON.stringify(value)).toString("base64url");
@@ -86,6 +87,8 @@ class StubNode {
     this.className = "";
     this.textContent = "";
     this.href = "";
+    this.dataset = {};
+    this.attributes = {};
   }
 
   append(...children) {
@@ -94,6 +97,10 @@ class StubNode {
 
   replaceChildren() {
     this.children = [];
+  }
+
+  setAttribute(name, value) {
+    this.attributes[name] = value;
   }
 }
 
@@ -135,10 +142,58 @@ test("the rendered /stages rows follow projected order, not the alphabet", () =>
   }
 });
 
+// The filter narrows to one domain while keeping the snapshot's projected
+// order; an unmapped repo appears under its interim domain, never silently.
+test("the /stages domain filter keeps projected order, including interim domains", () => {
+  const restore = stubDocument();
+  try {
+    const columns = stagesBoard({
+      board: {
+        columns: [
+          { stage: "Ideas", items: [{ ref: "o/mystery-repo#9", title: "zeta" }] },
+          { stage: "Building", items: [
+            { ref: "nateprich-projects/command-center#1", title: "zeta deploy" },
+            { ref: "o/mystery-repo#2", title: "Alpha fix" },
+            { ref: "nateprich-projects/github-runners#3", title: "mid refactor" },
+          ] },
+          { stage: "Done", items: [] },
+        ],
+      },
+    });
+    assert.equal(domainOf({ ref: "o/mystery-repo#9" }), "mystery-repo");
+    assert.deepEqual(listDomains(columns), ["mystery-repo", "Command center"]);
+
+    const narrowed = filterColumnsByDomain(columns, "mystery-repo");
+    const container = new StubNode("main");
+    assert.equal(renderStagesBoard(container, narrowed), 2);
+    assert.deepEqual(renderedTitles(container), ["zeta", "Alpha fix"]);
+
+    const kept = filterColumnsByDomain(columns, "Command center");
+    const commandCenter = new StubNode("main");
+    assert.equal(renderStagesBoard(commandCenter, kept), 2);
+    assert.deepEqual(renderedTitles(commandCenter), ["zeta deploy", "mid refactor"]);
+
+    assert.deepEqual(
+      filterColumnsByDomain(columns, null).flatMap((column) => column.items.map((item) => item.title)),
+      ["zeta", "zeta deploy", "Alpha fix", "mid refactor"],
+    );
+  } finally {
+    restore();
+  }
+});
+
+test("the selected domain comes from the ?domain= query", () => {
+  assert.equal(selectedDomainFromUrl("https://funnel.nateprich.com/stages?domain=Fantasy"), "Fantasy");
+  assert.equal(selectedDomainFromUrl("https://funnel.nateprich.com/stages"), null);
+});
+
 test("the /stages page does no client-side ordering", async () => {
   const source = await readFile(new URL("../public/stages.js", import.meta.url), "utf8");
-  assert.doesNotMatch(source, /\.(?:sort|filter|reverse)\s*\(/);
+  // The domain filter narrows rows with Array.filter, which keeps producer
+  // order; sorting or reversing the board would misrepresent the rank.
+  assert.doesNotMatch(source, /\.(?:sort|reverse)\s*\(/);
   assert.match(source, /\/api\/snapshot/);
+  assert.match(source, /domainOf/);
 });
 
 test("/stages refuses an unsigned request, like every other page", async () => {

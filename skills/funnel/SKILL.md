@@ -50,6 +50,10 @@ The code template documents these: `generated_at`, `counts_by_gate`,
 
 ## How to render it
 
+Before any decision is put to Nate, review it with the `decision-review`
+skill. A fresh, context-free reviewer critiques it first; this skill only
+lists and orders (Nate, 2026-10-09).
+
 Lead with the count and ordered list: Class, pin, question, repo link, wait.
 When `missing` is non-empty, say partial first and name each section and
 error — never read null as all-clear.

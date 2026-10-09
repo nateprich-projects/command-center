@@ -2953,6 +2953,7 @@ def test_the_breakdown_prompt_is_judgement_text_under_500_words():
     model has no tool to execute one with."""
     body = ROUTINE_BREAKDOWN.read_text()
     assert len(body.split()) < 500
+    assert len(body.split()) <= 500, "breakdown prompt holds the 500-word cap (#2024 Accept 3)"
     assert "\n---\n" in body, "the runner splits the prompt on the --- separator"
     prompt = body.split("\n---\n", 1)[1]
     assert prompt.count("PACKET_JSON") == 1

@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light dark">
+    <title>Domain — Command Center trial</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+    <style>
+      :root { color-scheme: light dark; }
+      body {
+        font-family: system-ui, -apple-system, sans-serif;
+        margin: 0 auto;
+        max-width: 72rem;
+        padding: 1.5rem 1rem 4rem;
+        line-height: 1.45;
+      }
+      .eyebrow { text-transform: uppercase; letter-spacing: 0.08em; font-size: 0.8rem; opacity: 0.7; margin: 0; }
+      h1 { margin: 0.25rem 0 0; font-size: 1.6rem; }
+      h2 { font-size: 1.15rem; margin: 0 0 0.5rem; }
+      .lede { opacity: 0.8; max-width: 60ch; }
+      .snapshot-status { opacity: 0.7; }
+      .phase { margin-top: 2rem; }
+      .phase-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.5rem; }
+      .phase-item {
+        border-top: 1px solid currentColor;
+        padding: 0.6rem 0;
+      }
+      .phase-item a { color: inherit; font-weight: 600; }
+      .phase-meta { opacity: 0.75; font-size: 0.9rem; }
+      .empty { opacity: 0.7; }
+      .placeholder { margin-top: 2rem; }
+    </style>
+    <script type="module" src="/domain.js"></script>
+  </head>
+  <body>
+    <header>
+      <p class="eyebrow">Command Center trial</p>
+      <h1 id="domain-name">Domain</h1>
+      <p class="lede">This domain's items in the five analysis-phase columns.
+        Items still classed Improve, New or Replace sit in “Not yet phased”
+        until the reclass lands. <a href="/stages">Back to the stage board</a>
+        · <a href="/">Back to the current dashboard</a>.</p>
+      <p id="domain-status" class="snapshot-status" role="status">Loading snapshot…</p>
+    </header>
+    <main id="domain-board"></main>
+    <section id="domain-kpi" class="placeholder" aria-label="KPI tree">
+      <h2>KPI tree</h2>
+      <p>Not built yet.</p>
+    </section>
+    <section id="domain-findings" class="placeholder" aria-label="Findings">
+      <h2>Findings</h2>
+      <p>Not built yet.</p>
+    </section>
+  </body>
+</html>

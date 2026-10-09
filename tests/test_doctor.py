@@ -480,18 +480,20 @@ def auth_payload(scopes):
 
 
 def project_payload(status=None, klass=None, lock=True, extra_status=None,
-                    origin=None, risk=None, needs=None):
+                    origin=None, risk=None, needs=None, domain=None):
     status = funnel.STAGES if status is None else status
     klass = funnel.LADDER if klass is None else klass
     origin = funnel.ORIGIN_OPTIONS if origin is None else origin
     risk = funnel.RISK_OPTIONS if risk is None else risk
     needs = funnel.NEEDS_OPTIONS if needs is None else needs
+    domain = funnel.DOMAIN_OPTIONS if domain is None else domain
     fields = [
         {"name": "Status", "options": [{"name": option} for option in status]},
         {"name": "Class", "options": [{"name": option} for option in klass]},
         {"name": "Origin", "options": [{"name": option} for option in origin]},
         {"name": "Risk", "options": [{"name": option} for option in risk]},
         {"name": "Needs", "options": [{"name": option} for option in needs]},
+        {"name": "Domain", "options": [{"name": option} for option in domain]},
     ]
     if extra_status:
         fields[0]["options"].append({"name": extra_status})

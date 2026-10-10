@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light dark">
+    <title>Command Center — Domains trial</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+    <style>
+      :root { color-scheme: light dark; }
+      body {
+        font-family: system-ui, -apple-system, sans-serif;
+        margin: 0 auto;
+        max-width: 72rem;
+        padding: 1.5rem 1rem 4rem;
+        line-height: 1.45;
+      }
+      .eyebrow { text-transform: uppercase; letter-spacing: 0.08em; font-size: 0.8rem; opacity: 0.7; margin: 0; }
+      h1 { margin: 0.25rem 0 0; font-size: 1.6rem; }
+      h2 { font-size: 1.15rem; margin: 0 0 0.5rem; }
+      h2 a { color: inherit; }
+      .lede { opacity: 0.8; max-width: 60ch; }
+      .snapshot-status { opacity: 0.7; }
+      .trial-strip { display: grid; gap: 0.25rem; margin-top: 1rem; }
+      .trial-strip p { margin: 0; }
+      .trial-strip-waiting { font-weight: 700; }
+      .trial-strip-usage, .trial-strip-urgent { font-size: 0.9rem; opacity: 0.85; }
+      .domain-row { margin-top: 2rem; border-top: 1px solid currentColor; padding-top: 1rem; }
+      .slot-list, .waiting-list { list-style: none; margin: 0.5rem 0; padding: 0; display: grid; gap: 0.5rem; }
+      .slot-card, .waiting-item { border-top: 1px solid currentColor; padding: 0.6rem 0; }
+      .slot-card a, .waiting-item a { color: inherit; font-weight: 600; }
+      .slot-meta, .waiting-meta { opacity: 0.75; font-size: 0.9rem; }
+      .over-limit { font-weight: 700; }
+      .empty { opacity: 0.7; }
+    </style>
+    <script type="module" src="/domains-home.js"></script>
+  </head>
+  <body>
+    <header>
+      <p class="eyebrow">Command Center trial</p>
+      <h1>Domains</h1>
+      <p class="lede">One row per domain, with up to two slot cards for the
+        domain's oldest in-flight non-urgent projects. When more than two are
+        in flight, the row says how many are over the limit. Each row links to
+        its detail page. <a href="/stages">Stage board trial</a> ·
+        <a href="/">Back to the current dashboard</a>.</p>
+      <p id="domains-status" class="snapshot-status" role="status">Loading snapshot…</p>
+      <section id="trial-strip" class="trial-strip" aria-label="Waiting, usage and urgent work"></section>
+    </header>
+    <main id="domains-rows"></main>
+  </body>
+</html>

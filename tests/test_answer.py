@@ -181,6 +181,29 @@ def test_approve_adopts_one_exact_class_before_status_and_records_source(
     assert funnel.CLASS_ADOPTION_OVERRIDE_NOTE in output
 
 
+@pytest.mark.parametrize("klass", ["New", "Replace"])
+def test_approve_leaves_a_legacy_proposal_for_nate(monkeypatch, capsys, klass):
+    item = shaped_project(
+        "# Plan\n\nProposed class: {}\n\nDo the work.\n".format(klass))
+    calls = stub_approve_writes(monkeypatch, item)
+
+    assert funnel.cmd_answer([item], NOW, "approve", item.ref, True) == 0
+
+    writes = [
+        call[2] for call in calls
+        if call[0] == "graphql" and call[1] == funnel.SET_FIELD
+    ]
+    assert [variables["field"] for variables in writes] == [
+        funnel.STATUS_FIELD_ID,
+    ]
+    assert item.klass is None
+    assert item.status == "Ready"
+
+    output = capsys.readouterr().out
+    assert "Class {} is legacy: no new assignments".format(klass) in output
+    assert "adopted Class" not in output
+
+
 @pytest.mark.parametrize(
     ("verb", "status", "expected"),
     [

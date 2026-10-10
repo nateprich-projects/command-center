@@ -103,9 +103,12 @@ def test_proposals_accept_the_phases(klass):
 
 
 @pytest.mark.parametrize("klass", ["New", "Replace"])
-def test_proposals_refuse_legacy(klass):
+def test_proposals_read_legacy_as_written(klass):
+    # The proposal line is prose: it reads as written, and the approve
+    # writer refuses to adopt it (see test_answer.py).
     body = "# Plan\n\nDo it.\n\nProposed class: {}\n".format(klass)
-    assert funnel.proposed_class_for_approval(body) is None
+    assert funnel.proposed_class_for_approval(body) == (
+        klass, "Proposed class: {}".format(klass))
 
 
 def test_proposals_accept_improve_as_the_old_name():

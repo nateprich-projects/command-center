@@ -15308,9 +15308,9 @@ def proposed_class_for_approval(
     Approval may fill an unset Project Class only from an explicit, whole-line
     proposal. A malformed proposal, a fuzzy value, or more than one proposal
     is ambiguous and therefore stays with Nate instead of becoming an
-    inference from plan prose. Legacy New and Replace refuse (#2425): a
-    proposal naming one stays with Nate. Improve is accepted as the old name
-    for Implement and is returned as written; the writer maps it.
+    inference from plan prose. Legacy New and Replace read as written; the
+    approve writer refuses to adopt them (#2425). Improve is accepted as the
+    old name for Implement and is returned as written; the writer maps it.
     """
     if not isinstance(plan, str):
         return None
@@ -15321,8 +15321,6 @@ def proposed_class_for_approval(
         if match is None:
             continue
         value = match.group("value").strip()
-        if value in LEGACY_CLASSES:
-            return None
         if value not in LADDER and value not in CLASS_RENAMES:
             return None
         matches.append((value, raw_line.strip()))
@@ -23967,6 +23965,14 @@ def cmd_answer(items: List[Item], now: datetime, verb: str, ref: str,
         if verb == "approve" and normalize_class(item.klass) not in LADDER
         else None
     )
+    if adoption is not None and adoption[0] in LEGACY_CLASSES:
+        # Legacy New and Replace take no new assignments (#2425): the
+        # proposal stays with Nate, like an ambiguous one, while the gate
+        # answer still applies.
+        print(
+            "Class {} is legacy: no new assignments; "
+            "leaving Class unset for Nate".format(adoption[0]))
+        adoption = None
 
     if verb == "accept" and not item.children_all_closed:
         if item.children_total == 0 and no_tickets:

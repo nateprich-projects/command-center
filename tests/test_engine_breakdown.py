@@ -86,6 +86,30 @@ def test_sizing_standard_routes_inferred_premises_before_the_build():
     assert "adds no label or field" in found
 
 
+def test_sizing_standard_carries_the_phase_path_and_implement_entry_rule():
+    """The sizing slice the packet sends carries #2407's phase path with its
+    linked-item send-back rule, and the phase vocabulary with Implement's
+    entry rule. Read from the slice, not the skill file: skill text outside
+    the sizing slice never reaches the model."""
+    found = breakdown.sizing_standard()
+    normalized = " ".join(found.replace("**", "").split())
+    assert ("frame, curate, describe, hypothesize, test, implement, verify"
+            in normalized)
+    assert "Its tickets stay inside that phase" in normalized
+    assert ("Send-back is a new linked item, never a sub-issue"
+            in normalized)
+    assert ("a new linked project idea in `Ideas`, classed for its phase "
+            "and linked back" in normalized)
+    assert ("A finished phase is never reopened with more tickets"
+            in normalized)
+    assert ("The phase vocabulary is `Curate`, `Describe`, `Hypothesize`, "
+            "`Test` and `Implement`" in normalized)
+    assert ("Implement needs a tested finding or Nate's explicit ask"
+            in normalized)
+    assert ("A cheap, reversible change may ship with its Verify check as "
+            "its test" in normalized)
+
+
 def test_sizing_standard_excludes_the_protocol_the_runner_owns():
     found = breakdown.sizing_standard()
     assert "gh issue create" not in found

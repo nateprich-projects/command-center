@@ -76,6 +76,25 @@ and link it to the plan; the dependent implementation ticket lists that
 project's open issue reference in `depends_on`. The project carries
 `Class: Investigate`; the dependent ticket carries no `Class`.
 
+### Phase work
+
+A plan covers one phase of the path **frame, curate, describe, hypothesize,
+test, implement, verify** (#2407). Its tickets stay inside that phase: work
+that belongs to an earlier phase is not another ticket here.
+
+**Send-back is a new linked item, never a sub-issue.** When breakdown finds
+the plan needs earlier-phase work redone — a description built on uncurated
+data, a test of an unrecorded hypothesis — that work becomes a new linked
+project idea in `Ideas`, classed for its phase and linked back, so it is
+shaped, gated and ranked like any other project. A finished phase is never
+reopened with more tickets (#945 precedent).
+
+The phase vocabulary is `Curate`, `Describe`, `Hypothesize`, `Test` and
+`Implement` (#2407). **Implement needs a tested finding or Nate's explicit
+ask:** break a change into Implement tickets only when a finished test found
+for it or he asked for it outright. A cheap, reversible change may ship with
+its Verify check as its test.
+
 ## Ordering and independence
 
 Tickets should be workable in any order: one ticket per run, and the ladder

@@ -286,6 +286,87 @@ def _validate_investigate_possible_defect(plan_markdown: str) -> None:
             "in plan_markdown")
 
 
+#: The five decision-first phases (#2407). Shape names them as strings so
+#: phase proposals validate before the Class-option migration lands; only
+#: Implement carries a gate here.
+PHASE_CLASS_NAMES = (
+    "Curate", "Describe", "Hypothesize", "Test", "Implement",
+)
+
+#: An observed-symptom marker: "Observed symptom" with a space or a hyphen,
+#: in any case. The canonical line is Title Case with a space.
+_OBSERVED_SYMPTOM_MARKER_RE = re.compile(
+    r"observed[\s-]+symptom", re.IGNORECASE)
+_OBSERVED_SYMPTOM_LINE_RE = re.compile(
+    r"observed[\s-]+symptom:[ ]+(.+)", re.IGNORECASE)
+
+
+def _validate_investigate_observed_symptom(plan_markdown: str) -> None:
+    """Require one explicit observed-symptom statement for Investigate.
+
+    Mirrors ``_validate_investigate_possible_defect``: only a whole line in
+    the plan narrative counts, and a malformed line carrying the marker
+    fails closed, even if another valid line is present.
+    """
+    matching_lines = []
+    malformed_line = False
+    for raw_line in plan_markdown.splitlines():
+        line = raw_line.strip()
+        if not _OBSERVED_SYMPTOM_MARKER_RE.match(line):
+            continue
+        match = _OBSERVED_SYMPTOM_LINE_RE.fullmatch(line)
+        if not match or not match.group(1).strip():
+            malformed_line = True
+            continue
+        if len(_OBSERVED_SYMPTOM_MARKER_RE.findall(line)) != 1:
+            malformed_line = True
+            continue
+        matching_lines.append(line)
+
+    if malformed_line or len(matching_lines) != 1:
+        raise ShapeError(
+            "proposed_class Investigate requires exactly one non-empty "
+            "whole line of the form 'Observed symptom: <statement>' "
+            "in plan_markdown")
+
+
+_TESTED_FINDING_RE = re.compile(
+    r"\btest(?:ed)?[\s-]+finding\b\s*:\s*\S", re.IGNORECASE)
+_EXPLICIT_ASK_RE = re.compile(
+    r"\bexplicit[\s-]+ask\b\s*:\s*\S", re.IGNORECASE)
+_VERIFY_LINE_RE = re.compile(r"\bverify\s*:\s*\S", re.IGNORECASE)
+
+
+def _validate_implement_basis(plan_markdown: str) -> None:
+    """Require an Implement plan to cite its basis (#2407).
+
+    A tested finding or Nate's explicit ask, each as one non-empty line of
+    the form 'Tested finding: <finding>' or 'Explicit ask: <ask>'. A cheap,
+    reversible change may instead ship with its test: the plan says it is
+    cheap and reversible and carries a 'Verify: <check>' line naming the
+    check that judges it. At least one basis passes; a blank citation
+    cites nothing.
+    """
+    lines = plan_markdown.splitlines()
+    if any(_TESTED_FINDING_RE.search(line) for line in lines):
+        return
+    if any(_EXPLICIT_ASK_RE.search(line) for line in lines):
+        return
+    lowered = plan_markdown.lower()
+    cheap_reversible = (
+        "cheap" in lowered and "reversib" in lowered
+        and "irreversib" not in lowered)
+    if cheap_reversible and any(
+            _VERIFY_LINE_RE.search(line) for line in lines):
+        return
+    raise ShapeError(
+        "proposed_class Implement requires a tested finding or an "
+        "explicit ask: one non-empty whole line of the form "
+        "'Tested finding: <finding>' or 'Explicit ask: <ask>'; a cheap, "
+        "reversible change may instead ship with its test as a "
+        "'Verify: <check>' line")
+
+
 def _check_keys(entry: object, keys: Sequence[str], where: str) -> None:
     """Reject a mapping that is missing keys or carries unknown ones."""
     if not isinstance(entry, dict):
@@ -563,10 +644,11 @@ def validate_answer(
     _check_keys(data, sorted(ANSWER_KEYS), "the answer")
     assert isinstance(data, dict)
     proposed = _require_line(data["proposed_class"], "proposed_class")
-    if proposed not in funnel.LADDER:
+    if proposed not in funnel.LADDER and proposed not in PHASE_CLASS_NAMES:
         raise ShapeError(
-            "proposed_class {!r} is not a ladder class; choose one of "
-            "{}".format(proposed, ", ".join(funnel.LADDER)))
+            "proposed_class {!r} is not a class; choose one of "
+            "{}".format(proposed, ", ".join(
+                list(funnel.LADDER) + list(PHASE_CLASS_NAMES))))
     allowed_hotspots = _validate_packet_hotspots(
         hotspots if include_hotspot_routing and hotspots is not None else [])
     hotspot_targets, redesign_remainder = _validate_hotspot_routing(
@@ -580,6 +662,9 @@ def validate_answer(
     plan_markdown = _require_text(data["plan_markdown"], "plan_markdown")
     if proposed == "Investigate":
         _validate_investigate_possible_defect(plan_markdown)
+        _validate_investigate_observed_symptom(plan_markdown)
+    if proposed == "Implement":
+        _validate_implement_basis(plan_markdown)
     return {
         "decided_from_precedent": decided_from_precedent,
         "decided_by_agent": decided_by_agent,

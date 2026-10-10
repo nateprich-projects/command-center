@@ -1162,6 +1162,85 @@ def test_append_pushes_the_records_either_side_of_a_torn_spool_line(
     assert "dropped 1 unreadable line" in capsys.readouterr().err
 
 
+# --- torn trailing line must not glue the next record (#2207) ---------------
+#
+# `_spool` appended JSON plus newline without ensuring it started on a fresh
+# line, so when a killed write left the spool without a trailing newline the
+# next record glued onto the torn fragment. The drain then counted that one
+# glued line unreadable and dropped both halves: the following record was
+# lost. The guard below restores the boundary; the fragment itself stays, so
+# the drain still reports exactly one unreadable line.
+
+
+def _torn_tail_spool(agent):
+    """A spool holding only a torn fragment with no trailing newline, as a
+    write killed before its newline leaves it."""
+    path = pathlib.Path(heartbeat._spool_path(agent))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('{"agent": "' + agent + '", "phase": "sta')
+
+
+def test_a_spool_append_after_a_torn_fragment_keeps_the_record(
+        tmp_path, monkeypatch):
+    _isolate_spool(tmp_path, monkeypatch)
+    monkeypatch.setattr(heartbeat, "_fetch", lambda agent: (None, None))
+    _torn_tail_spool("codex")
+    record = {"run": "a", "phase": "finish", "ts": 1, "agent": "codex",
+              "outcome": "done"}
+
+    heartbeat._spool("codex", record)
+
+    read = heartbeat.read("codex")
+    assert list(read) == [record]
+    assert read.unreadable == 1
+
+
+def test_read_counts_a_torn_spool_line_as_unreadable(tmp_path, monkeypatch):
+    _isolate_spool(tmp_path, monkeypatch)
+    monkeypatch.setattr(heartbeat, "_fetch", lambda agent: (None, None))
+    _torn_tail_spool("codex")
+
+    read = heartbeat.read("codex")
+
+    assert list(read) == []
+    assert read.unreadable == 1
+
+
+def test_a_record_spooled_during_a_push_survives_a_torn_line(
+        tmp_path, monkeypatch):
+    """The torn fragment is the trailing line; the record a concurrent lane
+    spools while this drain's PUT is in flight must reach the next drain."""
+    _isolate_spool(tmp_path, monkeypatch)
+    first = {"run": "a", "phase": "start", "ts": 1, "agent": "codex"}
+    path = pathlib.Path(heartbeat._spool_path("codex"))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(first, sort_keys=True) + "\n"
+        + '{"agent": "codex", "phase": "sta'
+    )
+    during = {"run": "b", "phase": "start", "ts": 2, "agent": "codex"}
+    store = {"text": "", "sha": "s0", "puts": 0}
+
+    def fetch(agent):
+        return (store["text"] or None), store["sha"]
+
+    def fake_gh(*args, **k):
+        heartbeat._spool("codex", during)
+        store["puts"] += 1
+        store["text"] = _pushed_text({"input": k.get("input")})
+        store["sha"] = "s{}".format(store["puts"])
+        return "{}"
+
+    monkeypatch.setattr(heartbeat, "_fetch", fetch)
+    monkeypatch.setattr(heartbeat, "gh", fake_gh)
+
+    heartbeat._push("codex")
+
+    assert store["text"].splitlines() == [
+        json.dumps(first, sort_keys=True)]
+    assert list(heartbeat._spooled("codex")) == [during]
+
+
 def test_read_leaves_out_and_counts_a_non_object_line(tmp_path, monkeypatch):
     _isolate_spool(tmp_path, monkeypatch)
     durable = {"run": "a", "phase": "start", "ts": 1, "agent": "codex"}

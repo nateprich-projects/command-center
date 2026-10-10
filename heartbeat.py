@@ -392,7 +392,24 @@ def _spool_path(agent: str) -> str:
 
 def _spool(agent: str, record: Dict) -> None:
     os.makedirs(SPOOL_DIR, exist_ok=True)
-    with open(_spool_path(agent), "a") as fh:
+    path = _spool_path(agent)
+    try:
+        # A write killed before its newline leaves the spool without a
+        # trailing newline; appending onto that line would glue this record
+        # to the torn fragment and the drain would drop both as one
+        # unreadable line (#2207). Restore the boundary first, leaving the
+        # fragment itself for the drain to count. A missing file starts on a
+        # fresh line, as does an empty one. Read as bytes: the torn tail may
+        # end mid-character, and b"\n" never trails a multibyte sequence.
+        with open(path, "rb+") as fh:
+            fh.seek(0, os.SEEK_END)
+            if fh.tell() > 0:
+                fh.seek(-1, os.SEEK_END)
+                if fh.read(1) != b"\n":
+                    fh.write(b"\n")
+    except FileNotFoundError:
+        pass
+    with open(path, "a") as fh:
         fh.write(json.dumps(record, sort_keys=True) + "\n")
 
 

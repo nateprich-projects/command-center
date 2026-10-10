@@ -458,6 +458,13 @@ def domain_default(repo: str) -> Optional[str]:
     if short in DOMAIN_OPTIONS:
         return short
     return None
+
+
+#: Slots per domain (#2407, #2428). Two, equal for every domain. Only work
+#: agents can move counts; waiting-on-Nate holds no slot and is uncapped,
+#: and urgent work and Bugs stay outside slots. Slots gate entry only, so
+#: an over-cap domain's in-flight projects finish first.
+DOMAIN_SLOTS = 2
 PREEMPTING = {"Broken", "Maintenance"}
 
 #: Existing-work classes and finite investigations may take the unattended
@@ -1793,6 +1800,129 @@ def split_decisions(
         else:
             nate.append(item)
     return nate, watch
+
+
+def _waits_on_nate(
+    item: Item, by_ref: Optional[Dict[str, Item]] = None,
+) -> bool:
+    """Whether an item's current gate belongs to Nate (#2407, #2428).
+
+    ``gate_question`` says what is asked; the owner table says who answers.
+    Items waiting on Nate hold no domain slot and are not capped.
+    """
+    route = _gate_route(item, by_ref)
+    return route is not None and GATE_OWNER_TABLE[route][1] == "Nate"
+
+
+def _is_slot_urgent(item: Item, by_ref: Dict[str, Item]) -> bool:
+    """Whether an item is urgent work for domain slots (#2407, #2428).
+
+    Urgent is Broken, the observed failure: the only class that preempts
+    the WIP cap, so the only one that stays outside domain slots.
+    Maintenance preempts ranking but never the cap
+    (``test_maintenance_does_not_preempt_the_limit``), so it counts like
+    any other agent-movable work. The cap checks the direct effective
+    class, as ``next_ticket`` does: a ticket that blocks a Broken one
+    ranks with it but stays inside slots.
+    """
+    return effective_class(item, by_ref) == "Broken"
+
+
+def _is_slot_movable_ticket(ticket: Item) -> bool:
+    """Whether a ticket is structural work agents can move (#2428).
+
+    Open, unblocked, with no prerequisites and no human-only Needs.
+    Runtime withholdings (freeze, backoff, readiness, review, decline
+    routes) still occupy: they are per-pull filters, and a project
+    awaiting review is finishing, not free.
+    """
+    return (
+        ticket.state == "OPEN"
+        and not ticket.is_blocked
+        and not ticket.open_blockers
+        and not ticket.children_total
+        and ticket.needs in NEEDS_OPTIONS
+        and ticket.needs != "human"
+        and (ticket.risk is None or ticket.risk in RISK_OPTIONS)
+    )
+
+
+def _counts_toward_domain_slots(
+    item: Item, by_ref: Dict[str, Item],
+) -> bool:
+    """Whether a project occupies one of its domain's slots (#2407, #2428).
+
+    Only agent-movable Building work counts: at least one open ticket
+    agents can move. Waiting on Nate holds no slot, urgent (Broken) and
+    Bugs stay outside, and a blocked project has nothing agents can move.
+    Ready projects hold no slot until they enter; finished or fully
+    blocked projects hold none. A project whose domain cannot be
+    attributed (Fantasy-GM without an explicit Domain, unknown repos)
+    holds none rather than blocking.
+    """
+    if item.state != "OPEN" or item.parent is not None:
+        return False
+    if item.status != "Building":
+        return False
+    if item.is_blocked:
+        return False
+    if effective_domain(item, by_ref) not in DOMAIN_OPTIONS:
+        return False
+    klass = effective_class(item, by_ref)
+    if klass not in LADDER or klass == "Bug":
+        return False
+    if _is_slot_urgent(item, by_ref):
+        return False
+    if _waits_on_nate(item, by_ref):
+        return False
+    return any(
+        child.parent == item.ref and _is_slot_movable_ticket(child)
+        for child in by_ref.values()
+    )
+
+
+def domain_slot_counts(items: Sequence[Item]) -> Dict[str, int]:
+    """Agent-movable Building projects per domain toward ``DOMAIN_SLOTS``.
+
+    Pure over fixtures (#2428). Only work agents can move counts;
+    waiting-on-Nate, urgent (Broken) and Bugs are outside. Domains with
+    no occupants are absent rather than zero.
+    """
+    by_ref = {item.ref: item for item in items}
+    counts: Dict[str, int] = {}
+    for item in items:
+        if not _counts_toward_domain_slots(item, by_ref):
+            continue
+        domain = effective_domain(item, by_ref)
+        if domain in DOMAIN_OPTIONS:
+            counts[domain] = counts.get(domain, 0) + 1
+    return counts
+
+
+def domain_entry_allowed(items: Sequence[Item], ticket: Item) -> bool:
+    """Whether a ticket may start under its domain's entry-only cap (#2428).
+
+    In-flight work (a parent already Building) is always allowed, even
+    over cap: slots gate entry only, so over-cap projects finish first.
+    Only a new entry (a parent still Ready) blocks, and only when its
+    domain already holds ``DOMAIN_SLOTS`` agent-movable projects. Urgent
+    (Broken), Bugs and waiting-on-Nate are outside or uncapped. Pins,
+    tiers, turns and interim gating are out of scope here and change
+    nothing: a pinned new entry still blocks when its domain is full.
+    """
+    by_ref = {item.ref: item for item in items}
+    parent = by_ref.get(ticket.parent or "")
+    if parent is None or parent.status != "Ready":
+        return True
+    domain = effective_domain(ticket, by_ref)
+    if domain not in DOMAIN_OPTIONS:
+        return True
+    klass = effective_class(ticket, by_ref)
+    if klass == "Bug" or _is_slot_urgent(ticket, by_ref):
+        return True
+    if _waits_on_nate(ticket, by_ref) or _waits_on_nate(parent, by_ref):
+        return True
+    return domain_slot_counts(items).get(domain, 0) < DOMAIN_SLOTS
 
 
 def watch_gate_json(
@@ -5830,6 +5960,11 @@ def next_ticket(items: Sequence[Item], now: datetime,
     Below the limit, Bugs get their share of starts (``_with_the_bug_share``).
     ``recent_starts`` is ``recent_ticket_starts``'s answer, passed in like
     ``backed_off`` so this stays pure over fixtures; None is an empty history.
+
+    A domain at its slot cap holds new entries back while its in-flight
+    work finishes first (``domain_entry_allowed``, #2428). Urgent and Bug
+    entries stay outside the cap; the Bug share and finite-class ranking
+    preemption are unchanged.
     """
     excluded = excluded or frozenset()
     queue = [
@@ -5854,7 +5989,10 @@ def next_ticket(items: Sequence[Item], now: datetime,
     if not free:
         return None
     if not at_capacity(items, now, pr_facts=pr_facts):
-        return _with_the_bug_share(items, free, recent_starts or ())
+        allowed = [item for item in free if domain_entry_allowed(items, item)]
+        if not allowed:
+            return None
+        return _with_the_bug_share(items, allowed, recent_starts or ())
 
     # At capacity. Only a Broken ticket may exceed it, and only when nothing
     # already in motion is Broken — preemption is for getting a fix moving, not

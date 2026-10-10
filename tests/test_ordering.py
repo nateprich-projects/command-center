@@ -2012,7 +2012,9 @@ def _successive_starts(rows, history):
     The lane asks ``next_ticket``, starts what it is given and finishes it
     before asking again. A start moves a Ready project to Building, as
     ``claim`` does, and a finished ticket stops blocking, as on GitHub.
-    Returns the refs started and how many were not ``startable()``'s first.
+    A finished ticket also frees its domain slot once its project closes,
+    as ``projected_pull_order`` does (#2428). Returns the refs started and
+    how many were not ``startable()``'s first.
     """
     rows = [copy.copy(row) for row in rows]
     by_ref = {row.ref: row for row in rows}
@@ -2026,8 +2028,11 @@ def _successive_starts(rows, history):
         history.append(effective_class(chosen, by_ref))
         chosen.state = "CLOSED"
         parent = by_ref[chosen.parent]
+        parent.children_done += 1
         if parent.status == "Ready":
             parent.status = "Building"
+        if parent.children_done >= parent.children_total:
+            parent.state = "CLOSED"
         for row in rows:
             row.open_blockers = [
                 ref for ref in row.open_blockers if ref != chosen.ref]

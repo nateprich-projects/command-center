@@ -2527,6 +2527,126 @@ def test_human_step_title_for_claude_code_environment_names_environment():
             "Claude Code environment step: Approve the OAuth app")
 
 
+def _four_hundred_char_action() -> str:
+    """A ~400-character word-separated action like the one that failed #2340."""
+    return " ".join("step-{:03d}".format(n) for n in range(50))
+
+
+def test_human_step_title_caps_a_long_action_at_256_chars():
+    """The #2340 filing failed because the title exceeded GitHub's cap."""
+    action = _four_hundred_char_action()
+    assert len(action) > 256
+    title = implement.render_human_step_title(action, needs="human")
+    assert len(title) <= 256
+    assert title.startswith("Human step: ")
+    assert title.endswith(implement.HUMAN_STEP_TITLE_TRUNCATION_MARKER)
+    assert implement.HUMAN_STEP_TITLE_TRUNCATION_MARKER not in title[:-1]
+
+
+def test_human_step_title_cap_keeps_prefix_for_both_needs():
+    action = _four_hundred_char_action()
+    for needs, prefix in (("human", "Human step: "),
+                          ("claude-code-environment",
+                           "Claude Code environment step: ")):
+        title = implement.render_human_step_title(action, needs=needs)
+        assert len(title) <= 256
+        assert title.startswith(prefix)
+        assert title.endswith(implement.HUMAN_STEP_TITLE_TRUNCATION_MARKER)
+
+
+def test_human_step_title_exact_fit_carries_marker():
+    """A 256-char uncut title still shortens so the marker shows truncation."""
+    action = "a" * (256 - len("Human step: "))
+    assert len("Human step: " + action) == 256
+    title = implement.render_human_step_title(action, needs="human")
+    assert len(title) <= 256
+    assert title.endswith(implement.HUMAN_STEP_TITLE_TRUNCATION_MARKER)
+
+
+def test_human_step_title_just_under_the_cap_has_no_marker():
+    action = "a" * (255 - len("Human step: "))
+    assert len("Human step: " + action) == 255
+    title = implement.render_human_step_title(action, needs="human")
+    assert title == "Human step: " + action
+    assert implement.HUMAN_STEP_TITLE_TRUNCATION_MARKER not in title
+
+
+def test_human_step_title_cuts_a_long_action_at_a_word_boundary():
+    action = "a" * 240 + " " + "b" * 200
+    title = implement.render_human_step_title(action, needs="human")
+    assert len(title) <= 256
+    assert title.endswith(implement.HUMAN_STEP_TITLE_TRUNCATION_MARKER)
+    assert title == "Human step: " + "a" * 240 + "\u2026"
+
+
+def test_human_step_title_hard_cuts_a_spaceless_action_mid_word():
+    title = implement.render_human_step_title("x" * 400, needs="human")
+    assert title == "Human step: " + "x" * 243 + "\u2026"
+    assert len(title) == 256
+
+
+def test_human_step_title_prefixes_leave_room_for_the_cap():
+    """Both canonical heads are far short of the cap, so the overlong-prefix
+    fallback stays dormant on the real cap while every path still files at
+    most 256 characters (#2401)."""
+    for needs in ("human", "claude-code-environment"):
+        title = implement.render_human_step_title("x" * 400, needs=needs)
+        assert len(title) <= 256
+        assert title.endswith(implement.HUMAN_STEP_TITLE_TRUNCATION_MARKER)
+
+
+def test_human_step_title_overlong_prefix_falls_back_to_head_cut(monkeypatch):
+    """The head-only fallback triggers when the prefix alone fills the cap."""
+    monkeypatch.setattr(implement, "HUMAN_STEP_TITLE_LIMIT", 10)
+    title = implement.render_human_step_title("x" * 400, needs="human")
+    assert len(title) <= 10
+    assert title.endswith(implement.HUMAN_STEP_TITLE_TRUNCATION_MARKER)
+    assert title == "Human ste" + "\u2026"
+
+
+def test_human_step_body_keeps_the_full_action_past_truncation():
+    """Two distinct long actions may share a display title; the body keeps
+    each complete instruction and the dedup stable line is unchanged."""
+    first = _four_hundred_char_action() + " first"
+    second = _four_hundred_char_action() + " second"
+    assert (implement.render_human_step_title(first, needs="human")
+            == implement.render_human_step_title(second, needs="human"))
+    for action in (first, second):
+        body = implement.render_human_step_body(
+            parent_number=7, ticket_number=42,
+            reason="entering a credential", action=action,
+        )
+        assert body.startswith("Part of #7; discovered while implementing #42.")
+        assert action in body
+        match = implement.HUMAN_STEP_TICKET_RE.search(body)
+        assert match is not None and int(match.group("number")) == 42
+
+
+def test_create_human_step_issue_passes_title_through_to_gh(
+        monkeypatch, tmp_path):
+    """Filing is pass-through: gh receives the given title verbatim, so the
+    renderer owns the cap (create_human_step_issue, implement.py:2295-2312)."""
+    seen = []
+
+    def fake_run(argv, **kwargs):
+        seen.append(list(argv))
+        return type("R", (), {
+            "returncode": 0, "stderr": "",
+            "stdout": "https://github.com/owner/repo/issues/99\n",
+        })()
+
+    monkeypatch.setattr(funnel, "_run_gh", fake_run)
+    long_title = "Human step: " + "x" * 400
+    body = "Part of #7; discovered while implementing #42."
+    created = implement.create_human_step_issue(
+        "owner/repo", 7, long_title, body, cwd=tmp_path)
+    assert created["number"] == 99
+    assert created["ref"] == "owner/repo#99"
+    assert seen and seen[0][:3] == ["gh", "issue", "create"]
+    assert seen[0][seen[0].index("--title") + 1] == long_title
+    assert seen[0][seen[0].index("--body") + 1] == body
+
+
 def test_parse_created_number_reads_the_issue_url():
     assert implement.parse_created_number(
         "https://github.com/owner/repo/issues/99\n") == 99

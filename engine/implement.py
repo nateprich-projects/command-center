@@ -2210,11 +2210,41 @@ def create_or_update_pr(repo: str, context: dict, ticket: dict,
     return {"number": int(match.group(1)), "url": url}
 
 
+#: GitHub rejects issue titles longer than 256 characters (createIssue), so a
+#: human-step filing with a longer title loses the run's work (#2400).
+HUMAN_STEP_TITLE_LIMIT = 256
+
+#: Marks a human-step title shortened to fit the title cap. The full action
+#: sentence stays in the issue body, so the title is display-only.
+HUMAN_STEP_TITLE_TRUNCATION_MARKER = "\u2026"
+
+
 def render_human_step_title(action: str, *, needs: str) -> str:
-    """Render the blocked-step title with its canonical Needs prefix."""
+    """Render the blocked-step title with its canonical Needs prefix.
+
+    The title is capped at ``HUMAN_STEP_TITLE_LIMIT`` characters so the
+    filing never trips GitHub's title limit: only the action portion is
+    shortened, at a word boundary, and the truncation marker shows the
+    title is display-only. A title reaching the cap is shortened too, so
+    every truncated title carries the marker. The full action sentence
+    stays in the issue body and dedup still keys off the body's stable
+    line (#2400).
+    """
     prefix = ("Claude Code environment step"
               if needs == "claude-code-environment" else "Human step")
-    return "{}: {}".format(prefix, action)
+    full = "{}: {}".format(prefix, action)
+    if len(full) < HUMAN_STEP_TITLE_LIMIT:
+        return full
+    head = "{}: ".format(prefix)
+    if len(head) >= HUMAN_STEP_TITLE_LIMIT:
+        return (head[:HUMAN_STEP_TITLE_LIMIT - 1]
+                + HUMAN_STEP_TITLE_TRUNCATION_MARKER)
+    room = HUMAN_STEP_TITLE_LIMIT - 1 - len(head)
+    cut = action[:room]
+    space = cut.rfind(" ")
+    if space > 0:
+        cut = cut[:space]
+    return head + cut + HUMAN_STEP_TITLE_TRUNCATION_MARKER
 
 
 def render_human_step_body(*, parent_number: int, ticket_number: int,

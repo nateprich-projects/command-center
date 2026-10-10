@@ -70,7 +70,7 @@ def _manifest_set(root, **overrides):
             "status": "PAUSED"},
         "command-center-funnel-watch-github-writer": {
             "rrule": WATCH, "model": "gpt-6.1-sol", "effort": "high",
-            "status": "ACTIVE"},
+            "status": "PAUSED"},
         "command-center-tickets-mon-fri-after-midnight": {
             "rrule": MON_FRI, "model": "gpt-5.6-sol", "effort": "high",
             "status": "PAUSED"},
@@ -134,7 +134,7 @@ def test_the_manifest_names_two_implement_automations_one_watch_and_three_retire
     assert codex_run.AUTOMATIONS_WATCH_EXPECTED == {
         "command-center-funnel-watch-github-writer": {
             "model": "gpt-6.1-sol", "reasoning_effort": "high",
-            "status": "ACTIVE", "rrule": WATCH,
+            "status": "PAUSED", "rrule": WATCH,
         },
     }
     assert codex_run.AUTOMATIONS_RETIRED == {
@@ -243,14 +243,14 @@ def test_watch_model_and_effort_drift_are_not_ticket_lane_drift(
 
 @pytest.mark.parametrize(("override", "expected"), [
     ({"absent": True}, "command-center-funnel-watch-github-writer: missing"),
-    ({"status": "PAUSED"},
-     "command-center-funnel-watch-github-writer: status expected ACTIVE, "
-     "found PAUSED"),
+    ({"status": "ACTIVE"},
+     "command-center-funnel-watch-github-writer: status expected PAUSED, "
+     "found ACTIVE"),
     ({"rrule": ALL_DAY},
      "command-center-funnel-watch-github-writer: rrule expected " + WATCH
      + ", found " + ALL_DAY),
 ])
-def test_watch_missing_paused_and_wrong_rrule_have_own_findings(
+def test_watch_missing_active_and_wrong_rrule_have_own_findings(
         tmp_path, override, expected):
     watch = "command-center-funnel-watch-github-writer"
     _manifest_set(tmp_path, **{watch: override})
@@ -259,6 +259,18 @@ def test_watch_missing_paused_and_wrong_rrule_have_own_findings(
 
     assert drift == [expected]
     assert "escalated" not in drift[0]
+
+
+def test_paused_writer_standby_reports_no_drift(tmp_path):
+    """The #2296 rollback standby stays PAUSED; the old ACTIVE expectation
+    would report this clean fixture as drift."""
+    _manifest_set(tmp_path)
+
+    drift = codex_run.automation_findings(str(tmp_path))["drift"]
+
+    assert drift == []
+    assert (codex_run.AUTOMATIONS_WATCH_EXPECTED[
+        "command-center-funnel-watch-github-writer"]["status"] == "PAUSED")
 
 
 def test_an_automation_outside_the_manifest_is_drift(tmp_path):

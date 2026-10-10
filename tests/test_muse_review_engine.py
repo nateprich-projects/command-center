@@ -3027,6 +3027,29 @@ def test_the_breakdown_prompt_keeps_nates_needs_list_open_and_whole():
         assert phrase in normalized, phrase
 
 
+def test_capability_boundary_middle_line_reads_the_same_in_both_files():
+    """#2476/#2488: Needs records capability, never a session reservation. gh
+    and the funnel's own commands are any-agent work, the Muse-may list (live
+    runs, log/journal/session-store reads, corpus replays) is any-agent work,
+    and the still-Claude list reads the same in the shared boundary and in
+    the breakdown prompt Muse sees."""
+    boundary = (ROOT / "skills" / "capability-boundary.md").read_text()
+    prompt = ROUTINE_BREAKDOWN.read_text().split("\n---\n", 1)[1]
+    claude_only = boundary.split("Workable only where")[1].split(
+        "Workable by no agent")[0]
+    assert "gh" not in claude_only
+    assert "funnel" not in claude_only
+    for text in (boundary, prompt):
+        normalized = " ".join(text.split()).lower()
+        assert "never reservation" in normalized
+        assert "reserves work by claiming it" in normalized
+        for phrase in ("live runs", "corpus replays",
+                       "bootout", "kickstart", "jeffy", "_personalops",
+                       "keychain reads", "statusline", "scheduled tasks",
+                       "cloud thread"):
+            assert phrase in normalized, phrase
+
+
 def test_the_breakdown_prompt_asks_for_seams_a_reproduction_and_sequencing(
         tmp_path):
     """The prompt Muse is sent carries the ticket shape the implementer

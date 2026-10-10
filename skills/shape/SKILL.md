@@ -122,9 +122,12 @@ inventing an answer is a defect.
 
 ## Class it when you file it
 
-Class a capture with the ladder names — `Investigate`, `Broken`,
-`Maintenance`, `Improve`, `New`, `Replace`, `Bug` — and say why; stated doubt beats
-confident error. Choose the class for what the tickets will deliver: a study,
+Class a capture with the class names — `Investigate`, `Broken`,
+`Maintenance`, the phases `Curate`, `Describe`, `Hypothesize`, `Test`,
+`Implement`, and `Bug` — and say why; stated doubt beats
+confident error. `New` and `Replace` are legacy options that take no new
+assignments until their open items close (#2407). Choose the class for what
+the tickets will deliver: a study,
 measurement, documentation recording, or product research with no
 possible-defect question takes the class that fits its deliverable, never
 `Investigate`. When that work changes no behaviour, include the analysis marker
@@ -133,7 +136,9 @@ above.
 Use `Investigate` only to decide whether a possible defect exists. The engine
 requires exactly one non-empty whole line of the form
 `Possible defect: <statement>` in the plan, naming the defect the evidence will
-decide. This is a thin mirror of `engine/shape.py`, which defines the check. The
+decide, and exactly one non-empty whole line of the form
+`Observed symptom: <statement>`, naming what was observed. This is a thin
+mirror of `engine/shape.py`, which defines the checks. The
 recorded examples live in `tests/fixtures/investigate_shape_excerpts.json` and
 are exercised by `tests/test_engine_shape.py`. An `Investigate` plan delivers
 evidence, never the fix: follow-ups are new ideas, classed for the work and
@@ -166,3 +171,11 @@ A `Broken` plan fixes the observed failure with the smallest change. Hardening
 beyond it, such as the same flaw on paths that have not failed, extra guards
 or a redesign of the area, becomes separate `Bug` or `Improve` ideas linked
 back, not more tickets in the same plan. _(Nate, 2026-09-28, #1832.)_
+
+An `Implement` plan needs a tested finding or Nate's explicit ask (#2407).
+The engine requires one non-empty line of the form
+`Tested finding: <finding>` or `Explicit ask: <ask>` in the plan. A cheap,
+reversible change may instead ship with its test: the plan states it is cheap
+and reversible and carries a `Verify: <check>` line naming the check that
+judges it. This is a thin mirror of `engine/shape.py`, which defines the
+check; see `tests/test_engine_shape.py`.

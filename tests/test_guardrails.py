@@ -302,8 +302,11 @@ def test_shape_skill_defines_bug_and_asks_broken_plans_for_the_smallest_fix():
     skill = " ".join(
         (ROOT / "skills" / "shape" / "SKILL.md").read_text().split())
     for phrase in (
-        "`Investigate`, `Broken`, `Maintenance`, `Improve`, `New`, "
-        "`Replace`, `Bug` — and say why",
+        "`Investigate`, `Broken`, `Maintenance`, the phases `Curate`, "
+        "`Describe`, `Hypothesize`, `Test`, `Implement`, and `Bug` — and "
+        "say why",
+        "`New` and `Replace` are legacy options that take no new "
+        "assignments until their open items close (#2407).",
         "`Bug` is a latent defect: found by reading, review or tests, with no "
         "observed occurrence. It never preempts;",
         "Tell the two apart by whether the failure has happened, not by how "

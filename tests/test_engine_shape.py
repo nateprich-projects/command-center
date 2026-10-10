@@ -505,11 +505,13 @@ def test_recorded_genuine_defect_shape_accepts_one_possible_defect_line():
     proposed_class = fixture["proposed_class_line"].split(": ", 1)[1]
     candidate = shape.validate_answer(answer(
         proposed_class=proposed_class,
-        plan_markdown="{}\n\n{}".format(
-            fixture["body_excerpt"], fixture["possible_defect_line"])))
+        plan_markdown="{}\n\n{}\n{}".format(
+            fixture["body_excerpt"], fixture["possible_defect_line"],
+            fixture["observed_symptom_line"])))
 
     assert candidate["proposed_class"] == "Investigate"
     assert fixture["possible_defect_line"] in candidate["plan_markdown"]
+    assert fixture["observed_symptom_line"] in candidate["plan_markdown"]
 
 
 @pytest.mark.parametrize("malformed", [
@@ -544,6 +546,164 @@ def test_non_investigate_proposal_is_untouched_by_possible_defect_check():
             "Possible defect: another line.\n")))
 
     assert candidate["proposed_class"] == "Improve"
+
+
+def test_proposed_class_accepts_the_five_phase_names():
+    for klass in ("Curate", "Describe", "Hypothesize", "Test"):
+        candidate = shape.validate_answer(answer(proposed_class=klass))
+        assert candidate["proposed_class"] == klass
+
+
+def test_investigate_rejects_a_plan_with_no_observed_symptom_line():
+    with pytest.raises(shape.ShapeError, match="Observed symptom"):
+        shape.validate_answer(answer(
+            proposed_class="Investigate",
+            plan_markdown=(
+                "# Plan\n\n"
+                "Possible defect: the route uses a different quota "
+                "counter.\n")))
+
+
+def test_investigate_accepts_one_observed_symptom_line():
+    candidate = shape.validate_answer(answer(
+        proposed_class="Investigate",
+        plan_markdown=(
+            "# Plan\n\n"
+            "Possible defect: the route uses a different quota counter.\n"
+            "Observed symptom: the /rate_limit endpoint reported full "
+            "headroom while a call returned Remaining 0.\n")))
+
+    assert candidate["proposed_class"] == "Investigate"
+
+
+def test_investigate_accepts_the_hyphenated_symptom_spelling():
+    candidate = shape.validate_answer(answer(
+        proposed_class="Investigate",
+        plan_markdown=(
+            "# Plan\n\n"
+            "Possible defect: the route uses a different quota counter.\n"
+            "Observed-symptom: the call returned Remaining 0.\n")))
+
+    assert candidate["proposed_class"] == "Investigate"
+
+
+@pytest.mark.parametrize("malformed", [
+    "Observed symptom:",
+    "Observed symptom:   ",
+    "Observed symptom is present but has no colon: statement",
+    "Observed symptom:statement has no separator",
+])
+def test_investigate_rejects_blank_or_malformed_observed_symptom_lines(
+        malformed):
+    with pytest.raises(shape.ShapeError, match="Observed symptom"):
+        shape.validate_answer(answer(
+            proposed_class="Investigate",
+            plan_markdown=(
+                "# Plan\n\n"
+                "Possible defect: the route uses a different quota "
+                "counter.\n"
+                "{}\n".format(malformed))))
+
+
+def test_investigate_rejects_multiple_observed_symptom_lines():
+    with pytest.raises(shape.ShapeError, match="Observed symptom"):
+        shape.validate_answer(answer(
+            proposed_class="Investigate",
+            plan_markdown=(
+                "# Plan\n\n"
+                "Possible defect: the route uses a different quota "
+                "counter.\n"
+                "Observed symptom: the first observation.\n"
+                "Observed symptom: the second observation.\n")))
+
+
+def test_non_investigate_proposal_is_untouched_by_observed_symptom_check():
+    candidate = shape.validate_answer(answer(
+        proposed_class="Improve",
+        plan_markdown=(
+            "# Plan\n\nObserved symptom:\n"
+            "Observed symptom: another line.\n")))
+
+    assert candidate["proposed_class"] == "Improve"
+
+
+def test_implement_rejects_a_plan_with_no_tested_finding_or_explicit_ask():
+    with pytest.raises(shape.ShapeError) as excinfo:
+        shape.validate_answer(answer(
+            proposed_class="Implement",
+            plan_markdown="# Plan\n\nDo the thing.\n"))
+
+    message = str(excinfo.value)
+    assert "Tested finding" in message
+    assert "Explicit ask" in message
+    assert "Verify" in message
+
+
+def test_implement_accepts_a_tested_finding_line():
+    candidate = shape.validate_answer(answer(
+        proposed_class="Implement",
+        plan_markdown=(
+            "# Plan\n\n"
+            "Tested finding: the trial cut median start time by half.\n")))
+
+    assert candidate["proposed_class"] == "Implement"
+
+
+def test_implement_accepts_an_explicit_ask_line():
+    candidate = shape.validate_answer(answer(
+        proposed_class="Implement",
+        plan_markdown="# Plan\n\nExplicit ask: file it now.\n"))
+
+    assert candidate["proposed_class"] == "Implement"
+
+
+def test_implement_accepts_nates_explicit_ask_line():
+    candidate = shape.validate_answer(answer(
+        proposed_class="Implement",
+        plan_markdown="# Plan\n\nNate's explicit ask: do this now.\n"))
+
+    assert candidate["proposed_class"] == "Implement"
+
+
+def test_implement_accepts_a_cheap_reversible_change_with_verify():
+    candidate = shape.validate_answer(answer(
+        proposed_class="Implement",
+        plan_markdown=(
+            "# Plan\n\n"
+            "A cheap, reversible copy change.\n"
+            "Verify: the trial page still renders its rows.\n")))
+
+    assert candidate["proposed_class"] == "Implement"
+
+
+def test_implement_rejects_a_cheap_reversible_change_without_verify():
+    with pytest.raises(shape.ShapeError, match="Verify"):
+        shape.validate_answer(answer(
+            proposed_class="Implement",
+            plan_markdown="# Plan\n\nA cheap, reversible copy change.\n"))
+
+
+def test_implement_rejects_verify_without_a_cheap_reversible_claim():
+    with pytest.raises(shape.ShapeError, match="Tested finding"):
+        shape.validate_answer(answer(
+            proposed_class="Implement",
+            plan_markdown="# Plan\n\nVerify: the page still renders.\n"))
+
+
+def test_implement_rejects_blank_citation_lines():
+    with pytest.raises(shape.ShapeError, match="Tested finding"):
+        shape.validate_answer(answer(
+            proposed_class="Implement",
+            plan_markdown=(
+                "# Plan\n\nTested finding:\nExplicit ask:   \n")))
+
+
+def test_non_implement_proposal_is_untouched_by_basis_check():
+    candidate = shape.validate_answer(answer(
+        proposed_class="Broken",
+        plan_markdown="# Plan\n\nDo the thing.\n"))
+
+    assert candidate["proposed_class"] == "Broken"
 
 
 def test_plan_markdown_must_be_non_empty():
@@ -1468,7 +1628,8 @@ def test_all_agent_self_approvable_classes_strip_generic_permission(klass):
         proposed_class=klass,
         plan_markdown=(
             "# Plan\n\nDo the thing.\n\n"
-            "Possible defect: a defect exists."
+            "Possible defect: a defect exists.\n"
+            "Observed symptom: the call returned Remaining 0."
             if klass == "Investigate" else "# Plan\n\nDo the thing."),
         needs_nate={"exposure": None, "gates": None,
                     "scope": ["Should we fix this?"],
@@ -1500,7 +1661,8 @@ def test_investigate_is_explicitly_covered_by_agent_output_review():
         proposed_class="Investigate",
         plan_markdown=(
             "# Plan\n\nDo the thing.\n\n"
-            "Possible defect: the behavior may be defective."),
+            "Possible defect: the behavior may be defective.\n"
+            "Observed symptom: the call returned Remaining 0."),
         needs_nate={"exposure": None, "gates": None,
                     "scope": ["Should we fix this?",
                               "Should this happen now?"],
@@ -2534,7 +2696,8 @@ def test_apply_does_not_rewrite_an_existing_class_for_investigate(
     calls = stub_gh(monkeypatch, item)
     plan_markdown = (
         "# Plan\n\n"
-        "Possible defect: the route uses a different quota counter.\n")
+        "Possible defect: the route uses a different quota counter.\n"
+        "Observed symptom: the call returned Remaining 0.\n")
 
     assert shape.apply_shape(
         [item], NOW, item.ref, answer(

@@ -253,6 +253,42 @@ def test_framer_refuses_empty_decision_points():
         shape_split.parse_framer(framer_answer(decision_points=[]))
 
 
+def test_framer_refuses_an_investigate_draft_with_no_observed_symptom():
+    with pytest.raises(ShapeError, match="Observed symptom"):
+        shape_split.parse_framer(framer_answer(
+            proposed_class="Investigate",
+            plan_markdown=(
+                "# Plan\n\n"
+                "Possible defect: the route uses a different quota "
+                "counter.\n")))
+
+
+def test_framer_accepts_an_investigate_draft_with_a_symptom_line():
+    parsed = shape_split.parse_framer(framer_answer(
+        proposed_class="Investigate",
+        plan_markdown=(
+            "# Plan\n\n"
+            "Possible defect: the route uses a different quota counter.\n"
+            "Observed symptom: the call returned Remaining 0.\n")))
+    assert parsed["proposed_class"] == "Investigate"
+
+
+def test_framer_refuses_an_implement_draft_with_no_cited_basis():
+    with pytest.raises(ShapeError, match="Tested finding"):
+        shape_split.parse_framer(framer_answer(
+            proposed_class="Implement",
+            plan_markdown="# Plan\n\nDo the thing.\n"))
+
+
+def test_framer_accepts_an_implement_draft_with_a_tested_finding():
+    parsed = shape_split.parse_framer(framer_answer(
+        proposed_class="Implement",
+        plan_markdown=(
+            "# Plan\n\n"
+            "Tested finding: the trial cut median start time by half.\n")))
+    assert parsed["proposed_class"] == "Implement"
+
+
 def test_framer_refuses_repeated_decision_points():
     with pytest.raises(ShapeError, match="repeats"):
         shape_split.parse_framer(framer_answer(

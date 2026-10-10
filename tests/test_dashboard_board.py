@@ -830,7 +830,7 @@ def test_a_ticket_shows_the_class_it_ranks_as_and_what_it_unblocks():
         REPO + "#65", REPO + "#66", REPO + "#67",
     ]
     assert by_number[24]["unblocks_later"] == []
-    assert by_number[23]["class"] == "Improve"
+    assert by_number[23]["class"] == "Implement"
     assert by_number[23]["unblocks"] == []
     # The class shown is the class startable() ranks by.
     ranked = funnel.queue_classes([

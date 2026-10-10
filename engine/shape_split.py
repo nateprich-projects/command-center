@@ -292,7 +292,7 @@ def parse_framer(answer: object, *,
         data.setdefault("redesign_remainder", "")
     _check_keys(data, FRAMER_KEYS, "the framer answer")
     proposed = _require_line(data["proposed_class"], "proposed_class")
-    if proposed not in funnel.LADDER:
+    if funnel.normalize_class(proposed) not in funnel.LADDER:
         raise ShapeError(
             "proposed_class {!r} is not a ladder class; choose one of "
             "{}".format(proposed, ", ".join(funnel.LADDER)))

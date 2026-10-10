@@ -163,7 +163,7 @@ def test_approve_adopts_one_exact_class_before_status_and_records_source(
     assert [variables["field"] for variables in writes] == [
         funnel.CLASS_FIELD_ID, funnel.STATUS_FIELD_ID,
     ]
-    assert item.klass == "Improve"
+    assert item.klass == "Implement"
     assert item.status == "Ready"
 
     comment = next(
@@ -171,12 +171,12 @@ def test_approve_adopts_one_exact_class_before_status_and_records_source(
         if call[0] == "run" and call[1][1:3] == ["issue", "comment"]
     )
     body = comment[comment.index("--body") + 1]
-    assert "**Class adopted:** Improve" in body
+    assert "**Class adopted:** Implement" in body
     assert "Source line: `Proposed class: Improve`" in body
     assert funnel.CLASS_ADOPTION_OVERRIDE_NOTE in body
 
     output = capsys.readouterr().out
-    assert "adopted Class Improve" in output
+    assert "adopted Class Implement" in output
     assert "Proposed class: Improve" in output
     assert funnel.CLASS_ADOPTION_OVERRIDE_NOTE in output
 
@@ -261,7 +261,7 @@ def test_class_adoption_dry_run_does_not_advance_the_shaped_gate(monkeypatch, ca
     assert item.status == "Shaped"
     assert not any(kind == "graphql" for kind, *_ in calls)
     output = capsys.readouterr().out
-    assert "would adopt Class Improve" in output
+    assert "would adopt Class Implement" in output
     assert "Nothing was changed" in output
 
 

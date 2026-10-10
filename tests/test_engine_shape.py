@@ -190,7 +190,7 @@ def test_hotspot_routes_reuse_redesign_by_title_prefix_without_marker():
     }]
 
 
-def test_hotspot_routes_capture_missing_redesign_as_improve(monkeypatch):
+def test_hotspot_routes_capture_missing_redesign_as_implement(monkeypatch):
     target = {"repo_path": "engine/shape.py", "function": "collect"}
     measured = [dict(target, broken_fix_count=4, window_days=7)]
     seen = {}
@@ -208,7 +208,7 @@ def test_hotspot_routes_capture_missing_redesign_as_improve(monkeypatch):
     assert "Hotspot: engine/shape.py:collect" in seen["note"].splitlines()
     assert seen["kwargs"]["repo"] == REPO
     assert seen["kwargs"]["origin"] == "agent"
-    assert seen["kwargs"]["klass"] == "Improve"
+    assert seen["kwargs"]["klass"] == "Implement"
     assert route[0]["ref"] == REPO + "#105"
 
 
@@ -1521,15 +1521,15 @@ def test_investigate_is_explicitly_covered_by_agent_output_review():
         "origin agent")
 
 
-def test_improve_is_explicitly_covered_by_agent_output_review_and_close_policy():
-    assert "Improve" in funnel.SELF_APPROVABLE_CLASSES
+def test_implement_is_explicitly_covered_by_agent_output_review_and_close_policy():
+    assert "Implement" in funnel.SELF_APPROVABLE_CLASSES
 
     item = idea(
-        1448, klass="Improve",
+        1448, klass="Implement",
         body=funnel.origin_block("agent", at=NOW, run="shape-run",
                                  agent="muse"))
     candidate = shape.validate_answer(answer(
-        proposed_class="Improve",
+        proposed_class="Implement",
         needs_nate={"exposure": None, "gates": None,
                     "scope": ["Should we fix this?",
                               "Should this happen now?"],
@@ -1538,13 +1538,13 @@ def test_improve_is_explicitly_covered_by_agent_output_review_and_close_policy()
     reviewed, rejected = shape.review_shape_output_for_item(
         [item], item, candidate)
     status, reason = shape.decide(
-        reviewed, klass="Improve", origin_voice="agent")
+        reviewed, klass="Implement", origin_voice="agent")
 
     assert reviewed["needs_nate"]["scope"] is None
     assert any("generic Scope permission" in signal for signal in rejected)
     assert any("scheduling" in signal for signal in rejected)
     assert status == "Ready"
-    assert reason == "needs_nate all null; class Improve self-approvable; origin agent"
+    assert reason == "needs_nate all null; class Implement self-approvable; origin agent"
 
     item.status = "Building"
     item.children_total = 1
@@ -1574,16 +1574,16 @@ def test_self_approvable_upkeep_classes_close_after_all_tickets(klass, origin):
     ("origin", "can_close"),
     [("agent", True), ("nate-direct", False), ("nate-relayed", False)],
 )
-def test_improve_auto_close_requires_agent_origin(origin, can_close):
+def test_implement_auto_close_requires_agent_origin(origin, can_close):
     item = idea(
-        1448, klass="Improve", origin=origin,
+        1448, klass="Implement", origin=origin,
         body=(funnel.origin_block(
             origin, at=NOW, run="shape-run",
             agent="muse" if origin == "agent" else "nate")
               if origin in funnel.ORIGIN_VOICES else ""),
         status="Building", children_total=2, children_done=2)
 
-    assert "Improve" in funnel.SELF_APPROVABLE_CLASSES
+    assert "Implement" in funnel.SELF_APPROVABLE_CLASSES
     assert funnel._auto_closeable_project(item) is can_close
     assert funnel.gate_question(item) == (None if can_close else "Accept it?")
 
@@ -2348,7 +2348,7 @@ def test_apply_advances_an_all_clear_agent_plan_to_ready(
     comments = gh_calls(calls, "gh", "issue", "comment")
     assert len(comments) == 1
     assert funnel.parse_self_approval(comments[0][1][-1]) == (
-        "needs_nate all null; class Improve self-approvable; "
+        "needs_nate all null; class Implement self-approvable; "
         "origin agent; no escalated risk")
     output = capsys.readouterr().out
     assert "owner/repo#42 → Ready" in output
@@ -2382,7 +2382,7 @@ def test_apply_captures_and_links_a_selected_hotspot_redesign(
     assert captured["title"] == (
         "Redesign engine/shape.py:collect: 3 Broken fixes in seven days")
     assert captured["kwargs"]["origin"] == "agent"
-    assert captured["kwargs"]["klass"] == "Improve"
+    assert captured["kwargs"]["klass"] == "Implement"
     route_comments = [call[1][-1] for call in
                       gh_calls(calls, "gh", "issue", "comment")
                       if "Hotspot(s):" in call[1][-1]]
@@ -2524,7 +2524,7 @@ def test_apply_writes_the_class_for_an_unclassed_agent_idea(monkeypatch):
     class_writes = [call for call in writes
                     if call[2].get("field") == funnel.CLASS_FIELD_ID]
     assert len(class_writes) == 1
-    assert class_writes[0][2]["option"] == "opt-Improve"
+    assert class_writes[0][2]["option"] == "opt-Implement"
     assert item.status == "Ready"
 
 
@@ -2644,7 +2644,7 @@ def test_apply_advances_a_scan_only_plan_with_risk_escalated(
     approvals = [body for body in comments
                  if funnel.parse_self_approval(body) is not None]
     assert [funnel.parse_self_approval(body) for body in approvals] == [
-        "needs_nate all null; class Improve self-approvable; origin agent; "
+        "needs_nate all null; class Implement self-approvable; origin agent; "
         "scan-only escalation (credentials) raises the review tier; "
         "no declared risk"]
     scans = [body for body in comments if body not in approvals]

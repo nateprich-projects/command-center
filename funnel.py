@@ -381,11 +381,103 @@ STAGES = ["Ideas", "Shaped", "Ready", "Building", "Done", "Parked"]
 
 #: The ladder, best-first. Only finite classes may preempt in-flight work.
 #: Bug is a latent defect: found by reading, review or tests, with no observed
-#: occurrence. It ranks below Replace and never preempts, so latent finds no
+#: occurrence. It ranks last and never preempts, so latent finds no
 #: longer ride Broken's preemption past every other class (#1832, #1845).
+#: Improve was renamed to Implement keeping its option id, and Curate,
+#: Describe, Hypothesize and Test were added (#2407, #2425). New and Replace
+#: stay as legacy options that rank where they did until their open items
+#: close; they take no new assignments (``LEGACY_CLASSES``).
 LADDER = [
-    "Investigate", "Broken", "Maintenance", "Improve", "New", "Replace", "Bug",
+    "Investigate", "Broken", "Maintenance", "Curate", "Describe",
+    "Hypothesize", "Test", "Implement", "New", "Replace", "Bug",
 ]
+
+#: Legacy Class options (#2407, #2425). They stay on the Project field while
+#: open items carry them, so in-flight work keeps its rank and finishes, but
+#: no fresh assignment may name them. ``is_assignable_class`` enforces this;
+#: ``needs_class`` still accepts them as a held class.
+LEGACY_CLASSES = frozenset({"New", "Replace"})
+
+#: Old Class names mapped to their rename target (#2425). Improve became
+#: Implement with the same option id; boards read before the migration and old
+#: fixtures still say Improve. ``normalize_class`` maps them so existing
+#: assignments keep working; new assignments use the new name.
+CLASS_RENAMES = {"Improve": "Implement"}
+
+#: Classes a fresh assignment may name (#2425): every ladder class except the
+#: legacy options. Curate, Describe, Hypothesize, Test and Implement all
+#: accept assignments; New and Replace refuse while their open items remain.
+ASSIGNABLE_CLASSES = frozenset(
+    klass for klass in LADDER if klass not in LEGACY_CLASSES
+)
+
+#: The five decision-first phases (#2407, #2425). For later tickets: ordering,
+#: shape and accept decide their rules; this ticket only makes them
+#: assignable options.
+PHASE_CLASSES = frozenset(
+    {"Curate", "Describe", "Hypothesize", "Test", "Implement"}
+)
+
+
+def normalize_class(klass: Optional[str]) -> Optional[str]:
+    """Map an old Class name to its rename target (#2425).
+
+    Improve reads as Implement with the same option id. Anything else,
+    including None and unknown names, passes through unchanged.
+    """
+    if isinstance(klass, str):
+        return CLASS_RENAMES.get(klass, klass)
+    return klass
+
+
+def is_assignable_class(klass: Optional[str]) -> bool:
+    """Whether a fresh assignment may name this Class (#2425).
+
+    New and Replace refuse while their open items remain; every other ladder
+    class accepts, including the five phases. Improve is accepted as the old
+    name for Implement so pre-migration proposals still land. Pure over the
+    name; callers with items use ``class_assignment_refusal`` for the message.
+    """
+    if not isinstance(klass, str):
+        return False
+    if klass in LEGACY_CLASSES:
+        return False
+    return normalize_class(klass) in ASSIGNABLE_CLASSES
+
+
+def class_assignment_refusal(
+    klass: Optional[str],
+    items: Optional[Sequence["Item"]] = None,
+) -> Optional[str]:
+    """Why this Class cannot be freshly assigned, or None to allow it (#2425).
+
+    Legacy New and Replace always refuse; when ``items`` carries open rows
+    the message names how many still hold the option. Unknown and missing
+    names refuse as well. Improve passes as the old name for Implement.
+    """
+    if not isinstance(klass, str) or not klass:
+        return "a fresh assignment needs a Class; choose one of {}".format(
+            ", ".join(sorted(ASSIGNABLE_CLASSES)))
+    if klass in LEGACY_CLASSES:
+        holding = 0
+        if items is not None:
+            holding = sum(
+                1 for item in items
+                if item.state == "OPEN" and item.klass == klass)
+        if holding:
+            return (
+                "Class {} is legacy: no new assignments while {} open "
+                "item{} still hold{} it; open items keep it until they "
+                "close".format(
+                    klass, holding, "s" if holding != 1 else "",
+                    "" if holding != 1 else "s"))
+        return (
+            "Class {} is legacy: no new assignments; it stays only while "
+            "open items hold it".format(klass))
+    if normalize_class(klass) not in ASSIGNABLE_CLASSES:
+        return "unknown Class {!r}; choose one of {}".format(
+            klass, ", ".join(sorted(ASSIGNABLE_CLASSES)))
+    return None
 
 #: The finite classes. `plan.md`: "Broken and Maintenance preempt in-flight
 #: work — and this is only safe because both are finite. The governing rule:
@@ -470,9 +562,11 @@ PREEMPTING = {"Broken", "Maintenance"}
 #: Existing-work classes and finite investigations may take the unattended
 #: shaping path. Origin remains an independent condition: class describes the
 #: work, not who raised it. Bug is existing work too: a latent defect in
-#: something already shipped (#1845).
+#: something already shipped (#1845). Improve was renamed to Implement
+#: (#2425); the earlier phases take their shaping rule in a later ticket, so
+#: only Implement is self-approvable here.
 SELF_APPROVABLE_CLASSES = frozenset(
-    {"Investigate", "Broken", "Maintenance", "Improve", "Bug"}
+    {"Investigate", "Broken", "Maintenance", "Implement", "Bug"}
 )
 
 #: The defect classes, for measurement only. Broken is an observed failure
@@ -1056,17 +1150,19 @@ def ladder_index(klass: Optional[str]) -> int:
     """Rank on the ladder. An unset Class sorts last and never preempts.
 
     An unset Class must never behave like Broken; a forgotten field must not
-    acquire preemption rights.
+    acquire preemption rights. Improve ranks as Implement (#2425).
     """
+    klass = normalize_class(klass)
     return LADDER.index(klass) if klass in LADDER else len(LADDER)
 
 
 def effective_class(item: Item, by_ref: Dict[str, Item]) -> Optional[str]:
     """A ticket inherits its parent's Class — the ladder ranks projects, not
     individual tickets. Sub-issues join the parent's Project automatically with
-    their fields blank, so this is the normal case, not an edge case."""
+    their fields blank, so this is the normal case, not an edge case.
+    Improve reads as Implement (#2425)."""
     parent = by_ref.get(item.parent or "")
-    return (parent.klass if parent else None) or item.klass
+    return normalize_class((parent.klass if parent else None) or item.klass)
 
 
 def dependency_descendants(items: Sequence[Item]) -> Dict[str, Set[str]]:
@@ -1106,13 +1202,14 @@ def needs_class(item: Item) -> bool:
     Tickets are exempt because they inherit. A parentless item is a project,
     and a project with no Status at all is exactly the forgotten-field case
     this is meant to catch — so a missing Status does not excuse a missing
-    Class.
+    Class. Legacy New and Replace still count as held (#2425), as does
+    Improve, which reads as Implement.
     """
     if item.state == "CLOSED" or item.parent:
         return False
     if item.status in ("Ideas", "Done", "Parked"):
         return False
-    return item.klass not in LADDER
+    return normalize_class(item.klass) not in LADDER
 
 
 def effective_domain(item: Item, by_ref: Dict[str, Item]) -> Optional[str]:
@@ -3073,7 +3170,7 @@ def self_approval_eligible(klass: Optional[str], origin_voice: Optional[str],
     if state is not None and str(state).upper() != "OPEN":
         return False
     return (
-        klass in SELF_APPROVABLE_CLASSES
+        normalize_class(klass) in SELF_APPROVABLE_CLASSES
         and effective_shape_owner(origin_voice, override_target) == "agents"
         and not needs_nate
         and not escalated
@@ -3211,7 +3308,7 @@ def _startable_without_repo_readiness(
     # residual ticket silently promote it to Building.
     return (
         parent.status in ("Ready", "Building")
-        and parent.klass in LADDER
+        and normalize_class(parent.klass) in LADDER
         and not parent.is_blocked
     )
 
@@ -4042,7 +4139,7 @@ def _order_startable_items(
             # Finite classes preempt in-flight work of unbounded ones — the half
             # of plan.md's rule this key never implemented until #435. Measured
             # 2026-09-09: six Broken projects at Ready sat behind ten in-flight
-            # Improve tickets all afternoon. Read through `effective_rank` so a
+            # Implement tickets all afternoon. Read through `effective_rank` so a
             # ticket that blocks a Broken one preempts with it. Finite work
             # leads a pin (Nate, 2026-09-25).
             0 if preempting[item.ref] else 1,
@@ -5404,6 +5501,7 @@ def class_adoption_comment(
     klass: str, source_line: str, at: Optional[datetime] = None,
 ) -> str:
     """Build the durable record for a class adopted at Nate's approve gate."""
+    klass = normalize_class(klass) or klass
     if klass not in LADDER:
         raise ValueError("unknown adopted class {!r}".format(klass))
     if not isinstance(source_line, str) or not source_line.strip():
@@ -5892,7 +5990,7 @@ def _with_the_bug_share(
       oldest"). A pinned Bug is pinned work, and takes the turn itself.
     - Otherwise the ordinary order, less the Bugs it would put ahead of other
       work: repo tier ranks above the ladder, so a tier-1 Bug would otherwise
-      go before a hobby repo's Improve on every pull.
+      go before a hobby repo's Implement on every pull.
     - A Bug fills a pull that nothing else can, chosen as on the Bugs' turn.
 
     Two Bugs keep their ordinary place, because each is a commitment already
@@ -10653,7 +10751,7 @@ BEGIN_ITEM_NODE_FIELDS = ITEM_NODE_FIELDS.replace(
 # facts, Status, Class, gate (Needs), claim, and canonical ticket Risk. Pinned
 # is also read for the settled ordering rule. Origin does not route ticket
 # work, but begin and merge decide a finished project's close from this view,
-# and without it every Improve project read as Nate's and never closed (#2147).
+# and without it every Implement project read as Nate's and never closed (#2147).
 # Domain is read for the Fantasy-GM explicit-domain requirement (#2426).
 STARTABLE_ITEM_NODE_FIELDS = """\
           id
@@ -14230,7 +14328,7 @@ def dashboard_board(
 
         A pin is Nate's explicit ordering call and leads whatever else is
         true (#902). Then the ladder, whoever owns the next step: a `Broken`
-        project Muse is reviewing reads above `Improve` work Codex can start,
+        project Muse is reviewing reads above `Implement` work Codex can start,
         because reviewing and implementing run side by side and the class is
         the priority (Nate, 2026-09-24, choosing this over the engineers'
         queue leading the board). Within a class, projects with startable
@@ -14873,7 +14971,9 @@ def closed_itself_items(items: Iterable[Item], now: datetime) -> List[Item]:
 
 
 #: The classes whose finished projects close themselves whoever raised them.
-#: Improve also closes, when its shape owner is the agents (#987, #1845).
+#: Implement also closes, when its shape owner is the agents (#987, #1845).
+#: Improve was renamed to Implement (#2425); the earlier phases take their
+#: close rule in a later ticket, so only Implement closes here.
 SELF_CLOSING_UPKEEP_CLASSES = frozenset(
     {"Investigate", "Broken", "Maintenance", "Bug"}
 )
@@ -14886,10 +14986,10 @@ def _can_close_itself(item: Item) -> bool:
     the marker is malformed. Otherwise the existing class/origin rules apply.
 
     The upkeep classes are safe to close regardless of who raised them. An
-    ``Improve`` project is safe only when its effective shape owner is the
+    ``Implement`` project is safe only when its effective shape owner is the
     agents, using the same origin and authorised override reading as the
     unattended shaping predicate. Missing or malformed origin therefore
-    resolves to Nate and fails closed.
+    resolves to Nate and fails closed. Improve reads as Implement (#2425).
     """
     body = item.body if isinstance(item.body, str) else ""
     if parse_analysis_marker(body) is not None:
@@ -14897,11 +14997,12 @@ def _can_close_itself(item: Item) -> bool:
 
     # Bug closes itself exactly as Broken does (#1845). #987's final accept
     # rule names the upkeep classes as SELF_APPROVABLE_CLASSES and lets every
-    # one but Improve close itself whoever raised it; Bug is a defect class,
+    # one but Implement close itself whoever raised it; Bug is a defect class,
     # upkeep like Broken, so no Bug project waits at `Accept it?`.
-    if item.klass in SELF_CLOSING_UPKEEP_CLASSES:
+    klass = normalize_class(item.klass)
+    if klass in SELF_CLOSING_UPKEEP_CLASSES:
         return True
-    if item.klass != "Improve":
+    if klass != "Implement":
         return False
 
     override = parse_origin_override(body)
@@ -15207,7 +15308,9 @@ def proposed_class_for_approval(
     Approval may fill an unset Project Class only from an explicit, whole-line
     proposal. A malformed proposal, a fuzzy value, or more than one proposal
     is ambiguous and therefore stays with Nate instead of becoming an
-    inference from plan prose.
+    inference from plan prose. Legacy New and Replace refuse (#2425): a
+    proposal naming one stays with Nate. Improve is accepted as the old name
+    for Implement and is returned as written; the writer maps it.
     """
     if not isinstance(plan, str):
         return None
@@ -15218,7 +15321,9 @@ def proposed_class_for_approval(
         if match is None:
             continue
         value = match.group("value").strip()
-        if value not in LADDER:
+        if value in LEGACY_CLASSES:
+            return None
+        if value not in LADDER and value not in CLASS_RENAMES:
             return None
         matches.append((value, raw_line.strip()))
 
@@ -15236,8 +15341,12 @@ def unclassed_capture_items(items: Iterable[Item]) -> List[Item]:
     Ideas stay outside the decision counts. This diagnostic only makes the
     forgotten assignment visible, preserving the funnel's unbounded Ideas
     stage and leaving the origin-specific repair to the right actor.
+    Improve counts as held via its rename to Implement (#2425).
     """
-    return [item for item in ideas(items) if item.klass not in LADDER]
+    return [
+        item for item in ideas(items)
+        if normalize_class(item.klass) not in LADDER
+    ]
 
 
 def _unclassed_capture_item_json(item: Item) -> Dict[str, object]:
@@ -19033,12 +19142,11 @@ def cmd_capture(items: List[Item], now: datetime, title: str, note: Optional[str
         )
     if origin == "agent" and klass is None:
         raise GitHubError("capture requires --class when --origin agent")
-    if klass is not None and klass not in LADDER:
-        raise GitHubError(
-            "unknown capture class {!r}; choose one of {}".format(
-                klass, ", ".join(LADDER)
-            )
-        )
+    if klass is not None:
+        refusal = class_assignment_refusal(klass, items)
+        if refusal is not None:
+            raise GitHubError("capture {}".format(refusal))
+        klass = normalize_class(klass)
     evidence, refusal = _capture_observed(origin, klass, observed)
     if refusal is not None:
         raise GitHubError(refusal)
@@ -23229,17 +23337,19 @@ def _finished_close_candidate(item: Item, *,
 
     Open at Building with every ticket closed, in a class that can close
     itself. Its body decides the rest: an analysis marker keeps it at Accept,
-    and an Improve project's origin override can hand it to either owner.
+    and an Implement project's origin override can hand it to either owner.
+    Improve reads as Implement (#2425).
     """
     completed = item.children_done if children_done is None else children_done
+    klass = normalize_class(item.klass)
     return (
         item.state == "OPEN"
         and item.status == "Building"
         and item.children_total > 0
         and completed == item.children_total
         and (
-            item.klass in SELF_CLOSING_UPKEEP_CLASSES
-            or item.klass == "Improve"
+            klass in SELF_CLOSING_UPKEEP_CLASSES
+            or klass == "Implement"
         )
     )
 
@@ -23854,7 +23964,7 @@ def cmd_answer(items: List[Item], now: datetime, verb: str, ref: str,
 
     adoption = (
         proposed_class_for_approval(item.body)
-        if verb == "approve" and item.klass not in LADDER
+        if verb == "approve" and normalize_class(item.klass) not in LADDER
         else None
     )
 
@@ -23895,6 +24005,7 @@ def cmd_answer(items: List[Item], now: datetime, verb: str, ref: str,
     if not confirmed:
         if adoption is not None:
             adopted_class, source_line = adoption
+            adopted_class = normalize_class(adopted_class) or adopted_class
             print(
                 "would adopt Class {} from source line `{}`; {}".format(
                     adopted_class, source_line, CLASS_ADOPTION_OVERRIDE_NOTE
@@ -23929,6 +24040,7 @@ def cmd_answer(items: List[Item], now: datetime, verb: str, ref: str,
 
     if adoption is not None:
         adopted_class, source_line = adoption
+        adopted_class = normalize_class(adopted_class) or adopted_class
         gh_graphql(
             SET_FIELD,
             project=PROJECT_ID,
@@ -23957,6 +24069,7 @@ def cmd_answer(items: List[Item], now: datetime, verb: str, ref: str,
 
     if adoption is not None:
         adopted_class, source_line = adoption
+        adopted_class = normalize_class(adopted_class) or adopted_class
         comment = _run_gh(
             [
                 "gh", "issue", "comment", str(item.number), "--repo", item.repo,

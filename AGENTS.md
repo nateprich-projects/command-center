@@ -69,6 +69,14 @@ plausible-looking lists.
 Ordering rules get unit tests against fixtures. That is the part most likely to be subtly
 wrong.
 
+**Overseers score their own hypotheses through shared code (#2407).**
+"I never said they couldn't use scores for their own work." _(Nate, 2026-10-09.)_
+A domain overseer scores hypotheses — value is impact × min(p, 1-p) ÷ cost —
+and shared code orders slot admission from those scores. The no-scores rule
+keeps governing the funnel's work queue: you may recommend that a `Status` or
+`Class` value should change, but you may not supply a score, alter a rank
+key, or reorder queue items yourself. See `plan.md`, "Domains and phases".
+
 ## Execution rules — non-negotiable
 
 - **In-app scheduling only, for Claude Code and Codex.** Claude Code Routines and Codex
@@ -391,6 +399,12 @@ which tracks detecting repository drift mechanically.
 Deliberately de-jargonised — some repos in the funnel are public and a stranger should
 understand a status or label without a glossary. The complete label set is
 `needs-shaping` and `blocked`. Do not add a third without changing `plan.md` first.
+
+The `Class` vocabulary is `Investigate`, `Broken`, `Maintenance`, `Curate`,
+`Describe`, `Hypothesize`, `Test`, `Implement` and `Bug` (#2407). `Improve`,
+`New` and `Replace` are legacy options that take no new assignments until
+their open items close. `Investigate` requires an observed symptom _(agent
+rule, unconfirmed — advisory)_. See `plan.md`, "Domains and phases".
 
 ## Scope
 

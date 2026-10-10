@@ -1,7 +1,7 @@
 ---
 title: Command Center — Design Record
 tags: [command-center, funnel, design-record, plan]
-last_updated: 2026-09-19
+last_updated: 2026-10-09
 status: Design settled. v0 in progress.
 ---
 
@@ -137,6 +137,18 @@ predicate for both the `Accept it?` gate and unattended close:
    waits, unless Nate expressly says that one does not. **Confirmed by Nate,
    2026-09-19.**
 
+   **Amendment (#2407, Nate 2026-10-09): curation, description and hypothesis
+   work no longer waits at `Accept it?`.** `Curate`, `Describe` and
+   `Hypothesize` projects close when they ship, with their findings recorded
+   in the domain's records. A finished `Test` still waits — whether it
+   proposes a change or concludes "leave it" — alongside the other sign-offs
+   in "Domains and phases". This knowingly adopts the alternative this section
+   rejected, self-close with findings recorded, by Nate's choice. Why: rule 5
+   was written for analyses commissioned for a decision (#685), where closing
+   unread loses the work; the phases below a test are steps toward one, and
+   holding each at a gate would refill Nate's queue with routine measuring
+   just as he steps back from setting priorities proactively.
+
 _Rejected: scoping the rule to the `Investigate` class, which needs no new marker and
 is read straight off the existing class field. It would have missed #685, which was
 `Maintenance` — the exact case that prompted the rule — and classing every analysis as
@@ -250,6 +262,16 @@ was always the intent of the prioritization"; until then a pin reached only his
 decision queue.)_ **Finite work leads a pin:** a Broken or Maintenance ticket, or one
 that blocks such work, goes ahead of pinned work. _(Nate, 2026-09-25.)_
 
+**Phase work leaves this ladder (#2407, Nate 2026-10-09).** `Improve`, `New`
+and `Replace` give way to the five phases — `Curate`, `Describe`,
+`Hypothesize`, `Test`, `Implement` — and phase work is ordered by slots and
+turns across domains (see "Domains and phases"), not by a ladder rung. The
+ladder still ranks `Investigate`, `Broken`, `Maintenance` and `Bug`, and only
+finite classes preempt, as before. Why: the ladder and tiers together let
+command-center file its own Improve work and rank it above every hobby repo,
+so 355 of 487 merged PRs from 2026-09-24 to 2026-10-08 landed in
+command-center and none in AFL; phase work takes turns by domain instead.
+
 **Repos are tiered, and the tier ranks above the Building commitment.** Tier 1 is the
 tooling that keeps everything else running (`command-center`, `github-runners`,
 `workbench`); tier 2 has real-world impact (`career-toolset`, `jeffy-finance-agent`);
@@ -265,6 +287,17 @@ higher-tier work is startable, which on 2026-09-24's board meant waiting behind 
 non-finite tickets. Nate chose to accept it and watch a week rather than add a starvation
 guard. _(2026-09-25.)_ The rejection of a strict ladder on in-flight work below still
 holds within a tier.
+
+**Tiers no longer rank phase work (#2407, Nate 2026-10-09).** Domains with
+free slots take turns, equal for every domain; repo tiers do not order
+`Curate`, `Describe`, `Hypothesize`, `Test` or `Implement` work. Outside phase
+work, tiers read as before — including the Bug turn's pick of the startable
+Bug in the highest repo tier — and the Muse exposure posture now names
+repositories directly instead of tiers (see "Domains and phases"). Why: on
+2026-09-24's board a hobby project already Building waited behind 26 tier-1
+non-finite tickets, and that ordering put 73% of merged PRs from 2026-09-24 to
+2026-10-08 in command-center with none in AFL; the tier that kept tooling
+unblocked was starving the domains the tooling exists to serve.
 
 Within one decision gate, the same ladder breaks class ties; gate depth still wins.
 
@@ -376,6 +409,94 @@ problem. It is the signal to reassess how many plates are spinning. The brief ca
 share-of-runs on Broken + Bug + Maintenance over 30 days, and days since anything new
 started. Bug counts with Broken there, as it does in the fix-on-fix join, because
 latent finds were classed Broken until #1832 split them out (#1845).
+
+## Domains and phases (#2407)
+
+Decided by Nate in session on 2026-10-09, unless marked agent. Three failures
+forced it: the funnel mostly works on itself — 355 of 487 merged PRs from
+2026-09-24 to 2026-10-08 were in command-center, with none in AFL — because
+tier 1 outranks the hobby tier, command-center files its own work, and
+agent-origin Improve self-approves; analysis stalls or misleads, and how
+things are measured has no home; and Nate wants to step back from setting
+priorities or preferences proactively.
+
+### Domains and overseers
+
+- **Domains.** League and AFL are domains homed in Fantasy-GM. Command-center
+  is a domain that includes github-runners.
+- **Interim domains.** workbench, career-toolset and jeffy-finance-agent are
+  interim domains with no overseer. Only urgent work, Bugs and Nate's explicit
+  asks enter them until he gives one an overseer.
+- **One overseer per domain** — Nate's term. It oversees the domain's data and
+  work. It frames, describes, hypothesizes and tests itself, and proposes
+  data-collection code and changes as funnel work. It never sets priority or
+  autonomy, and it abstains when evidence is short.
+- **Mission: decisions first, some exploring.** About one proposal in four may
+  be open exploration.
+- **KPI tree per domain.** Nate accepts the top once: for the leagues,
+  championships, "the only permanent metric that we start with"; for
+  command-center, work delivered to the other domains, with a guardrail to
+  spread Nate's usage across the week. Every node below the top is measured,
+  never assumed.
+- **Records per domain** live in its private home, never here: charter, data
+  sources, versioned measures, questions and hypotheses, findings and a
+  decision log. Records hold knowledge; work status stays on issues.
+- **Nate's thoughts.** A thought he tosses in goes into the domain's list,
+  carrying his voice but shapeable by agents and with no boost. Asking about
+  it later does not move it. Only an explicit ask ("do this now", "file it",
+  "pin it") changes priority.
+- **Autonomy ladder.** The rungs are report, recommend, alert, act after Nate
+  confirms, and act then tell him. Every climb is his gate.
+
+### Classes and phases
+
+- **Unchanged:** Broken, Maintenance and the Bug lane, 2 of every 8 starts.
+  Investigate now also requires an observed symptom (agent, from review).
+- **Improve, New and Replace give way to Nate's five phases:** Curate,
+  Describe, Hypothesize, Test and Implement. Improve is renamed to Implement,
+  keeping its assignments; New and Replace stay as legacy options that take no
+  new assignments until their open items close (agent).
+- **Implement needs** a tested finding or Nate's explicit ask. A cheap,
+  reversible change may ship with its Verify check as its test (agent).
+- **The path:** frame, curate, describe, hypothesize, test, implement, verify.
+  Work sent back to an earlier phase becomes a new linked item, never a
+  sub-issue (#945 precedent).
+- **Hypotheses are scored by the overseer:** value is impact × min(p, 1-p) ÷
+  cost; value is zero when no answer would change the decision; likely, cheap,
+  reversible ideas go on a "try and watch" list; estimates and their reasons
+  are recorded; shared code orders slot admission from them. The no-scores
+  rule still governs the funnel's work queue (see AGENTS.md).
+
+### Slots and ordering
+
+- **Two slots per domain,** equal for every domain. Only work agents can move
+  counts. Items waiting on Nate hold no slot and are not capped.
+- **No repo tiers for phase work.** Domains with free slots take turns.
+- **Urgent work and Bugs** stay outside slots and turns, and only finite
+  classes preempt.
+- **Nate's explicit asks** take their domain's next free slot ahead of anything
+  waiting.
+- **Slots limit entry to the funnel,** never work already inside it, so
+  command-center's in-flight projects finish first.
+
+### Sign-offs
+
+- **What waits for Nate:** every finished test, whether it proposes a change or
+  concludes "leave it"; each domain's top goal, once; any change to a KPI that
+  live advice is judged by; both the plan and the result of anything he
+  explicitly asks for; every autonomy climb.
+- **Everything else closes when it ships.** A shipped change's check returns
+  later as a finished test.
+- **The rule 5 amendment:** curation, description and hypothesis work no longer
+  waits at Accept. This knowingly adopts the alternative this record rejected,
+  self-close with findings recorded, by Nate's choice. See rule 5 under
+  "Building completion and automatic acceptance".
+
+### Exposure
+
+- The Muse contributor list is restated by repository name, independent of
+  tiers: command-center, github-runners, workbench, Fantasy-GM, The-League and
+  AFL. The #1570 posture is unchanged.
 
 ## The agents
 

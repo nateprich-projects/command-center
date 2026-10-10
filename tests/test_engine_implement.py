@@ -1111,6 +1111,43 @@ def test_no_diff_with_wrong_base_sha_posts_rejection_and_errors(
     assert (clone / "README.md").read_text() == "seed\n"
 
 
+def test_no_diff_without_verification_posts_nothing_and_errors(
+        tmp_path, monkeypatch):
+    """Missing verification still errors with no runner comment (#2453)."""
+    _, clone = make_clone(tmp_path)
+    _stub_claim_state(monkeypatch, "empty")
+    monkeypatch.setattr(implement, "fetch_ticket", lambda repo, number: ticket(number))
+    monkeypatch.setattr(
+        heartbeat, "read_github",
+        lambda agent: pytest.fail("missing verification must fail before the heartbeat read"),
+    )
+    effects = {"comments": [], "closed": [], "released": [], "finished": []}
+
+    with pytest.raises(
+        implement.ImplementError,
+        match="done answer produced no change and named no evidence",
+    ):
+        implement.finish_done(
+            answer(),
+            run="run-42",
+            repo=REPO,
+            cwd=clone,
+            test_commands=[[sys.executable, "-c", "pass"]],
+            release=effects["released"].append,
+            heartbeat_finish=lambda *args: effects["finished"].append(args),
+            close_effect=lambda *args, **kwargs: effects["closed"].append(args),
+            comment_effect=lambda *args, **kwargs: effects["comments"].append(
+                (args, kwargs)),
+            verify_comment_effect=lambda *args, **kwargs: pytest.fail(
+                "missing verification posts no verification comment"),
+        )
+
+    assert effects["comments"] == []
+    assert effects["closed"] == []
+    assert effects["released"] == []
+    assert effects["finished"] == []
+
+
 def test_diff_backed_done_with_verification_still_opens_pr(
         tmp_path, monkeypatch):
     """The diff path ignores verification and opens a PR as before (#2452)."""

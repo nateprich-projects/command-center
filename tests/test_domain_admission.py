@@ -196,6 +196,57 @@ def test_phase_order_ignores_repo_tiers():
     assert [item.number for item in funnel.startable(rows)] == [21, 11]
 
 
+def test_scorer_orders_within_domain_ahead_of_age():
+    old = proj(CC, 10, "Ready", "Curate", days=30)
+    t_old = tick(CC, 11, old.ref, days=30)
+    new = proj(CC, 20, "Ready", "Curate", days=1)
+    t_new = tick(CC, 21, new.ref, days=1)
+    rows = [old, t_old, new, t_new]
+    tickets = [t_old, t_new]
+    hypotheses = {
+        t_old.ref: {"impact": 10, "p": 0.5, "cost": 10},   # 0.5
+        t_new.ref: {"impact": 100, "p": 0.5, "cost": 10},  # 5.0
+    }
+    assert [item.number for item in funnel.phase_turn_order(
+        rows, tickets, hypotheses)] == [21, 11]
+    assert [item.number for item in funnel._order_startable_items(
+        rows, tickets, hypotheses)] == [21, 11]
+    # Without estimates age still decides.
+    assert [item.number for item in funnel.phase_turn_order(
+        rows, tickets)] == [11, 21]
+
+
+def test_scorer_never_passes_an_explicit_ask():
+    asked = proj(CC, 10, "Ready", "Curate", days=30, pinned=True)
+    t_asked = tick(CC, 11, asked.ref, days=30)
+    plain = proj(CC, 20, "Ready", "Curate", days=1)
+    t_plain = tick(CC, 21, plain.ref, days=1)
+    rows = [asked, t_asked, plain, t_plain]
+    hypotheses = {
+        asked.ref: funnel.Hypothesis(key="ask", impact=1, p=0.5, cost=10),
+        t_plain.ref: {"impact": 100, "p": 0.5, "cost": 10},
+    }
+    assert [item.number for item in funnel.phase_turn_order(
+        rows, [t_asked, t_plain], hypotheses)] == [11, 21]
+
+
+def test_unscored_and_zero_value_keep_age_order():
+    old = proj(CC, 10, "Ready", "Curate", days=30)
+    t_old = tick(CC, 11, old.ref, days=30)
+    mid = proj(CC, 20, "Ready", "Curate", days=20)
+    t_mid = tick(CC, 21, mid.ref, days=20)
+    new = proj(CC, 30, "Ready", "Curate", days=1)
+    t_new = tick(CC, 31, new.ref, days=1)
+    rows = [old, t_old, mid, t_mid, new, t_new]
+    hypotheses = {
+        t_new.ref: {"impact": 100, "p": 0.5, "cost": 10},
+        t_mid.ref: {"impact": 999, "p": 0.5, "cost": 1,
+                    "changes_decision": False},  # zero value
+    }
+    assert [item.number for item in funnel.phase_turn_order(
+        rows, [t_old, t_mid, t_new], hypotheses)] == [31, 11, 21]
+
+
 def test_thoughts_carry_no_boost_and_later_asks_do_not_move():
     thought = proj(CC, 10, "Ready", "Curate", days=5, origin="Nate")
     t_thought = tick(CC, 11, thought.ref, days=5, origin="Nate")

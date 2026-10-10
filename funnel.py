@@ -2022,9 +2022,62 @@ def _turn_since(item: Item) -> datetime:
             or datetime.max.replace(tzinfo=timezone.utc))
 
 
+def _turn_hypothesis_payload(
+    item: Item,
+    hypotheses: Optional[Mapping[str, Any]],
+) -> Dict[str, Any]:
+    """One shared-scorer payload for a turn candidate (#2407, #2429).
+
+    The payload carries the ticket's ref as ``key`` so the scorer's
+    stable order maps back to tickets. A ticket with an entry in
+    ``hypotheses`` — by its own ref, else its parent's — carries the
+    overseer's estimates; any other ticket carries no estimates and
+    scores zero, tying with every other unscored ticket so age still
+    decides among them. Accepts the same shapes the scorer does:
+    mappings, ``Hypothesis`` records, or objects with estimate
+    attributes.
+    """
+    entry: Any = None
+    if hypotheses:
+        entry = hypotheses.get(item.ref)
+        if entry is None and item.parent:
+            entry = hypotheses.get(item.parent)
+    if entry is None:
+        return {"key": item.ref}
+    if isinstance(entry, Mapping):
+        payload = dict(entry)
+        payload["key"] = item.ref
+        return payload
+    payload = normalize_hypothesis(entry).to_dict()
+    payload["key"] = item.ref
+    return payload
+
+
+def _scorer_admission_ranks(
+    rows: Sequence[Item],
+    hypotheses: Optional[Mapping[str, Any]],
+) -> Dict[str, int]:
+    """Ticket refs in shared-scorer admission order (#2407, #2429).
+
+    Calls ``order_hypotheses`` over one payload per row and returns
+    ``ref -> rank``, lowest rank first. Rows are pre-sorted by age so
+    the scorer's stable order keeps oldest-first among ties: unscored
+    tickets all score zero, so without estimates this is exactly age
+    order and the scorer changes nothing.
+    """
+    presorted = sorted(
+        rows, key=lambda item: (_turn_since(item), item.repo, item.number))
+    payloads = [_turn_hypothesis_payload(item, hypotheses)
+                for item in presorted]
+    ordered = order_hypotheses(payloads)
+    return {payload["key"]: rank
+            for rank, payload in enumerate(ordered)}
+
+
 def _phase_turn_positions(
     items: Sequence[Item],
     candidates: Sequence[Item],
+    hypotheses: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Tuple[int, int, int]]:
     """Round-robin positions for phase-turn candidates (#2407, #2429).
 
@@ -2033,12 +2086,14 @@ def _phase_turn_positions(
     non-preempting ticket candidate. Projects never take turns. Within
     each domain, explicit asks go
     first, then a blocker before its dependent (``-len(descendants)``),
-    then oldest, repo, number. Domains go oldest-waiting first, then by
-    name. Rounds interleave: every domain's first, then every domain's
-    second, so equal domains take equal turns. Urgent and Bugs never
-    rank as phases, so they stay outside turns. Hypotheses feeding
-    Hypothesize work are pre-ordered by the shared scorer
-    (``order_hypotheses``); tickets carry no scores themselves.
+    then the shared scorer's admission order (``order_hypotheses``
+    over each ticket's hypothesis estimates; tickets without estimates
+    score zero and keep age order), then oldest, repo, number. Domains
+    go oldest-waiting first, then by name. Rounds interleave: every
+    domain's first, then every domain's second, so equal domains take
+    equal turns. Urgent and Bugs never rank as phases, so they stay
+    outside turns. Tickets carry no scores themselves; estimates arrive
+    with the overseer's ``hypotheses``, keyed by ticket or parent ref.
     """
     by_ref = {item.ref: item for item in items}
     descendants = dependency_descendants(items)
@@ -2059,9 +2114,11 @@ def _phase_turn_positions(
         assert domain is not None
         by_domain.setdefault(domain, []).append(item)
     for rows in by_domain.values():
+        ranks = _scorer_admission_ranks(rows, hypotheses)
         rows.sort(key=lambda item: (
             0 if is_explicit_ask(item, by_ref) else 1,
             -len(descendants.get(item.ref, set())),
+            ranks[item.ref],
             _turn_since(item),
             item.repo,
             item.number,
@@ -2085,12 +2142,16 @@ def _phase_turn_positions(
 def phase_turn_order(
     items: Sequence[Item],
     candidates: Optional[Sequence[Item]] = None,
+    hypotheses: Optional[Mapping[str, Any]] = None,
 ) -> List[Item]:
     """Phase candidates in domain-turn order, asks first (#2407, #2429).
 
     Pure over fixtures. ``items`` is the loaded view (projects and
     tickets) that domains, ranks and pins read from; ``candidates``
     defaults to the tickets among it, since projects never take turns.
+    ``hypotheses`` carries the overseer's estimates keyed by ticket or
+    parent ref; within each domain, after asks and blockers, tickets
+    follow the shared scorer's admission order over them.
     Only phase-ranked, attributable, non-preempting tickets take turns;
     every other candidate keeps its input order after them. Asks (pins)
     lead globally, as ``startable()`` ranks them, with turns ordering
@@ -2101,7 +2162,7 @@ def phase_turn_order(
     if candidates is None:
         candidates = [item for item in items if item.parent is not None]
     rows = list(candidates)
-    positions = _phase_turn_positions(items, rows)
+    positions = _phase_turn_positions(items, rows, hypotheses)
     by_ref = {item.ref: item for item in items}
 
     def key(item: Item):
@@ -4213,13 +4274,16 @@ def _filter_prequalified_startable_items(
 
 def _order_startable_items(
     items: Sequence[Item], candidates: Sequence[Item],
+    hypotheses: Optional[Mapping[str, Any]] = None,
 ) -> List[Item]:
     """Order already-filtered candidates against the complete loaded view.
 
     Phase work (#2407, #2429) leaves the ladder and tiers: attributable,
     non-preempting phase-ranked tickets take domain turns
     (``_phase_turn_positions``), with the Building commitment first and
-    no tier or ladder rung in the key. Pins still lead globally for
+    no tier or ladder rung in the key. Within each domain, after asks
+    and blockers, tickets follow the shared scorer's admission order
+    over the overseer's ``hypotheses``. Pins still lead globally for
     both groups, so an explicit ask jumps its domain's queue and wins
     over unpinned work elsewhere, as every pin does. Urgent and Bugs
     never rank as phases, so they stay outside turns; finite-class
@@ -4237,7 +4301,8 @@ def _order_startable_items(
         ref: _effective_tier(ref, by_ref, descendants) for ref in by_ref
     }
     preempting = {ref: _preempts(ref, by_ref, descendants) for ref in by_ref}
-    turn_positions = _phase_turn_positions(items, list(candidates))
+    turn_positions = _phase_turn_positions(
+        items, list(candidates), hypotheses)
 
     def in_flight(item: Item) -> bool:
         """Once a project is Building, its remaining tickets finish first.

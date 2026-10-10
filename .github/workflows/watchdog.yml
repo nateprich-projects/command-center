@@ -26,6 +26,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Ensure GitHub CLI is available
+        # The hobby-linux runners serve CI, which never shells out to `gh`.
+        # Install it for the run when the image lacks it; a no-op otherwise.
+        # Nothing changes on the micro-PC itself.
+        run: |
+          if ! command -v gh >/dev/null 2>&1; then
+            sudo apt-get update && sudo apt-get install -y gh
+          fi
+          gh --version
+
       - name: Check heartbeats
         env:
           GH_TOKEN: ${{ github.token }}

@@ -988,6 +988,196 @@ def test_done_with_diff_ignores_evidence(
     assert effects["finished"][0][:3] == ("codex", "run-42", "done")
 
 
+def verification_answer(base_sha):
+    return {
+        **answer(),
+        "verification": {
+            "base_sha": base_sha,
+            "tests": "python3 -m pytest tests/test_engine_implement.py -q: pass",
+            "files_checked": ["engine/implement.py"],
+        },
+    }
+
+
+def test_no_diff_with_verification_posts_one_comment_and_closes(
+        tmp_path, monkeypatch):
+    """An already-done ticket finishes in one run off a runner post (#2452)."""
+    _, clone = make_clone(tmp_path)
+    _stub_claim_state(monkeypatch, "empty")
+    monkeypatch.setattr(implement, "fetch_ticket", lambda repo, number: ticket(number))
+    monkeypatch.setattr(
+        heartbeat, "read_github",
+        lambda agent: [{"run": "run-42", "phase": "start", "ts": 1000}],
+    )
+    base = run_git("rev-parse", "origin/main", cwd=clone).stdout.strip()
+    url = (
+        "https://github.com/nateprich-projects/project/issues/12"
+        "#issuecomment-91"
+    )
+    monkeypatch.setattr(
+        funnel, "_gh_api_json",
+        lambda endpoint: {
+            "id": 91,
+            "user": {"login": "nateprich"},
+            "url": "https://api.github.com/repos/nateprich-projects/"
+                   "project/issues/comments/91",
+            "html_url": url,
+            "created_at": "1970-01-01T00:16:40Z",
+        },
+    )
+    posts = []
+    effects = {"comments": [], "closed": [], "released": [], "finished": []}
+
+    def verify(repo, number, body, *, run, agent, cwd):
+        posts.append((repo, number, body))
+        return url
+
+    result = implement.finish_done(
+        verification_answer(base),
+        run="run-42",
+        repo=REPO,
+        cwd=clone,
+        test_commands=[[sys.executable, "-c", "pass"]],
+        release=effects["released"].append,
+        heartbeat_finish=lambda *args: effects["finished"].append(args),
+        pr_effect=lambda *args: pytest.fail("no-diff completion must not open a PR"),
+        close_effect=lambda repo, number, *, cwd: effects["closed"].append(
+            (repo, number)),
+        comment_effect=lambda *args, **kwargs: effects["comments"].append(
+            (args, kwargs)),
+        verify_comment_effect=verify,
+    )
+
+    assert result == {
+        "number": 42,
+        "url": ticket(42)["url"],
+        "closed": True,
+    }
+    assert len(posts) == 1
+    assert effects["comments"] == []
+    repo, number, body = posts[0]
+    assert (repo, number) == (REPO, 42)
+    assert implement.NO_DIFF_VERIFICATION_MARKER in body
+    for field in (REPO + "#42", "run-42", base,
+                  "python3 -m pytest tests/test_engine_implement.py -q: pass",
+                  "engine/implement.py"):
+        assert field in body
+    assert effects["closed"] == [(REPO, 42)]
+    assert effects["released"] == [REPO + "#42"]
+    assert effects["finished"][0][:3] == ("codex", "run-42", "done")
+    assert url in effects["finished"][0][3]
+
+
+def test_no_diff_with_wrong_base_sha_posts_rejection_and_errors(
+        tmp_path, monkeypatch):
+    """A wrong proof re-errors with a superseding comment, no delete (#2452)."""
+    _, clone = make_clone(tmp_path)
+    _stub_claim_state(monkeypatch, "empty")
+    monkeypatch.setattr(implement, "fetch_ticket", lambda repo, number: ticket(number))
+    monkeypatch.setattr(
+        heartbeat, "read_github",
+        lambda agent: [{"run": "run-42", "phase": "start", "ts": 1000}],
+    )
+    monkeypatch.setattr(
+        funnel, "_gh_api_json",
+        lambda endpoint: pytest.fail("a rejected proof verifies nothing"),
+    )
+    effects = {"comments": [], "closed": [], "released": [], "finished": []}
+
+    with pytest.raises(
+        implement.ImplementError,
+        match="no-diff verification rejected",
+    ):
+        implement.finish_done(
+            verification_answer("0" * 40),
+            run="run-42",
+            repo=REPO,
+            cwd=clone,
+            test_commands=[[sys.executable, "-c", "pass"]],
+            release=effects["released"].append,
+            heartbeat_finish=lambda *args: effects["finished"].append(args),
+            close_effect=lambda *args, **kwargs: effects["closed"].append(args),
+            comment_effect=lambda repo, number, body, **kwargs: effects[
+                "comments"].append(body),
+            verify_comment_effect=lambda *args, **kwargs: pytest.fail(
+                "a rejected proof posts no verification"),
+        )
+
+    assert len(effects["comments"]) == 1
+    assert "claimed base SHA" in effects["comments"][0]
+    assert effects["closed"] == []
+    assert effects["released"] == []
+    assert effects["finished"] == []
+    assert (clone / "README.md").read_text() == "seed\n"
+
+
+def test_diff_backed_done_with_verification_still_opens_pr(
+        tmp_path, monkeypatch):
+    """The diff path ignores verification and opens a PR as before (#2452)."""
+    _, clone = make_clone(tmp_path)
+    _stub_claim_state(monkeypatch, "empty")
+    (clone / "implemented.txt").write_text("done\n")
+    monkeypatch.setattr(
+        implement, "fetch_ticket", lambda repo, number: ticket(number))
+    monkeypatch.setattr(
+        heartbeat, "read_github",
+        lambda agent: pytest.fail("the diff path must ignore verification"),
+    )
+    base = run_git("rev-parse", "origin/main", cwd=clone).stdout.strip()
+    effects = {"released": [], "finished": []}
+
+    result = implement.finish_done(
+        verification_answer(base),
+        run="run-42",
+        repo=REPO,
+        cwd=clone,
+        test_commands=[[sys.executable, "-c", "pass"]],
+        release=effects["released"].append,
+        heartbeat_finish=lambda *args: effects["finished"].append(args),
+        pr_effect=lambda repo, context, found_ticket, body: {
+            "number": 91, "url": "https://github.com/owner/repo/pull/91"},
+        verify_comment_effect=lambda *args, **kwargs: pytest.fail(
+            "the diff path posts no verification comment"),
+    )
+
+    assert result["number"] == 91
+    assert effects["released"] == [REPO + "#42"]
+    assert effects["finished"][0][:3] == ("codex", "run-42", "done")
+
+
+def test_done_answer_accepts_a_verification_block():
+    base = "a" * 40
+    found = implement.parse_answer(json.dumps({
+        **answer(), "verification": {
+            "base_sha": base,
+            "tests": "pytest -q: pass",
+            "files_checked": ["engine/implement.py"],
+        },
+    }))
+    assert found["verification"] == {
+        "base_sha": base,
+        "tests": "pytest -q: pass",
+        "files_checked": ["engine/implement.py"],
+    }
+
+
+@pytest.mark.parametrize(
+    "verification",
+    ({"base_sha": "abc", "tests": "t",
+      "files_checked": ["f"]},
+     {"base_sha": "a" * 40, "tests": "  ",
+      "files_checked": ["f"]},
+     {"base_sha": "a" * 40, "tests": "t", "files_checked": []},
+     {"base_sha": "a" * 40, "tests": "t",
+      "files_checked": ["f"], "extra": "x"},
+     "verification"))
+def test_done_answer_rejects_a_malformed_verification_block(verification):
+    with pytest.raises(implement.ImplementError,
+                       match="answer verification"):
+        implement.parse_answer(json.dumps({
+            **answer(), "verification": verification}))
+
+
 def test_finish_ticket_pushes_opens_pr_releases_and_finishes(tmp_path, monkeypatch):
     remote, clone = make_clone(tmp_path)
     _stub_claim_state(monkeypatch, "empty")
@@ -5638,6 +5828,7 @@ def test_finish_git_invocation_sites_match_the_recorded_inventory():
         ("rev-parse", "--show-toplevel"): 2,
         ("rev-parse", "HEAD"): 2,
         ("rev-parse", "--verify"): 2,
+        ("rev-parse", "origin/main"): 1,
         ("branch", "--show-current"): 2,
         ("status", "--porcelain"): 1,
         ("remote", "get-url"): 2,
@@ -5656,8 +5847,8 @@ def test_finish_git_invocation_sites_match_the_recorded_inventory():
     assert actual == expected
 
     inventory = (ROOT / "docs" / "finish-subprocess-bounds.md").read_text()
-    assert "28 bounded Git callsites" in inventory
-    assert "27 static callsites" in inventory
+    assert "29 bounded Git callsites" in inventory
+    assert "28 static callsites" in inventory
     for command in (
         "git diff --name-only -z",
         "git diff --cached --name-only -z",
@@ -5672,6 +5863,7 @@ def test_finish_git_invocation_sites_match_the_recorded_inventory():
         "git merge -s ours",
         "git push --set-upstream origin",
         "git rev-parse HEAD",
+        "git rev-parse origin/main",
         "git commit --only -m [human-step-wip] -- <tracked paths>",
         "make",
         "python3 -m pytest",

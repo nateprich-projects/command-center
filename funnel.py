@@ -18557,7 +18557,12 @@ def cmd_send_back(items: List[Item], now: datetime, ref: str, reason: str,
                   confirmed: bool = False, run: Optional[str] = None,
                   agent: Optional[str] = None,
                   instruction: Optional[str] = None) -> int:
-    """Return a Shaped project to Ideas, ready for reshaping."""
+    """Return a Shaped project to Ideas, ready for reshaping.
+
+    A Building project waiting at Accept returns the same way: only Status
+    moves to Ideas while Class, Origin, Risk and Needs stay untouched, and
+    child tickets and prior evidence are left alone.
+    """
     if not isinstance(reason, str) or not reason.strip():
         raise GitHubError("send-back requires a non-empty reason")
     if not isinstance(instruction, str) or not instruction.strip():
@@ -18582,15 +18587,23 @@ def cmd_send_back(items: List[Item], now: datetime, ref: str, reason: str,
         raise GitHubError(
             "fresh Project read did not match {}".format(item.ref)
         )
-    if fresh.status != "Shaped":
+    at_accept = (
+        fresh.status == "Building"
+        and (
+            gate_question(fresh) == GATES["Building"]
+            or is_held_at_accept(fresh)
+        )
+    )
+    if fresh.status != "Shaped" and not at_accept:
         raise GitHubError(
             "refusing send-back for {}: fresh Status is {}; only Shaped items "
-            "can return to Ideas".format(item.ref, fresh.status or "missing")
+            "and Building projects waiting at Accept can return to Ideas"
+            .format(item.ref, fresh.status or "missing")
         )
 
     comment_body = SEND_BACK_COMMENT_PREFIX + reason
     if not confirmed:
-        print("would move {} from Shaped to Ideas".format(item.ref))
+        print("would move {} from {} to Ideas".format(item.ref, fresh.status))
         print(comment_body)
         print("\nNothing was changed. Re-run with --yes to send it back.")
         return 1
@@ -24775,7 +24788,7 @@ def main(argv: Optional[Sequence[str]] = None, *,
     )
     send_back = sub.add_parser(
         "send-back",
-        help="return a Shaped project to Ideas with Nate's reason — dry run without --yes",
+        help="return a Shaped project, or a Building project at Accept, to Ideas with Nate's reason — dry run without --yes",
     )
     send_back.add_argument("ref", help="issue number, owner/repo#number, or URL")
     send_back.add_argument(

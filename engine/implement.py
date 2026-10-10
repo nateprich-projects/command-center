@@ -479,8 +479,13 @@ def _read_done_answer(answer: dict) -> dict:
         isinstance(value, str) and value.strip() for value in risks
     )):
         raise ImplementError("answer risks must be a list of non-empty strings")
+    verification = _read_done_verification(answer.get("verification")
+                                           if "verification" in answer
+                                           else None,
+                                           present="verification" in answer)
     extra = sorted(
-        set(answer) - {"done", "summary", "departures", "evidence", "risks"})
+        set(answer) - {"done", "summary", "departures", "evidence", "risks",
+                       "verification"})
     if extra:
         raise ImplementError("answer has unknown field(s): {}".format(", ".join(extra)))
     found = {
@@ -492,7 +497,53 @@ def _read_done_answer(answer: dict) -> dict:
         found["evidence"] = [value.strip() for value in evidence]
     if "risks" in answer:
         found["risks"] = [value.strip() for value in risks]
+    if verification is not None:
+        found["verification"] = verification
     return found
+
+
+#: A full Git object SHA: the runner compares it exactly, so a short prefix
+#: is not machine-usable here.
+_FULL_SHA_RE = re.compile(r"\A[0-9a-fA-F]{40}\Z")
+
+
+def _read_done_verification(value: object, *, present: bool) -> Optional[dict]:
+    """Validate the no-diff done answer's machine-usable verification (#2452).
+
+    The model cannot mint an owner-posted GitHub URL, so a no-diff done
+    answer carries what the runner needs to post one itself: the base SHA it
+    checked, the tests it ran with their result, and the files it checked.
+    """
+    if not present:
+        return None
+    if not isinstance(value, dict):
+        raise ImplementError("answer verification must be an object")
+    base_sha = value.get("base_sha")
+    if (not isinstance(base_sha, str) or not base_sha.strip()
+            or not _FULL_SHA_RE.match(base_sha.strip())):
+        raise ImplementError(
+            "answer verification base_sha must be a full 40-hex SHA")
+    tests = value.get("tests")
+    if not isinstance(tests, str) or not tests.strip():
+        raise ImplementError(
+            "answer verification tests must be a non-empty string")
+    files_checked = value.get("files_checked")
+    if (not isinstance(files_checked, list) or not files_checked
+            or not all(isinstance(entry, str) and entry.strip()
+                       for entry in files_checked)):
+        raise ImplementError(
+            "answer verification files_checked must be a non-empty list "
+            "of non-empty strings")
+    extra = sorted(set(value) - {"base_sha", "tests", "files_checked"})
+    if extra:
+        raise ImplementError(
+            "answer verification has unknown field(s): {}".format(
+                ", ".join(extra)))
+    return {
+        "base_sha": base_sha.strip(),
+        "tests": tests.strip(),
+        "files_checked": [entry.strip() for entry in files_checked],
+    }
 
 
 def _read_blocked_answer(value: object) -> dict:
@@ -2147,6 +2198,152 @@ def close_no_diff_ticket(repo: str, number: int, *,
                 repo, number, (proc.stderr or "").strip()))
 
 
+#: Marks the one runner-posted comment that satisfies the no-diff done gate
+#: (#2452). The gate itself still checks timestamp and ownership through
+#: ``_verify_done_evidence``; the marker names the comment's purpose so a
+#: reader can tell it from any other owner comment on the ticket.
+NO_DIFF_VERIFICATION_MARKER = "<!-- no-diff-verification -->"
+
+
+def _no_diff_base_sha(root: pathlib.Path) -> str:
+    """Read the origin/main HEAD the runner checks the claim against."""
+    proc = _run(["git", "rev-parse", "origin/main"], cwd=root,
+                check=False, timeout=LOCAL_GIT_TIMEOUT_SECONDS)
+    if proc.returncode != 0 or not proc.stdout.strip():
+        raise ImplementError("could not read origin/main for no-diff check")
+    return proc.stdout.strip()
+
+
+def render_no_diff_verification_comment(
+        *, ref: str, run: str, base_sha: str, tests: str,
+        files_checked: Sequence[str]) -> str:
+    """Render the fixed runner-owned no-diff verification record (#2452)."""
+    return "\n".join([
+        "{}".format(NO_DIFF_VERIFICATION_MARKER),
+        "**No-diff verification:** {} is already done; no change to commit.".format(
+            ref),
+        "",
+        "- ticket: {}".format(ref),
+        "- run: {}".format(run),
+        "- base SHA: {} (origin/main, checked by the runner)".format(base_sha),
+        "- empty diff: working tree clean and no commits ahead of "
+        "origin/main (checked by the runner)",
+        "- tests: {}".format(tests),
+        "- files checked: {}".format(", ".join(files_checked)),
+    ])
+
+
+def render_no_diff_mismatch_comment(
+        *, ref: str, run: str, claimed: str, actual: str,
+        why: str) -> str:
+    """Render the superseding record when the claimed proof is wrong (#2452).
+
+    It supersedes the model's verification without deleting anything.
+    """
+    return "\n".join([
+        "{}".format(NO_DIFF_VERIFICATION_MARKER),
+        "**No-diff verification rejected:** {} keeps its state.".format(ref),
+        "",
+        "- ticket: {}".format(ref),
+        "- run: {}".format(run),
+        "- why: {}".format(why),
+        "- claimed base SHA: {}".format(claimed),
+        "- origin/main HEAD: {}".format(actual),
+    ])
+
+
+def post_no_diff_verification_comment(
+        repo: str, number: int, body: str, *,
+        run: str, agent: str, cwd: pathlib.Path) -> str:
+    """Post one runner-owned verification comment and return its URL (#2452).
+
+    ``gh issue comment`` prints no URL, so this creates the comment through
+    the REST endpoint and reads ``html_url`` back from its response. Only a
+    URL returned here ever enters the no-diff gate as satisfying evidence.
+    """
+    proc = funnel._run_gh(
+        ["gh", "api", "repos/{}/issues/{}/comments".format(repo, number),
+         "--method", "POST", "-f", "body={}".format(
+             funnel.append_provenance(
+                 body, "agent", at=datetime.now(timezone.utc),
+                 run=run, agent=agent))],
+        cwd=str(cwd), capture_output=True, text=True,
+    )
+    if proc.returncode != 0:
+        raise funnel.GitHubError(
+            "could not post no-diff verification on {}#{}: {}".format(
+                repo, number, (proc.stderr or "").strip()))
+    try:
+        payload = json.loads(proc.stdout or "")
+    except ValueError:
+        payload = None
+    url = payload.get("html_url") if isinstance(payload, dict) else None
+    if not isinstance(url, str) or not url.strip():
+        raise funnel.GitHubError(
+            "no-diff verification post on {}#{} returned no comment URL".format(
+                repo, number))
+    return url.strip()
+
+
+def _finish_no_diff_evidence(
+        answer: dict, *, ref: str, run: str, agent: str,
+        repo: str, number: int, root: pathlib.Path,
+        comment_effect: Callable[..., None],
+        verify_comment_effect: Callable[..., str]) -> List[str]:
+    """Satisfy the no-diff gate with one runner-posted comment (#2452).
+
+    Without ``verification`` this is today's fail-closed gate unchanged:
+    ``_verify_done_evidence`` over the answer's ``evidence``, which errors
+    when none is named. With ``verification`` the runner re-checks the empty
+    diff and the base SHA itself, posts one fixed-template owner comment,
+    and feeds only that new comment's URL into ``_verify_done_evidence`` —
+    so only a runner-created comment from the current run can satisfy this
+    path, and model-named evidence is never consulted here. A failed post
+    keeps today's finish error with normal retry; a wrong proof posts one
+    superseding rejection comment, deletes nothing, and re-errors.
+    """
+    verification = answer.get("verification")
+    if verification is None:
+        return _verify_done_evidence(
+            answer.get("evidence") or [], run=run, agent=agent,
+        )
+    checked = _read_done_verification(verification, present=True)
+    actual = _no_diff_base_sha(root)
+    claimed = checked["base_sha"]
+    if _working_tree_paths(root) or _branch_paths(root):
+        why = "the runner still sees a diff against origin/main"
+    elif actual.lower() != claimed.lower():
+        why = "claimed base SHA does not match origin/main HEAD"
+    else:
+        why = ""
+    if why:
+        comment_effect(
+            repo, number,
+            render_no_diff_mismatch_comment(
+                ref=ref, run=run, claimed=claimed, actual=actual, why=why),
+            run=run, agent=agent, cwd=root,
+        )
+        raise ImplementError(
+            "no-diff verification rejected for {}: {}".format(ref, why))
+    body = render_no_diff_verification_comment(
+        ref=ref, run=run, base_sha=actual, tests=checked["tests"],
+        files_checked=checked["files_checked"],
+    )
+    try:
+        url = verify_comment_effect(
+            repo, number, body, run=run, agent=agent, cwd=root,
+        )
+    except (funnel.GitHubError, OSError, subprocess.SubprocessError) as exc:
+        raise ImplementError(
+            "could not post no-diff verification comment for {}: {}".format(
+                ref, exc))
+    if not isinstance(url, str) or not url.strip():
+        raise ImplementError(
+            "no-diff verification post for {} returned no comment URL".format(
+                ref))
+    return _verify_done_evidence([url.strip()], run=run, agent=agent)
+
+
 def create_or_update_pr(repo: str, context: dict, ticket: dict,
                         body: str) -> dict:
     """Create or update the ticket PR, unless its pushed head already merged.
@@ -3535,6 +3732,8 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
                 close_effect: Callable[..., None]
                 = close_no_diff_ticket,
                 comment_effect: Callable[..., None] = post_agent_comment,
+                verify_comment_effect: Callable[..., str]
+                = post_no_diff_verification_comment,
                 extra_note: Optional[str] = None) -> dict:
     """Perform every happy-path effect and return the resulting PR identity.
 
@@ -3640,8 +3839,12 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
             allow_empty=True,
         )
         if committed is None:
-            evidence = _verify_done_evidence(
-                answer.get("evidence") or [], run=run, agent=agent,
+            evidence = _finish_no_diff_evidence(
+                answer, ref=ref, run=run, agent=agent,
+                repo=resolved, number=context["number"],
+                root=context["root"],
+                comment_effect=comment_effect,
+                verify_comment_effect=verify_comment_effect,
             )
             _require_current_claim(ref, run, agent)
             close_effect(

@@ -173,8 +173,11 @@ def test_maintenance_and_pins_do_not_bypass_the_cap():
 
 
 def test_other_domains_enter_while_one_is_full():
-    other = proj(WB, 30, "Ready", "Improve", days=1)
-    other_ticket = tick(WB, 31, other.ref, days=1)
+    # League, not workbench: interim entries need an explicit ask (#2429),
+    # so a non-interim domain tests slot independence without conflating it.
+    other = proj("owner/Fantasy-GM", 30, "Ready", "Improve", days=1,
+                 domain="League")
+    other_ticket = tick("owner/Fantasy-GM", 31, other.ref, days=1)
     same = proj(CC, 40, "Ready", "Improve", days=1)
     same_ticket = tick(CC, 41, same.ref, days=1)
     rows = _full_domain([other, other_ticket, same, same_ticket])

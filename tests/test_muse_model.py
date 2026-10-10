@@ -14,8 +14,9 @@ import muse_model  # noqa: E402
 
 
 #: The repositories Nate cleared for the contributor model on 2026-09-26
-#: (#1570), retained as the canonical posture by #1987: repo tiers 1 and 3.
-#: Spelled out so a silent allowlist change fails here.
+#: (#1570), retained as the canonical posture by #1987 and restated by
+#: repository name independent of tiers by #2407 (#2429). Spelled out so
+#: a silent allowlist change fails here.
 CLEARED = ("command-center", "github-runners", "workbench",
            "Fantasy-GM", "The-League", "AFL")
 #: Tier 2, kept on the private model: real-world impact, real-world data.
@@ -40,26 +41,15 @@ def cleared(monkeypatch):
     monkeypatch.setattr(muse_model, "CONTRIBUTOR_REPOS", frozenset(CLEARED))
 
 
-def test_1987_retains_the_exact_tier_1_and_3_contributor_map():
-    """Keep #1987's tier-to-model posture tied to the independent repo tiers."""
-    import funnel
-
-    tier_1 = {name for name, tier in funnel.REPO_TIERS.items() if tier == 1}
-    assert tier_1 == {"command-center", "github-runners", "workbench"}
+def test_2407_restates_the_1570_posture_by_name_independent_of_tiers():
+    """#2407 (#2429) names the six cleared repos directly, never via tiers."""
     assert muse_model.CONTRIBUTOR_REPOS == frozenset(CLEARED)
-    assert tier_1 <= muse_model.CONTRIBUTOR_REPOS
-    assert all(funnel.repo_tier(repo) == 3
-               for repo in muse_model.CONTRIBUTOR_REPOS - tier_1)
 
 
-def test_1987_keeps_tier_2_off_contributor_and_unnamed_on_standard():
-    """Tier 2 stays excluded, and unlisted names fail closed to standard."""
-    import funnel
-
-    tier_2 = {name for name, tier in funnel.REPO_TIERS.items() if tier == 2}
-    assert tier_2 == set(EXCLUDED)
-    assert not tier_2 & muse_model.CONTRIBUTOR_REPOS
-    assert all(muse_model.model_for(repo) == STANDARD_ID for repo in tier_2)
+def test_2407_keeps_excluded_repos_off_contributor_and_unnamed_on_standard():
+    """The two real-world-data repos stay excluded; unlisted fails closed."""
+    assert not set(EXCLUDED) & muse_model.CONTRIBUTOR_REPOS
+    assert all(muse_model.model_for(repo) == STANDARD_ID for repo in EXCLUDED)
     assert muse_model.model_for("unnamed-repository") == STANDARD_ID
 
 
@@ -71,7 +61,7 @@ def test_every_cleared_repo_resolves_to_the_literal_contributor_id(repo):
 
 
 @pytest.mark.parametrize("repo", EXCLUDED)
-def test_every_tier_2_repo_resolves_to_the_literal_private_id(repo):
+def test_every_excluded_repo_resolves_to_the_literal_private_id(repo):
     assert muse_model.model_for(repo) == STANDARD_ID
     assert muse_model.model_for("nateprich-projects/" + repo) == STANDARD_ID
 
@@ -89,7 +79,7 @@ def test_cleared_repos_route_to_the_literal_contributor_id(repo, cleared):
 
 @pytest.mark.parametrize("repo", EXCLUDED)
 def test_excluded_repos_route_to_the_literal_private_id(repo, cleared):
-    """The tier-2 repos Nate kept off Discounted Services on 2026-09-26.
+    """The repos Nate kept off Discounted Services on 2026-09-26.
     If this ever passes while naming the contributor id, personal data
     is going somewhere he declined to send it."""
     assert muse_model.model_for(repo) == STANDARD_ID

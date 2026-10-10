@@ -2964,11 +2964,52 @@ def test_the_breakdown_prompt_is_judgement_text_under_500_words():
     assert '"risk": "standard" | "escalated"' in prompt
     assert '"needs": "none" | "human" | "claude-code-environment"' in prompt
     assert "exactly one json object and nothing else" in normalized
+    assert ("for each `## review focus` bullet, put one `accept` test in its "
+            "owning ticket; copy the text verbatim once" in normalized)
     for protocol in ("funnel.py", "heartbeat.py", "breakdown-apply",
                      "breakdown-packet", "gh issue create", "```bash"):
         assert protocol not in prompt, (
             "judgement text only: {!r} is unreachable without tools".format(
                 protocol))
+
+
+def test_the_breakdown_prompt_keeps_every_pre_trim_normative_rule():
+    """The #2024 trim rewords routines/muse-breakdown.md to hold the 500-word
+    cap while adding the Review-focus Accept rule. Every normative rule the
+    file stated before the trim must still be stated after it: deleting any
+    one of them fails this test, as does dropping the new Review-focus
+    bullet (so it fails on main and passes on the branch)."""
+    prompt = ROUTINE_BREAKDOWN.read_text().split("\n---\n", 1)[1]
+    normalized = " ".join(prompt.split()).lower()
+    for rule in (
+            "`project.body` is the whole, canonical plan",
+            "current body supersedes `issue_thread`",
+            "`siblings` are filed tickets",
+            "cover only gaps",
+            "follow `sizing_standard`, the sizing authority",
+            "one run ending in one pull request",
+            "split by behaviour, never by layer",
+            "an extra pr is cheaper than a dead run",
+            "tickets deliver the stated outcome end to end",
+            "usable state, not one per heading",
+            "prefer tickets workable in any order",
+            "record it in `depends_on`",
+            "sequence expand, migrate, contract only for a genuinely wide change",
+            "make a needed refactor its own prefactor ticket, first",
+            "small work stays one ticket",
+            "one indivisible plan is one ticket",
+            "for each `## review focus` bullet, put one `accept` test in its "
+            "owning ticket; copy the text verbatim once",
+            "its accept names the one to three seams its tests go at",
+            "makes its first accept item `reproduction:",
+            "`risk` is `escalated` when the ticket needs the expensive reviewer",
+            "`depends_on` holds sibling indices",
+            "`needs` is `none` for any-agent work",
+            "ask `needs_decision` with no tickets when the plan leaves a "
+            "decision undecided",
+            "tickets or the question, never both",
+    ):
+        assert rule in normalized, rule
 
 
 def test_the_breakdown_prompt_keeps_nates_needs_list_open_and_whole():
@@ -3031,6 +3072,13 @@ def test_the_shape_prompt_is_judgement_text_under_500_words():
             '"measured" | "documented" | "inferred"}]') in prompt
     assert "omit them from `plan_markdown`" in normalized
     assert "exactly one json object and nothing else" in normalized
+    assert '"failure_modes": [...]' in prompt
+    assert '"hotspot_targets": [{"repo_path": ..., "function": ...}]' in prompt
+    assert '"redesign_remainder": ...' in prompt
+    assert "0\u20133 non-empty strings" in normalized
+    assert "omission equals `[]`" in normalized
+    assert "exact `{repo_path, function}` pairs from packet hotspots" in normalized
+    assert "targets require non-empty markdown `redesign_remainder`" in normalized
     for protocol in ("funnel.py", "heartbeat.py", "shape-apply",
                      "shape-packet", "gh issue", "```bash"):
         assert protocol not in prompt, (
@@ -4810,6 +4858,30 @@ def test_the_count_rule_keeps_its_full_paragraph():
             "trace every effect call site's paths (success, traps, `finally`, "
             "hooks, retries), putting per-path counts in `evidence`; met twice "
             "when asked once is `unmet`.") in prompt
+
+
+def test_focus_present_and_absent_packets_keep_count_requirements_blocking(tmp_path):
+    """Both split calls receive the conditional scope and the count rule."""
+    for suffix, focus in (("present", "## Review focus\n- Check a daily run.\n"),
+                          ("absent", "")):
+        packet = _packet(ticket={
+            "ref": "owner/repo#6", "number": 6,
+            "body": "Accept: write one summary line per day.",
+            "parent_review_focus": focus,
+            "parent_review_focus_truncated": False,
+        })
+        proc, repo = _stubbed_runner(
+            tmp_path / suffix, _begin(), packet,
+            answers=_review_answers(_judge_answer()))
+        assert proc.returncode == 0, proc.stderr
+        lister = _lister_framing(repo)
+        judge = _judge_framing(repo)
+        assert "Keep every ticket count requirement" in lister
+        assert "do not infer a focus or narrow the review" in lister
+        assert "an effect performed twice when the ticket asks for once" in judge
+        assert "Focus never softens an assigned ticket Do or Accept row" in judge
+        assert '"parent_review_focus": ' in (repo / "muse.prompt.1").read_text()
+        assert '"parent_review_focus": ' in (repo / "muse.prompt.2").read_text()
 
 
 def test_the_judges_ask_for_cited_met_results_and_concrete_blocks(tmp_path):

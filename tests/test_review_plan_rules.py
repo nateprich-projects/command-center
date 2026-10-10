@@ -59,6 +59,7 @@ def test_the_routine_asks_for_ticket_work_and_unbroken_plan_rules():
             "repository's rules require?") in prompt
     assert ("`plan_md` and the plan bind only as rules the diff must not "
             "break") in prompt
+    assert "if `plan_md_missing`, judge against tickets alone" in prompt
     assert "A `Does not break:` row is met unless a diff line breaks it." \
         in prompt
     assert "Walk each ticket and plan requirement" not in prompt

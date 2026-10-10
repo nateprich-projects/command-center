@@ -705,6 +705,52 @@ ORIGIN_VOICES = ("nate-relayed", "agent")
 # work, they must reach the human acceptance gate regardless of Class or origin.
 ANALYSIS_MARKER = "<!-- command-center-analysis -->"
 
+#: Accept sign-off lines (#2407, #2431). Body lines, case-insensitive, each
+#: requiring a colon and a non-blank value — the same shape as the Implement
+#: basis lines in ``engine/shape.py``. A blank citation cites nothing.
+#: Phase names are read as strings here, before the Class-option migration
+#: (#2425) lands.
+_ACCEPT_TOP_GOAL_RE = re.compile(r"\btop[\s-]+goal\b\s*:\s*\S", re.IGNORECASE)
+_ACCEPT_KPI_RE = re.compile(r"\bkpi\b[^:\n]*:\s*\S", re.IGNORECASE)
+_ACCEPT_LIVE_ADVICE_RE = re.compile(r"\blive[\s-]+advice\b", re.IGNORECASE)
+_ACCEPT_EXPLICIT_ASK_RE = re.compile(
+    r"\bexplicit[\s-]+ask\b\s*:\s*\S", re.IGNORECASE)
+_ACCEPT_AUTONOMY_CLIMB_RE = re.compile(
+    r"\bautonomy[\s-]+climb\b\s*:\s*\S", re.IGNORECASE)
+
+
+def _accept_has_top_goal(body: object) -> bool:
+    """Whether a body names a domain top goal (#2407, #2431)."""
+    if not isinstance(body, str):
+        return False
+    return any(
+        _ACCEPT_TOP_GOAL_RE.search(line) for line in body.splitlines())
+
+
+def _accept_has_kpi_judged_by_live_advice(body: object) -> bool:
+    """Whether a body changes a KPI that live advice is judged by."""
+    if not isinstance(body, str):
+        return False
+    if not any(_ACCEPT_KPI_RE.search(line) for line in body.splitlines()):
+        return False
+    return bool(_ACCEPT_LIVE_ADVICE_RE.search(body))
+
+
+def _accept_has_explicit_ask_line(body: object) -> bool:
+    """Whether a body cites Nate's explicit ask as its basis."""
+    if not isinstance(body, str):
+        return False
+    return any(
+        _ACCEPT_EXPLICIT_ASK_RE.search(line) for line in body.splitlines())
+
+
+def _accept_has_autonomy_climb(body: object) -> bool:
+    """Whether a body records an autonomy climb."""
+    if not isinstance(body, str):
+        return False
+    return any(
+        _ACCEPT_AUTONOMY_CLIMB_RE.search(line) for line in body.splitlines())
+
 # A capture may carry the earlier PR or ticket that caused the idea. Keep this
 # separate from capture origin: origin says who raised it, while this marker
 # says what the work is a response to. The brief uses the marker as durable
@@ -1673,6 +1719,9 @@ def _gate_route(
     if item.status == "Shaped":
         # The shape writer holds on these recorded conditions. Unknown fields
         # fail closed to Nate, in keeping with the owner-table precedent.
+        # An explicit ask waits here too: both its plan and its result are
+        # Nate's gates (#2407, #2431). A pin is the ask; the body line is
+        # the plan's citation of it, as shape writes it.
         waits_for_nate = (
             item.origin not in ORIGIN_OPTIONS
             or item.risk not in RISK_OPTIONS
@@ -1680,6 +1729,8 @@ def _gate_route(
             or item.needs == "human"
             or item.risk == "escalated"
             or item.origin == "Nate"
+            or item.pinned
+            or _accept_has_explicit_ask_line(item.body)
         )
         if not waits_for_nate:
             return None
@@ -1706,9 +1757,22 @@ def _acceptance_waiting_reason(
     """Explain why a completed Building project is still awaiting acceptance."""
     if question != GATES["Building"]:
         return None
-    body = item.body if isinstance(item.body, str) else ""
+    body = getattr(item, "body", None)
+    body = body if isinstance(body, str) else ""
     if parse_analysis_marker(body) is not None:
         return "Analysis review"
+    # Sign-off reasons, most specific first (#2407, #2431). Phase names are
+    # strings, before the Class-option migration (#2425) lands.
+    if getattr(item, "klass", None) == "Test":
+        return "Finished test"
+    if _accept_has_top_goal(body):
+        return "Top goal"
+    if _accept_has_kpi_judged_by_live_advice(body):
+        return "KPI change"
+    if getattr(item, "pinned", False) or _accept_has_explicit_ask_line(body):
+        return "Explicit ask"
+    if _accept_has_autonomy_climb(body):
+        return "Autonomy climb"
     return "Ordinary accept"
 
 
@@ -15184,7 +15248,8 @@ def _can_close_itself(item: Item) -> bool:
     """Whether a finished project may close without Nate's acceptance.
 
     An analysis marker always keeps the human acceptance gate, including when
-    the marker is malformed. Otherwise the existing class/origin rules apply.
+    the marker is malformed. Otherwise the existing class/origin rules apply,
+    with the #2407 sign-offs layered over every class.
 
     The upkeep classes are safe to close regardless of who raised them. An
     ``Improve`` project is safe only when its effective shape owner is the
@@ -15196,13 +15261,37 @@ def _can_close_itself(item: Item) -> bool:
     if parse_analysis_marker(body) is not None:
         return False
 
+    # Sign-offs that always wait (#2407, #2431), over every class. Phase
+    # names are strings here, before the Class-option migration (#2425).
+    # A finished Test waits whether it proposes a change or concludes
+    # "leave it": there is no leave-it exception.
+    if item.klass == "Test":
+        return False
+    if _accept_has_top_goal(body):
+        return False
+    if _accept_has_kpi_judged_by_live_advice(body):
+        return False
+    if item.pinned or _accept_has_explicit_ask_line(body):
+        return False
+    if _accept_has_autonomy_climb(body):
+        return False
+
+    # Rule 5 amendment: curation, description and hypothesis work closes
+    # when it ships, with findings recorded in the domain's records.
+    if item.klass in ("Curate", "Describe", "Hypothesize"):
+        return True
+
     # Bug closes itself exactly as Broken does (#1845). #987's final accept
     # rule names the upkeep classes as SELF_APPROVABLE_CLASSES and lets every
     # one but Improve close itself whoever raised it; Bug is a defect class,
     # upkeep like Broken, so no Bug project waits at `Accept it?`.
     if item.klass in SELF_CLOSING_UPKEEP_CLASSES:
         return True
-    if item.klass != "Improve":
+    # Implement is Improve renamed, keeping its assignments (#2407): the
+    # same agent-owner rule. A shipped change's Verify check returns later
+    # as a finished Test, which waits above; the check itself never holds
+    # this close.
+    if item.klass not in ("Improve", "Implement"):
         return False
 
     override = parse_origin_override(body)
@@ -23543,7 +23632,10 @@ def _finished_close_candidate(item: Item, *,
 
     Open at Building with every ticket closed, in a class that can close
     itself. Its body decides the rest: an analysis marker keeps it at Accept,
-    and an Improve project's origin override can hand it to either owner.
+    an Improve or Implement project's origin override can hand it to either
+    owner, and a sign-off line (top goal, KPI judged by live advice,
+    explicit ask, autonomy climb) keeps it at Accept (#2407, #2431).
+    Phase names are strings, before the Class-option migration (#2425).
     """
     completed = item.children_done if children_done is None else children_done
     return (
@@ -23553,7 +23645,10 @@ def _finished_close_candidate(item: Item, *,
         and completed == item.children_total
         and (
             item.klass in SELF_CLOSING_UPKEEP_CLASSES
-            or item.klass == "Improve"
+            or item.klass in (
+                "Improve", "Implement",
+                "Curate", "Describe", "Hypothesize",
+            )
         )
     )
 

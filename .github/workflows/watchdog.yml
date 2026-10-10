@@ -27,14 +27,29 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Ensure GitHub CLI is available
-        # The hobby-linux runners serve CI, which never shells out to `gh`.
-        # Install it for the run when the image lacks it; a no-op otherwise.
-        # Nothing changes on the micro-PC itself.
+        # The hobby-linux runners serve CI, which never shells out to `gh`,
+        # and they have no passwordless sudo (first dispatch, run
+        # 38063285461). When the image lacks gh, fetch a pinned,
+        # checksum-verified release into this run's temp directory and put
+        # it on PATH; a no-op otherwise. Nothing changes on the micro-PC.
+        env:
+          GH_CLI_VERSION: "2.63.0"
         run: |
+          set -eu
           if ! command -v gh >/dev/null 2>&1; then
-            sudo apt-get update && sudo apt-get install -y gh
+            archive="gh_${GH_CLI_VERSION}_linux_amd64"
+            base="https://github.com/cli/cli/releases/download/v${GH_CLI_VERSION}"
+            dir="$RUNNER_TEMP/gh-cli"
+            mkdir -p "$dir"
+            curl -fsSL -o "$dir/$archive.tar.gz" "$base/$archive.tar.gz"
+            curl -fsSL -o "$dir/checksums.txt" "$base/gh_${GH_CLI_VERSION}_checksums.txt"
+            (cd "$dir" && grep " $archive.tar.gz\$" checksums.txt | sha256sum -c -)
+            tar -xzf "$dir/$archive.tar.gz" -C "$dir"
+            echo "$dir/$archive/bin" >> "$GITHUB_PATH"
+            "$dir/$archive/bin/gh" --version
+          else
+            gh --version
           fi
-          gh --version
 
       - name: Check heartbeats
         env:

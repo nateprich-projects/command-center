@@ -122,7 +122,7 @@ inventing an answer is a defect.
 
 ## Class it when you file it
 
-Class a capture with the ladder names — `Investigate`, `Broken`,
+Class a capture with the class names — `Investigate`, `Broken`,
 `Maintenance`, the phases `Curate`, `Describe`, `Hypothesize`, `Test`,
 `Implement`, and `Bug` — and say why; stated doubt beats
 confident error. `New` and `Replace` are legacy options that take no new

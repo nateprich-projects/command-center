@@ -275,7 +275,8 @@ def parse_framer(answer: object, *,
                  include_hotspot_routing: bool = True) -> Dict:
     """Validate the framer's draft.
 
-    ``proposed_class`` is a ladder class, ``plan_markdown`` a non-empty
+    ``proposed_class`` is a ladder class or phase name, ``plan_markdown``
+    a non-empty
     narrative (an Investigate draft carries its one Possible defect line
     and its one Observed symptom line; an Implement draft cites its tested
     finding, explicit ask, or cheap-reversible Verify check),
@@ -299,8 +300,9 @@ def parse_framer(answer: object, *,
     proposed = _require_line(data["proposed_class"], "proposed_class")
     if proposed not in funnel.LADDER and proposed not in PHASE_CLASS_NAMES:
         raise ShapeError(
-            "proposed_class {!r} is not a ladder class; choose one of "
-            "{}".format(proposed, ", ".join(funnel.LADDER)))
+            "proposed_class {!r} is not a class; choose one of "
+            "{}".format(proposed, ", ".join(
+                list(funnel.LADDER) + list(PHASE_CLASS_NAMES))))
     plan_markdown = _require_text(data["plan_markdown"], "plan_markdown")
     if proposed == "Investigate":
         _validate_investigate_possible_defect(plan_markdown)

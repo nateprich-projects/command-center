@@ -646,8 +646,9 @@ def validate_answer(
     proposed = _require_line(data["proposed_class"], "proposed_class")
     if proposed not in funnel.LADDER and proposed not in PHASE_CLASS_NAMES:
         raise ShapeError(
-            "proposed_class {!r} is not a ladder class; choose one of "
-            "{}".format(proposed, ", ".join(funnel.LADDER)))
+            "proposed_class {!r} is not a class; choose one of "
+            "{}".format(proposed, ", ".join(
+                list(funnel.LADDER) + list(PHASE_CLASS_NAMES))))
     allowed_hotspots = _validate_packet_hotspots(
         hotspots if include_hotspot_routing and hotspots is not None else [])
     hotspot_targets, redesign_remainder = _validate_hotspot_routing(

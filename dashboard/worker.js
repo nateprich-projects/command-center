@@ -301,6 +301,21 @@ async function handleRequest(request, env) {
     return withSecurityHeaders(await env.ASSETS.fetch(assetRequest));
   }
 
+  // Domains trial home (parent plan #2409, ticket #2414): one static file
+  // for the exact /domains path, behind the same Access check above. It
+  // reuses the shared table and top strip and only reads /api/snapshot.
+  // New files only; the current page is untouched.
+  if (url.pathname === "/domains") {
+    if (request.method !== "GET" && request.method !== "HEAD") {
+      return new Response("Method Not Allowed", { status: 405 });
+    }
+    if (!env.ASSETS || typeof env.ASSETS.fetch !== "function") {
+      return new Response("Assets unavailable", { status: 503 });
+    }
+    const assetRequest = new Request(new URL("/domains.html", url), request);
+    return withSecurityHeaders(await env.ASSETS.fetch(assetRequest));
+  }
+
   // Trial domain detail page (parent plan #2409, ticket #2413): one static
   // file served for every /domains/<domain> path, behind the same Access
   // check above. The page reads its domain from the URL and lays that

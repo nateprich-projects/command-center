@@ -156,6 +156,12 @@ can. File the session steps with Needs `claude-code-environment` and give Nate
 only what the boundary leaves him. "Physical access" means hands on hardware,
 not "runs on the Mac mini".
 
+**Split code from Mac steps.** A `claude-code-environment` ticket holds only
+the Mac step; put its code in a separate `none` ticket with linked accept, so
+the code step stays startable by any agent and neither half closes alone. The
+breakdown validator warns, never blocks, where a `claude-code-environment`
+ticket reads like it holds code changes.
+
 ## When the plan will not decompose
 
 If the plan is too vague to size and no recorded answer settles it, **ask

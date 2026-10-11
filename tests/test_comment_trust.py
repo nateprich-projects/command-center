@@ -81,6 +81,8 @@ COMMENT_READERS: Dict[str, str] = {
     "funnel.py:_current_block_comment_details": "funnel.py:_load_block_comment",
     "funnel.py:_current_shaped_hold_clear":
         "funnel.py:_current_shaped_hold_clear",
+    "funnel.py:_newest_ticket_answer":
+        "funnel.py:_newest_ticket_answer",
     "funnel.py:_self_approval_markers": "funnel.py:_self_approval_markers",
     "funnel.py:_parked_item_json": "funnel.py:_parked_item_json",
     "funnel.py:_latest_park_comment": "funnel.py:_latest_park_comment",

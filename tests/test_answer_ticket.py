@@ -38,6 +38,12 @@ verbatim answer and supersedes the active question, then a lift removes the
 blocked label while a replace keeps it under exactly one canonical
 replacement condition. Expected values below are written out from the
 ticket, not read from the code under test.
+
+The single comment carries both the answer and the state change, so the
+question can never be left open once the comment lands; the label move
+follows in the same run. When the label move itself fails, re-running the
+identical command finishes only the label move — the recorded answer is
+never posted twice and no hand edit is needed.
 """
 
 from __future__ import annotations
@@ -348,6 +354,10 @@ def _refusal_cases():
 def test_answer_ticket_refusals_change_nothing(monkeypatch):
     closed, project, no_project_row, unblocked = _refusal_cases()
     calls = record_gh(monkeypatch)
+    # Refusing a ticket with no active question re-reads its live thread to
+    # look for a recorded answer to finish; serve an empty thread here.
+    monkeypatch.setattr(
+        funnel, "_gh_json", lambda *args: {"comments": []})
 
     with pytest.raises(funnel.GitHubError):
         funnel.cmd_answer_ticket(
@@ -436,3 +446,157 @@ def test_verify_brief_and_gates_parse_the_three_fixed_prefixes():
          '"after": "2026-10-12T00:00:00Z"}\n```\nwait.'])
     assert refs == [] and until is None and event is not None
     assert event["outcome"] == "errored"
+
+
+# -- a stranded label move is finished without a second comment -------------
+
+def load_thread(monkeypatch, item, comments, labels):
+    """Serve a live thread read: comments plus labels plus open state."""
+    monkeypatch.setattr(
+        funnel, "_gh_json",
+        lambda *args: {
+            "comments": comments,
+            "labels": [{"name": name} for name in labels],
+            "state": "OPEN",
+        })
+    funnel._load_block_comment(item)
+    item.labels = list(labels)
+    return item
+
+
+def answered_thread(monkeypatch, outcome, condition=None, labels=None,
+                    extra=()):
+    """A thread whose answer comment already landed, label move pending."""
+    body = funnel._ticket_answer_comment_body(
+        ANSWER, QUESTION, outcome, condition)
+    comments = [
+        row(NEEDS_DECISION, "2026-10-10T11:55:00Z"),
+        row(PROSE_ANSWER, "2026-10-10T15:24:00Z"),
+        row(body, "2026-10-11T14:00:00Z"),
+    ]
+    comments.extend(extra)
+    if labels is None:
+        labels = [] if outcome == "lift" else ["blocked"]
+    return load_thread(monkeypatch, ticket_154(), comments, labels), body
+
+
+def test_a_stranded_lift_label_is_finished_without_a_second_comment(
+        monkeypatch, capsys):
+    """The verdict's partial-write shape: the answer comment landed but the
+    label removal failed. Re-running the identical command finishes only the
+    label move — no second comment, no hand edit."""
+    item, _body = answered_thread(
+        monkeypatch, "lift", labels=["blocked"])
+    assert item.needs_decision is None
+    assert item.is_blocked
+    calls = record_gh(monkeypatch)
+
+    assert funnel.cmd_answer_ticket(
+        [item], NOW, REF, ANSWER, "lift", None) == 0
+
+    assert len(calls) == 1
+    edit = calls[0]
+    assert edit[:3] == ["gh", "issue", "edit"]
+    assert edit[edit.index("--remove-label") + 1] == "blocked"
+    assert "blocked" not in item.labels
+    assert item.needs_decision is None
+    assert funnel.block_condition(item) is None
+    assert REF in capsys.readouterr().out
+
+
+def test_a_stranded_replace_label_is_finished_without_a_second_comment(
+        monkeypatch):
+    """The same recovery when a replace answer's label keep never landed."""
+    condition = funnel._ticket_answer_condition("Blocked until 2026-10-12")
+    item, _body = answered_thread(
+        monkeypatch, "replace", condition, labels=[])
+    assert item.needs_decision is None
+    assert not item.is_blocked
+    calls = record_gh(monkeypatch)
+
+    assert funnel.cmd_answer_ticket(
+        [item], NOW, REF, ANSWER, "replace", condition) == 0
+
+    assert len(calls) == 1
+    edit = calls[0]
+    assert edit[:3] == ["gh", "issue", "edit"]
+    assert "--add-label" in edit
+    assert item.is_blocked
+    assert item.needs_decision is None
+    assert funnel.block_condition(item) == "date"
+
+
+def test_a_finished_answer_is_not_posted_twice(monkeypatch):
+    """Re-running after both halves landed refuses: the recorded answer
+    stands and there is no label move left to finish."""
+    item, _body = answered_thread(monkeypatch, "lift")
+    assert not item.is_blocked
+    calls = record_gh(monkeypatch)
+
+    with pytest.raises(funnel.GitHubError):
+        funnel.cmd_answer_ticket([item], NOW, REF, ANSWER, "lift", None)
+
+    assert calls == []
+
+
+def test_a_finish_refuses_a_mismatched_outcome(monkeypatch):
+    """The label move follows the recorded answer, not the new flags: a
+    stranded lift is not finished by a replace run."""
+    item, _body = answered_thread(
+        monkeypatch, "lift", labels=["blocked"])
+    calls = record_gh(monkeypatch)
+
+    with pytest.raises(funnel.GitHubError) as failed:
+        funnel.cmd_answer_ticket(
+            [item], NOW, REF, ANSWER, "replace",
+            funnel._ticket_answer_condition("Blocked until 2026-10-12"))
+
+    assert "lift" in str(failed.value)
+    assert calls == []
+    assert item.is_blocked
+
+
+def test_a_finish_ignores_an_untrusted_answer_record(monkeypatch):
+    """An outsider's copy of the answer shape is not a record (#1788), so a
+    stuck label beside it is not finished."""
+    body = funnel._ticket_answer_comment_body(ANSWER, QUESTION, "lift")
+    item = load_thread(monkeypatch, ticket_154(), [
+        row(body, "2026-10-11T14:00:00Z",
+            author={"login": "someone-else"}),
+    ], ["blocked"])
+    assert item.needs_decision is None
+    calls = record_gh(monkeypatch)
+
+    with pytest.raises(funnel.GitHubError):
+        funnel.cmd_answer_ticket([item], NOW, REF, ANSWER, "lift", None)
+
+    assert calls == []
+
+
+def test_a_finish_survives_later_prose(monkeypatch):
+    """Prose posted after the stranded answer is not a record, so the newest
+    record is still the answer and its label move is still finished."""
+    item, _body = answered_thread(
+        monkeypatch, "lift", labels=["blocked"],
+        extra=[row("Thanks!", "2026-10-11T15:00:00Z")])
+    calls = record_gh(monkeypatch)
+
+    assert funnel.cmd_answer_ticket(
+        [item], NOW, REF, ANSWER, "lift", None) == 0
+
+    assert len(calls) == 1
+    assert calls[0][:3] == ["gh", "issue", "edit"]
+    assert "blocked" not in item.labels
+
+
+def test_an_unreadable_thread_still_refuses(monkeypatch):
+    """When the live thread cannot be read there is no recorded answer to
+    finish, so the refusal stands and nothing is written."""
+    item = ticket_154()
+    monkeypatch.setattr(funnel, "_gh_json", lambda *args: None)
+    calls = record_gh(monkeypatch)
+
+    with pytest.raises(funnel.GitHubError):
+        funnel.cmd_answer_ticket([item], NOW, REF, ANSWER, "lift", None)
+
+    assert calls == []

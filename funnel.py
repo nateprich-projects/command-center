@@ -19353,6 +19353,115 @@ def _ticket_answer_comment_body(answer: str, question: str, outcome: str,
     return "{}\n\n{}".format(body, replacement)
 
 
+def _newest_ticket_answer(
+    rows: object,
+) -> Optional[Tuple[List[str], Optional[date], Optional[str],
+                    Optional[Dict[str, str]]]]:
+    """The parsed ticket answer when the thread's newest record is one (#2495).
+
+    Only the owner account's comments may carry the Answered marker (#1788).
+    Record ordering matches ``_current_block_comment_details``: newest by
+    creation time, the later comment winning a tie, body order when any
+    record lacks a time. Later prose is not a record, so it never hides a
+    stranded answer.
+    """
+    records = []
+    for index, comment in enumerate(trusted_comments(rows)):
+        body = str(comment.get("body") or "")
+        answered = parse_ticket_answer(body)
+        if answered is not None:
+            # Checked first: a replace answer carries a canonical blocked
+            # header too, and only this command writes Answered lines — a
+            # question is inerted onto one line and a quote is blockquoted —
+            # so the marker unambiguously names this command's record.
+            records.append(
+                (parse_time(comment.get("createdAt")), index, answered))
+            continue
+        if (
+            parse_shaped_hold_comment(body) is not None
+            or _parse_block_comment_details([body]) is not None
+            or NEEDS_DECISION_RE.match(body)
+            or body.lstrip().startswith(DECLINED_PREFIX)
+        ):
+            records.append((parse_time(comment.get("createdAt")), index, None))
+    if not records:
+        return None
+    if all(at is not None for at, _, _ in records):
+        return max(records, key=lambda record: record[:2])[2]
+    return records[-1][2]
+
+
+def _finish_recorded_ticket_answer(item: Item, outcome: str) -> bool:
+    """Finish the label move of an already-recorded ticket answer (#2495).
+
+    When the answer comment landed but its label move never did, re-running
+    the identical command completes only the label move: no second comment,
+    no hand edit. Returns True when a stranded label move was completed and
+    False when the live thread shows no recorded answer to finish. A recorded
+    outcome that disagrees with the requested one refuses rather than
+    finishing the wrong move.
+    """
+    payload = _gh_json(
+        "gh", "issue", "view", str(item.number), "--repo", item.repo,
+        "--json", "state,labels,comments",
+    )
+    if not isinstance(payload, Mapping):
+        return False
+    if not isinstance(payload.get("comments"), list):
+        return False
+    if not isinstance(payload.get("labels"), list):
+        return False
+    if str(payload.get("state") or "").upper() not in ("", "OPEN"):
+        return False
+    labels = []
+    for label in payload["labels"]:
+        name = label.get("name") if isinstance(label, Mapping) else label
+        if isinstance(name, str):
+            labels.append(name)
+    answered = _newest_ticket_answer(payload["comments"])
+    if answered is None:
+        return False
+    refs, until, reason, event = answered
+    recorded = (
+        "lift" if not refs and until is None and event is None else "replace")
+    if recorded != outcome:
+        raise GitHubError(
+            "recorded answer on {} stands as {}; re-run with --outcome {} "
+            "to finish its label move".format(item.ref, recorded, recorded))
+    if recorded == "lift" and "blocked" not in labels:
+        return False
+    if recorded == "replace" and "blocked" in labels:
+        return False
+    if recorded == "lift":
+        edit_args = [
+            "gh", "issue", "edit", str(item.number), "--repo", item.repo,
+            "--remove-label", "blocked",
+        ]
+    else:
+        edit_args = [
+            "gh", "issue", "edit", str(item.number), "--repo", item.repo,
+            "--add-label", "blocked",
+        ]
+    edit = _run_gh(edit_args, capture_output=True, text=True)
+    if edit.returncode != 0:
+        raise GitHubError(
+            "recorded answer stands on {}, but its {} label move failed: "
+            "{}".format(item.ref, recorded, edit.stderr.strip()))
+    if recorded == "lift":
+        item.labels = [
+            label for label in item.labels if label != "blocked"]
+    elif "blocked" not in item.labels:
+        item.labels.append("blocked")
+    item.block_references = refs
+    item.blocked_until = until
+    item.block_reason = reason
+    item.block_event = event
+    item.needs_decision = None
+    print("{} recorded answer finished ({} label move)\n{}".format(
+        item.ref, recorded, item.url))
+    return True
+
+
 def cmd_answer_ticket(items: List[Item], now: datetime, ref: str,
                       answer: str, outcome: str,
                       condition: Optional[Tuple[str, object]] = None,
@@ -19364,9 +19473,11 @@ def cmd_answer_ticket(items: List[Item], now: datetime, ref: str,
     supersedes the active question, then a lift removes the blocked label
     while a replace keeps it under one canonical replacement condition.
     The comment goes first so a refused post changes nothing; a refused
-    label edit reports that the answer was recorded without its label move.
-    No other label, field, or issue is written, and the answer is kept
-    nowhere but the comment: GitHub is the state.
+    label edit reports that the answer was recorded without its label move,
+    and re-running the identical command finishes that stranded label move
+    without posting the answer twice. No other label, field, or issue is
+    written, and the answer is kept nowhere but the comment: GitHub is the
+    state.
     """
     item = find(items, ref)
     if outcome not in ("lift", "replace"):
@@ -19392,6 +19503,11 @@ def cmd_answer_ticket(items: List[Item], now: datetime, ref: str,
         raise GitHubError("{} is not in the Project".format(item.ref))
     question = item.needs_decision
     if question is None:
+        # No open question, but the live thread may hold this command's
+        # recorded answer with its label move still stranded: re-running the
+        # identical command finishes only that move, never a second comment.
+        if _finish_recorded_ticket_answer(item, outcome):
+            return 0
         raise GitHubError(
             "{} has no active Needs-a-decision block to answer".format(
                 item.ref)

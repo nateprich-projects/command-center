@@ -146,7 +146,8 @@ if [ -f "$REPO/session_log_compress.py" ] && \
   fi
 fi
 
-# Hourly pytest-debris, log and temp-dir inventory (#2464, #2465, #2466).
+# Hourly pytest-debris, log, temp-dir and workspace inventory
+# (#2464, #2465, #2466, #2467).
 # Dry-run only: it prints the sweep table and records skip-alerts, but
 # deletes and trims nothing until Nate reviews a real inventory and
 # enables --apply at enablement.

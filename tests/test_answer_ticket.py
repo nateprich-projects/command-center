@@ -8,6 +8,31 @@ no funnel command answering a ticket block — ``cmd_answer_gates`` answers a
 plan Gates question and refuses tickets — so prose plus hand label edits was
 the only path, and it left the pair behind.
 
+Verify-first (base origin/main 3623c8acf2811e49f81d984d0d2200af3e27799b,
+checked before implementing; implementation was contingent on both):
+- funnel.py has no ticket answer path on base: ``git grep -n
+  "answer-ticket|answer_ticket|cmd_answer_ticket|parse_ticket_answer|render_ticket_answer|TICKET_ANSWER"
+  <base> --`` returns no lines.
+- ``cmd_answer_gates`` is plan-Gates-only at funnel.py:18998 on base: it
+  refuses tickets via ``if item.parent is not None`` ("the Gates question
+  belongs to its project"), so a Needs-a-decision block on a sub-issue has
+  no answer path.
+- The brief and the gates already parse the three fixed replacement
+  prefixes through the ordinary block reader: block_record.py:31
+  (``BLOCK_COMMENT_PREFIX = "**Blocked"``), block_record.py:71
+  (``BLOCK_EVENT_COMMENT_PREFIX = "**Blocked until event:**"``),
+  funnel.py:1566 ``block_condition`` mapping date/reference/event, and
+  funnel.py:1743 ``gate_question``. Observed on this checkout:
+  ``_parse_block_comment_details(["**Blocked until 2026-10-12:** wait."])``
+  reads ``([], 2026-10-12, 'wait.', None)``; ``(["**Blocked on #12:**
+  wait."])`` reads ``(['#12'], None, 'wait.', None)``; the ``**Blocked
+  until event:**`` JSON-spec form reads ``([], None, 'wait.', {agent, job,
+  outcome, after})``; ``block_condition`` maps them to date/reference/event.
+  Fixture-shaped evidence on base: tests/test_block.py:48 (``**Blocked on
+  #84 and #90:**``), tests/test_block.py:75-area (``**Blocked until
+  YYYY-MM-DD:**``), tests/test_block.py:33 (``FF_WEEKLY_EVENT_COMMENT``
+  ``**Blocked until event:**``).
+
 ``answer-ticket`` is the sole ticket path now: one comment quotes Nate's
 verbatim answer and supersedes the active question, then a lift removes the
 blocked label while a replace keeps it under exactly one canonical
@@ -373,3 +398,41 @@ def test_a_header_shaped_answer_stays_a_quote(monkeypatch):
     assert reloaded.needs_decision is None
     assert reloaded.block_references == []
     assert funnel.block_condition(reloaded) is None
+
+
+# -- verify-first premises (base origin/main; pre-existing code) ------------
+
+def test_verify_no_ticket_answer_path_and_gates_refuses_tickets(monkeypatch):
+    """Verify-first premise 1 (funnel.py:18998 on base): no ticket answer
+    path existed and ``cmd_answer_gates`` answers plan Gates only — it
+    refuses a ticket, so a Needs-a-decision block on a sub-issue had no
+    command to answer it. (The no-ticket-path half is a base-tree grep fact
+    recorded in the module docstring, not assertable from this branch.)"""
+    item = blocked_ticket(monkeypatch)
+    with pytest.raises(funnel.GitHubError) as refused:
+        funnel.cmd_answer_gates([item], NOW, REF, ANSWER, "nate")
+    assert "ticket" in str(refused.value).lower()
+    assert "project" in str(refused.value).lower()
+
+
+def test_verify_brief_and_gates_parse_the_three_fixed_prefixes():
+    """Verify-first premise 2 (block_record.py:31, block_record.py:71,
+    funnel.py:1566 on base): the ordinary block reader parses each fixed
+    replacement prefix, so the brief and the gates read back what a replace
+    writes."""
+    from block_record import _parse_block_comment_details as parse_details
+
+    refs, until, _reason, event = parse_details(
+        ["**Blocked until 2026-10-12:** wait."])
+    assert refs == [] and str(until) == "2026-10-12" and event is None
+
+    refs, until, _reason, event = parse_details(
+        ["**Blocked on #12:** wait."])
+    assert refs == ["#12"] and until is None and event is None
+
+    refs, until, _reason, event = parse_details(
+        ['**Blocked until event:**\n```json\n{"agent": "codex", '
+         '"job": "command-center-tickets-hourly", "outcome": "errored", '
+         '"after": "2026-10-12T00:00:00Z"}\n```\nwait.'])
+    assert refs == [] and until is None and event is not None
+    assert event["outcome"] == "errored"

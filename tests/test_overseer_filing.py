@@ -171,6 +171,16 @@ def test_failure_comment_names_reason_and_options_without_defaults():
     assert "overseer-filing" in comment
 
 
+def test_write_failure_comment_prescribes_rerun_not_a_body_edit():
+    comment = overseer_filing.failure_comment(
+        "a Project field write failed: boom", routing_fault=False)
+    assert "a Project field write failed: boom" in comment
+    assert "no body edit is needed" in comment
+    assert "Re-run the `overseer-filing` workflow" in comment
+    assert "never defaulted" not in comment
+    assert "Fix the" not in comment
+
+
 # --- workflow file shape ---
 
 def test_workflow_runs_on_hobby_linux():
@@ -372,6 +382,7 @@ def test_main_validates_every_write_before_any_write(monkeypatch, tmp_path):
     assert status == 1
     assert fake.writes() == []
     assert len(fake.comments()) == 1
+    assert "no body edit is needed" in fake.comments()[0][-1]
 
 
 def test_main_supports_workflow_dispatch(monkeypatch, tmp_path):

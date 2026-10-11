@@ -318,21 +318,37 @@ def post_comment(repo: str, number: int, body: str) -> None:
        "-f", "body=" + body)
 
 
-def failure_comment(reason: str) -> str:
+def failure_comment(reason: str, routing_fault: bool = True) -> str:
+    if routing_fault:
+        remedy = (
+            "The issue was added to the Project with no fields set; routing "
+            "is never defaulted. Fix the `{}` block — a fenced ```json "
+            "object with Risk ({}), Needs ({}) and Domain ({}) — then "
+            "re-run the `overseer-filing` workflow for this issue "
+            "(`workflow_dispatch` with `issue_repo` and `issue_number`)."
+        ).format(
+            ROUTING_MARKER,
+            ", ".join(ALLOWED_VALUES["Risk"]),
+            ", ".join(ALLOWED_VALUES["Needs"]),
+            ", ".join(ALLOWED_VALUES["Domain"]),
+        )
+    else:
+        # A Project-side write failure, not a routing fault: the block was
+        # valid, so the fix is a re-run, not a body edit. The run stops at
+        # the first failed write, so some fields may already be set;
+        # re-running rewrites all five idempotently.
+        remedy = (
+            "The filing run stopped before the field set was confirmed, so "
+            "some fields may already be set. Re-run the `overseer-filing` "
+            "workflow for this issue (`workflow_dispatch` with `issue_repo` "
+            "and `issue_number`) to complete the set; no body edit is "
+            "needed."
+        )
     return (
         "{}\n\n"
         "Command Center could not file this issue into Project 2: {}.\n\n"
-        "The issue was added to the Project with no fields set; routing is "
-        "never defaulted. Fix the `{}` block — a fenced ```json object with "
-        "Risk ({}), Needs ({}) and Domain ({}) — then re-run the "
-        "`overseer-filing` workflow for this issue "
-        "(`workflow_dispatch` with `issue_repo` and `issue_number`)."
-    ).format(
-        FAILURE_MARKER, reason, ROUTING_MARKER,
-        ", ".join(ALLOWED_VALUES["Risk"]),
-        ", ".join(ALLOWED_VALUES["Needs"]),
-        ", ".join(ALLOWED_VALUES["Domain"]),
-    )
+        "{}"
+    ).format(FAILURE_MARKER, reason, remedy)
 
 
 def main() -> int:
@@ -401,7 +417,8 @@ def main() -> int:
     except (RuntimeError, ValueError) as exc:
         detail = "a Project field write failed: {}".format(exc)
         try:
-            post_comment(repo, number, failure_comment(detail))
+            post_comment(repo, number, failure_comment(detail,
+                                                     routing_fault=False))
         except (RuntimeError, ValueError) as comment_exc:
             print("overseer_filing: {} write failed ({}) and the failure "
                   "comment could not post: {}".format(ref, exc, comment_exc))

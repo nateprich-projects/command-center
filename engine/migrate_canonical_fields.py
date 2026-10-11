@@ -7,7 +7,8 @@ removes that prose after field-reading code is live. Both phases derive state
 from GitHub and are safe to re-run.
 
 ``ensure_class_options`` is separate from both: it extends the existing Class
-field to every ladder class (Bug, #1845) and touches no row.
+field to every ladder class (Bug, #1845; phases and the Improve rename,
+#2425) and touches no row.
 """
 
 from __future__ import annotations
@@ -45,6 +46,14 @@ OPTION_STYLE = {
     "Bug": (
         "Latent defect: found by reading, review or tests, never observed; "
         "never preempts", "YELLOW"),  # the live field's other six colours are taken
+    # The decision-first phases (#2407, #2425). Implement normally arrives
+    # via the Improve rename keeping its id and style; its entry here is the
+    # fallback when neither name is on the field.
+    "Curate": ("Gather and curate the domain's data", "GRAY"),
+    "Describe": ("Describe what the data shows", "ORANGE"),
+    "Hypothesize": ("Score hypotheses by value", "BLUE"),
+    "Test": ("Test a hypothesis and record the finding", "YELLOW"),
+    "Implement": ("Ship the tested change", "GREEN"),
 }
 
 RISK_LINE = re.compile(
@@ -105,8 +114,16 @@ def _graphql_string(value: object) -> str:
     return json.dumps(str(value), ensure_ascii=True)
 
 
-def _update_options(field: dict, required: Sequence[str]) -> None:
-    """Replace an option set while preserving every existing option ID."""
+def _update_options(field: dict, required: Sequence[str],
+                    renames: Optional[Dict[str, str]] = None) -> None:
+    """Replace an option set while preserving every existing option ID.
+
+    ``renames`` maps an old option name to its new one: the row is
+    resubmitted with the same id, description and colour under the new name,
+    so every assignment survives the rename (#2425). A rename whose target
+    already exists is left alone; nothing is ever deleted.
+    """
+    renames = renames or {}
     existing = field.get("options")
     if not isinstance(existing, list) or not isinstance(field.get("id"), str):
         raise MigrationError("{} is not a readable single-select".format(
@@ -123,14 +140,17 @@ def _update_options(field: dict, required: Sequence[str]) -> None:
             raise MigrationError(
                 "{} option {} has no ID; refusing to replace the set".format(
                     field["name"], name))
+        if name in renames and renames[name] not in names:
+            name = renames[name]
         rows.append({
             "id": option_id,
             "name": name,
             "description": option.get("description") or "",
             "color": option.get("color") or "GRAY",
         })
+    have = {row["name"] for row in rows}
     for name in required:
-        if name in names:
+        if name in have:
             continue
         description, color = OPTION_STYLE.get(name, ("", "GRAY"))
         rows.append({
@@ -214,17 +234,19 @@ def ensure_schema(*, apply: bool) -> List[str]:
 def ensure_class_options(*, apply: bool) -> List[str]:
     """Give the Project's Class field every ladder class; return the changes.
 
-    ``LADDER`` gained Bug in #1845 and the live field predates it. This goes
-    through ``_update_options``, which resubmits every existing option ID, so
-    no Class already on the board is orphaned. A field that already has every
-    class is left alone, so re-running it is a no-op. Dry run unless
-    ``apply``; from the repository root::
+    ``LADDER`` gained Bug in #1845 and the live field predates it; #2425
+    renames Improve to Implement keeping its option id and adds Curate,
+    Describe, Hypothesize and Test. This goes through ``_update_options``,
+    which resubmits every existing option ID, so no Class already on the
+    board is orphaned. Legacy New and Replace are kept, never deleted. A
+    field that already has every class is left alone, so re-running it is a
+    no-op. Dry run unless ``apply``; from the repository root::
 
         python3 -c 'from engine import migrate_canonical_fields as m; print(m.ensure_class_options(apply=True))'
 
-    After the write it re-reads the field and refuses to report success unless
-    every class is there and every option ID it started with survived under
-    its old name.
+    After the write it re-reads the field and refuses to report success
+    unless every class is there and every option ID it started with survived
+    under its old name, or under the rename target for Improve.
     """
     field = _one_field(_fields(), "Class")
     if field is None:
@@ -235,11 +257,21 @@ def ensure_class_options(*, apply: bool) -> List[str]:
         raise MigrationError(
             "Class field is {}, not funnel.CLASS_FIELD_ID {}".format(
                 field.get("id"), funnel.CLASS_FIELD_ID))
+    have = funnel._field_options(field)
+    renames = {
+        old: new for old, new in funnel.CLASS_RENAMES.items()
+        if old in have and new not in have
+    }
     missing = [value for value in funnel.LADDER
-               if value not in funnel._field_options(field)]
-    if not missing:
+               if value not in have and value not in renames.values()]
+    if not renames and not missing:
         return []
-    changes = ["extend Class with {}".format(", ".join(missing))]
+    changes = []
+    for old, new in renames.items():
+        changes.append(
+            "rename Class {} to {} (keeping its option id)".format(old, new))
+    if missing:
+        changes.append("extend Class with {}".format(", ".join(missing)))
     if not apply:
         return changes
 
@@ -248,7 +280,7 @@ def ensure_class_options(*, apply: bool) -> List[str]:
         for option in field.get("options") or []
         if isinstance(option, dict)
     }
-    _update_options(field, funnel.LADDER)
+    _update_options(field, funnel.LADDER, renames)
 
     verified = _one_field(_fields(), "Class")
     after = {
@@ -258,7 +290,8 @@ def ensure_class_options(*, apply: bool) -> List[str]:
     }
     lost = sorted(
         "{} ({})".format(name, option_id)
-        for option_id, name in kept.items() if after.get(option_id) != name)
+        for option_id, name in kept.items()
+        if after.get(option_id) != renames.get(name, name))
     absent = [value for value in funnel.LADDER if value not in after.values()]
     if lost or absent:
         raise MigrationError(

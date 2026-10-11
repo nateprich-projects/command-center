@@ -163,7 +163,7 @@ def test_approve_adopts_one_exact_class_before_status_and_records_source(
     assert [variables["field"] for variables in writes] == [
         funnel.CLASS_FIELD_ID, funnel.STATUS_FIELD_ID,
     ]
-    assert item.klass == "Improve"
+    assert item.klass == "Implement"
     assert item.status == "Ready"
 
     comment = next(
@@ -171,14 +171,37 @@ def test_approve_adopts_one_exact_class_before_status_and_records_source(
         if call[0] == "run" and call[1][1:3] == ["issue", "comment"]
     )
     body = comment[comment.index("--body") + 1]
-    assert "**Class adopted:** Improve" in body
+    assert "**Class adopted:** Implement" in body
     assert "Source line: `Proposed class: Improve`" in body
     assert funnel.CLASS_ADOPTION_OVERRIDE_NOTE in body
 
     output = capsys.readouterr().out
-    assert "adopted Class Improve" in output
+    assert "adopted Class Implement" in output
     assert "Proposed class: Improve" in output
     assert funnel.CLASS_ADOPTION_OVERRIDE_NOTE in output
+
+
+@pytest.mark.parametrize("klass", ["New", "Replace"])
+def test_approve_leaves_a_legacy_proposal_for_nate(monkeypatch, capsys, klass):
+    item = shaped_project(
+        "# Plan\n\nProposed class: {}\n\nDo the work.\n".format(klass))
+    calls = stub_approve_writes(monkeypatch, item)
+
+    assert funnel.cmd_answer([item], NOW, "approve", item.ref, True) == 0
+
+    writes = [
+        call[2] for call in calls
+        if call[0] == "graphql" and call[1] == funnel.SET_FIELD
+    ]
+    assert [variables["field"] for variables in writes] == [
+        funnel.STATUS_FIELD_ID,
+    ]
+    assert item.klass is None
+    assert item.status == "Ready"
+
+    output = capsys.readouterr().out
+    assert "Class {} is legacy: no new assignments".format(klass) in output
+    assert "adopted Class" not in output
 
 
 @pytest.mark.parametrize(
@@ -261,7 +284,7 @@ def test_class_adoption_dry_run_does_not_advance_the_shaped_gate(monkeypatch, ca
     assert item.status == "Shaped"
     assert not any(kind == "graphql" for kind, *_ in calls)
     output = capsys.readouterr().out
-    assert "would adopt Class Improve" in output
+    assert "would adopt Class Implement" in output
     assert "Nothing was changed" in output
 
 

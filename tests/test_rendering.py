@@ -30,7 +30,7 @@ def item(number, status=None, klass=None, days=1.0, **kw):
 
 def test_queue_renders_classes_in_each_section(capsys):
     waiting = item(
-        1, "Building", "Improve", children_total=1, children_done=1,
+        1, "Building", "Implement", children_total=1, children_done=1,
         body=funnel.origin_block("nate-relayed", at=NOW, run="render-run", agent="codex"),
         origin="Nate",
     )
@@ -44,7 +44,7 @@ def test_queue_renders_classes_in_each_section(capsys):
     ) == 0
     output = capsys.readouterr().out
 
-    assert "Improve" in output
+    assert "Implement" in output
     assert "Maintenance" in output
     assert "New (inherited)" in output
     assert "no class" in output
@@ -113,7 +113,7 @@ def test_queue_groups_each_section_in_existing_rank_order(capsys):
 
 def test_queue_keeps_single_repo_output_unchanged(capsys):
     waiting = item(
-        1, "Building", "Improve", children_total=1, children_done=1,
+        1, "Building", "Implement", children_total=1, children_done=1,
         body=funnel.origin_block("nate-relayed", at=NOW, run="render-run", agent="codex"),
         origin="Nate",
     )
@@ -130,7 +130,7 @@ def test_queue_keeps_single_repo_output_unchanged(capsys):
 
     assert output == (
         "Waiting on Nate (1), bottom-up:\n"
-        "  Building   Improve                  nateprich/beta#1                   1 day              Accept it?\n"
+        "  Building   Implement                nateprich/beta#1                   1 day              Accept it?\n"
         "\n"
         "Startable by Codex (1), start order (Bug turn: one in four; tier then oldest):\n"
         "  New (inherited)          nateprich/beta#3                   issue 3\n"

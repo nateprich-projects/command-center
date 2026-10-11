@@ -216,28 +216,44 @@ class FakeProject:
 
 def test_class_extension_adds_bug_and_resubmits_every_existing_option_id(
         monkeypatch):
+    # Pre-#1845 board, now also pre-#2425: the rename and the phases ride
+    # the same id-preserving write as Bug did.
     project = FakeProject(CLASS_BEFORE_BUG)
     monkeypatch.setattr(funnel, "gh_graphql", project)
 
     assert migrate.ensure_class_options(apply=True) == [
-        "extend Class with Bug"]
+        "rename Class Improve to Implement (keeping its option id)",
+        "extend Class with Curate, Describe, Hypothesize, Test, Bug"]
 
     [mutation] = project.mutations
     for option in CLASS_BEFORE_BUG:
-        assert 'id:"{}",name:"{}"'.format(
-            option["id"], option["name"]) in mutation
+        if option["name"] == "Improve":
+            # Renamed under the same id, so its assignments survive.
+            assert 'id:"opt-improve",name:"Implement"' in mutation
+        else:
+            assert 'id:"{}",name:"{}"'.format(
+                option["id"], option["name"]) in mutation
     # Existing descriptions and colours ride along unchanged.
     assert 'description:"Seen to fail",color:RED' in mutation
-    # Bug alone carries no id, so it is the one option GitHub mints.
-    assert '{name:"Bug"' in mutation
-    assert mutation.count("name:") == 7
+    # Only the five new names carry no id, so GitHub mints those alone.
+    for name in ("Curate", "Describe", "Hypothesize", "Test", "Bug"):
+        assert '{name:"%s"' % name in mutation
+    assert mutation.count("name:") == 11
     assert [option["id"] for option in project.options] == [
-        option["id"] for option in CLASS_BEFORE_BUG] + ["minted-6"]
+        "opt-investigate", "opt-broken", "opt-maintenance", "opt-improve",
+        "opt-new", "opt-replace",
+        "minted-6", "minted-7", "minted-8", "minted-9", "minted-10"]
+    assert [option["name"] for option in project.options] == [
+        "Investigate", "Broken", "Maintenance", "Implement", "New",
+        "Replace", "Curate", "Describe", "Hypothesize", "Test", "Bug"]
 
 
-def test_class_extension_is_a_no_op_once_bug_exists(monkeypatch):
-    project = FakeProject(CLASS_BEFORE_BUG + [
-        {"id": "opt-bug", "name": "Bug", "description": "", "color": "ORANGE"},
+def test_class_extension_is_a_no_op_once_every_ladder_class_exists(
+        monkeypatch):
+    project = FakeProject([
+        {"id": "opt-{}".format(name.lower()), "name": name,
+         "description": "", "color": "GRAY"}
+        for name in funnel.LADDER
     ])
     monkeypatch.setattr(funnel, "gh_graphql", project)
 
@@ -250,8 +266,28 @@ def test_class_extension_dry_run_writes_nothing(monkeypatch):
     monkeypatch.setattr(funnel, "gh_graphql", project)
 
     assert migrate.ensure_class_options(apply=False) == [
-        "extend Class with Bug"]
+        "rename Class Improve to Implement (keeping its option id)",
+        "extend Class with Curate, Describe, Hypothesize, Test, Bug"]
     assert project.mutations == []
+
+
+def test_class_rename_keeps_legacy_new_and_replace(monkeypatch):
+    # A board that already has Bug but predates the phases: New and Replace
+    # are resubmitted with their ids, never deleted.
+    project = FakeProject(CLASS_BEFORE_BUG + [
+        {"id": "opt-bug", "name": "Bug", "description": "", "color": "YELLOW"},
+    ])
+    monkeypatch.setattr(funnel, "gh_graphql", project)
+
+    assert migrate.ensure_class_options(apply=True) == [
+        "rename Class Improve to Implement (keeping its option id)",
+        "extend Class with Curate, Describe, Hypothesize, Test"]
+
+    [mutation] = project.mutations
+    assert 'id:"opt-new",name:"New"' in mutation
+    assert 'id:"opt-replace",name:"Replace"' in mutation
+    assert 'id:"opt-improve",name:"Implement"' in mutation
+    assert [option["name"] for option in project.options].count("New") == 1
 
 
 def test_class_extension_refuses_success_when_an_option_id_did_not_survive(

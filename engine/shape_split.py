@@ -41,7 +41,6 @@ import funnel  # noqa: E402
 from engine.shape import (  # noqa: E402
     ANSWER_KEYS,
     NEEDS_FIELDS,
-    PHASE_CLASS_NAMES,
     REF_RE,
     ShapeError,
     _check_keys,
@@ -298,11 +297,10 @@ def parse_framer(answer: object, *,
         data.setdefault("redesign_remainder", "")
     _check_keys(data, FRAMER_KEYS, "the framer answer")
     proposed = _require_line(data["proposed_class"], "proposed_class")
-    if proposed not in funnel.LADDER and proposed not in PHASE_CLASS_NAMES:
+    if funnel.normalize_class(proposed) not in funnel.LADDER:
         raise ShapeError(
-            "proposed_class {!r} is not a class; choose one of "
-            "{}".format(proposed, ", ".join(
-                list(funnel.LADDER) + list(PHASE_CLASS_NAMES))))
+            "proposed_class {!r} is not a ladder class; choose one of "
+            "{}".format(proposed, ", ".join(funnel.LADDER)))
     plan_markdown = _require_text(data["plan_markdown"], "plan_markdown")
     if proposed == "Investigate":
         _validate_investigate_possible_defect(plan_markdown)

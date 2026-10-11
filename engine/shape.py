@@ -153,7 +153,7 @@ NEEDS_FIELDS = (
 #: too (#2136).
 AGENT_SELF_APPROVABLE_OUTPUT_REVIEW = {
     "scope": (
-        "For agent-origin Investigate, Broken, Maintenance, Improve, and "
+        "For agent-origin Investigate, Broken, Maintenance, Implement, and "
         "Bug work, ask Scope and priority only for a concrete unresolved "
         "stakeholder tradeoff. Do not ask generic permission to implement "
         "the work."),
@@ -285,13 +285,6 @@ def _validate_investigate_possible_defect(plan_markdown: str) -> None:
             "whole line of the form 'Possible defect: <statement>' "
             "in plan_markdown")
 
-
-#: The five decision-first phases (#2407). Shape names them as strings so
-#: phase proposals validate before the Class-option migration lands; only
-#: Implement carries a gate here.
-PHASE_CLASS_NAMES = (
-    "Curate", "Describe", "Hypothesize", "Test", "Implement",
-)
 
 #: An observed-symptom marker: "Observed symptom" with a space or a hyphen,
 #: in any case. The canonical line is Title Case with a space.
@@ -644,11 +637,10 @@ def validate_answer(
     _check_keys(data, sorted(ANSWER_KEYS), "the answer")
     assert isinstance(data, dict)
     proposed = _require_line(data["proposed_class"], "proposed_class")
-    if proposed not in funnel.LADDER and proposed not in PHASE_CLASS_NAMES:
+    if funnel.normalize_class(proposed) not in funnel.LADDER:
         raise ShapeError(
-            "proposed_class {!r} is not a class; choose one of "
-            "{}".format(proposed, ", ".join(
-                list(funnel.LADDER) + list(PHASE_CLASS_NAMES))))
+            "proposed_class {!r} is not a ladder class; choose one of "
+            "{}".format(proposed, ", ".join(funnel.LADDER)))
     allowed_hotspots = _validate_packet_hotspots(
         hotspots if include_hotspot_routing and hotspots is not None else [])
     hotspot_targets, redesign_remainder = _validate_hotspot_routing(
@@ -929,7 +921,8 @@ def output_review_applies(klass: Optional[str],
     an origin override to agents does not widen it.
     """
     return (origin_voice == "agent"
-            and klass in funnel.SELF_APPROVABLE_CLASSES)
+            and funnel.normalize_class(klass)
+            in funnel.SELF_APPROVABLE_CLASSES)
 
 
 @dataclass(frozen=True)
@@ -969,7 +962,9 @@ def shape_inputs(items: Sequence, item,
     origin_voice = item.origin
     override = funnel.parse_origin_override(item.body or "")
     override_target = override["target"] if override is not None else None
-    class_adopted = item.klass not in funnel.LADDER and origin_voice == "agent"
+    class_adopted = (
+        funnel.normalize_class(item.klass) not in funnel.LADDER
+        and origin_voice == "agent")
     if class_adopted:
         klass = answer["proposed_class"] if answer is not None else None
     else:
@@ -1196,7 +1191,7 @@ def decide(answer: Dict, *,
     if state is not None and str(state).upper() != "OPEN":
         failed.append("the issue is {} on GitHub".format(
             str(state).upper()))
-    if klass not in funnel.SELF_APPROVABLE_CLASSES:
+    if funnel.normalize_class(klass) not in funnel.SELF_APPROVABLE_CLASSES:
         failed.append("class {} is not self-approvable".format(
             klass or "unset"))
     if funnel.effective_shape_owner(
@@ -1449,7 +1444,7 @@ def issue_url(ref: str) -> str:
 
 def hotspot_redesign_candidate(items: Sequence, repo: str,
                                target: Dict[str, str]):
-    """Find the most specific open Improve plan already owning a hotspot."""
+    """Find the most specific open Implement plan already owning a hotspot."""
     marker = "Hotspot: {}:{}".format(
         target["repo_path"], target["function"])
     prefix = "Redesign {}:{}".format(
@@ -1457,7 +1452,7 @@ def hotspot_redesign_candidate(items: Sequence, repo: str,
     candidates = []
     for item in items:
         if (item.repo != repo or str(item.state).upper() != "OPEN"
-                or item.klass != "Improve"):
+                or funnel.normalize_class(item.klass) != "Implement"):
             continue
         body_match = marker in (item.body or "").splitlines()
         title_match = (isinstance(item.title, str)
@@ -1472,7 +1467,7 @@ def prepare_hotspot_routes(items: list, repo: str,
                            targets: Sequence[Dict[str, str]],
                            hotspots: Sequence[Dict[str, object]],
                            now: datetime) -> List[Dict[str, str]]:
-    """Reuse or capture one open Improve project for each selected hotspot."""
+    """Reuse or capture one open Implement project for each hotspot."""
     measured = {
         (row["repo_path"], row["function"]): row
         for row in hotspots
@@ -1492,7 +1487,7 @@ def prepare_hotspot_routes(items: list, repo: str,
             urls: List[str] = []
             funnel.cmd_capture(
                 items, now, title, note, repo=repo, origin="agent",
-                klass="Improve", voice="agent", created_urls=urls,
+                klass="Implement", voice="agent", created_urls=urls,
                 quiet=True)
             if len(urls) != 1:
                 raise funnel.GitHubError(
@@ -1969,7 +1964,7 @@ def apply_shape(items: list, now: datetime, ref: str,
     answer = decision.answer
     hotspot_routes: List[Dict[str, str]] = []
     if answer["hotspot_targets"]:
-        # Routing may capture a missing Improve plan, so confirm the source
+        # Routing may capture a missing Implement plan, so confirm the source
         # idea is still shapeable before the first route write.
         fresh_state, fresh_status, fresh_children = _read_fresh_shape_facts(item)
         stale_reason = funnel.unshapeable_reason(
@@ -2078,15 +2073,18 @@ def apply_shape(items: list, now: datetime, ref: str,
         # This recovery write is the only place shaping may assign a
         # Class. Keep it immediately before the Status mutation so the
         # latter never makes an unclassed idea look like it advanced
-        # cleanly.
+        # cleanly. Improve is written as Implement (#2425).
+        write_klass = (
+            funnel.normalize_class(decision.inputs.klass)
+            or decision.inputs.klass)
         funnel.gh_graphql(
             funnel.SET_FIELD, project=funnel.PROJECT_ID,
             item=item.item_id, field=funnel.CLASS_FIELD_ID,
             option=funnel._option_id(funnel.CLASS_FIELD_ID,
-                                     decision.inputs.klass))
+                                     write_klass))
         # A same-session reader, the Shaped sweep included, reads the Class
         # from this object, as it reads the body above (#2138).
-        item.klass = decision.inputs.klass
+        item.klass = write_klass
     funnel.write_project_select(item.item_id, "Risk", decision.risk, item.ref)
     funnel.write_project_select(
         item.item_id, "Needs", decision.needs, item.ref)

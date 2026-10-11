@@ -471,17 +471,19 @@ def test_unset_class_sorts_last_and_never_preempts():
 
 def test_ladder_is_in_the_documented_order():
     ranks = [ladder_index(c) for c in [
-        "Investigate", "Broken", "Maintenance", "Improve", "New", "Replace",
-        "Bug",
+        "Investigate", "Broken", "Maintenance", "Curate", "Describe",
+        "Hypothesize", "Test", "Implement", "New", "Replace", "Bug",
     ]]
-    assert ranks == sorted(ranks) and len(set(ranks)) == 7
+    assert ranks == sorted(ranks) and len(set(ranks)) == 11
+    # Improve kept its rank through the rename to Implement (#2425).
+    assert ladder_index("Improve") == ladder_index("Implement")
 
 
 def test_investigate_is_first_without_gaining_preemption():
     assert ladder_index("Investigate") == 0
     assert funnel.PREEMPTING_CLASSES == frozenset({"Broken", "Maintenance"})
     assert funnel.SELF_APPROVABLE_CLASSES == frozenset(
-        {"Investigate", "Broken", "Maintenance", "Improve", "Bug"}
+        {"Investigate", "Broken", "Maintenance", "Implement", "Bug"}
     )
 
 
@@ -602,10 +604,13 @@ def test_higher_tier_work_does_not_wait_for_a_lower_tiers_building_project():
 
 
 def test_within_a_tier_the_building_commitment_still_holds():
+    # New outranks Replace on the ladder but both are non-phase, so the
+    # Building commitment decides. Improve would read as Implement (#2425)
+    # and take phase turns ahead of the in-flight legacy work (#2429).
     rows = [
         tier_project(TOOLING, 1, "Building", "Replace", days=1),
         tier_ticket(TOOLING, 2, 1, days=1),
-        tier_project(TOOLING, 3, "Ready", "Improve", days=30),
+        tier_project(TOOLING, 3, "Ready", "New", days=30),
         tier_ticket(TOOLING, 4, 3, days=30),
     ]
     assert [i.number for i in startable(rows)] == [2, 4]
@@ -1491,9 +1496,9 @@ def test_next_cli_filters_machine_local_work_by_requesting_agent(
 
 
 def _share_board(bug_repo):
-    """Five single-ticket Bug projects and sixteen Improve ones, all Ready.
+    """Five single-ticket Bug projects and sixteen Implement ones, all Ready.
 
-    The Improve work is in a hobby repo. With the Bugs there too the ladder
+    The Implement work is in a hobby repo. With the Bugs there too the ladder
     puts every Bug last; with them in the tooling tier, repo tier puts every
     Bug first. Either way only the share can space them.
     """
@@ -1502,7 +1507,7 @@ def _share_board(bug_repo):
         rows += [tier_project(bug_repo, 100 + k, "Ready", "Bug"),
                  tier_ticket(bug_repo, 200 + k, 100 + k)]
     for k in range(16):
-        rows += [tier_project(HOBBY, 300 + k, "Ready", "Improve"),
+        rows += [tier_project(HOBBY, 300 + k, "Ready", "Implement"),
                  tier_ticket(HOBBY, 400 + k, 300 + k)]
     return rows
 
@@ -1534,16 +1539,16 @@ def _one_lane_pulls(rows, starts, pulls):
 def test_a_single_lane_gets_one_bug_in_every_four_starts(bug_repo, prior):
     """Nate's worry, 2026-09-28: a lane that starts up, sees no Bug running
     and grabs one. This lane never has a Bug running, from an empty history
-    or one of eight Improve starts, and still gets three Bugs in twelve."""
+    or one of eight Implement starts, and still gets three Bugs in twelve."""
     rows = _share_board(bug_repo)
     starts = []
     for k in range(prior):
         starts.append({"run": "old-{}".format(k), "agent": "codex",
                        "phase": "bind", "ts": k, "do": "ticket",
-                       "work": "{}#9{}".format(HOBBY, k), "class": "Improve"})
+                       "work": "{}#9{}".format(HOBBY, k), "class": "Implement"})
 
     assert _one_lane_pulls(rows, starts, 12) == (
-        ["Bug", "Improve", "Improve", "Improve"] * 3)
+        ["Bug", "Implement", "Implement", "Implement"] * 3)
 
 
 def test_a_bug_just_started_makes_the_next_three_starts_something_else():
@@ -1553,7 +1558,7 @@ def test_a_bug_just_started_makes_the_next_three_starts_something_else():
     rows[1].state = "CLOSED"
 
     assert _one_lane_pulls(rows, starts, 8) == (
-        ["Improve", "Improve", "Improve", "Bug"] * 2)
+        ["Implement", "Implement", "Implement", "Bug"] * 2)
 
 
 def test_observed_broken_and_maintenance_still_go_first_on_the_bugs_turn():
@@ -1629,7 +1634,7 @@ def test_four_lanes_pulling_together_do_not_exceed_the_share():
         })
         classes.append(klass)
 
-    assert classes == ["Bug", "Improve", "Improve", "Improve"] * 4
+    assert classes == ["Bug", "Implement", "Implement", "Implement"] * 4
     assert all(classes[k:k + 8].count("Bug") <= 2 for k in range(9))
 
 
@@ -1872,7 +1877,12 @@ def _bug_free_board(seed):
     rng = random.Random(seed)
     repos = [TOOLING, "nateprich-projects/workbench", IMPACT, HOBBY,
              "nateprich-projects/AFL"]
-    classes = [klass for klass in funnel.LADDER if klass != "Bug"]
+    # Frozen pre-#2425 classes, not funnel.LADDER: these boards feed the
+    # Bug-share snapshots, so they must deal identically across Class
+    # migrations. Improve stays as the rename-path representative (#2425);
+    # phase ordering is covered by the turn tests.
+    classes = ["Investigate", "Broken", "Maintenance", "Improve", "New",
+               "Replace"]
     projects, tickets = [], []
     number = 1
     for _ in range(rng.randint(1, 6)):

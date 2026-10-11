@@ -656,15 +656,16 @@ def test_a_code_ticket_filed_none_does_not_warn():
 
 
 def test_breakdown_guidance_states_the_split_rule():
-    """#2489: the validator guidance says a claude-code-environment ticket
-    holds only the Mac step, with code in a separate none ticket with
-    linked accept. (The routines/skills prompts are protected paths this
-    ticket does not name, so the rule lives with the validator, which is
-    the seam this ticket may change.)"""
-    source = (ROOT / "engine" / "breakdown.py").read_text()
-    normalized = " ".join(source.split())
-    assert "holds only the Mac step" in normalized
-    assert "separate `none` ticket with linked accept" in normalized
+    """#2489: the guidance says a claude-code-environment ticket holds
+    only the Mac step, with code in a separate none ticket with linked
+    accept — in the sizing skill and in the prompt Muse sees."""
+    skill = (ROOT / "skills" / "breakdown" / "SKILL.md").read_text()
+    prompt = (ROOT / "routines" / "muse-breakdown.md").read_text()
+    sent = prompt.split("\n---\n", 1)[1]
+    for text in (skill, sent):
+        normalized = " ".join(text.split())
+        assert "holds only the Mac step" in normalized
+        assert "separate `none` ticket with linked accept" in normalized
 
 
 # -- validation: dependencies ---------------------------------------------------

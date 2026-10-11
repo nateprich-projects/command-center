@@ -954,12 +954,13 @@ def _seed_housekeeping(seed: Path, checkout: Path) -> None:
 
 
 def test_keeper_runs_the_housekeeping_inventory_once_an_hour(tmp_path):
-    """At :00 the keeper prints the dry-run sweep table (#2464, #2465).
+    """At :00 the keeper prints the dry-run sweep table (#2464, #2465, #2466).
 
     The sweep runs against the test session's real temp roots in dry-run,
     which never deletes or trims; its log and brief artifact are
-    redirected into the fixture home, and log discovery into an empty
-    fixture dir so the machine's real logs stay out of the assertion.
+    redirected into the fixture home, and log and temp discovery into
+    empty fixture dirs so the machine's real logs and temp dirs stay out
+    of the assertion.
     """
     bare, checkout = make_heartbeat_remote(tmp_path)
     _seed_housekeeping(tmp_path / "seed", checkout)
@@ -969,6 +970,8 @@ def test_keeper_runs_the_housekeeping_inventory_once_an_hour(tmp_path):
 
     empty_logs = tmp_path / "empty-logs"
     empty_logs.mkdir()
+    empty_temp = tmp_path / "empty-temp"
+    empty_temp.mkdir()
     result = run_keeper(
         checkout,
         home,
@@ -983,6 +986,7 @@ def test_keeper_runs_the_housekeeping_inventory_once_an_hour(tmp_path):
                 tmp_path / "housekeeping-brief.json"
             ),
             "COMMAND_CENTER_HOUSEKEEPING_LOG_DIR": str(empty_logs),
+            "COMMAND_CENTER_HOUSEKEEPING_TEMP_DIR": str(empty_temp),
         },
     )
 
@@ -990,6 +994,7 @@ def test_keeper_runs_the_housekeeping_inventory_once_an_hour(tmp_path):
     assert "# housekeeping sweep (dry-run)" in result.stdout
     assert "# pytest total " in result.stdout
     assert "# log total " in result.stdout
+    assert "# temp " in result.stdout
     assert "path\tsize_bytes\taction\treason" in result.stdout
     assert (tmp_path / "housekeeping-brief.json").is_file()
 

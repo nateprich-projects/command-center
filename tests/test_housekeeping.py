@@ -12,6 +12,11 @@ The log trim keeps the newest 25 MiB per file and caps total logs around
 held-open files, recent failure evidence and small files are kept in
 both modes. When protected files alone exceed the total the sweep skips
 and alerts on both channels.
+
+The temp sweep removes only ``muse-*`` dirs older than 24 h that are
+strictly empty: younger, non-empty, unowned and unreadable dirs are kept
+in both modes, and symlinks, files and non-matching names are never
+inventoried.
 """
 
 from __future__ import annotations
@@ -78,6 +83,7 @@ def _run_pass(tmp_path, **kwargs):
         log_capped,
         notes,
         logs_swept,
+        _temps_swept,
     ) = housekeeping.run_pass(
         log_path=log, brief_path=brief, now=NOW, **kwargs
     )
@@ -138,6 +144,30 @@ def _empty_pytest_root(tmp_path):
     root = tmp_path / "pytest-of-empty"
     root.mkdir(parents=True, exist_ok=True)
     return root
+
+
+HOUR = 60 * 60
+
+
+def _make_temp(root, name, age_hours, with_file=False):
+    """Build a temp-dir fixture; the dir mtime is set last."""
+    path = root / name
+    path.mkdir(parents=True, exist_ok=True)
+    if with_file:
+        (path / "leftover.txt").write_text("live", encoding="utf-8")
+    stamp = NOW - age_hours * HOUR
+    os.utime(path, (stamp, stamp))
+    return path
+
+
+def _empty_log_root(tmp_path):
+    root = tmp_path / "empty-logs"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _temp_rows(rows):
+    return [row for row in rows if row.get("kind") == "temp"]
 
 
 def test_lock_pid_reading_treats_missing_and_bad_locks_as_uncertain(tmp_path):
@@ -768,3 +798,188 @@ def test_cli_log_table_and_log_root_guard(tmp_path, capsys):
     ])
     assert code == 2
     assert "refusing non-internal-disk log root" in capsys.readouterr().err
+
+
+def test_empty_old_temp_dirs_are_removed_only_in_apply(tmp_path):
+    temp = tmp_path / "tmp"
+    temp.mkdir()
+    target = _make_temp(temp, "muse-old-empty", 30)
+
+    rows, _, _, _, _, _, _, _, _ = _run_pass(
+        tmp_path,
+        explicit_roots=[str(_empty_pytest_root(tmp_path))],
+        explicit_log_roots=[str(_empty_log_root(tmp_path))],
+        explicit_temp_roots=[str(temp)],
+    )
+    row = _by_basename(rows, "muse-old-empty")
+    assert row["action"] == "would-delete"
+    assert row["size_bytes"] == 0
+    assert target.exists()
+
+    rows, _, _, _, _, _, _, log_path, brief = _run_pass(
+        tmp_path,
+        explicit_roots=[str(_empty_pytest_root(tmp_path))],
+        explicit_log_roots=[str(_empty_log_root(tmp_path))],
+        explicit_temp_roots=[str(temp)],
+        apply=True,
+    )
+    assert _by_basename(rows, "muse-old-empty")["action"] == "delete"
+    assert not target.exists()
+    assert "action=delete" in log_path.read_text(encoding="utf-8")
+    # No cap on this sweep, so no warning artifact is ever written.
+    assert json.loads(brief.read_text(encoding="utf-8")) == []
+
+
+def test_temp_nonempty_recent_and_unowned_are_kept_in_both_modes(
+    tmp_path, monkeypatch
+):
+    """Only empty old owned muse-* dirs go; the rest are kept, never listed
+    for removal, in both dry-run and --apply."""
+    for mode in ("dry", "apply"):
+        temp = tmp_path / mode / "tmp"
+        temp.mkdir(parents=True)
+        busy = _make_temp(temp, "muse-busy", 30, with_file=True)
+        fresh = _make_temp(temp, "muse-fresh", 1)
+
+        rows, _, _, _, _, _, _, _, _ = _run_pass(
+            tmp_path / mode,
+            explicit_roots=[
+                str(_empty_pytest_root(tmp_path / mode))
+            ],
+            explicit_log_roots=[str(_empty_log_root(tmp_path / mode))],
+            explicit_temp_roots=[str(temp)],
+            apply=(mode == "apply"),
+        )
+        assert busy.exists()
+        assert fresh.exists()
+        assert _by_basename(rows, "muse-busy")["action"] == "keep"
+        assert "not empty" in _by_basename(rows, "muse-busy")["reason"]
+        assert _by_basename(rows, "muse-fresh")["action"] == "keep"
+        assert "24 hours" in _by_basename(rows, "muse-fresh")["reason"]
+
+    # Nothing owned by another user is ever eligible.
+    temp = tmp_path / "owned" / "tmp"
+    temp.mkdir(parents=True)
+    foreign = _make_temp(temp, "muse-foreign", 30)
+    monkeypatch.setattr(os, "geteuid", lambda: 59999)
+    rows, _, _, _, _, _, _, _, _ = _run_pass(
+        tmp_path / "owned",
+        explicit_roots=[str(_empty_pytest_root(tmp_path / "owned"))],
+        explicit_log_roots=[str(_empty_log_root(tmp_path / "owned"))],
+        explicit_temp_roots=[str(temp)],
+        apply=True,
+    )
+    assert foreign.exists()
+    assert _by_basename(rows, "muse-foreign")["action"] == "keep"
+    assert "not owned" in _by_basename(rows, "muse-foreign")["reason"]
+
+
+def test_temp_symlinks_files_and_nonmatching_are_untouched(tmp_path):
+    temp = tmp_path / "tmp"
+    temp.mkdir()
+    target = _make_temp(temp, "muse-real", 30)
+    (temp / "muse-file").write_text("a file, not a dir", encoding="utf-8")
+    (temp / "muse-link").symlink_to(target)
+    other = temp / "other-old"
+    other.mkdir()
+    os.utime(other, (NOW - 30 * HOUR, NOW - 30 * HOUR))
+
+    rows, _, _, _, _, _, _, _, _ = _run_pass(
+        tmp_path,
+        explicit_roots=[str(_empty_pytest_root(tmp_path))],
+        explicit_log_roots=[str(_empty_log_root(tmp_path))],
+        explicit_temp_roots=[str(temp)],
+        apply=True,
+    )
+    # Only the matching real dir is inventoried; it was empty and old.
+    assert [row["path"] for row in _temp_rows(rows)] == [str(target)]
+    assert not target.exists()
+    assert (temp / "muse-file").is_file()
+    assert (temp / "muse-link").is_symlink()
+    assert other.is_dir()
+
+
+def test_temp_roots_follow_tmpdir_and_dedupe(tmp_path, monkeypatch):
+    monkeypatch.setattr(tempfile, "tempdir", None)
+    monkeypatch.setenv("TMPDIR", str(tmp_path))
+    roots = housekeeping.temp_roots()
+    assert roots[0] == tmp_path.resolve()
+    assert len(roots) == len({str(root) for root in roots})
+
+    monkeypatch.setattr(tempfile, "tempdir", None)
+    monkeypatch.delenv("TMPDIR")
+    assert len(housekeeping.temp_roots()) == 1
+
+    monkeypatch.setattr(tempfile, "tempdir", None)
+    monkeypatch.setenv("TMPDIR", str(tmp_path))
+    monkeypatch.setenv(
+        housekeeping.TEMP_DIR_ENV, str(tmp_path / "override")
+    )
+    assert housekeeping.temp_roots() == [tmp_path / "override"]
+
+
+def test_temp_scoped_runs_sweep_only_what_they_ask(tmp_path):
+    temp = tmp_path / "tmp"
+    temp.mkdir()
+    target = _make_temp(temp, "muse-old-empty", 30)
+
+    # A pytest-scoped run sweeps no temp dirs.
+    rows, _, _, _, _, _, _, _, _ = _run_pass(
+        tmp_path, explicit_roots=[str(_empty_pytest_root(tmp_path))]
+    )
+    assert _temp_rows(rows) == []
+    assert target.exists()
+
+    # A log-scoped run sweeps no temp dirs either.
+    rows, _, _, _, _, _, _, _, _ = _run_pass(
+        tmp_path, explicit_log_roots=[str(_empty_log_root(tmp_path))]
+    )
+    assert _temp_rows(rows) == []
+    assert target.exists()
+
+
+def test_cli_temp_table_and_temp_root_guard(tmp_path, capsys):
+    temp = tmp_path / "tmp"
+    temp.mkdir()
+    _make_temp(temp, "muse-old-empty", 30)
+    empty = _empty_pytest_root(tmp_path)
+    empty_logs = _empty_log_root(tmp_path)
+
+    code = housekeeping.main([
+        "--root", str(empty),
+        "--log-root", str(empty_logs),
+        "--temp-root", str(temp),
+        "--log", str(tmp_path / "housekeeping.log"),
+        "--brief", str(tmp_path / "housekeeping-brief.json"),
+    ])
+    assert code == 0
+    out = capsys.readouterr().out.splitlines()
+    assert out[0] == "# housekeeping sweep (dry-run)"
+    assert out[1].startswith("# pytest total ")
+    assert out[2].startswith("# log total ")
+    assert out[3].startswith("# temp ")
+    assert "muse-* dirs" in out[3]
+    header = out.index("path\tsize_bytes\taction\treason")
+    body = "\n".join(out[header + 1:])
+    assert "muse-old-empty" in body
+    assert "\twould-delete\t" in body
+
+    # A --root-only run prints no temp line.
+    code = housekeeping.main([
+        "--root", str(empty),
+        "--log", str(tmp_path / "housekeeping.log"),
+        "--brief", str(tmp_path / "housekeeping-brief.json"),
+    ])
+    assert code == 0
+    out = capsys.readouterr().out.splitlines()
+    assert out[0] == "# housekeeping sweep (dry-run)"
+    assert out[1].startswith("# pytest total ")
+    assert out[2] == "path\tsize_bytes\taction\treason"
+
+    code = housekeeping.main([
+        "--temp-root", "/Volumes/External SSD/tmp",
+        "--log", str(tmp_path / "housekeeping.log"),
+        "--brief", str(tmp_path / "housekeeping-brief.json"),
+    ])
+    assert code == 2
+    assert "refusing non-internal-disk temp root" in capsys.readouterr().err

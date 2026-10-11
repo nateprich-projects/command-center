@@ -146,10 +146,10 @@ if [ -f "$REPO/session_log_compress.py" ] && \
   fi
 fi
 
-# Hourly pytest-debris and log inventory (#2464, #2465). Dry-run only: it
-# prints the sweep table and records skip-alerts, but deletes and trims
-# nothing until Nate reviews a real inventory and enables --apply at
-# enablement.
+# Hourly pytest-debris, log and temp-dir inventory (#2464, #2465, #2466).
+# Dry-run only: it prints the sweep table and records skip-alerts, but
+# deletes and trims nothing until Nate reviews a real inventory and
+# enables --apply at enablement.
 if [ -f "$REPO/housekeeping.py" ] && \
    [ "$("$KEEPER_DATE" +%M 2>/dev/null || true)" = "00" ]; then
   if ! PYTHONDONTWRITEBYTECODE=1 python3 "$REPO/housekeeping.py"; then

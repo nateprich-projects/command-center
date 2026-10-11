@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""Hourly disk housekeeping for pytest debris and logs (tickets 2464, 2465).
+"""Hourly disk housekeeping for pytest debris, logs and temp dirs
+(tickets 2464, 2465, 2466).
 
-Dry-run by default; ``--apply`` deletes and trims. Two sweeps share one
+Dry-run by default; ``--apply`` deletes and trims. Three sweeps share one
 ``path size action reason`` table, one housekeeping log and one
-funnel-brief warning artifact: the pytest numbered-dir sweep and the
-command-center log trim. Temp dirs and the free-space gate are separate
-tickets, and workspace deletion, the owner protocol, the evidence store,
-backups and restore tests are out per the slimmed 2026-10-10 approval.
+funnel-brief warning artifact: the pytest numbered-dir sweep, the
+command-center log trim and the empty temp-dir sweep. The free-space gate
+is a separate ticket, and workspace deletion, the owner protocol, the
+evidence store, backups and restore tests are out per the slimmed
+2026-10-10 approval.
 
 What the pytest sweep does
 --------------------------
@@ -36,6 +38,19 @@ Under each log root (``~/Library/Logs`` by default) it inspects the
 * cap total logs around 200 MiB by summed bytes; when protected files
   alone still exceed the cap after every eligible trim, skip and alert
   (housekeeping log plus funnel-brief warning) instead of evicting.
+
+What the temp sweep does
+-----------------------
+Under each temp root (the current ``tempfile.gettempdir()`` plus the
+TMPDIR-unset fallback, deduplicated) it inspects the ``muse-*``
+directories directly below, internal-disk only via the shared guard:
+
+* remove only directories matching ``muse-*`` that are older than 24 h
+  and strictly empty (no entries remaining);
+* keep anything younger than 24 h, anything non-empty, anything not
+  owned by this user, and anything unreadable;
+* never touch symlinks, files, or non-matching names: they are not
+  inventoried at all.
 
 Every run, dry-run or apply, prints a ``path size action reason`` table to
 stdout, appends deletes, trims and skip-alerts to the housekeeping log,
@@ -111,6 +126,12 @@ Safety notes
   files alone over the cap mean skip and alert.
 * Log age is the file's own mtime; a trim updates it to the trim moment.
   Files younger than 14 days are never trimmed, even over 25 MiB.
+* Temp removal re-checks ownership, age and strict emptiness immediately
+  before removing each dir, refuses targets outside the swept root or on
+  a non-internal disk, and removes with ``os.rmdir``, which fails rather
+  than recursing when a dir became non-empty after the check.
+* Temp roots are world-writable (``/tmp``), so the root itself is not
+  ownership-checked; every candidate dir is.
 """
 
 from __future__ import annotations
@@ -193,6 +214,14 @@ LOG_RETRY_ACTION = (
     "finish and logs age past 14 days; if the warning persists, a live "
     "run may be leaking log output"
 )
+
+#: Temp dirs swept: empty ``muse-*`` dirs left by finished runs.
+TEMP_PATTERN = "muse-*"
+#: A temp dir must be older than this to be removed.
+TEMP_AGE_SECONDS = 24 * 60 * 60
+#: Override the discovered temp dirs (single path). Tests use explicit
+#: ``--temp-root``; the keeper test uses this for a hermetic discovery.
+TEMP_DIR_ENV = "COMMAND_CENTER_HOUSEKEEPING_TEMP_DIR"
 
 
 def _utc_now() -> float:
@@ -288,6 +317,55 @@ def log_files(root: Path) -> List[Path]:
         except OSError:
             continue
         if not fnmatch.fnmatch(entry.name, LOG_PATTERN):
+            continue
+        found.append(Path(entry.path))
+    found.sort()
+    return found
+
+
+def temp_roots() -> List[Path]:
+    """Confirmed temp dirs: current context plus TMPDIR-unset fallback.
+
+    ``COMMAND_CENTER_HOUSEKEEPING_TEMP_DIR`` replaces discovery with one
+    explicit dir, so the keeper test sweeps a fixture instead of the
+    machine's real temp dirs.
+    """
+    override = os.environ.get(TEMP_DIR_ENV)
+    if override:
+        return [Path(override)]
+    roots = [
+        Path(tempfile.gettempdir()).resolve(),
+        Path(_tmpdir_without_tmpdir_env()).resolve(),
+    ]
+    seen = set()
+    ordered = []
+    for root in roots:
+        if str(root) not in seen:
+            seen.add(str(root))
+            ordered.append(root)
+    return ordered
+
+
+def temp_candidate_dirs(root: Path) -> List[Path]:
+    """Sorted ``muse-*`` real dirs directly under a temp root.
+
+    Skips symlinks, files and non-matching names. Non-recursive: temp
+    dirs sit flat in the temp dir.
+    """
+    found = []
+    try:
+        entries = list(os.scandir(root))
+    except OSError:
+        return []
+    for entry in entries:
+        try:
+            if entry.is_symlink():
+                continue
+            if not entry.is_dir(follow_symlinks=False):
+                continue
+        except OSError:
+            continue
+        if not fnmatch.fnmatch(entry.name, TEMP_PATTERN):
             continue
         found.append(Path(entry.path))
     found.sort()
@@ -921,6 +999,149 @@ def apply_log_trims(
         )
 
 
+def _dir_is_empty(path: Path) -> Optional[bool]:
+    """True when a dir holds no entries, None when it cannot be listed.
+
+    ``os.scandir`` never yields ``.`` or ``..``, so any first entry
+    proves non-empty. Uncertainty keeps, never deletes.
+    """
+    try:
+        with os.scandir(path) as entries:
+            for _entry in entries:
+                return False
+    except OSError:
+        return None
+    return True
+
+
+def plan_temp_sweep(
+    roots: List[Path],
+    now: Optional[float] = None,
+) -> List[Dict[str, object]]:
+    """Plan the empty temp-dir sweep across roots without touching anything.
+
+    Each row carries ``path``, ``size_bytes`` (always 0: removed dirs are
+    empty), ``action`` (``keep`` or ``would-delete``) and ``reason``.
+    Only ``muse-*`` dirs older than 24 h that are strictly empty and
+    owned by this user are marked ``would-delete``; everything else is
+    kept.
+    """
+    now = _utc_now() if now is None else float(now)
+    cutoff = now - TEMP_AGE_SECONDS
+    rows: List[Dict[str, object]] = []
+
+    for root in roots:
+        try:
+            entries = temp_candidate_dirs(root)
+        except OSError:
+            continue
+        for path in entries:
+            row: Dict[str, object] = {
+                "path": str(path),
+                "size_bytes": 0,
+                "action": "keep",
+                "reason": "",
+                "kind": "temp",
+            }
+            rows.append(row)
+            mtime = _dir_mtime(path)
+            if mtime is None:
+                row["reason"] = "unreadable; kept"
+                continue
+            if not root_owned_by_me(path):
+                row["reason"] = "not owned by this user; kept"
+                continue
+            if mtime >= cutoff:
+                row["reason"] = "younger than 24 hours; kept"
+                continue
+            empty = _dir_is_empty(path)
+            if empty is None:
+                row["reason"] = "could not list entries; kept"
+                continue
+            if not empty:
+                row["reason"] = "not empty; kept"
+                continue
+            row["action"] = "would-delete"
+            row["reason"] = "empty and older than 24 hours"
+
+    return rows
+
+
+def apply_temp_deletions(
+    rows: List[Dict[str, object]],
+    roots: List[Path],
+    log: "HousekeepingLog",
+    now: Optional[float] = None,
+) -> None:
+    """Remove ``would-delete`` temp rows that still verify, in place.
+
+    Each target is re-checked immediately before removal: still inside
+    a swept root, still on the internal disk, still a real dir owned by
+    this user, still old, still strictly empty. Removal is ``os.rmdir``,
+    which fails rather than recursing if the dir became non-empty after
+    the check; that race reads as a skip, never an error. Anything else
+    that fails revalidation is kept and logged instead.
+    """
+    now = _utc_now() if now is None else float(now)
+    cutoff = now - TEMP_AGE_SECONDS
+    for row in rows:
+        if row.get("action") != "would-delete":
+            continue
+        path = Path(str(row["path"]))
+
+        def _skip(reason: str) -> None:
+            row["action"] = "skip"
+            row["reason"] = reason
+            log.record(
+                "skip",
+                str(path),
+                int(row["size_bytes"]),
+                str(row["reason"]),
+            )
+
+        if path.is_symlink():
+            _skip("became a symlink before delete; kept")
+            continue
+        if not path.is_dir():
+            _skip("no longer a directory before delete; kept")
+            continue
+        if not any(_is_within(path, root) for root in roots):
+            _skip("no longer inside a swept root; kept")
+            continue
+        if not is_internal_disk(path):
+            _skip("not on the internal disk; kept")
+            continue
+        if not root_owned_by_me(path):
+            _skip("no longer owned by this user; kept")
+            continue
+        mtime = _dir_mtime(path)
+        if mtime is None or mtime >= cutoff:
+            _skip("written since the plan; kept")
+            continue
+        if _dir_is_empty(path) is not True:
+            _skip("no longer empty before delete; kept")
+            continue
+        try:
+            os.rmdir(path)
+        except OSError as exc:
+            if exc.errno in (errno.ENOTEMPTY, errno.EEXIST):
+                _skip("became non-empty before delete; kept")
+                continue
+            row["action"] = "error"
+            row["reason"] = "delete failed: {}".format(exc)
+            log.record(
+                "error",
+                str(path),
+                int(row["size_bytes"]),
+                str(row["reason"]),
+            )
+            continue
+        row["action"] = "delete"
+        log.record(
+            "delete", str(path), int(row["size_bytes"]), str(row["reason"])
+        )
+
+
 class HousekeepingLog:
     """Append-only ``key=value`` record of deletes, trims, skip-alerts and errors."""
 
@@ -1179,6 +1400,42 @@ def _resolve_log_roots(
     return roots, notes
 
 
+def _resolve_temp_roots(
+    explicit: List[str],
+) -> Tuple[List[Path], List[str]]:
+    """Temp roots: explicit ``--temp-root`` values or the confirmed discovery.
+
+    Returns ``(roots, notes)``; notes describe skipped roots for the table
+    header. Explicit SSD roots are refused outright; discovered problems
+    skip with a note. The root itself is not ownership-checked: ``/tmp``
+    is world-writable by design, so every candidate dir is checked
+    instead.
+    """
+    notes: List[str] = []
+    if explicit:
+        roots = []
+        for value in explicit:
+            root = Path(value)
+            if not is_internal_disk(root):
+                raise SystemExit(
+                    "housekeeping: refusing non-internal-disk temp root {}".format(
+                        value
+                    )
+                )
+            roots.append(root)
+        return roots, notes
+    roots = []
+    for root in temp_roots():
+        if not is_internal_disk(root):
+            notes.append("skipped non-internal temp root {}".format(root))
+            continue
+        if not root.is_dir():
+            notes.append("temp root not present {}".format(root))
+            continue
+        roots.append(root)
+    return roots, notes
+
+
 def run_pass(
     apply: bool = False,
     explicit_roots: Optional[List[str]] = None,
@@ -1187,17 +1444,18 @@ def run_pass(
     now: Optional[float] = None,
     explicit_log_roots: Optional[List[str]] = None,
     lsof: Optional[str] = None,
+    explicit_temp_roots: Optional[List[str]] = None,
 ) -> Tuple[
-    List[Dict[str, object]], int, bool, int, bool, List[str], bool
+    List[Dict[str, object]], int, bool, int, bool, List[str], bool, bool
 ]:
-    """Plan (and optionally apply) both sweeps; write log and warnings.
+    """Plan (and optionally apply) all sweeps; write log and warnings.
 
     Returns ``(rows, pytest_total, pytest_capped, log_total, log_capped,
-    notes, logs_swept)``. ``rows`` is pytest rows then log rows. Log
-    roots are explicit ``--log-root`` values, or the discovered
-    ``~/Library/Logs`` when pytest roots were also discovered; a pytest
-    explicit run sweeps no logs unless asked, so pytest fixtures stay
-    hermetic. Skip-alerts go to the housekeeping log and the brief
+    notes, logs_swept, temps_swept)``. ``rows`` is pytest rows, then log
+    rows, then temp rows. Log and temp roots are their explicit values,
+    or the discovered dirs when no sweep was scoped explicitly; an
+    explicit run sweeps only the sweeps it was asked for, so fixtures
+    stay hermetic. Skip-alerts go to the housekeeping log and the brief
     artifact in both modes.
     """
     roots, notes = _resolve_roots(list(explicit_roots or []))
@@ -1212,7 +1470,18 @@ def run_pass(
     else:
         log_roots_resolved, log_notes = _resolve_log_roots([])
         logs_swept = True
-    notes = list(notes) + list(log_notes)
+    if explicit_temp_roots is not None:
+        temp_roots_resolved, temp_notes = _resolve_temp_roots(
+            list(explicit_temp_roots)
+        )
+        temps_swept = True
+    elif explicit_roots is not None or explicit_log_roots is not None:
+        temp_roots_resolved, temp_notes = [], []
+        temps_swept = False
+    else:
+        temp_roots_resolved, temp_notes = _resolve_temp_roots([])
+        temps_swept = True
+    notes = list(notes) + list(log_notes) + list(temp_notes)
     log = HousekeepingLog(log_path)
     pytest_rows, pytest_total, pytest_capped = plan_pytest_sweep(
         roots, now=now
@@ -1220,9 +1489,11 @@ def run_pass(
     log_rows, log_total, log_capped = plan_log_sweep(
         log_roots_resolved, now=now, lsof=lsof
     )
+    temp_rows = plan_temp_sweep(temp_roots_resolved, now=now)
     if apply:
         apply_deletions(pytest_rows, roots, log)
         apply_log_trims(log_rows, log_roots_resolved, log, now=now, lsof=lsof)
+        apply_temp_deletions(temp_rows, temp_roots_resolved, log, now=now)
     warnings = capped_warnings(
         pytest_rows, roots, pytest_capped, now=now
     ) + log_capped_warnings(log_rows, log_roots_resolved, log_capped, now=now)
@@ -1235,13 +1506,14 @@ def run_pass(
         )
     write_brief_warnings(warnings, brief_path)
     return (
-        pytest_rows + log_rows,
+        pytest_rows + log_rows + temp_rows,
         pytest_total,
         pytest_capped,
         log_total,
         log_capped,
         notes,
         logs_swept,
+        temps_swept,
     )
 
 
@@ -1254,10 +1526,12 @@ def render_table(
     notes: List[str],
     apply: bool,
     logs_swept: bool = True,
+    temps_swept: bool = True,
 ) -> str:
-    """The ``path size action reason`` inventory table for both sweeps."""
-    pytest_rows = [row for row in rows if row.get("kind") != "log"]
+    """The ``path size action reason`` inventory table for all sweeps."""
+    pytest_rows = [row for row in rows if row.get("kind") == "pytest"]
     log_rows = [row for row in rows if row.get("kind") == "log"]
+    temp_rows = [row for row in rows if row.get("kind") == "temp"]
     lines = [
         "# housekeeping sweep ({})".format(
             "apply" if apply else "dry-run"
@@ -1277,6 +1551,12 @@ def render_table(
                 _format_bytes(LOG_PER_FILE_BYTES),
                 _format_bytes(LOG_TOTAL_CAP_BYTES),
                 "yes" if log_capped else "no",
+            )
+        )
+    if temps_swept:
+        lines.append(
+            "# temp {} muse-* dirs (remove only empty dirs older than 24 h)".format(
+                len(temp_rows)
             )
         )
     lines.extend("# note: {}".format(note) for note in notes)
@@ -1299,7 +1579,8 @@ def render_table(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Sweep pytest numbered-dir debris and trim command-center logs. "
+            "Sweep pytest numbered-dir debris, trim command-center logs "
+            "and remove empty muse-* temp dirs. "
             "Dry-run by default; --apply deletes and trims."
         )
     )
@@ -1328,6 +1609,16 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--temp-root",
+        action="append",
+        default=None,
+        dest="temp_root",
+        help=(
+            "sweep exactly this temp dir instead of discovering "
+            "the confirmed temp dirs (repeatable; internal disk only)"
+        ),
+    )
+    parser.add_argument(
         "--log",
         default=None,
         help="housekeeping log path (default: {})".format(LOG_ENV),
@@ -1351,12 +1642,14 @@ def main(argv: Optional[List[str]] = None) -> int:
             log_capped,
             notes,
             logs_swept,
+            temps_swept,
         ) = run_pass(
             apply=args.apply,
             explicit_roots=args.root,
             log_path=Path(args.log) if args.log else None,
             brief_path=Path(args.brief) if args.brief else None,
             explicit_log_roots=args.log_root,
+            explicit_temp_roots=args.temp_root,
         )
     except SystemExit as exc:
         print(str(exc), file=sys.stderr)
@@ -1374,6 +1667,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             notes,
             args.apply,
             logs_swept,
+            temps_swept,
         )
     )
     return 0

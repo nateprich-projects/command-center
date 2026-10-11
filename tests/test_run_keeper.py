@@ -954,11 +954,12 @@ def _seed_housekeeping(seed: Path, checkout: Path) -> None:
 
 
 def test_keeper_runs_the_housekeeping_inventory_once_an_hour(tmp_path):
-    """At :00 the keeper prints the dry-run sweep table (#2464).
+    """At :00 the keeper prints the dry-run sweep table (#2464, #2465).
 
     The sweep runs against the test session's real temp roots in dry-run,
-    which never deletes; its log and brief artifact are redirected into the
-    fixture home.
+    which never deletes or trims; its log and brief artifact are
+    redirected into the fixture home, and log discovery into an empty
+    fixture dir so the machine's real logs stay out of the assertion.
     """
     bare, checkout = make_heartbeat_remote(tmp_path)
     _seed_housekeeping(tmp_path / "seed", checkout)
@@ -966,6 +967,8 @@ def test_keeper_runs_the_housekeeping_inventory_once_an_hour(tmp_path):
     tools, _launchctl_log = make_tools(tmp_path)
     write_executable(tools / "date", "printf '%s\\n' 00\n")
 
+    empty_logs = tmp_path / "empty-logs"
+    empty_logs.mkdir()
     result = run_keeper(
         checkout,
         home,
@@ -979,11 +982,14 @@ def test_keeper_runs_the_housekeeping_inventory_once_an_hour(tmp_path):
             "COMMAND_CENTER_HOUSEKEEPING_BRIEF": str(
                 tmp_path / "housekeeping-brief.json"
             ),
+            "COMMAND_CENTER_HOUSEKEEPING_LOG_DIR": str(empty_logs),
         },
     )
 
     assert result.returncode == 0, result.stderr
-    assert "# housekeeping pytest sweep (dry-run)" in result.stdout
+    assert "# housekeeping sweep (dry-run)" in result.stdout
+    assert "# pytest total " in result.stdout
+    assert "# log total " in result.stdout
     assert "path\tsize_bytes\taction\treason" in result.stdout
     assert (tmp_path / "housekeeping-brief.json").is_file()
 
@@ -1012,5 +1018,5 @@ def test_keeper_skips_housekeeping_between_hours(tmp_path):
     )
 
     assert result.returncode == 0, result.stderr
-    assert "housekeeping pytest sweep" not in result.stdout
+    assert "housekeeping sweep" not in result.stdout
     assert not (tmp_path / "housekeeping-brief.json").exists()

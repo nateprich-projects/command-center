@@ -15,6 +15,7 @@
     "source": "command-center#239",
     "proposed_class_line": "Proposed class: Investigate",
     "body_excerpt": "The /rate_limit endpoint reported full headroom while a real GraphQL call on the same token returned Remaining 0, Used 5012.",
-    "possible_defect_line": "Possible defect: the /rate_limit endpoint reports a budget counter different from the one actual calls spend."
+    "possible_defect_line": "Possible defect: the /rate_limit endpoint reports a budget counter different from the one actual calls spend.",
+    "observed_symptom_line": "Observed symptom: a real GraphQL call on the same token returned Remaining 0, Used 5012."
   }
 }

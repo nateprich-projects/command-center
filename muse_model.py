@@ -29,11 +29,12 @@ CONTRIBUTOR_MODEL = "muse-spark-1.3-contributor"
 #: including one this module has never heard of.
 STANDARD_MODEL = "muse-spark-1.3"
 
-#: The repositories cleared for the contributor model, by bare name: repo
-#: tiers 1 and 3, never tier 2 (`funnel.REPO_TIERS`). #1987 retires the z.ai
-#: bridge without changing this canonical posture: the listed repos use
-#: ``CONTRIBUTOR_MODEL``; tier 2 and names outside this set use
-#: ``STANDARD_MODEL``.
+#: The repositories cleared for the contributor model, by bare name,
+#: restated independent of tiers (#2407): command-center, github-runners,
+#: workbench, Fantasy-GM, The-League and AFL. The #1570 posture is
+#: unchanged. #1987 retires the z.ai bridge without changing this
+#: canonical posture: the listed repos use ``CONTRIBUTOR_MODEL``; every
+#: other name uses ``STANDARD_MODEL``.
 #:
 #: Nate, 2026-09-26 (#1570): "So tier 1 and tier 3, but not tier 2." z.ai's
 #: standard tier had used its week in about 46 hours, and Muse cannot carry
@@ -44,16 +45,15 @@ STANDARD_MODEL = "muse-spark-1.3"
 #: two football repos before #1315 withdrew all three. `career-toolset` and
 #: `jeffy-finance-agent` carry real-world data and stay private.
 #:
-#: Named here rather than derived from the tiers: a repository new to the
-#: funnel is tier 3 by default, and it must not reach a training tier
-#: before anyone decided it should. A test holds tier 2 off this list.
+#: Named here, never derived from ``funnel.REPO_TIERS``: a repository new
+#: to the funnel must not reach a training tier before anyone decided it
+#: should. A test holds this exact list by name.
 #:
 #: Membership is exact. A near-miss spelling is not a member, because the
 #: failure it would otherwise cause cannot be withdrawn.
 CONTRIBUTOR_REPOS = frozenset({
-    # Tier 1 (`funnel.REPO_TIERS`).
+    # By repository name, independent of tiers (#2407, #2429).
     "command-center", "github-runners", "workbench",
-    # Tier 3 (`funnel.HOBBY_TIER`).
     "Fantasy-GM", "The-League", "AFL",
 })
 

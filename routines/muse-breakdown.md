@@ -17,20 +17,20 @@ breaking it at all?
 
 ## Sizing and coverage
 
-- One ticket is one run ending in one pull request, holding one concern with one way to tell it worked.
-- Split by behaviour, never by layer: every ticket works on its own.
-- When in doubt, err small: an extra PR is cheaper than a dead run.
-- Together, tickets deliver the stated outcome end to end, setup to
+- One ticket is one run ending in one pull request, holding one concern.
+- Split by behaviour, never by layer.
+- An extra PR is cheaper than a dead run.
+- Together, tickets deliver the stated outcome end to end,
   usable state, not one per heading.
 - Prefer tickets workable in any order; where order matters, record
   it in `depends_on`.
-- Sequence expand, migrate, contract only for a genuinely wide change, and make a needed refactor its own prefactor ticket, first; small work stays one ticket.
-- One indivisible plan is one ticket; say why in its body.
+- Sequence expand, migrate, contract only for a genuinely wide change; make a needed refactor its own prefactor ticket, first; small work stays one ticket.
+- One indivisible plan is one ticket.
 - For each `## Review focus` bullet, put one `Accept` test in its owning ticket; copy the text verbatim once.
 
 ## The answer
 
-Reply with exactly one JSON object and nothing else (no prose, no fences):
+Reply with exactly one JSON object and nothing else:
 
 {"tickets": [{"title": ..., "body": ..., "risk": "standard" | "escalated", "depends_on": [...], "needs": "none" | "human" | "claude-code-environment"}], "needs_decision": null | "question"}
 
@@ -46,10 +46,14 @@ Reply with exactly one JSON object and nothing else (no prose, no fences):
 - `depends_on` holds sibling indices into `tickets` from 0, or
   `owner/repo#n` refs to existing open issues; never the ticket
   itself, never a cycle.
-- `needs` is `none` for any-agent work; `claude-code-environment`
-  for other work a Claude Code session on the Mac mini can do (live
-  config, deploys, live runs, logs, `launchctl`, `sudo -n`, Keychain
-  reads, `osascript`); `human` for Nate's acts, such as:
+- `needs` is `none` for any-agent work: code, `gh` and the funnel's
+  own commands, `gh`-only readbacks, live runs, reads of logs,
+  journals and session stores, corpus replays. `claude-code-environment`
+  is capability, never reservation (a session reserves work by claiming
+  it), for live config, deploys, `launchctl` load, bootout or kickstart,
+  `sudo -n -u` jeffy/_personalops, Keychain reads, `~/.claude` skills,
+  routine prompts and statusline, Desktop scheduled tasks, `osascript`,
+  anything needing a Claude Code cloud thread. `human` for Nate's acts, such as:
   typing a secret, a new account, app or tunnel, a sign-in, a GUI
   consent prompt, an app UI with no API, billing, root code from a
   user-writable path, a decision, hands on hardware. One

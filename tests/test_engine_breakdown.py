@@ -86,6 +86,30 @@ def test_sizing_standard_routes_inferred_premises_before_the_build():
     assert "adds no label or field" in found
 
 
+def test_sizing_standard_carries_the_phase_path_and_implement_entry_rule():
+    """The sizing slice the packet sends carries #2407's phase path with its
+    linked-item send-back rule, and the phase vocabulary with Implement's
+    entry rule. Read from the slice, not the skill file: skill text outside
+    the sizing slice never reaches the model."""
+    found = breakdown.sizing_standard()
+    normalized = " ".join(found.replace("**", "").split())
+    assert ("frame, curate, describe, hypothesize, test, implement, verify"
+            in normalized)
+    assert "Its tickets stay inside that phase" in normalized
+    assert ("Send-back is a new linked item, never a sub-issue"
+            in normalized)
+    assert ("a new linked project idea in `Ideas`, classed for its phase "
+            "and linked back" in normalized)
+    assert ("A finished phase is never reopened with more tickets"
+            in normalized)
+    assert ("The phase vocabulary is `Curate`, `Describe`, `Hypothesize`, "
+            "`Test` and `Implement`" in normalized)
+    assert ("Implement needs a tested finding or Nate's explicit ask"
+            in normalized)
+    assert ("A cheap, reversible change may ship with its Verify check as "
+            "its test" in normalized)
+
+
 def test_sizing_standard_excludes_the_protocol_the_runner_owns():
     found = breakdown.sizing_standard()
     assert "gh issue create" not in found
@@ -577,6 +601,71 @@ def test_a_missing_depends_on_means_no_dependencies():
     assert errors == []
     assert normalized["tickets"][0]["depends_on"] == []
     assert seen == []
+
+
+# -- validation: mixed code-plus-Mac claude tickets warn, never block (#2489)
+
+MIXED_CLAUDE_BODY = (
+    "What: fix the ordering in engine/breakdown.py.\n\n"
+    "Accept: pytest passes; a live run shows the new order.")
+
+MAC_ONLY_BODY = (
+    "What: load the funnel-watch agent with launchctl kickstart "
+    "gui/501/com.nateprich.funnel-watch.\n\n"
+    "Accept: launchctl print shows the job running; read back the "
+    "session journal for the run outcome.")
+
+
+def test_a_mixed_code_plus_mac_claude_ticket_warns():
+    """#2489 reproduction: a claude-code-environment ticket holding code
+    changes warns, so the code can be split into a separate none ticket
+    with linked accept."""
+    ticket = raw_ticket(needs="claude-code-environment",
+                        body=MIXED_CLAUDE_BODY)
+    warnings = breakdown.mixed_claude_warnings([ticket])
+    assert len(warnings) == 1
+    assert "ticket 0" in warnings[0]
+    assert "separate" in warnings[0] and "none" in warnings[0]
+
+
+def test_a_mixed_claude_ticket_still_validates():
+    """The mixed-ticket warning never blocks: the answer stays
+    applicable (#2489)."""
+    errors, normalized, _ = validate({"tickets": [
+        raw_ticket(needs="claude-code-environment",
+                   body=MIXED_CLAUDE_BODY)]})
+    assert errors == []
+    assert normalized is not None
+
+
+def test_a_valid_mac_only_ticket_does_not_warn_or_block():
+    """A claude-code-environment ticket holding only the Mac step stays
+    silent and applicable."""
+    ticket = raw_ticket(needs="claude-code-environment",
+                        body=MAC_ONLY_BODY)
+    assert breakdown.mixed_claude_warnings([ticket]) == []
+    errors, normalized, _ = validate({"tickets": [ticket]})
+    assert errors == []
+    assert normalized is not None
+
+
+def test_a_code_ticket_filed_none_does_not_warn():
+    """Correctly filed code work is not the validator's business."""
+    ticket = raw_ticket(needs="none", body=MIXED_CLAUDE_BODY)
+    assert breakdown.mixed_claude_warnings([ticket]) == []
+
+
+def test_breakdown_guidance_states_the_split_rule():
+    """#2489: the breakdown guidance states the split rule — a
+    claude-code-environment ticket holds only the Mac step, with code in
+    a separate none ticket with linked accept. Read from the guidance
+    seam, not the validator: skills/breakdown/SKILL.md holds the full
+    split rule, while routines/muse-breakdown.md stays under its
+    500-word guard."""
+    guidance = (ROOT / "skills" / "breakdown" / "SKILL.md").read_text()
+    normalized = " ".join(guidance.split())
+    assert "holds only the Mac step" in normalized
+    assert "separate `none` ticket with linked accept" in normalized
 
 
 # -- validation: dependencies ---------------------------------------------------

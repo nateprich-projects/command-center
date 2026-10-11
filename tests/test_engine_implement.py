@@ -988,6 +988,233 @@ def test_done_with_diff_ignores_evidence(
     assert effects["finished"][0][:3] == ("codex", "run-42", "done")
 
 
+def verification_answer(base_sha):
+    return {
+        **answer(),
+        "verification": {
+            "base_sha": base_sha,
+            "tests": "python3 -m pytest tests/test_engine_implement.py -q: pass",
+            "files_checked": ["engine/implement.py"],
+        },
+    }
+
+
+def test_no_diff_with_verification_posts_one_comment_and_closes(
+        tmp_path, monkeypatch):
+    """An already-done ticket finishes in one run off a runner post (#2452)."""
+    _, clone = make_clone(tmp_path)
+    _stub_claim_state(monkeypatch, "empty")
+    monkeypatch.setattr(implement, "fetch_ticket", lambda repo, number: ticket(number))
+    monkeypatch.setattr(
+        heartbeat, "read_github",
+        lambda agent: [{"run": "run-42", "phase": "start", "ts": 1000}],
+    )
+    base = run_git("rev-parse", "origin/main", cwd=clone).stdout.strip()
+    url = (
+        "https://github.com/nateprich-projects/project/issues/12"
+        "#issuecomment-91"
+    )
+    monkeypatch.setattr(
+        funnel, "_gh_api_json",
+        lambda endpoint: {
+            "id": 91,
+            "user": {"login": "nateprich"},
+            "url": "https://api.github.com/repos/nateprich-projects/"
+                   "project/issues/comments/91",
+            "html_url": url,
+            "created_at": "1970-01-01T00:16:40Z",
+        },
+    )
+    posts = []
+    effects = {"comments": [], "closed": [], "released": [], "finished": []}
+
+    def verify(repo, number, body, *, run, agent, cwd):
+        posts.append((repo, number, body))
+        return url
+
+    result = implement.finish_done(
+        verification_answer(base),
+        run="run-42",
+        repo=REPO,
+        cwd=clone,
+        test_commands=[[sys.executable, "-c", "pass"]],
+        release=effects["released"].append,
+        heartbeat_finish=lambda *args: effects["finished"].append(args),
+        pr_effect=lambda *args: pytest.fail("no-diff completion must not open a PR"),
+        close_effect=lambda repo, number, *, cwd: effects["closed"].append(
+            (repo, number)),
+        comment_effect=lambda *args, **kwargs: effects["comments"].append(
+            (args, kwargs)),
+        verify_comment_effect=verify,
+    )
+
+    assert result == {
+        "number": 42,
+        "url": ticket(42)["url"],
+        "closed": True,
+    }
+    assert len(posts) == 1
+    assert effects["comments"] == []
+    repo, number, body = posts[0]
+    assert (repo, number) == (REPO, 42)
+    assert implement.NO_DIFF_VERIFICATION_MARKER in body
+    for field in (REPO + "#42", "run-42", base,
+                  "python3 -m pytest tests/test_engine_implement.py -q: pass",
+                  "engine/implement.py"):
+        assert field in body
+    assert effects["closed"] == [(REPO, 42)]
+    assert effects["released"] == [REPO + "#42"]
+    assert effects["finished"][0][:3] == ("codex", "run-42", "done")
+    assert url in effects["finished"][0][3]
+
+
+def test_no_diff_with_wrong_base_sha_posts_rejection_and_errors(
+        tmp_path, monkeypatch):
+    """A wrong proof re-errors with a superseding comment, no delete (#2452)."""
+    _, clone = make_clone(tmp_path)
+    _stub_claim_state(monkeypatch, "empty")
+    monkeypatch.setattr(implement, "fetch_ticket", lambda repo, number: ticket(number))
+    monkeypatch.setattr(
+        heartbeat, "read_github",
+        lambda agent: [{"run": "run-42", "phase": "start", "ts": 1000}],
+    )
+    monkeypatch.setattr(
+        funnel, "_gh_api_json",
+        lambda endpoint: pytest.fail("a rejected proof verifies nothing"),
+    )
+    effects = {"comments": [], "closed": [], "released": [], "finished": []}
+
+    with pytest.raises(
+        implement.ImplementError,
+        match="no-diff verification rejected",
+    ):
+        implement.finish_done(
+            verification_answer("0" * 40),
+            run="run-42",
+            repo=REPO,
+            cwd=clone,
+            test_commands=[[sys.executable, "-c", "pass"]],
+            release=effects["released"].append,
+            heartbeat_finish=lambda *args: effects["finished"].append(args),
+            close_effect=lambda *args, **kwargs: effects["closed"].append(args),
+            comment_effect=lambda repo, number, body, **kwargs: effects[
+                "comments"].append(body),
+            verify_comment_effect=lambda *args, **kwargs: pytest.fail(
+                "a rejected proof posts no verification"),
+        )
+
+    assert len(effects["comments"]) == 1
+    assert "claimed base SHA" in effects["comments"][0]
+    assert effects["closed"] == []
+    assert effects["released"] == []
+    assert effects["finished"] == []
+    assert (clone / "README.md").read_text() == "seed\n"
+
+
+def test_no_diff_without_verification_posts_nothing_and_errors(
+        tmp_path, monkeypatch):
+    """Missing verification still errors with no runner comment (#2453)."""
+    _, clone = make_clone(tmp_path)
+    _stub_claim_state(monkeypatch, "empty")
+    monkeypatch.setattr(implement, "fetch_ticket", lambda repo, number: ticket(number))
+    monkeypatch.setattr(
+        heartbeat, "read_github",
+        lambda agent: pytest.fail("missing verification must fail before the heartbeat read"),
+    )
+    effects = {"comments": [], "closed": [], "released": [], "finished": []}
+
+    with pytest.raises(
+        implement.ImplementError,
+        match="done answer produced no change and named no evidence",
+    ):
+        implement.finish_done(
+            answer(),
+            run="run-42",
+            repo=REPO,
+            cwd=clone,
+            test_commands=[[sys.executable, "-c", "pass"]],
+            release=effects["released"].append,
+            heartbeat_finish=lambda *args: effects["finished"].append(args),
+            close_effect=lambda *args, **kwargs: effects["closed"].append(args),
+            comment_effect=lambda *args, **kwargs: effects["comments"].append(
+                (args, kwargs)),
+            verify_comment_effect=lambda *args, **kwargs: pytest.fail(
+                "missing verification posts no verification comment"),
+        )
+
+    assert effects["comments"] == []
+    assert effects["closed"] == []
+    assert effects["released"] == []
+    assert effects["finished"] == []
+
+
+def test_diff_backed_done_with_verification_still_opens_pr(
+        tmp_path, monkeypatch):
+    """The diff path ignores verification and opens a PR as before (#2452)."""
+    _, clone = make_clone(tmp_path)
+    _stub_claim_state(monkeypatch, "empty")
+    (clone / "implemented.txt").write_text("done\n")
+    monkeypatch.setattr(
+        implement, "fetch_ticket", lambda repo, number: ticket(number))
+    monkeypatch.setattr(
+        heartbeat, "read_github",
+        lambda agent: pytest.fail("the diff path must ignore verification"),
+    )
+    base = run_git("rev-parse", "origin/main", cwd=clone).stdout.strip()
+    effects = {"released": [], "finished": []}
+
+    result = implement.finish_done(
+        verification_answer(base),
+        run="run-42",
+        repo=REPO,
+        cwd=clone,
+        test_commands=[[sys.executable, "-c", "pass"]],
+        release=effects["released"].append,
+        heartbeat_finish=lambda *args: effects["finished"].append(args),
+        pr_effect=lambda repo, context, found_ticket, body: {
+            "number": 91, "url": "https://github.com/owner/repo/pull/91"},
+        verify_comment_effect=lambda *args, **kwargs: pytest.fail(
+            "the diff path posts no verification comment"),
+    )
+
+    assert result["number"] == 91
+    assert effects["released"] == [REPO + "#42"]
+    assert effects["finished"][0][:3] == ("codex", "run-42", "done")
+
+
+def test_done_answer_accepts_a_verification_block():
+    base = "a" * 40
+    found = implement.parse_answer(json.dumps({
+        **answer(), "verification": {
+            "base_sha": base,
+            "tests": "pytest -q: pass",
+            "files_checked": ["engine/implement.py"],
+        },
+    }))
+    assert found["verification"] == {
+        "base_sha": base,
+        "tests": "pytest -q: pass",
+        "files_checked": ["engine/implement.py"],
+    }
+
+
+@pytest.mark.parametrize(
+    "verification",
+    ({"base_sha": "abc", "tests": "t",
+      "files_checked": ["f"]},
+     {"base_sha": "a" * 40, "tests": "  ",
+      "files_checked": ["f"]},
+     {"base_sha": "a" * 40, "tests": "t", "files_checked": []},
+     {"base_sha": "a" * 40, "tests": "t",
+      "files_checked": ["f"], "extra": "x"},
+     "verification"))
+def test_done_answer_rejects_a_malformed_verification_block(verification):
+    with pytest.raises(implement.ImplementError,
+                       match="answer verification"):
+        implement.parse_answer(json.dumps({
+            **answer(), "verification": verification}))
+
+
 def test_finish_ticket_pushes_opens_pr_releases_and_finishes(tmp_path, monkeypatch):
     remote, clone = make_clone(tmp_path)
     _stub_claim_state(monkeypatch, "empty")
@@ -2527,6 +2754,94 @@ def test_human_step_title_for_claude_code_environment_names_environment():
             "Claude Code environment step: Approve the OAuth app")
 
 
+MUSE_MAY_STEP_ACTIONS = [
+    # Live runs are any-agent work under the middle line (#2491).
+    "Do a live run of the funnel and post the heartbeat as evidence",
+    "Run the funnel live and post the evidence",
+    # Reads of logs, journals and session stores are any-agent work.
+    "Read the session logs to confirm the run finished",
+    "Read the usage journal for the window spend",
+    "Read the Muse session store for the failed run",
+    # Corpus replays are any-agent work.
+    "Replay the review corpus with both seeds",
+]
+
+
+@pytest.mark.parametrize("action", MUSE_MAY_STEP_ACTIONS)
+def test_muse_may_steps_no_longer_file_claude(action):
+    """Reproduction for #2491: a blocked step the middle line gives any
+    agent must not file claude-code-environment, even when the implementer
+    claims the Claude Code environment reason."""
+    assert implement.needs_for_human_step(
+        "a Claude Code environment", action) == "none"
+
+
+STILL_CLAUDE_STEP_ACTIONS = [
+    "Kickstart the funnel-watch agent",
+    "Load the replacement plist with launchctl load after bootout",
+    "Run sudo -n -u jeffy personal-ops-admin status",
+    "Read the deploy key from the Keychain without printing it",
+    "Deploy the new plist and confirm it loads",
+    "Edit the live config for the watch agent",
+    "Read the routine prompt in ~/.claude for the watch",
+    "Check the statusline after the reinstall",
+    "Run the osascript prompt for consent",
+    "Open a Claude Code cloud thread to approve the deploy",
+]
+
+
+@pytest.mark.parametrize("action", STILL_CLAUDE_STEP_ACTIONS)
+def test_genuine_mac_steps_still_file_claude(action):
+    """Steps on the still-Claude list keep filing claude-code-environment
+    (#2491): the middle line moves only the Muse-may steps."""
+    assert implement.needs_for_human_step(
+        "a Claude Code environment", action) == "claude-code-environment"
+
+
+@pytest.mark.parametrize("action", [
+    # Any-agent language beside a still-Claude signal stays Claude.
+    "Check the launchd logs after kickstart",
+    "Run the funnel live on the new plist and confirm it loads",
+    "Tail the session log after sudo -n -u jeffy restarts the job",
+    "Read the session log after _personalops restarts the job",
+])
+def test_still_claude_signal_wins_over_any_agent_language(action):
+    """A blocked step mixing any-agent language with genuine Mac work
+    stays claude-code-environment (#2491)."""
+    assert implement.needs_for_human_step(
+        "a Claude Code environment", action) == "claude-code-environment"
+
+
+@pytest.mark.parametrize("action", MUSE_MAY_STEP_ACTIONS)
+def test_nate_reasons_ignore_step_wording(action):
+    """Nate's four reasons always file human, whatever the action names:
+    the middle-line reroute applies only to the Claude reason (#2491)."""
+    assert implement.needs_for_human_step(
+        "entering a credential", action) == "human"
+
+
+def test_unrecognized_claude_step_keeps_session_needs():
+    """A Claude-claimed step matching neither list keeps the claimed
+    reason's Needs: the matcher is heuristic, so unknown steps stay
+    where the implementer put them (#2491)."""
+    assert implement.needs_for_human_step(
+        "a Claude Code environment", "Approve the OAuth app") == (
+            "claude-code-environment")
+
+
+def test_human_step_body_names_any_agent_for_none_needs():
+    """A rerouted step names any agent as its actor, never Nate and never
+    a Claude session (#2491)."""
+    body = implement.render_human_step_body(
+        parent_number=7, ticket_number=42,
+        reason="a Claude Code environment",
+        action="Do a live run of the funnel",
+        needs="none",
+    )
+    assert "Action any agent must perform: Do a live run of the funnel." in (
+        body)
+
+
 def _four_hundred_char_action() -> str:
     """A ~400-character word-separated action like the one that failed #2340."""
     return " ".join("step-{:03d}".format(n) for n in range(50))
@@ -2909,6 +3224,61 @@ def test_finish_blocked_on_human_files_the_step_for_its_reason(
               if needs == "claude-code-environment" else "Human step")
     assert titles == ["{}: Kickstart the job".format(prefix)]
     assert "Action {} must perform: Kickstart the job.".format(actor) in body
+
+
+@pytest.mark.parametrize("action", MUSE_MAY_STEP_ACTIONS)
+def test_finish_blocked_on_human_routes_muse_may_step_to_none(
+        tmp_path, monkeypatch, action):
+    """End to end for #2491: a live run, log/journal/session-store read or
+    corpus replay claimed as Claude work files Needs=none through the
+    any-agent effect, titled and bodied for any agent, never for Claude."""
+    from engine import breakdown as breakdown_engine
+
+    _, clone = make_clone(tmp_path)
+    monkeypatch.setattr(implement, "fetch_ticket", lambda repo, number: ticket(number))
+    fields = []
+    monkeypatch.setattr(
+        breakdown_engine, "add_to_project", lambda url: "step-item-id")
+    monkeypatch.setattr(
+        funnel, "write_project_select",
+        lambda item_id, field, value, ref: fields.append(
+            (item_id, field, value, ref)))
+    monkeypatch.setattr(
+        breakdown_engine, "write_needs",
+        lambda item_id, value, ref: fields.append(
+            (item_id, "Needs", value, ref)))
+    titles = []
+    bodies = []
+
+    def create(repo, parent, title, body, **kwargs):
+        titles.append(title)
+        bodies.append(body)
+        return {"number": 43, "ref": "{}#43".format(repo),
+                "url": "https://github.com/{}/issues/43".format(repo)}
+
+    implement.finish_blocked_on_human(
+        blocked(reason="a Claude Code environment",
+                action=action)["blocked_on_human"],
+        run="run-42", repo=REPO, cwd=clone,
+        release=lambda ref: None,
+        heartbeat_finish=lambda *args: None,
+        create_effect=create,
+        block_effect=lambda *args, **kwargs: None,
+        comment_effect=lambda *args, **kwargs: None,
+        sub_issues_effect=lambda repo, number: [],
+    )
+
+    assert fields == [
+        ("step-item-id", "Origin", "agent", REPO + "#43"),
+        ("step-item-id", "Risk", "standard", REPO + "#43"),
+        ("step-item-id", "Needs", "none", REPO + "#43"),
+    ]
+    title, = titles
+    assert title == "Human step: {}".format(action)
+    body, = bodies
+    assert "Action any agent must perform: {}.".format(
+        action.rstrip().rstrip(".")) in body
+    assert "a Claude Code session on the Mac mini" not in body
 
 
 def test_finish_blocked_on_human_requires_a_parent(tmp_path, monkeypatch):
@@ -5638,6 +6008,7 @@ def test_finish_git_invocation_sites_match_the_recorded_inventory():
         ("rev-parse", "--show-toplevel"): 2,
         ("rev-parse", "HEAD"): 2,
         ("rev-parse", "--verify"): 2,
+        ("rev-parse", "origin/main"): 1,
         ("branch", "--show-current"): 2,
         ("status", "--porcelain"): 1,
         ("remote", "get-url"): 2,
@@ -5656,8 +6027,8 @@ def test_finish_git_invocation_sites_match_the_recorded_inventory():
     assert actual == expected
 
     inventory = (ROOT / "docs" / "finish-subprocess-bounds.md").read_text()
-    assert "28 bounded Git callsites" in inventory
-    assert "27 static callsites" in inventory
+    assert "29 bounded Git callsites" in inventory
+    assert "28 static callsites" in inventory
     for command in (
         "git diff --name-only -z",
         "git diff --cached --name-only -z",
@@ -5672,6 +6043,7 @@ def test_finish_git_invocation_sites_match_the_recorded_inventory():
         "git merge -s ours",
         "git push --set-upstream origin",
         "git rev-parse HEAD",
+        "git rev-parse origin/main",
         "git commit --only -m [human-step-wip] -- <tracked paths>",
         "make",
         "python3 -m pytest",

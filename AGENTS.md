@@ -350,6 +350,12 @@ key, or reorder queue items yourself. See `plan.md`, "Domains and phases".
   runs until the clock or the provider's own limit stops it and never reads usage;
   `begin` enforces its Saturday-before-11:15 window instead. See `plan.md`, "Budget".
   _(Nate, 2026-09-25, #1557.)_
+- **Exception: the Claude Code Projects overseer routines have no budget gate.**
+  The daily routines for The League, AFL and command-center (#2418) run as cloud
+  threads, which cannot read Nate's Claude usage — plan usage reaches only a
+  terminal session's status line — so they run until the clock or the provider's
+  own limit stops them and never read usage. Check, then exception forever if
+  needed. _(confirmed by Nate 2026-10-09.)_
 
 - **Analysis waits for Nate by default:** projects whose tickets change no behaviour never close themselves, whatever their class, and reach `Accept it?` only after findings are posted on the parent issue; see `plan.md`, "Building completion and automatic acceptance", rule 5.
 

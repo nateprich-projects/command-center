@@ -526,6 +526,59 @@ def validate_answer(answer: object, issue_state: Callable[[str], Optional[str]],
     return [], {"tickets": tickets, "needs_decision": question}
 
 
+#: Best-effort code-change signals for the mixed-ticket warning (#2489):
+#: in-checkout paths, the test runner, and change language a pure Mac
+#: step never needs. Mac-step language (`launchctl`, `sudo -n`, Keychain,
+#: `osascript`, Desktop tasks, `~/.claude` paths, `gh`-only readbacks) is
+#: deliberately absent, so a valid Mac-only ticket stays silent. The list
+#: is heuristic — hence warn, never block.
+CODE_CHANGE_RES = (
+    re.compile(r"\b(?:engine|skills|routines|tests|scripts|dashboard)/\S+"),
+    re.compile(r"\.py\b"),
+    re.compile(r"(?i)\b(?:pytest|pull request|diff|code changes?|code fix"
+               r"|refactor|implement the fix|migration)\b"),
+)
+
+
+def _looks_like_code_work(text: object) -> bool:
+    """Whether ticket text reads like it holds in-checkout code changes."""
+    if not isinstance(text, str):
+        return False
+    return any(pattern.search(text) for pattern in CODE_CHANGE_RES)
+
+
+def mixed_claude_warnings(tickets: Sequence[dict]) -> List[str]:
+    """Warn about claude-code-environment tickets that hold code (#2489).
+
+    A `claude-code-environment` ticket holds only the Mac step, with its
+    code in a separate `none` ticket with linked accept; a bundled
+    code-plus-Mac ticket under one label forces pure code onto Claude.
+    The check reads ticket text for code-change signals, which is
+    heuristic, so it returns warnings and never blocks: validation still
+    accepts the answer, and a valid Mac-only ticket yields no warning.
+    """
+    warnings = []
+    for index, ticket in enumerate(tickets or []):
+        if not isinstance(ticket, dict):
+            continue
+        if ticket.get("needs") != "claude-code-environment":
+            continue
+        title = ticket.get("title")
+        body = ticket.get("body")
+        text = " ".join(
+            part for part in (
+                title if isinstance(title, str) else "",
+                body if isinstance(body, str) else "",
+            ) if part)
+        if _looks_like_code_work(text):
+            warnings.append(
+                "ticket {} ({!r}) needs claude-code-environment but reads "
+                "like it holds code changes: split the code into a separate "
+                "none ticket with linked accept, leaving only the Mac step "
+                "here".format(index, title))
+    return warnings
+
+
 def creation_order(tickets: Sequence[dict]) -> List[int]:
     """List ticket indices so every blocker is created before its dependent.
 
@@ -1075,6 +1128,12 @@ def apply_main(argv: Optional[Sequence[str]] = None) -> int:
             print("breakdown-apply: {}".format(error), file=sys.stderr)
         return validation_exit(args.attempt)
     assert normalized is not None
+    # The mixed-ticket check warns and never blocks (#2489): a
+    # claude-code-environment ticket holding code is misfiled, but the
+    # signal is heuristic, so it rides on stderr with the exit unchanged.
+    for warning in mixed_claude_warnings(normalized["tickets"]):
+        print("breakdown-apply: warning: {}".format(warning),
+              file=sys.stderr)
     if args.validate_only:
         print(json.dumps(normalized, indent=2, sort_keys=True))
         return 0

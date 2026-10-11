@@ -87,6 +87,7 @@ from block_record import (
 )
 import nightly_watch
 import price_watch
+import housekeeping
 
 # --------------------------------------------------------------------------
 # Configuration. These are the only knobs; everything else is derived.
@@ -411,12 +412,8 @@ ASSIGNABLE_CLASSES = frozenset(
     klass for klass in LADDER if klass not in LEGACY_CLASSES
 )
 
-#: The five decision-first phases (#2407, #2425). For later tickets: ordering,
-#: shape and accept decide their rules; this ticket only makes them
-#: assignable options.
-PHASE_CLASSES = frozenset(
-    {"Curate", "Describe", "Hypothesize", "Test", "Implement"}
-)
+#: The five decision-first phases live in ``PHASE_CLASSES`` below and in
+#: ``LADDER`` above (#2407, #2425); one definition serves both.
 
 
 def normalize_class(klass: Optional[str]) -> Optional[str]:
@@ -557,6 +554,20 @@ def domain_default(repo: str) -> Optional[str]:
 #: and urgent work and Bugs stay outside slots. Slots gate entry only, so
 #: an over-cap domain's in-flight projects finish first.
 DOMAIN_SLOTS = 2
+
+#: The five phases (#2407). Improve, New and Replace give way to these;
+#: Improve is renamed to Implement, New and Replace stay as legacy options
+#: that take no new assignments until their open items close (#2425).
+#: Phase work leaves the ladder and tiers: domains with free slots take
+#: turns (#2429). The phases sit in LADDER as well, so the ladder and the
+#: turn logic read the same options.
+PHASE_CLASSES = ("Curate", "Describe", "Hypothesize", "Test", "Implement")
+
+#: Interim domains with no overseer (#2407, #2429). Only urgent work,
+#: Bugs and Nate's explicit asks enter them until he gives one an
+#: overseer. workbench is tier 1, career-toolset and jeffy-finance-agent
+#: tier 2; the gate names domains, never tiers.
+INTERIM_DOMAINS = ("workbench", "career-toolset", "jeffy-finance-agent")
 PREEMPTING = {"Broken", "Maintenance"}
 
 #: Existing-work classes and finite investigations may take the unattended
@@ -785,6 +796,51 @@ ORIGIN_VOICES = ("nate-relayed", "agent")
 # work, they must reach the human acceptance gate regardless of Class or origin.
 ANALYSIS_MARKER = "<!-- command-center-analysis -->"
 
+#: Accept sign-off lines (#2407, #2431). Body lines, case-insensitive, each
+#: requiring a colon and a non-blank value — the same shape as the Implement
+#: basis lines in ``engine/shape.py``. A blank citation cites nothing.
+#: Phase names are the ``PHASE_CLASSES`` options (#2407, #2425).
+_ACCEPT_TOP_GOAL_RE = re.compile(r"\btop[\s-]+goal\b\s*:\s*\S", re.IGNORECASE)
+_ACCEPT_KPI_RE = re.compile(r"\bkpi\b[^:\n]*:\s*\S", re.IGNORECASE)
+_ACCEPT_LIVE_ADVICE_RE = re.compile(r"\blive[\s-]+advice\b", re.IGNORECASE)
+_ACCEPT_EXPLICIT_ASK_RE = re.compile(
+    r"\bexplicit[\s-]+ask\b\s*:\s*\S", re.IGNORECASE)
+_ACCEPT_AUTONOMY_CLIMB_RE = re.compile(
+    r"\bautonomy[\s-]+climb\b\s*:\s*\S", re.IGNORECASE)
+
+
+def _accept_has_top_goal(body: object) -> bool:
+    """Whether a body names a domain top goal (#2407, #2431)."""
+    if not isinstance(body, str):
+        return False
+    return any(
+        _ACCEPT_TOP_GOAL_RE.search(line) for line in body.splitlines())
+
+
+def _accept_has_kpi_judged_by_live_advice(body: object) -> bool:
+    """Whether a body changes a KPI that live advice is judged by."""
+    if not isinstance(body, str):
+        return False
+    if not any(_ACCEPT_KPI_RE.search(line) for line in body.splitlines()):
+        return False
+    return bool(_ACCEPT_LIVE_ADVICE_RE.search(body))
+
+
+def _accept_has_explicit_ask_line(body: object) -> bool:
+    """Whether a body cites Nate's explicit ask as its basis."""
+    if not isinstance(body, str):
+        return False
+    return any(
+        _ACCEPT_EXPLICIT_ASK_RE.search(line) for line in body.splitlines())
+
+
+def _accept_has_autonomy_climb(body: object) -> bool:
+    """Whether a body records an autonomy climb."""
+    if not isinstance(body, str):
+        return False
+    return any(
+        _ACCEPT_AUTONOMY_CLIMB_RE.search(line) for line in body.splitlines())
+
 # A capture may carry the earlier PR or ticket that caused the idea. Keep this
 # separate from capture origin: origin says who raised it, while this marker
 # says what the work is a response to. The brief uses the marker as durable
@@ -958,6 +1014,7 @@ BRIEF_PURE_SECTIONS = frozenset({
     "price_changes",
     "model_releases",
     "watch_faults",
+    "housekeeping_warnings",
 })
 
 # No brief section feeds a gate any more: the merge gate reads the
@@ -1756,6 +1813,9 @@ def _gate_route(
     if item.status == "Shaped":
         # The shape writer holds on these recorded conditions. Unknown fields
         # fail closed to Nate, in keeping with the owner-table precedent.
+        # An explicit ask waits here too: both its plan and its result are
+        # Nate's gates (#2407, #2431). A pin is the ask; the body line is
+        # the plan's citation of it, as shape writes it.
         waits_for_nate = (
             item.origin not in ORIGIN_OPTIONS
             or item.risk not in RISK_OPTIONS
@@ -1763,6 +1823,8 @@ def _gate_route(
             or item.needs == "human"
             or item.risk == "escalated"
             or item.origin == "Nate"
+            or item.pinned
+            or _accept_has_explicit_ask_line(item.body)
         )
         if not waits_for_nate:
             return None
@@ -1789,9 +1851,22 @@ def _acceptance_waiting_reason(
     """Explain why a completed Building project is still awaiting acceptance."""
     if question != GATES["Building"]:
         return None
-    body = item.body if isinstance(item.body, str) else ""
+    body = getattr(item, "body", None)
+    body = body if isinstance(body, str) else ""
     if parse_analysis_marker(body) is not None:
         return "Analysis review"
+    # Sign-off reasons, most specific first (#2407, #2431). Test is the
+    # ``PHASE_CLASSES`` option (#2425).
+    if getattr(item, "klass", None) == "Test":
+        return "Finished test"
+    if _accept_has_top_goal(body):
+        return "Top goal"
+    if _accept_has_kpi_judged_by_live_advice(body):
+        return "KPI change"
+    if getattr(item, "pinned", False) or _accept_has_explicit_ask_line(body):
+        return "Explicit ask"
+    if _accept_has_autonomy_climb(body):
+        return "Autonomy climb"
     return "Ordinary accept"
 
 
@@ -1996,16 +2071,91 @@ def domain_slot_counts(items: Sequence[Item]) -> Dict[str, int]:
     return counts
 
 
+def is_phase_class(klass: Optional[str]) -> bool:
+    """Whether a Class value is one of the five phases (#2407, #2429)."""
+    return klass in PHASE_CLASSES
+
+
+def is_phase_work(item: Item, by_ref: Dict[str, Item]) -> bool:
+    """Whether an item does phase work: its effective Class is a phase.
+
+    Direct, like ``_is_slot_urgent``: a ticket that blocks phase work
+    ranks with it for ordering (``queue_classes``) but is not itself
+    phase work for gating. Turn eligibility in ``_order_startable_items``
+    uses the ranked class instead, so a phase ticket that blocks finite
+    work goes with that work outside turns.
+    """
+    return effective_class(item, by_ref) in PHASE_CLASSES
+
+
+def is_explicit_ask(item: Item, by_ref: Optional[Mapping[str, Item]] = None,
+                    ) -> bool:
+    """Whether an item is Nate's explicit ask (#2407, #2429).
+
+    An explicit ask ("do this now", "file it", "pin it") is a pin: the
+    ticket or its project carries it, and ``_pinned_ancestor`` is the
+    existing read of that call. A thought he tosses in carries his voice
+    (origin Nate) but no pin, so it carries no boost: ordering never
+    reads origin. Asking about it later does not move it either: turns
+    read since, repo and number, never comment or body recency.
+    """
+    seen: Set[str] = set()
+    current: Optional[Item] = item
+    table = by_ref or {}
+    while current is not None and current.ref not in seen:
+        if current.pinned:
+            return True
+        seen.add(current.ref)
+        parent_ref = current.parent or ""
+        current = table.get(parent_ref) if parent_ref else None
+    return False
+
+
+def is_interim_domain(domain: Optional[str]) -> bool:
+    """Whether a domain is interim: no overseer yet (#2407, #2429)."""
+    return domain in INTERIM_DOMAINS
+
+
+def interim_entry_allowed(items: Sequence[Item], ticket: Item) -> bool:
+    """Whether a ticket clears the interim gate (#2407, #2429).
+
+    Interim domains (workbench, career-toolset, jeffy-finance-agent)
+    admit only urgent work, Bugs and Nate's explicit asks until he gives
+    one an overseer. In-flight work is already inside, so it always
+    clears; only a new entry (a parent still Ready) is gated. Urgent is
+    the direct effective class (``_is_slot_urgent``), as slots read it:
+    a ticket that blocks a Broken one still needs its own ask. Waiting
+    on Nate is uncapped and clears, like slots. Unattributable domains
+    clear rather than block, like slots.
+    """
+    by_ref = {item.ref: item for item in items}
+    parent = by_ref.get(ticket.parent or "")
+    if parent is None or parent.status != "Ready":
+        return True
+    domain = effective_domain(ticket, by_ref)
+    if domain not in DOMAIN_OPTIONS or domain not in INTERIM_DOMAINS:
+        return True
+    klass = effective_class(ticket, by_ref)
+    if klass == "Bug" or _is_slot_urgent(ticket, by_ref):
+        return True
+    if _waits_on_nate(ticket, by_ref) or _waits_on_nate(parent, by_ref):
+        return True
+    return is_explicit_ask(ticket, by_ref)
+
+
 def domain_entry_allowed(items: Sequence[Item], ticket: Item) -> bool:
-    """Whether a ticket may start under its domain's entry-only cap (#2428).
+    """Whether a ticket may start under its domain's gates (#2428, #2429).
 
     In-flight work (a parent already Building) is always allowed, even
     over cap: slots gate entry only, so over-cap projects finish first.
-    Only a new entry (a parent still Ready) blocks, and only when its
-    domain already holds ``DOMAIN_SLOTS`` agent-movable projects. Urgent
-    (Broken), Bugs and waiting-on-Nate are outside or uncapped. Pins,
-    tiers, turns and interim gating are out of scope here and change
-    nothing: a pinned new entry still blocks when its domain is full.
+    Only a new entry (a parent still Ready) blocks. Interim domains
+    admit only urgent work, Bugs and explicit asks
+    (``interim_entry_allowed``); every domain blocks a new entry while
+    it holds ``DOMAIN_SLOTS`` agent-movable projects. Urgent (Broken),
+    Bugs and waiting-on-Nate are outside or uncapped. An explicit ask
+    takes its domain's next free slot ahead of anything waiting
+    (turns), but a pinned new entry still blocks when its domain is
+    full: asks jump the queue, never the cap.
     """
     by_ref = {item.ref: item for item in items}
     parent = by_ref.get(ticket.parent or "")
@@ -2019,7 +2169,185 @@ def domain_entry_allowed(items: Sequence[Item], ticket: Item) -> bool:
         return True
     if _waits_on_nate(ticket, by_ref) or _waits_on_nate(parent, by_ref):
         return True
+    if not interim_entry_allowed(items, ticket):
+        return False
     return domain_slot_counts(items).get(domain, 0) < DOMAIN_SLOTS
+
+
+def _turn_since(item: Item) -> datetime:
+    """When a turn candidate started waiting: the queue's own clock."""
+    return (question_since(item) or item.status_since or item.created_at
+            or datetime.max.replace(tzinfo=timezone.utc))
+
+
+def _turn_hypothesis_payload(
+    item: Item,
+    hypotheses: Optional[Mapping[str, Any]],
+) -> Dict[str, Any]:
+    """One shared-scorer payload for a turn candidate (#2407, #2429).
+
+    The payload carries the ticket's ref as ``key`` so the scorer's
+    stable order maps back to tickets. A ticket with an entry in
+    ``hypotheses`` — by its own ref, else its parent's — carries the
+    overseer's estimates; any other ticket carries no estimates and
+    scores zero, tying with every other unscored ticket so age still
+    decides among them. Accepts the same shapes the scorer does:
+    mappings, ``Hypothesis`` records, or objects with estimate
+    attributes.
+    """
+    entry: Any = None
+    if hypotheses:
+        entry = hypotheses.get(item.ref)
+        if entry is None and item.parent:
+            entry = hypotheses.get(item.parent)
+    if entry is None:
+        return {"key": item.ref}
+    if isinstance(entry, Mapping):
+        payload = dict(entry)
+        payload["key"] = item.ref
+        return payload
+    payload = normalize_hypothesis(entry).to_dict()
+    payload["key"] = item.ref
+    return payload
+
+
+def _scorer_admission_ranks(
+    rows: Sequence[Item],
+    hypotheses: Optional[Mapping[str, Any]],
+) -> Dict[str, int]:
+    """Ticket refs in shared-scorer admission order (#2407, #2429).
+
+    Calls ``order_hypotheses`` over one payload per row and returns
+    ``ref -> rank``, lowest rank first. Rows are pre-sorted by age so
+    the scorer's stable order keeps oldest-first among ties: unscored
+    tickets all score zero, so without estimates this is exactly age
+    order and the scorer changes nothing.
+    """
+    presorted = sorted(
+        rows, key=lambda item: (_turn_since(item), item.repo, item.number))
+    payloads = [_turn_hypothesis_payload(item, hypotheses)
+                for item in presorted]
+    ordered = order_hypotheses(payloads)
+    return {payload["key"]: rank
+            for rank, payload in enumerate(ordered)}
+
+
+def _phase_turn_positions(
+    items: Sequence[Item],
+    candidates: Sequence[Item],
+    hypotheses: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Tuple[int, int, int]]:
+    """Round-robin positions for phase-turn candidates (#2407, #2429).
+
+    Returns ``ref -> (round, domain_rank, within_rank)`` for every
+    phase-ranked (``queue_classes`` in ``PHASE_CLASSES``), attributable,
+    non-preempting ticket candidate. Projects never take turns. Within
+    each domain, explicit asks go
+    first, then a blocker before its dependent (``-len(descendants)``),
+    then the shared scorer's admission order (``order_hypotheses``
+    over each ticket's hypothesis estimates; tickets without estimates
+    score zero and keep age order), then oldest, repo, number. Domains
+    go oldest-waiting first, then by name. Rounds interleave: every
+    domain's first, then every domain's second, so equal domains take
+    equal turns. Urgent and Bugs never rank as phases, so they stay
+    outside turns. Tickets carry no scores themselves; estimates arrive
+    with the overseer's ``hypotheses``, keyed by ticket or parent ref.
+    """
+    by_ref = {item.ref: item for item in items}
+    descendants = dependency_descendants(items)
+    ranked_as = queue_classes(items, descendants)
+    preempting = {
+        ref: _preempts(ref, by_ref, descendants) for ref in by_ref
+    }
+    eligible = [
+        item for item in candidates
+        if item.parent is not None
+        and ranked_as.get(item.ref) in PHASE_CLASSES
+        and effective_domain(item, by_ref) in DOMAIN_OPTIONS
+        and not preempting.get(item.ref, False)
+    ]
+    by_domain: Dict[str, List[Item]] = {}
+    for item in eligible:
+        domain = effective_domain(item, by_ref)
+        assert domain is not None
+        by_domain.setdefault(domain, []).append(item)
+    for rows in by_domain.values():
+        ranks = _scorer_admission_ranks(rows, hypotheses)
+        rows.sort(key=lambda item: (
+            0 if is_explicit_ask(item, by_ref) else 1,
+            -len(descendants.get(item.ref, set())),
+            ranks[item.ref],
+            _turn_since(item),
+            item.repo,
+            item.number,
+        ))
+    ordered_domains = sorted(
+        by_domain,
+        key=lambda domain: (
+            min(_turn_since(item) for item in by_domain[domain]),
+            domain,
+        ),
+    )
+    domain_rank = {domain: rank for rank, domain in enumerate(ordered_domains)}
+    positions: Dict[str, Tuple[int, int, int]] = {}
+    for domain, rows in by_domain.items():
+        for within_rank, item in enumerate(rows):
+            positions[item.ref] = (
+                within_rank, domain_rank[domain], within_rank)
+    return positions
+
+
+def phase_turn_order(
+    items: Sequence[Item],
+    candidates: Optional[Sequence[Item]] = None,
+    hypotheses: Optional[Mapping[str, Any]] = None,
+) -> List[Item]:
+    """Phase candidates in domain-turn order, asks first (#2407, #2429).
+
+    Pure over fixtures. ``items`` is the loaded view (projects and
+    tickets) that domains, ranks and pins read from; ``candidates``
+    defaults to the tickets among it, since projects never take turns.
+    ``hypotheses`` carries the overseer's estimates keyed by ticket or
+    parent ref; within each domain, after asks and blockers, tickets
+    follow the shared scorer's admission order over them.
+    Only phase-ranked, attributable, non-preempting tickets take turns;
+    every other candidate keeps its input order after them. Asks (pins)
+    lead globally, as ``startable()`` ranks them, with turns ordering
+    each pin level: an ask takes its domain's next free slot ahead of
+    anything waiting there, and domains with free slots rotate. No repo
+    tier enters the key. Urgent and Bugs are outside turns by rank.
+    """
+    if candidates is None:
+        candidates = [item for item in items if item.parent is not None]
+    rows = list(candidates)
+    positions = _phase_turn_positions(items, rows, hypotheses)
+    by_ref = {item.ref: item for item in items}
+
+    def key(item: Item):
+        position = positions.get(item.ref)
+        if position is None:
+            return (1, 0, 0, 0, _turn_since(item), item.repo, item.number)
+        ask = 0 if is_explicit_ask(item, by_ref) else 1
+        return (0, ask, position[0], position[1], position[2],
+                _turn_since(item), item.repo, item.number)
+
+    return sorted(rows, key=key)
+
+
+#: Alias spellings for the admission seam (#2429).
+is_phase = is_phase_class
+is_nate_explicit_ask = is_explicit_ask
+is_explicit_nate_ask = is_explicit_ask
+explicit_ask = is_explicit_ask
+is_interim = is_interim_domain
+interim_allowed = interim_entry_allowed
+interim_admission_allowed = interim_entry_allowed
+domain_turn_order = phase_turn_order
+turn_order = phase_turn_order
+order_by_turns = phase_turn_order
+phase_admission_order = phase_turn_order
+domain_admission_order = phase_turn_order
+admission_turn_order = phase_turn_order
 
 
 def watch_gate_json(
@@ -3305,7 +3633,8 @@ def _startable_without_repo_readiness(
     # tickets." `Building` is not a precondition for work but the record that
     # work began — `cmd_claim` writes it on the first claim. A parent without a
     # valid Class is the plan.md-invalid, not-startable case; do not let its
-    # residual ticket silently promote it to Building.
+    # residual ticket silently promote it to Building. Phases (#2407, #2429)
+    # sit in LADDER; Improve reads as Implement (#2425).
     return (
         parent.status in ("Ready", "Building")
         and normalize_class(parent.klass) in LADDER
@@ -3886,15 +4215,10 @@ def _pinned_ancestor(item: Item, by_ref: Mapping[str, Item]) -> bool:
     Broken work while he asked why (#673). It now outranks the ladder's
     default order. It orders and nothing more -- the WIP-cap preemption
     stays with the finite classes, and a pin never unblocks or unlocks.
+    The same predicate is Nate's explicit ask (``is_explicit_ask``,
+    #2429); one implementation serves both names.
     """
-    seen: Set[str] = set()
-    current: Optional[Item] = item
-    while current is not None and current.ref not in seen:
-        if current.pinned:
-            return True
-        seen.add(current.ref)
-        current = by_ref.get(current.parent or "")
-    return False
+    return is_explicit_ask(item, by_ref)
 
 
 def startable(
@@ -4107,13 +4431,26 @@ def _filter_prequalified_startable_items(
 
 def _order_startable_items(
     items: Sequence[Item], candidates: Sequence[Item],
+    hypotheses: Optional[Mapping[str, Any]] = None,
 ) -> List[Item]:
-    """Order already-filtered candidates against the complete loaded view."""
+    """Order already-filtered candidates against the complete loaded view.
+
+    Phase work (#2407, #2429) leaves the ladder and tiers: attributable,
+    non-preempting phase-ranked tickets take domain turns
+    (``_phase_turn_positions``), with the Building commitment first and
+    no tier or ladder rung in the key. Within each domain, after asks
+    and blockers, tickets follow the shared scorer's admission order
+    over the overseer's ``hypotheses``. Pins still lead globally for
+    both groups, so an explicit ask jumps its domain's queue and wins
+    over unpinned work elsewhere, as every pin does. Urgent and Bugs
+    never rank as phases, so they stay outside turns; finite-class
+    preemption and the Bug share (``next_ticket``) are unchanged.
+    """
     by_ref = {i.ref: i for i in items}
     descendants = dependency_descendants(items)
+    ranked_as = queue_classes(items, descendants)
     effective_rank = {
-        ref: ladder_index(klass)
-        for ref, klass in queue_classes(items, descendants).items()
+        ref: ladder_index(klass) for ref, klass in ranked_as.items()
     }
     # A ticket that blocks higher-tier work takes that tier, as it takes the
     # class above: otherwise tier-1 work would wait on its own prerequisite.
@@ -4121,6 +4458,8 @@ def _order_startable_items(
         ref: _effective_tier(ref, by_ref, descendants) for ref in by_ref
     }
     preempting = {ref: _preempts(ref, by_ref, descendants) for ref in by_ref}
+    turn_positions = _phase_turn_positions(
+        items, list(candidates), hypotheses)
 
     def in_flight(item: Item) -> bool:
         """Once a project is Building, its remaining tickets finish first.
@@ -4135,25 +4474,45 @@ def _order_startable_items(
 
     def key(item: Item):
         since = question_since(item) or datetime.max.replace(tzinfo=timezone.utc)
+        position = turn_positions.get(item.ref)
+        if position is None:
+            return (
+                # Finite classes preempt in-flight work of unbounded ones — the half
+                # of plan.md's rule this key never implemented until #435. Measured
+                # 2026-09-09: six Broken projects at Ready sat behind ten in-flight
+                # Implement tickets all afternoon. Read through `effective_rank` so a
+                # ticket that blocks a Broken one preempts with it. Finite work
+                # leads a pin (Nate, 2026-09-25).
+                0 if preempting[item.ref] else 1,
+                0 if pinned_ancestor(item) else 1,
+                # Phases (group 0 below) go first when preempting and pin
+                # tie; among non-phases this tag is constant, so their
+                # relative order is exactly the pre-#2429 one.
+                1,
+                # Above the Building commitment: higher-tier work need not wait
+                # for a lower tier's in-flight project (Nate, 2026-09-25).
+                effective_tier[item.ref],
+                not in_flight(item),
+                effective_rank[item.ref],
+                # A blocker with the same effective rank as its dependent still
+                # has to go first. An ancestor reaches every descendant, so this
+                # count is strictly larger for an acyclic dependency edge while
+                # remaining deterministic and finite for cycles.
+                -len(descendants[item.ref]),
+                since,
+                item.repo,
+                item.number,
+            )
+        # Phase-turn work: the commitment first, then round-robin
+        # (round, domain, within). No tier, no ladder rung.
         return (
-            # Finite classes preempt in-flight work of unbounded ones — the half
-            # of plan.md's rule this key never implemented until #435. Measured
-            # 2026-09-09: six Broken projects at Ready sat behind ten in-flight
-            # Implement tickets all afternoon. Read through `effective_rank` so a
-            # ticket that blocks a Broken one preempts with it. Finite work
-            # leads a pin (Nate, 2026-09-25).
             0 if preempting[item.ref] else 1,
             0 if pinned_ancestor(item) else 1,
-            # Above the Building commitment: higher-tier work need not wait
-            # for a lower tier's in-flight project (Nate, 2026-09-25).
-            effective_tier[item.ref],
+            0,
             not in_flight(item),
-            effective_rank[item.ref],
-            # A blocker with the same effective rank as its dependent still
-            # has to go first. An ancestor reaches every descendant, so this
-            # count is strictly larger for an acyclic dependency edge while
-            # remaining deterministic and finite for cycles.
-            -len(descendants[item.ref]),
+            position[0],
+            position[1],
+            position[2],
             since,
             item.repo,
             item.number,
@@ -6060,9 +6419,11 @@ def next_ticket(items: Sequence[Item], now: datetime,
     ``backed_off`` so this stays pure over fixtures; None is an empty history.
 
     A domain at its slot cap holds new entries back while its in-flight
-    work finishes first (``domain_entry_allowed``, #2428). Urgent and Bug
-    entries stay outside the cap; the Bug share and finite-class ranking
-    preemption are unchanged.
+    work finishes first (``domain_entry_allowed``, #2428). Interim domains
+    admit only urgent work, Bugs and explicit asks, and phase work takes
+    domain turns with no tier effect (``_order_startable_items``, #2429).
+    Urgent and Bug entries stay outside slots and turns; the Bug share
+    and finite-class ranking preemption are unchanged.
     """
     excluded = excluded or frozenset()
     queue = [
@@ -14983,7 +15344,8 @@ def _can_close_itself(item: Item) -> bool:
     """Whether a finished project may close without Nate's acceptance.
 
     An analysis marker always keeps the human acceptance gate, including when
-    the marker is malformed. Otherwise the existing class/origin rules apply.
+    the marker is malformed. Otherwise the existing class/origin rules apply,
+    with the #2407 sign-offs layered over every class.
 
     The upkeep classes are safe to close regardless of who raised them. An
     ``Implement`` project is safe only when its effective shape owner is the
@@ -14995,6 +15357,27 @@ def _can_close_itself(item: Item) -> bool:
     if parse_analysis_marker(body) is not None:
         return False
 
+    # Sign-offs that always wait (#2407, #2431), over every class. Test,
+    # Curate, Describe and Hypothesize are the ``PHASE_CLASSES`` options
+    # (#2425). A finished Test waits whether it proposes a change or
+    # concludes
+    # "leave it": there is no leave-it exception.
+    if item.klass == "Test":
+        return False
+    if _accept_has_top_goal(body):
+        return False
+    if _accept_has_kpi_judged_by_live_advice(body):
+        return False
+    if item.pinned or _accept_has_explicit_ask_line(body):
+        return False
+    if _accept_has_autonomy_climb(body):
+        return False
+
+    # Rule 5 amendment: curation, description and hypothesis work closes
+    # when it ships, with findings recorded in the domain's records.
+    if item.klass in ("Curate", "Describe", "Hypothesize"):
+        return True
+
     # Bug closes itself exactly as Broken does (#1845). #987's final accept
     # rule names the upkeep classes as SELF_APPROVABLE_CLASSES and lets every
     # one but Implement close itself whoever raised it; Bug is a defect class,
@@ -15002,6 +15385,10 @@ def _can_close_itself(item: Item) -> bool:
     klass = normalize_class(item.klass)
     if klass in SELF_CLOSING_UPKEEP_CLASSES:
         return True
+    # Implement is Improve renamed, keeping its assignments (#2407, #2425):
+    # the same agent-owner rule. A shipped change's Verify check returns
+    # later as a finished Test, which waits above; the check itself never
+    # holds this close.
     if klass != "Implement":
         return False
 
@@ -17538,6 +17925,10 @@ def cmd_brief(
             "watch_faults",
             lambda: recent_watch_values()["watch_faults"],
         )
+        housekeeping_warnings = section(
+            "housekeeping_warnings",
+            lambda: housekeeping.brief_warnings(),
+        )
 
         # The reader-bound sections have now had their deadline-bounded turn.
         # These renderers use only the loaded Project items and preloaded PR
@@ -17578,6 +17969,7 @@ def cmd_brief(
         price_changes = pure_values["price_changes"]
         model_releases = pure_values["model_releases"]
         watch_faults = pure_values["watch_faults"]
+        housekeeping_warnings = pure_values["housekeeping_warnings"]
         pending_wakes = pending_wakes_json(parked)
 
         blocked_comment_errors = [
@@ -17661,6 +18053,7 @@ def cmd_brief(
             "price_changes": price_changes,
             "model_releases": model_releases,
             "watch_faults": watch_faults,
+            "housekeeping_warnings": housekeeping_warnings,
             "rejected_merges": rejected,
             "degraded": degraded,
             "timings": timings,
@@ -18363,7 +18756,12 @@ def cmd_send_back(items: List[Item], now: datetime, ref: str, reason: str,
                   confirmed: bool = False, run: Optional[str] = None,
                   agent: Optional[str] = None,
                   instruction: Optional[str] = None) -> int:
-    """Return a Shaped project to Ideas, ready for reshaping."""
+    """Return a Shaped project to Ideas, ready for reshaping.
+
+    A Building project waiting at Accept returns the same way: only Status
+    moves to Ideas while Class, Origin, Risk and Needs stay untouched, and
+    child tickets and prior evidence are left alone.
+    """
     if not isinstance(reason, str) or not reason.strip():
         raise GitHubError("send-back requires a non-empty reason")
     if not isinstance(instruction, str) or not instruction.strip():
@@ -18388,15 +18786,23 @@ def cmd_send_back(items: List[Item], now: datetime, ref: str, reason: str,
         raise GitHubError(
             "fresh Project read did not match {}".format(item.ref)
         )
-    if fresh.status != "Shaped":
+    at_accept = (
+        fresh.status == "Building"
+        and (
+            gate_question(fresh) == GATES["Building"]
+            or is_held_at_accept(fresh)
+        )
+    )
+    if fresh.status != "Shaped" and not at_accept:
         raise GitHubError(
             "refusing send-back for {}: fresh Status is {}; only Shaped items "
-            "can return to Ideas".format(item.ref, fresh.status or "missing")
+            "and Building projects waiting at Accept can return to Ideas"
+            .format(item.ref, fresh.status or "missing")
         )
 
     comment_body = SEND_BACK_COMMENT_PREFIX + reason
     if not confirmed:
-        print("would move {} from Shaped to Ideas".format(item.ref))
+        print("would move {} from {} to Ideas".format(item.ref, fresh.status))
         print(comment_body)
         print("\nNothing was changed. Re-run with --yes to send it back.")
         return 1
@@ -23335,8 +23741,10 @@ def _finished_close_candidate(item: Item, *,
 
     Open at Building with every ticket closed, in a class that can close
     itself. Its body decides the rest: an analysis marker keeps it at Accept,
-    and an Implement project's origin override can hand it to either owner.
-    Improve reads as Implement (#2425).
+    and an Implement project's origin override can hand it to either owner
+    (Improve reads as Implement, #2425), and a sign-off line (top goal,
+    KPI judged by live advice, explicit ask, autonomy climb) keeps it at
+    Accept (#2407, #2431).
     """
     completed = item.children_done if children_done is None else children_done
     klass = normalize_class(item.klass)
@@ -23347,7 +23755,10 @@ def _finished_close_candidate(item: Item, *,
         and completed == item.children_total
         and (
             klass in SELF_CLOSING_UPKEEP_CLASSES
-            or klass == "Implement"
+            or klass in (
+                "Implement",
+                "Curate", "Describe", "Hypothesize",
+            )
         )
     )
 
@@ -24593,7 +25004,7 @@ def main(argv: Optional[Sequence[str]] = None, *,
     )
     send_back = sub.add_parser(
         "send-back",
-        help="return a Shaped project to Ideas with Nate's reason — dry run without --yes",
+        help="return a Shaped project, or a Building project at Accept, to Ideas with Nate's reason — dry run without --yes",
     )
     send_back.add_argument("ref", help="issue number, owner/repo#number, or URL")
     send_back.add_argument(

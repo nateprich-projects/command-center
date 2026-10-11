@@ -192,6 +192,67 @@ HUMAN_STEP_NEEDS = {
     for reason in BLOCKED_ON_HUMAN_REASONS
 }
 
+#: Steps the middle line gives any agent even though a blocked implementer
+#: might file them as Claude work (#2491): live runs, reads of logs,
+#: journals and session stores, and corpus replays. Matched against the
+#: blocked action's wording with word boundaries, so `catalog`, `dialog`,
+#: `login` and `backlog` never read as log work. The match is heuristic,
+#: so a still-Claude signal wins and anything unrecognized keeps the
+#: claimed reason's Needs.
+ANY_AGENT_STEP_RES = (
+    re.compile(r"(?i)\blive[ _-]*runs?\b"),
+    re.compile(r"(?i)\bruns?(?:ning)?\b.{0,30}\blive\b"),
+    re.compile(r"(?i)\blogs?\b"),
+    re.compile(r"(?i)\bjournals?\b"),
+    re.compile(r"(?i)\bsession[ _-]*stores?\b"),
+    re.compile(r"(?i)\bsession[ _-]*logs?\b"),
+    re.compile(r"(?i)\bcorpuses?\b"),
+    re.compile(r"(?i)\breplay(?:s|ed|ing)?\b"),
+)
+
+#: Genuine Mac signals from the middle line's still-Claude list (#2491):
+#: live config edits and deploys, `~/.claude` and the statusline,
+#: launchctl verbs, sudo -n -u jeffy and _personalops, Keychain,
+#: osascript, Desktop scheduled tasks, and Claude Code cloud threads.
+#: Checked before ANY_AGENT_STEP_RES so a step mixing both vocabularies
+#: stays claude-code-environment.
+STILL_CLAUDE_RES = (
+    re.compile(r"(?i)\blive[ _-]*config\b"),
+    re.compile(r"(?i)\b(?:re-?)?deploy(?:s|ed|ing|ments?)?\b"),
+    re.compile(r"~/\.claude\b"),
+    re.compile(r"(?i)\bstatusline\b"),
+    re.compile(r"(?i)\blaunchctl\b"),
+    re.compile(r"(?i)\b(?:bootout|kickstart|bootstrap)\b"),
+    re.compile(r"(?i)\bplist\b"),
+    re.compile(r"(?i)\bsudo\b"),
+    re.compile(r"(?i)_personalops\b"),
+    re.compile(r"(?i)\bjeffy\b"),
+    re.compile(r"(?i)\bkeychain\b"),
+    re.compile(r"(?i)\bosascript\b"),
+    re.compile(r"(?i)\bdesktop[ _-]*scheduled[ _-]*tasks?\b"),
+    re.compile(r"(?i)\bcloud[ _-]*threads?\b"),
+)
+
+
+def needs_for_human_step(reason: str, action: str) -> str:
+    """Route one blocked step to its Needs value under the middle line.
+
+    Nate's four reasons always file ``human``. A step claimed for the
+    Claude Code environment files ``claude-code-environment`` unless its
+    action reads as Muse-may work — a live run, a log/journal/session-store
+    read, or a corpus replay — with no still-Claude signal, in which case
+    it files ``none`` so any agent can take it (#2491). Unrecognized
+    wording keeps the claimed reason's Needs.
+    """
+    if reason != CLAUDE_CODE_ENVIRONMENT_REASON:
+        return HUMAN_STEP_NEEDS[reason]
+    text = action if isinstance(action, str) else ""
+    if any(pattern.search(text) for pattern in STILL_CLAUDE_RES):
+        return "claude-code-environment"
+    if any(pattern.search(text) for pattern in ANY_AGENT_STEP_RES):
+        return "none"
+    return HUMAN_STEP_NEEDS[reason]
+
 
 def fetch_ticket(repo: str, number: int) -> dict:
     """Read the ticket and its native parent identity."""
@@ -479,8 +540,13 @@ def _read_done_answer(answer: dict) -> dict:
         isinstance(value, str) and value.strip() for value in risks
     )):
         raise ImplementError("answer risks must be a list of non-empty strings")
+    verification = _read_done_verification(answer.get("verification")
+                                           if "verification" in answer
+                                           else None,
+                                           present="verification" in answer)
     extra = sorted(
-        set(answer) - {"done", "summary", "departures", "evidence", "risks"})
+        set(answer) - {"done", "summary", "departures", "evidence", "risks",
+                       "verification"})
     if extra:
         raise ImplementError("answer has unknown field(s): {}".format(", ".join(extra)))
     found = {
@@ -492,7 +558,53 @@ def _read_done_answer(answer: dict) -> dict:
         found["evidence"] = [value.strip() for value in evidence]
     if "risks" in answer:
         found["risks"] = [value.strip() for value in risks]
+    if verification is not None:
+        found["verification"] = verification
     return found
+
+
+#: A full Git object SHA: the runner compares it exactly, so a short prefix
+#: is not machine-usable here.
+_FULL_SHA_RE = re.compile(r"\A[0-9a-fA-F]{40}\Z")
+
+
+def _read_done_verification(value: object, *, present: bool) -> Optional[dict]:
+    """Validate the no-diff done answer's machine-usable verification (#2452).
+
+    The model cannot mint an owner-posted GitHub URL, so a no-diff done
+    answer carries what the runner needs to post one itself: the base SHA it
+    checked, the tests it ran with their result, and the files it checked.
+    """
+    if not present:
+        return None
+    if not isinstance(value, dict):
+        raise ImplementError("answer verification must be an object")
+    base_sha = value.get("base_sha")
+    if (not isinstance(base_sha, str) or not base_sha.strip()
+            or not _FULL_SHA_RE.match(base_sha.strip())):
+        raise ImplementError(
+            "answer verification base_sha must be a full 40-hex SHA")
+    tests = value.get("tests")
+    if not isinstance(tests, str) or not tests.strip():
+        raise ImplementError(
+            "answer verification tests must be a non-empty string")
+    files_checked = value.get("files_checked")
+    if (not isinstance(files_checked, list) or not files_checked
+            or not all(isinstance(entry, str) and entry.strip()
+                       for entry in files_checked)):
+        raise ImplementError(
+            "answer verification files_checked must be a non-empty list "
+            "of non-empty strings")
+    extra = sorted(set(value) - {"base_sha", "tests", "files_checked"})
+    if extra:
+        raise ImplementError(
+            "answer verification has unknown field(s): {}".format(
+                ", ".join(extra)))
+    return {
+        "base_sha": base_sha.strip(),
+        "tests": tests.strip(),
+        "files_checked": [entry.strip() for entry in files_checked],
+    }
 
 
 def _read_blocked_answer(value: object) -> dict:
@@ -2147,6 +2259,152 @@ def close_no_diff_ticket(repo: str, number: int, *,
                 repo, number, (proc.stderr or "").strip()))
 
 
+#: Marks the one runner-posted comment that satisfies the no-diff done gate
+#: (#2452). The gate itself still checks timestamp and ownership through
+#: ``_verify_done_evidence``; the marker names the comment's purpose so a
+#: reader can tell it from any other owner comment on the ticket.
+NO_DIFF_VERIFICATION_MARKER = "<!-- no-diff-verification -->"
+
+
+def _no_diff_base_sha(root: pathlib.Path) -> str:
+    """Read the origin/main HEAD the runner checks the claim against."""
+    proc = _run(["git", "rev-parse", "origin/main"], cwd=root,
+                check=False, timeout=LOCAL_GIT_TIMEOUT_SECONDS)
+    if proc.returncode != 0 or not proc.stdout.strip():
+        raise ImplementError("could not read origin/main for no-diff check")
+    return proc.stdout.strip()
+
+
+def render_no_diff_verification_comment(
+        *, ref: str, run: str, base_sha: str, tests: str,
+        files_checked: Sequence[str]) -> str:
+    """Render the fixed runner-owned no-diff verification record (#2452)."""
+    return "\n".join([
+        "{}".format(NO_DIFF_VERIFICATION_MARKER),
+        "**No-diff verification:** {} is already done; no change to commit.".format(
+            ref),
+        "",
+        "- ticket: {}".format(ref),
+        "- run: {}".format(run),
+        "- base SHA: {} (origin/main, checked by the runner)".format(base_sha),
+        "- empty diff: working tree clean and no commits ahead of "
+        "origin/main (checked by the runner)",
+        "- tests: {}".format(tests),
+        "- files checked: {}".format(", ".join(files_checked)),
+    ])
+
+
+def render_no_diff_mismatch_comment(
+        *, ref: str, run: str, claimed: str, actual: str,
+        why: str) -> str:
+    """Render the superseding record when the claimed proof is wrong (#2452).
+
+    It supersedes the model's verification without deleting anything.
+    """
+    return "\n".join([
+        "{}".format(NO_DIFF_VERIFICATION_MARKER),
+        "**No-diff verification rejected:** {} keeps its state.".format(ref),
+        "",
+        "- ticket: {}".format(ref),
+        "- run: {}".format(run),
+        "- why: {}".format(why),
+        "- claimed base SHA: {}".format(claimed),
+        "- origin/main HEAD: {}".format(actual),
+    ])
+
+
+def post_no_diff_verification_comment(
+        repo: str, number: int, body: str, *,
+        run: str, agent: str, cwd: pathlib.Path) -> str:
+    """Post one runner-owned verification comment and return its URL (#2452).
+
+    ``gh issue comment`` prints no URL, so this creates the comment through
+    the REST endpoint and reads ``html_url`` back from its response. Only a
+    URL returned here ever enters the no-diff gate as satisfying evidence.
+    """
+    proc = funnel._run_gh(
+        ["gh", "api", "repos/{}/issues/{}/comments".format(repo, number),
+         "--method", "POST", "-f", "body={}".format(
+             funnel.append_provenance(
+                 body, "agent", at=datetime.now(timezone.utc),
+                 run=run, agent=agent))],
+        cwd=str(cwd), capture_output=True, text=True,
+    )
+    if proc.returncode != 0:
+        raise funnel.GitHubError(
+            "could not post no-diff verification on {}#{}: {}".format(
+                repo, number, (proc.stderr or "").strip()))
+    try:
+        payload = json.loads(proc.stdout or "")
+    except ValueError:
+        payload = None
+    url = payload.get("html_url") if isinstance(payload, dict) else None
+    if not isinstance(url, str) or not url.strip():
+        raise funnel.GitHubError(
+            "no-diff verification post on {}#{} returned no comment URL".format(
+                repo, number))
+    return url.strip()
+
+
+def _finish_no_diff_evidence(
+        answer: dict, *, ref: str, run: str, agent: str,
+        repo: str, number: int, root: pathlib.Path,
+        comment_effect: Callable[..., None],
+        verify_comment_effect: Callable[..., str]) -> List[str]:
+    """Satisfy the no-diff gate with one runner-posted comment (#2452).
+
+    Without ``verification`` this is today's fail-closed gate unchanged:
+    ``_verify_done_evidence`` over the answer's ``evidence``, which errors
+    when none is named. With ``verification`` the runner re-checks the empty
+    diff and the base SHA itself, posts one fixed-template owner comment,
+    and feeds only that new comment's URL into ``_verify_done_evidence`` —
+    so only a runner-created comment from the current run can satisfy this
+    path, and model-named evidence is never consulted here. A failed post
+    keeps today's finish error with normal retry; a wrong proof posts one
+    superseding rejection comment, deletes nothing, and re-errors.
+    """
+    verification = answer.get("verification")
+    if verification is None:
+        return _verify_done_evidence(
+            answer.get("evidence") or [], run=run, agent=agent,
+        )
+    checked = _read_done_verification(verification, present=True)
+    actual = _no_diff_base_sha(root)
+    claimed = checked["base_sha"]
+    if _working_tree_paths(root) or _branch_paths(root):
+        why = "the runner still sees a diff against origin/main"
+    elif actual.lower() != claimed.lower():
+        why = "claimed base SHA does not match origin/main HEAD"
+    else:
+        why = ""
+    if why:
+        comment_effect(
+            repo, number,
+            render_no_diff_mismatch_comment(
+                ref=ref, run=run, claimed=claimed, actual=actual, why=why),
+            run=run, agent=agent, cwd=root,
+        )
+        raise ImplementError(
+            "no-diff verification rejected for {}: {}".format(ref, why))
+    body = render_no_diff_verification_comment(
+        ref=ref, run=run, base_sha=actual, tests=checked["tests"],
+        files_checked=checked["files_checked"],
+    )
+    try:
+        url = verify_comment_effect(
+            repo, number, body, run=run, agent=agent, cwd=root,
+        )
+    except (funnel.GitHubError, OSError, subprocess.SubprocessError) as exc:
+        raise ImplementError(
+            "could not post no-diff verification comment for {}: {}".format(
+                ref, exc))
+    if not isinstance(url, str) or not url.strip():
+        raise ImplementError(
+            "no-diff verification post for {} returned no comment URL".format(
+                ref))
+    return _verify_done_evidence([url.strip()], run=run, agent=agent)
+
+
 def create_or_update_pr(repo: str, context: dict, ticket: dict,
                         body: str) -> dict:
     """Create or update the ticket PR, unless its pushed head already merged.
@@ -2248,21 +2506,29 @@ def render_human_step_title(action: str, *, needs: str) -> str:
 
 
 def render_human_step_body(*, parent_number: int, ticket_number: int,
-                           reason: str, action: str) -> str:
+                           reason: str, action: str,
+                           needs: Optional[str] = None) -> str:
     """Render the human-step sub-issue body with its reason as prose.
 
     The ``Human step: <reason>`` line is prose for Nate to read, not a
     marker: the body scanner is deleted (#826) and the machine signal is
     the Needs Project field, written alongside by ``finish_blocked_on_human``.
     A step a Claude Code session can do names the session as its actor,
-    not Nate (#1901).
+    not Nate (#1901); a step the middle line gives any agent names any
+    agent (#2491). ``needs`` defaults to the reason's mapping so existing
+    callers read unchanged.
     """
     doing = action.rstrip()
     if not doing.endswith("."):
         doing += "."
-    who = ("a Claude Code session on the Mac mini"
-           if HUMAN_STEP_NEEDS.get(reason) == "claude-code-environment"
-           else "Nate")
+    effective = (needs if needs is not None
+                 else HUMAN_STEP_NEEDS.get(reason))
+    if effective == "claude-code-environment":
+        who = "a Claude Code session on the Mac mini"
+    elif effective == "none":
+        who = "any agent"
+    else:
+        who = "Nate"
     return "\n".join([
         "Part of #{}; discovered while implementing #{}.".format(
             parent_number, ticket_number),
@@ -2322,7 +2588,8 @@ def write_human_step_needs(url: str, ref: str, needs: str = "human") -> None:
     already present (as breakdown's ``add_to_project`` does), then one
     mutation sets the field. Without this the new ticket would read as
     unset and miss the human_steps section (#826). ``needs`` is ``human``
-    for Nate's steps and ``claude-code-environment`` for a session's (#1901).
+    for Nate's steps, ``claude-code-environment`` for a session's (#1901),
+    and ``none`` for a rerouted any-agent step (#2491).
     """
     from engine import breakdown as breakdown_engine
 
@@ -2335,6 +2602,11 @@ def write_human_step_needs(url: str, ref: str, needs: str = "human") -> None:
 def write_session_step_needs(url: str, ref: str) -> None:
     """Route a new step to a Claude Code session on the Mac mini (#1901)."""
     write_human_step_needs(url, ref, needs="claude-code-environment")
+
+
+def write_any_agent_step_needs(url: str, ref: str) -> None:
+    """Route a rerouted step to any agent (Needs none, #2491)."""
+    write_human_step_needs(url, ref, needs="none")
 
 
 def write_declined_needs(url: str, ref: str) -> None:
@@ -3535,6 +3807,8 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
                 close_effect: Callable[..., None]
                 = close_no_diff_ticket,
                 comment_effect: Callable[..., None] = post_agent_comment,
+                verify_comment_effect: Callable[..., str]
+                = post_no_diff_verification_comment,
                 extra_note: Optional[str] = None) -> dict:
     """Perform every happy-path effect and return the resulting PR identity.
 
@@ -3640,8 +3914,12 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
             allow_empty=True,
         )
         if committed is None:
-            evidence = _verify_done_evidence(
-                answer.get("evidence") or [], run=run, agent=agent,
+            evidence = _finish_no_diff_evidence(
+                answer, ref=ref, run=run, agent=agent,
+                repo=resolved, number=context["number"],
+                root=context["root"],
+                comment_effect=comment_effect,
+                verify_comment_effect=verify_comment_effect,
             )
             _require_current_claim(ref, run, agent)
             close_effect(
@@ -3740,6 +4018,8 @@ def finish_blocked_on_human(
         needs_effect: Callable[[str, str], None] = write_human_step_needs,
         session_needs_effect: Callable[[str, str], None]
         = write_session_step_needs,
+        any_agent_needs_effect: Callable[[str, str], None]
+        = write_any_agent_step_needs,
         sub_issues_effect: Callable[[str, int], List[Dict[str, object]]]
         = read_parent_sub_issues,
         comments_effect: Callable[[str, int], List[str]]
@@ -3758,8 +4038,10 @@ def finish_blocked_on_human(
     clean Git head matches the ticket's remote branch; other work stays (#1856).
     A failure after the sub-issue exists names it, so the retry starts
     from GitHub's truth rather than filing a second one. The step's Needs
-    follows its reason: ``session_needs_effect`` for a step a Claude Code
-    session can do, ``needs_effect`` for Nate's (#1901).
+    follows its reason and wording (``needs_for_human_step``):
+    ``session_needs_effect`` for a step a Claude Code session can do,
+    ``any_agent_needs_effect`` for Muse-may work the middle line gives any
+    agent (#2491), ``needs_effect`` for Nate's (#1901).
 
     The ticket's ``**Blocked on #N:**`` record is posted before its label
     and blocked-by edge (#2168), so a labelled ticket's current record is
@@ -3804,17 +4086,20 @@ def finish_blocked_on_human(
             head_effect=head_effect, route_needs_effect=route_needs_effect,
             human_needs_effect=human_needs_effect, extra_note=extra_note,
             wip_sha=wip_sha)
-    step_needs = HUMAN_STEP_NEEDS[blocked["reason"]]
+    step_needs = needs_for_human_step(blocked["reason"], blocked["action"])
     title = render_human_step_title(
         blocked["action"], needs=step_needs)
     body = render_human_step_body(
         parent_number=parent_number, ticket_number=context["number"],
-        reason=blocked["reason"], action=blocked["action"])
+        reason=blocked["reason"], action=blocked["action"],
+        needs=step_needs)
     created = create_effect(
         resolved, parent_number, title, body, cwd=context["root"])
     try:
         if step_needs == "claude-code-environment":
             session_needs_effect(created["url"], created["ref"])
+        elif step_needs == "none":
+            any_agent_needs_effect(created["url"], created["ref"])
         else:
             needs_effect(created["url"], created["ref"])
         blocked_comment = block_record.render_blocked(

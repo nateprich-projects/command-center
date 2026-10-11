@@ -51,7 +51,9 @@ from engine.shape import (  # noqa: E402
     _validate_escalated_risk,
     _validate_failure_modes,
     _validate_hotspot_routing,
+    _validate_implement_basis,
     _validate_packet_hotspots,
+    _validate_investigate_observed_symptom,
     _validate_investigate_possible_defect,
     _validate_precedent,
     _validate_premises,
@@ -272,8 +274,11 @@ def parse_framer(answer: object, *,
                  include_hotspot_routing: bool = True) -> Dict:
     """Validate the framer's draft.
 
-    ``proposed_class`` is a ladder class, ``plan_markdown`` a non-empty
-    narrative (an Investigate draft carries its one Possible defect line),
+    ``proposed_class`` is a ladder class or phase name, ``plan_markdown``
+    a non-empty
+    narrative (an Investigate draft carries its one Possible defect line
+    and its one Observed symptom line; an Implement draft cites its tested
+    finding, explicit ask, or cheap-reversible Verify check),
     ``decision_points`` a non-empty list of distinct one-line points, and
     ``depends_on`` owner/repo#n refs. The narrative may not write the
     Siblings checked section: code renders it from the sibling checks.
@@ -299,6 +304,9 @@ def parse_framer(answer: object, *,
     plan_markdown = _require_text(data["plan_markdown"], "plan_markdown")
     if proposed == "Investigate":
         _validate_investigate_possible_defect(plan_markdown)
+        _validate_investigate_observed_symptom(plan_markdown)
+    if funnel.normalize_class(proposed) == "Implement":
+        _validate_implement_basis(plan_markdown)
     if _SIBLINGS_HEADING_RE.search(plan_markdown):
         raise ShapeError(
             "plan_markdown must not carry a '{}' section; the sibling "

@@ -265,6 +265,140 @@ def test_send_back_refuses_every_fresh_status_other_than_shaped(
     assert "fresh Status is {}".format(fresh_status) in capsys.readouterr().err
 
 
+ACCEPT_BODY = (
+    "# Trial plan\n\n"
+    "Sub-issue nateprich/beta#43 tracks the first pair.\n\n"
+    "Accept evidence: 50-pair run kept verbatim in comments."
+)
+
+
+def accept_item(**overrides):
+    # Implement never closes itself, so a Building project with every ticket
+    # closed waits at Accept ("Accept it?") instead of closing unattended.
+    fields = dict(
+        repo=REPO,
+        number=77,
+        title="A finished project waiting at Accept",
+        url="https://github.com/nateprich/beta/issues/77",
+        state="OPEN",
+        body=ACCEPT_BODY,
+        status="Ready",  # The loaded view can be stale; the fresh read decides.
+        klass="Implement",
+        origin="Nate",
+        risk="standard",
+        needs="human",
+        item_id="project-item-77",
+        children_total=2,
+        children_done=2,
+    )
+    fields.update(overrides)
+    return funnel.Item(**fields)
+
+
+def test_send_back_accept_moves_building_project_to_ideas(monkeypatch):
+    item = accept_item()
+    fresh = accept_item(status="Building")
+    assert funnel.gate_question(fresh) == "Accept it?"
+    events, fresh_reads = stub_github(monkeypatch, item, fresh)
+
+    assert funnel.main([
+        "send-back", item.ref, "--reason", REASON, "--instruction", INSTRUCTION,
+        "--yes", "--run", "run-77", "--agent", "codex",
+    ]) == 0
+
+    assert fresh_reads == [(item.ref,)]
+    assert fresh.status == "Ideas"
+    assert item.status == "Ideas"
+    assert (item.klass, item.origin, item.risk, item.needs) == (
+        "Implement", "Nate", "standard", "human",
+    )
+    assert fresh.body == ACCEPT_BODY
+    assert item.body == ACCEPT_BODY
+    assert "needs-shaping" in fresh.labels
+    writes = [event for event in events if event[0] == "graphql"]
+    assert len(writes) == 1
+    assert writes[0][2]["option"] == "ideas-option"
+    comments = [
+        event for event in events
+        if event[0] == "gh" and event[1][:3] == ("gh", "issue", "comment")
+    ]
+    assert len(comments) == 1
+    posted = comments[0][1][-1]
+    assert funnel._visible_comment(posted) == "Send-back to Ideas: " + REASON
+    # Only the parent issue is ever touched; child tickets stay as evidence.
+    touched = {
+        event[1][event[1].index("--repo") - 1]
+        for event in events
+        if event[0] == "gh" and "--repo" in event[1]
+    }
+    assert touched == {"77"}
+
+
+def test_send_back_accept_dry_run_changes_nothing(monkeypatch, capsys):
+    item = accept_item(status="Building")
+    fresh = accept_item(status="Building")
+    events, fresh_reads = stub_github(monkeypatch, item, fresh)
+
+    assert funnel.main([
+        "send-back", item.ref, "--reason", REASON, "--instruction", INSTRUCTION,
+    ]) == 1
+
+    assert fresh_reads == [(item.ref,)]
+    assert events == []
+    assert item.status == "Building"
+    output = capsys.readouterr().out
+    assert "would move {} from Building to Ideas".format(item.ref) in output
+    assert "Nothing was changed" in output
+
+
+def test_send_back_held_at_accept_moves_to_ideas(monkeypatch):
+    from datetime import date
+
+    item = accept_item()
+    fresh = accept_item(
+        status="Building", labels=["blocked"], blocked_until=date(2026, 11, 1),
+    )
+    assert funnel.is_held_at_accept(fresh)
+    events, _fresh_reads = stub_github(monkeypatch, item, fresh)
+
+    assert funnel.main([
+        "send-back", item.ref, "--reason", REASON, "--instruction", INSTRUCTION,
+        "--yes",
+    ]) == 0
+
+    assert fresh.status == "Ideas"
+    assert item.status == "Ideas"
+    assert (item.klass, item.origin, item.risk, item.needs) == (
+        "Implement", "Nate", "standard", "human",
+    )
+    assert item.body == ACCEPT_BODY
+
+
+@pytest.mark.parametrize("fresh_kwargs", [
+    {"status": "Building", "children_total": 0, "children_done": 0},
+    {"status": "Building", "children_total": 2, "children_done": 1},
+    {"status": "Building", "klass": "Broken"},
+])
+def test_send_back_refuses_building_projects_not_at_accept(
+    monkeypatch, capsys, fresh_kwargs
+):
+    item = accept_item(status="Building")
+    fresh = accept_item(**fresh_kwargs)
+    assert funnel.gate_question(fresh) != "Accept it?"
+    assert not funnel.is_held_at_accept(fresh)
+    events, fresh_reads = stub_github(monkeypatch, item, fresh)
+
+    assert funnel.main([
+        "send-back", item.ref, "--reason", REASON,
+        "--instruction", INSTRUCTION, "--yes",
+    ]) == 2
+
+    assert fresh_reads == [(item.ref,)]
+    assert events == []
+    assert item.status == "Building"
+    assert "fresh Status is Building" in capsys.readouterr().err
+
+
 def test_send_back_requires_nate_instruction_before_loading(monkeypatch, capsys):
     loads = []
     monkeypatch.setattr(funnel, "load_items", lambda: loads.append("loaded") or [])

@@ -44,6 +44,8 @@ root — one JSON object and nothing else in the file:
   `an account or billing setting`, `physical access to a machine`
 - an unlanded named prerequisite, before any change: `{"declined":"..."}`
 
+Already done with no diff: add `"verification":{"base_sha":"<full origin/main SHA you checked>","tests":"<commands plus result>","files_checked":["<paths>"]}`. The runner re-checks the SHA and the empty diff, then posts the verification itself.
+
 `summary` says what you changed. `departures` names everything the ticket
 or plan asked for that you deliberately did not do — say what you did not
 do, plainly. The runner validates the answer, tests the checkout, commits

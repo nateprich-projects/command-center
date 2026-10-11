@@ -1877,7 +1877,12 @@ def _bug_free_board(seed):
     rng = random.Random(seed)
     repos = [TOOLING, "nateprich-projects/workbench", IMPACT, HOBBY,
              "nateprich-projects/AFL"]
-    classes = [klass for klass in funnel.LADDER if klass != "Bug"]
+    # Frozen pre-#2425 classes, not funnel.LADDER: these boards feed the
+    # Bug-share snapshots, so they must deal identically across Class
+    # migrations. Improve stays as the rename-path representative (#2425);
+    # phase ordering is covered by the turn tests.
+    classes = ["Investigate", "Broken", "Maintenance", "Improve", "New",
+               "Replace"]
     projects, tickets = [], []
     number = 1
     for _ in range(rng.randint(1, 6)):

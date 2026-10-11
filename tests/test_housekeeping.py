@@ -875,28 +875,38 @@ def test_temp_nonempty_recent_and_unowned_are_kept_in_both_modes(
 
 
 def test_temp_symlinks_files_and_nonmatching_are_untouched(tmp_path):
-    temp = tmp_path / "tmp"
-    temp.mkdir()
-    target = _make_temp(temp, "muse-real", 30)
-    (temp / "muse-file").write_text("a file, not a dir", encoding="utf-8")
-    (temp / "muse-link").symlink_to(target)
-    other = temp / "other-old"
-    other.mkdir()
-    os.utime(other, (NOW - 30 * HOUR, NOW - 30 * HOUR))
+    for mode in ("dry", "apply"):
+        temp = tmp_path / mode / "tmp"
+        temp.mkdir(parents=True)
+        target = _make_temp(temp, "muse-real", 30)
+        (temp / "muse-file").write_text(
+            "a file, not a dir", encoding="utf-8"
+        )
+        (temp / "muse-link").symlink_to(target)
+        other = temp / "other-old"
+        other.mkdir()
+        os.utime(other, (NOW - 30 * HOUR, NOW - 30 * HOUR))
 
-    rows, _, _, _, _, _, _, _, _ = _run_pass(
-        tmp_path,
-        explicit_roots=[str(_empty_pytest_root(tmp_path))],
-        explicit_log_roots=[str(_empty_log_root(tmp_path))],
-        explicit_temp_roots=[str(temp)],
-        apply=True,
-    )
-    # Only the matching real dir is inventoried; it was empty and old.
-    assert [row["path"] for row in _temp_rows(rows)] == [str(target)]
-    assert not target.exists()
-    assert (temp / "muse-file").is_file()
-    assert (temp / "muse-link").is_symlink()
-    assert other.is_dir()
+        rows, _, _, _, _, _, _, _, _ = _run_pass(
+            tmp_path / mode,
+            explicit_roots=[
+                str(_empty_pytest_root(tmp_path / mode))
+            ],
+            explicit_log_roots=[str(_empty_log_root(tmp_path / mode))],
+            explicit_temp_roots=[str(temp)],
+            apply=(mode == "apply"),
+        )
+        # Only the matching real dir is inventoried; it was empty and old.
+        assert [row["path"] for row in _temp_rows(rows)] == [str(target)]
+        if mode == "dry":
+            assert _by_basename(rows, "muse-real")["action"] == "would-delete"
+            assert target.exists()
+        else:
+            assert _by_basename(rows, "muse-real")["action"] == "delete"
+            assert not target.exists()
+        assert (temp / "muse-file").is_file()
+        assert (temp / "muse-link").is_symlink()
+        assert other.is_dir()
 
 
 def test_temp_roots_follow_tmpdir_and_dedupe(tmp_path, monkeypatch):

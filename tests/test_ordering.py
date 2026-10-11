@@ -604,10 +604,13 @@ def test_higher_tier_work_does_not_wait_for_a_lower_tiers_building_project():
 
 
 def test_within_a_tier_the_building_commitment_still_holds():
+    # New outranks Replace on the ladder but both are non-phase, so the
+    # Building commitment decides. Improve would read as Implement (#2425)
+    # and take phase turns ahead of the in-flight legacy work (#2429).
     rows = [
         tier_project(TOOLING, 1, "Building", "Replace", days=1),
         tier_ticket(TOOLING, 2, 1, days=1),
-        tier_project(TOOLING, 3, "Ready", "Improve", days=30),
+        tier_project(TOOLING, 3, "Ready", "New", days=30),
         tier_ticket(TOOLING, 4, 3, days=30),
     ]
     assert [i.number for i in startable(rows)] == [2, 4]

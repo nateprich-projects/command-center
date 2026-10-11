@@ -655,7 +655,7 @@ def validate_answer(
     if proposed == "Investigate":
         _validate_investigate_possible_defect(plan_markdown)
         _validate_investigate_observed_symptom(plan_markdown)
-    if funnel.normalize_class(proposed) == "Implement":
+    if proposed == "Implement":
         _validate_implement_basis(plan_markdown)
     return {
         "decided_from_precedent": decided_from_precedent,

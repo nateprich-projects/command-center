@@ -305,7 +305,7 @@ def parse_framer(answer: object, *,
     if proposed == "Investigate":
         _validate_investigate_possible_defect(plan_markdown)
         _validate_investigate_observed_symptom(plan_markdown)
-    if funnel.normalize_class(proposed) == "Implement":
+    if proposed == "Implement":
         _validate_implement_basis(plan_markdown)
     if _SIBLINGS_HEADING_RE.search(plan_markdown):
         raise ShapeError(

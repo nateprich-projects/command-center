@@ -1624,13 +1624,15 @@ def test_agent_review_keeps_real_scope_and_proposed_action_risk():
 
 @pytest.mark.parametrize("klass", sorted(funnel.SELF_APPROVABLE_CLASSES))
 def test_all_agent_self_approvable_classes_strip_generic_permission(klass):
+    plan = "# Plan\n\nDo the thing."
+    if klass == "Investigate":
+        plan += ("\n\nPossible defect: a defect exists.\n"
+                 "Observed symptom: the call returned Remaining 0.")
+    if klass == "Implement":
+        plan += "\n\nTested finding: the trial cut errors."
     candidate = shape.validate_answer(answer(
         proposed_class=klass,
-        plan_markdown=(
-            "# Plan\n\nDo the thing.\n\n"
-            "Possible defect: a defect exists.\n"
-            "Observed symptom: the call returned Remaining 0."
-            if klass == "Investigate" else "# Plan\n\nDo the thing."),
+        plan_markdown=plan,
         needs_nate={"exposure": None, "gates": None,
                     "scope": ["Should we fix this?"],
                     "preference": None},
@@ -1692,6 +1694,7 @@ def test_implement_is_explicitly_covered_by_agent_output_review_and_close_policy
                                  agent="muse"))
     candidate = shape.validate_answer(answer(
         proposed_class="Implement",
+        plan_markdown="# Plan\n\nDo the thing.\n\nTested finding: it works.",
         needs_nate={"exposure": None, "gates": None,
                     "scope": ["Should we fix this?",
                               "Should this happen now?"],

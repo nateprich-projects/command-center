@@ -17,32 +17,35 @@ breaking it at all?
 
 ## Sizing and coverage
 
-- One ticket is one run ending in one pull request, one concern.
+- One ticket is one run ending in one pull request, holding one concern.
 - Split by behaviour, never by layer.
 - An extra PR is cheaper than a dead run.
-- Tickets deliver the stated outcome end to end, usable state, not one
-  per heading.
-- Prefer tickets workable in any order; else record it in `depends_on`.
+- Together, tickets deliver the stated outcome end to end,
+  usable state, not one per heading.
+- Prefer tickets workable in any order; where order matters, record
+  it in `depends_on`.
 - Sequence expand, migrate, contract only for a genuinely wide change; make a needed refactor its own prefactor ticket, first; small work stays one ticket.
 - One indivisible plan is one ticket.
 - For each `## Review focus` bullet, put one `Accept` test in its owning ticket; copy the text verbatim once.
 
 ## The answer
 
-Exactly one JSON object and nothing else:
+Reply with exactly one JSON object and nothing else:
 
 {"tickets": [{"title": ..., "body": ..., "risk": "standard" | "escalated", "depends_on": [...], "needs": "none" | "human" | "claude-code-environment"}], "needs_decision": null | "question"}
 
-- `title` names the one concern; `body` states the work and its
-  proof. Its Accept names the one to three seams its tests go
+- `title` names the one concern; `body` states the bounded work and
+  its proof. Its Accept names the one to three seams its tests go
   at; a ticket fixing a reported defect makes its first Accept item
   `Reproduction: <the failing test at a named seam>`. The runner
   writes the `Risk` field and edges itself.
 - `risk` is `escalated` when the ticket needs the expensive reviewer
-  (credentials, migrations, destructive work), else `standard`. Your
-  line wins over any later scan, so mean it.
+  (credentials, permissions, migrations, destructive or concurrent
+  work), else `standard`. Your line wins over any later scan, so
+  mean it.
 - `depends_on` holds sibling indices into `tickets` from 0, or
-  `owner/repo#n` refs to open issues; never itself, never a cycle.
+  `owner/repo#n` refs to existing open issues; never the ticket
+  itself, never a cycle.
 - `needs` is `none` for any-agent work: code, `gh` and the funnel's
   own commands, `gh`-only readbacks, live runs, reads of logs,
   journals and session stores, corpus replays. `claude-code-environment`
@@ -54,9 +57,7 @@ Exactly one JSON object and nothing else:
   typing a secret, a new account, app or tunnel, a sign-in, a GUI
   consent prompt, an app UI with no API, billing, root code from a
   user-writable path, a decision, hands on hardware. One
-  human action per ticket: split mixed work, session steps from his. A
-  `claude-code-environment` ticket holds only the Mac step; file code in
-  a separate `none` ticket with linked accept.
+  human action per ticket: split mixed work, session steps from his.
 - Ask `needs_decision` with no tickets when the plan leaves a
   decision undecided: tickets or the question, never both. Never
   invent the missing decision: a ticket built on one is worse than

@@ -52,17 +52,6 @@ Never pass on your own view of the item. If this session shaped, built or review
 4. **Don't ask what the agents can settle.** Anything that should go back for more work goes back on his answer, with the work named.
 5. **Record the detail where agents read it.** The verification and the review go into the GitHub comment that records his answer, not into the box.
 
-## Recording his answer on a ticket
-
-When the decision is a ticket's `**Needs a decision:**` block, record it
-only with `funnel answer-ticket <ref> --answer "<his verbatim answer>"
---outcome lift|replace [--condition "<canonical>"]`: one comment quotes the
-answer and either lifts the blocked state or replaces it with one canonical
-condition (`Blocked until YYYY-MM-DD`, `Blocked on #N [and #M ...]`, or
-`Blocked until event {...}`). Never answer in prose, and never hand-edit the
-`blocked` label or the block comment: a prose answer leaves the ticket
-blocked (#2484). Plan Gates questions stay on `funnel answer-gates`.
-
 ## Not this skill
 
 - Reviewing a PR's code: use `independent-review`.

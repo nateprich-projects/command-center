@@ -4,7 +4,7 @@ Filled and sent by `scripts/muse-review-engine`, tools off.
 
 ---
 
-Break an approved plan into tickets. No tools; use this packet alone.
+Break an approved plan into tickets.
 
 ## The question
 
@@ -20,7 +20,7 @@ breaking it at all?
 - One ticket is one run ending in one pull request, holding one concern.
 - Split by behaviour, never by layer.
 - An extra PR is cheaper than a dead run.
-- Together, tickets deliver the stated outcome end to end,
+- Tickets deliver the stated outcome end to end,
   usable state, not one per heading.
 - Prefer tickets workable in any order; where order matters, record
   it in `depends_on`.
@@ -41,8 +41,7 @@ Reply with exactly one JSON object and nothing else:
   writes the `Risk` field and edges itself.
 - `risk` is `escalated` when the ticket needs the expensive reviewer
   (credentials, permissions, migrations, destructive or concurrent
-  work), else `standard`. Your line wins over any later scan, so
-  mean it.
+  work), else `standard`. Your line wins over any later scan.
 - `depends_on` holds sibling indices into `tickets` from 0, or
   `owner/repo#n` refs to existing open issues; never the ticket
   itself, never a cycle.
@@ -57,7 +56,9 @@ Reply with exactly one JSON object and nothing else:
   typing a secret, a new account, app or tunnel, a sign-in, a GUI
   consent prompt, an app UI with no API, billing, root code from a
   user-writable path, a decision, hands on hardware. One
-  human action per ticket: split mixed work, session steps from his.
+  human action per ticket: split mixed work, session steps from his. A
+  `claude-code-environment` ticket holds only the Mac step; file code in
+  a separate `none` ticket with linked accept.
 - Ask `needs_decision` with no tickets when the plan leaves a
   decision undecided: tickets or the question, never both. Never
   invent the missing decision: a ticket built on one is worse than

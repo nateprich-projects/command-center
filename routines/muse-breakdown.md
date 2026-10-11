@@ -57,7 +57,9 @@ Reply with exactly one JSON object and nothing else:
   typing a secret, a new account, app or tunnel, a sign-in, a GUI
   consent prompt, an app UI with no API, billing, root code from a
   user-writable path, a decision, hands on hardware. One
-  human action per ticket: split mixed work, session steps from his.
+  human action per ticket: split mixed work, session steps from his. A
+  `claude-code-environment` ticket holds only the Mac step; file code in
+  a separate `none` ticket with linked accept.
 - Ask `needs_decision` with no tickets when the plan leaves a
   decision undecided: tickets or the question, never both. Never
   invent the missing decision: a ticket built on one is worse than

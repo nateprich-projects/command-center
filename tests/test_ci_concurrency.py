@@ -66,6 +66,23 @@ def test_hobby_linux_label_unchanged():
 
 
 def test_watchdog_has_no_concurrency():
-    # watchdog.yml runs on ubuntu-latest (GitHub-hosted) on a schedule; it
-    # never touches hobby-linux, so it is out of scope for #1110.
+    # watchdog.yml runs on the shared hobby-linux runner on a schedule; it is
+    # a short hourly check, so it is out of scope for #1110.
     assert "concurrency" not in WATCHDOG_YML.read_text()
+
+
+def test_watchdog_runs_on_hobby_linux():
+    # The watchdog must stay off GitHub-hosted runners so it keeps running
+    # once command-center goes private (#2416); it must also never run on the
+    # Mac it watches.
+    text = WATCHDOG_YML.read_text()
+    assert "[self-hosted, linux, x64, hobby-linux]" in text
+    assert "ubuntu-latest" not in text
+
+
+def test_watchdog_ensures_gh_before_check():
+    # watchdog.py shells out to `gh`, which CI never needed, so the workflow
+    # carries its own fallback install step ahead of the check (#2419).
+    text = WATCHDOG_YML.read_text()
+    check_step = text.index("Check heartbeats")
+    assert "command -v gh" in text[:check_step]

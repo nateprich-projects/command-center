@@ -50,7 +50,7 @@ Never pass on your own view of the item. If this session shaped, built or review
    Offer the reviewer's alternatives as the other options: approve, approve with changes, send back for named work, or park with a reason.
 3. **Never recommend the option that hides a problem.** Parking or deferring a real failure to tidy the queue is not a recommendation.
 4. **Don't ask what the agents can settle.** Anything that should go back for more work goes back on his answer, with the work named.
-5. **Record his answer through the command, never in prose.** When his answer resolves a ticket's `Needs a decision` question, run `funnel answer-ticket <ref> --answer "<his verbatim answer>" --outcome lift` — or `--outcome replace --condition "Blocked until YYYY-MM-DD | Blocked on #N [and #M ...] | Blocked until event {...}"` when the ticket stays blocked under exactly one canonical condition. The verification and the review go into that same command-written comment, not into the box and not into a separate prose comment. Never hand-edit the `blocked` label or the block; prose plus hand edits is the failure that left Fantasy-GM#154 blocked after its answer (#2484). Plan Gates questions stay on `answer-gates`.
+5. **Record the detail where agents read it.** The verification and the review go into the GitHub comment that records his answer, not into the box.
 
 ## Not this skill
 

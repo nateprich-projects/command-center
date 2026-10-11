@@ -2829,6 +2829,44 @@ def test_unrecognized_claude_step_keeps_session_needs():
             "claude-code-environment")
 
 
+CALENDAR_WAIT_STEP_ACTIONS = [
+    "Waiting on the calendar event on 2026-11-01 before this ticket can "
+    "proceed",
+    "The calendar window opens next week; waiting on the calendar to start "
+    "the rollout",
+    "Waiting until 2026-11-01 for the scheduled window to open",
+    "Blocked until 2026-11-01 for the calendar window; will retry after",
+]
+
+
+@pytest.mark.parametrize("action", CALENDAR_WAIT_STEP_ACTIONS)
+def test_calendar_wait_steps_no_longer_file_claude(action):
+    """Reproduction for #2492: a calendar-wait blocked step names no Mac
+    capability, so it must not file claude-code-environment even when the
+    implementer claims the Claude Code environment reason."""
+    assert implement.needs_for_human_step(
+        "a Claude Code environment", action) == "none"
+
+
+@pytest.mark.parametrize("action", [
+    "Waiting on the calendar event; then kickstart the agent with launchctl",
+    "Waiting until 2026-11-01 for sudo -n -u jeffy maintenance to finish",
+    "Waiting on the calendar; the live config deploy follows the date",
+])
+def test_calendar_wait_with_mac_signal_stays_claude(action):
+    """A calendar wait naming genuine Mac work stays
+    claude-code-environment: only the still-Claude list files it (#2492)."""
+    assert implement.needs_for_human_step(
+        "a Claude Code environment", action) == "claude-code-environment"
+
+
+def test_calendar_wait_restore_reason():
+    """Restores of #1712 and #1715 where still open carry the ticket's
+    reason for Needs none (#2492)."""
+    assert implement.CALENDAR_WAIT_RESTORE_REASON == (
+        "Code-only fix; no Mac capability needed, startable by any agent.")
+
+
 def test_human_step_body_names_any_agent_for_none_needs():
     """A rerouted step names any agent as its actor, never Nate and never
     a Claude session (#2491)."""

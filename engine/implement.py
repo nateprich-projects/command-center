@@ -234,15 +234,28 @@ STILL_CLAUDE_RES = (
 )
 
 
+#: Calendar waits name no Mac capability and no Nate action (#2492): the
+#: ticket is plain code work that is not startable on this run, as in
+#: #1712 and #1715. Matched against the blocked action's wording; a
+#: still-Claude signal still wins, so a wait naming genuine Mac work keeps
+#: the session lane.
+CALENDAR_WAIT_STEP_RES = (
+    re.compile(r"(?i)\bcalendar\b"),
+    re.compile(r"(?i)\bwait(?:ing|s|ed)?\b.{0,40}\buntil\b.{0,40}"
+               r"\b\d{4}-\d{2}-\d{2}\b"),
+    re.compile(r"(?i)\bblocked\b.{0,40}\buntil\b.{0,40}\b\d{4}-\d{2}-\d{2}\b"),
+)
+
+
 def needs_for_human_step(reason: str, action: str) -> str:
     """Route one blocked step to its Needs value under the middle line.
 
     Nate's four reasons always file ``human``. A step claimed for the
     Claude Code environment files ``claude-code-environment`` unless its
     action reads as Muse-may work — a live run, a log/journal/session-store
-    read, or a corpus replay — with no still-Claude signal, in which case
-    it files ``none`` so any agent can take it (#2491). Unrecognized
-    wording keeps the claimed reason's Needs.
+    read, or a corpus replay — or as a calendar wait, with no still-Claude
+    signal, in which case it files ``none`` so any agent can take it
+    (#2491, #2492). Unrecognized wording keeps the claimed reason's Needs.
     """
     if reason != CLAUDE_CODE_ENVIRONMENT_REASON:
         return HUMAN_STEP_NEEDS[reason]
@@ -250,6 +263,8 @@ def needs_for_human_step(reason: str, action: str) -> str:
     if any(pattern.search(text) for pattern in STILL_CLAUDE_RES):
         return "claude-code-environment"
     if any(pattern.search(text) for pattern in ANY_AGENT_STEP_RES):
+        return "none"
+    if any(pattern.search(text) for pattern in CALENDAR_WAIT_STEP_RES):
         return "none"
     return HUMAN_STEP_NEEDS[reason]
 
@@ -2633,14 +2648,21 @@ def write_declined_agent_needs(url: str, ref: str) -> None:
     breakdown_engine.write_needs(item_id, "agent", ref)
 
 
+#: Reason recorded when a calendar-wait mislabel is restored to Needs
+#: none (#2492): #1712 and #1715 where still open carry this reason.
+CALENDAR_WAIT_RESTORE_REASON = (
+    "Code-only fix; no Mac capability needed, startable by any agent.")
+
+
 def write_declined_calendar_wait_needs(url: str, ref: str) -> None:
     """Keep a calendar-wait decline on any-agent work (Needs none, #2492).
 
     A calendar wait names no Mac capability and no Nate action: the ticket
-    is plain code work that is not startable on this run. The route
-    preserves Needs none so the wait neither strands the ticket in a
-    session lane nor asks Nate; the next lane run re-reads the date and
-    either works the ticket or declines again.
+    is plain code work that is not startable on this run, as in #1712 and
+    #1715. The route preserves Needs none so the wait neither strands the
+    ticket in a session lane nor asks Nate; the next lane run re-reads the
+    date and either works the ticket or declines again. Restores of those
+    tickets where still open carry CALENDAR_WAIT_RESTORE_REASON.
     """
     from engine import breakdown as breakdown_engine
 

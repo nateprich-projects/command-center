@@ -17,6 +17,10 @@ The temp sweep removes only ``muse-*`` dirs older than 24 h that are
 strictly empty: younger, non-empty, unowned and unreadable dirs are kept
 in both modes, and symlinks, files and non-matching names are never
 inventoried.
+
+The workspace flag listing is inventory only: every leftover ``run.*``
+dir gets a ``flag`` row in both dry-run and ``--apply``, and no mode
+ever unlinks a workspace.
 """
 
 from __future__ import annotations
@@ -84,6 +88,7 @@ def _run_pass(tmp_path, **kwargs):
         notes,
         logs_swept,
         _temps_swept,
+        _workspaces_swept,
     ) = housekeeping.run_pass(
         log_path=log, brief_path=brief, now=NOW, **kwargs
     )
@@ -168,6 +173,43 @@ def _empty_log_root(tmp_path):
 
 def _temp_rows(rows):
     return [row for row in rows if row.get("kind") == "temp"]
+
+
+def _empty_temp_root(tmp_path):
+    root = tmp_path / "empty-temp"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _empty_workspace_root(tmp_path):
+    root = tmp_path / "empty-workspaces"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _make_workspace(root, name, files=()):
+    """Build a leftover ``run.*`` fixture with nested content."""
+    path = root / name
+    path.mkdir(parents=True, exist_ok=True)
+    for relative, content in files:
+        target = path / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(content)
+    return path
+
+
+def _workspace_rows(rows):
+    return [row for row in rows if row.get("kind") == "workspace"]
+
+
+def _scoped_roots(tmp_path, workspace_root):
+    """Explicit roots for every sweep, so workspace tests stay hermetic."""
+    return {
+        "explicit_roots": [str(_empty_pytest_root(tmp_path))],
+        "explicit_log_roots": [str(_empty_log_root(tmp_path))],
+        "explicit_temp_roots": [str(_empty_temp_root(tmp_path))],
+        "explicit_workspace_roots": [str(workspace_root)],
+    }
 
 
 def test_lock_pid_reading_treats_missing_and_bad_locks_as_uncertain(tmp_path):
@@ -993,3 +1035,211 @@ def test_cli_temp_table_and_temp_root_guard(tmp_path, capsys):
     ])
     assert code == 2
     assert "refusing non-internal-disk temp root" in capsys.readouterr().err
+
+
+def test_leftover_workspaces_are_flagged_in_both_modes(tmp_path):
+    """Every leftover run.* dir gets a flag row; nothing is ever removed."""
+    for mode in ("dry", "apply"):
+        base = tmp_path / mode
+        root = base / "workspaces"
+        root.mkdir(parents=True)
+        first = _make_workspace(
+            root, "run.abc123", [("answer.json", b'{"done":true}')]
+        )
+        second = _make_workspace(
+            root,
+            "run.def456",
+            [("nested/deep.bin", b"x" * 4096), ("notes.txt", b"wip")],
+        )
+
+        rows, _, _, _, _, _, _, _, _ = _run_pass(
+            base,
+            apply=(mode == "apply"),
+            **_scoped_roots(base, root),
+        )
+        flagged = {
+            row["path"]: row for row in _workspace_rows(rows)
+        }
+        assert sorted(flagged) == [str(first), str(second)]
+        for path, row in flagged.items():
+            assert row["action"] == "flag"
+            assert "never deleted" in row["reason"]
+            assert row["size_bytes"] > 0
+        assert flagged[str(first)]["size_bytes"] == len(b'{"done":true}')
+        assert flagged[str(second)]["size_bytes"] == 4096 + len(b"wip")
+        # Flagging touches nothing, in either mode.
+        assert (first / "answer.json").read_bytes() == b'{"done":true}'
+        assert (second / "nested" / "deep.bin").read_bytes() == b"x" * 4096
+        assert (second / "notes.txt").read_bytes() == b"wip"
+
+
+def test_apply_never_unlinks_a_workspace(tmp_path):
+    """--apply leaves the whole workspace tree byte-identical."""
+    root = tmp_path / "workspaces"
+    root.mkdir()
+    target = _make_workspace(
+        root,
+        "run.XiM9MQ",
+        [
+            ("answer.json", b'{"blocked_on_human":{}}'),
+            (".git/HEAD", b"ref: refs/heads/ticket/1\n"),
+            ("src/main.py", b"print('wip')\n"),
+        ],
+    )
+    before = {
+        path.relative_to(target): path.read_bytes()
+        for path in sorted(target.rglob("*"))
+        if path.is_file()
+    }
+
+    rows, _, _, _, _, _, _, log_path, brief = _run_pass(
+        tmp_path, apply=True, **_scoped_roots(tmp_path, root)
+    )
+    assert _by_basename(rows, "run.XiM9MQ")["action"] == "flag"
+    assert target.is_dir()
+    after = {
+        path.relative_to(target): path.read_bytes()
+        for path in sorted(target.rglob("*"))
+        if path.is_file()
+    }
+    assert after == before
+    # Flag-only inventory writes no log records and no warning.
+    assert not log_path.exists()
+    assert json.loads(brief.read_text(encoding="utf-8")) == []
+
+
+def test_workspace_symlinks_files_and_nonmatching_are_unlisted(tmp_path):
+    for mode in ("dry", "apply"):
+        base = tmp_path / mode
+        root = base / "workspaces"
+        root.mkdir(parents=True)
+        target = _make_workspace(root, "run.real", [("kept.txt", b"kept")])
+        (root / "run-file").write_text(
+            "a file, not a dir", encoding="utf-8"
+        )
+        (root / "run-link").symlink_to(target)
+        other = root / "other-old"
+        other.mkdir()
+        (other / "payload.txt").write_text("not a workspace", encoding="utf-8")
+
+        rows, _, _, _, _, _, _, _, _ = _run_pass(
+            base,
+            apply=(mode == "apply"),
+            **_scoped_roots(base, root),
+        )
+        # Only the matching real dir is inventoried, flagged in both modes.
+        assert [row["path"] for row in _workspace_rows(rows)] == [
+            str(target)
+        ]
+        assert _by_basename(rows, "run.real")["action"] == "flag"
+        assert target.is_dir()
+        assert (root / "run-file").is_file()
+        assert (root / "run-link").is_symlink()
+        assert other.is_dir()
+
+
+def test_workspace_roots_default_and_override(tmp_path, monkeypatch):
+    monkeypatch.delenv(housekeeping.WORKSPACE_DIR_ENV, raising=False)
+    assert housekeeping.workspace_roots() == [
+        Path(os.path.expanduser(housekeeping.WORKSPACE_DEFAULT))
+    ]
+    assert housekeeping.WORKSPACE_DEFAULT.endswith(
+        "command-center-muse-implement-workspaces"
+    )
+
+    monkeypatch.setenv(
+        housekeeping.WORKSPACE_DIR_ENV, str(tmp_path / "override")
+    )
+    assert housekeeping.workspace_roots() == [tmp_path / "override"]
+
+
+def test_workspace_scoped_runs_sweep_only_what_they_ask(tmp_path):
+    root = tmp_path / "workspaces"
+    root.mkdir()
+    target = _make_workspace(root, "run.leftover", [("a.txt", b"a")])
+
+    # A pytest-scoped run lists no workspaces.
+    rows, _, _, _, _, _, _, _, _ = _run_pass(
+        tmp_path, explicit_roots=[str(_empty_pytest_root(tmp_path))]
+    )
+    assert _workspace_rows(rows) == []
+    assert target.exists()
+
+    # A log-scoped run lists no workspaces either.
+    rows, _, _, _, _, _, _, _, _ = _run_pass(
+        tmp_path, explicit_log_roots=[str(_empty_log_root(tmp_path))]
+    )
+    assert _workspace_rows(rows) == []
+    assert target.exists()
+
+    # A temp-scoped run lists no workspaces either.
+    rows, _, _, _, _, _, _, _, _ = _run_pass(
+        tmp_path,
+        explicit_roots=[str(_empty_pytest_root(tmp_path))],
+        explicit_log_roots=[str(_empty_log_root(tmp_path))],
+        explicit_temp_roots=[str(_empty_temp_root(tmp_path))],
+    )
+    assert _workspace_rows(rows) == []
+    assert target.exists()
+
+    # A workspace-scoped run lists workspaces and no log or temp rows.
+    rows, _, _, _, _, _, _, _, _ = _run_pass(
+        tmp_path,
+        explicit_roots=[str(_empty_pytest_root(tmp_path))],
+        explicit_workspace_roots=[str(root)],
+    )
+    assert [row["path"] for row in _workspace_rows(rows)] == [str(target)]
+    assert _by_basename(rows, "run.leftover")["action"] == "flag"
+    assert [
+        row for row in rows if row.get("kind") in ("log", "temp")
+    ] == []
+
+
+def test_cli_workspace_table_and_workspace_root_guard(tmp_path, capsys):
+    root = tmp_path / "workspaces"
+    root.mkdir()
+    _make_workspace(root, "run.leftover", [("a.txt", b"a")])
+    empty = _empty_pytest_root(tmp_path)
+    empty_logs = _empty_log_root(tmp_path)
+    empty_temp = _empty_temp_root(tmp_path)
+
+    code = housekeeping.main([
+        "--root", str(empty),
+        "--log-root", str(empty_logs),
+        "--temp-root", str(empty_temp),
+        "--workspace-root", str(root),
+        "--log", str(tmp_path / "housekeeping.log"),
+        "--brief", str(tmp_path / "housekeeping-brief.json"),
+    ])
+    assert code == 0
+    out = capsys.readouterr().out.splitlines()
+    assert out[0] == "# housekeeping sweep (dry-run)"
+    assert out[1].startswith("# pytest total ")
+    assert out[2].startswith("# log total ")
+    assert out[3].startswith("# temp ")
+    assert out[4].startswith("# workspace ")
+    assert "run.* dirs" in out[4]
+    header = out.index("path\tsize_bytes\taction\treason")
+    body = "\n".join(out[header + 1:])
+    assert "run.leftover" in body
+    assert "\tflag\t" in body
+
+    # A --root-only run prints no workspace line.
+    code = housekeeping.main([
+        "--root", str(empty),
+        "--log", str(tmp_path / "housekeeping.log"),
+        "--brief", str(tmp_path / "housekeeping-brief.json"),
+    ])
+    assert code == 0
+    out = capsys.readouterr().out.splitlines()
+    assert out[0] == "# housekeeping sweep (dry-run)"
+    assert out[1].startswith("# pytest total ")
+    assert out[2] == "path\tsize_bytes\taction\treason"
+
+    code = housekeeping.main([
+        "--workspace-root", "/Volumes/External SSD/workspaces",
+        "--log", str(tmp_path / "housekeeping.log"),
+        "--brief", str(tmp_path / "housekeeping-brief.json"),
+    ])
+    assert code == 2
+    assert "refusing non-internal-disk workspace root" in capsys.readouterr().err

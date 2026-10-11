@@ -954,13 +954,13 @@ def _seed_housekeeping(seed: Path, checkout: Path) -> None:
 
 
 def test_keeper_runs_the_housekeeping_inventory_once_an_hour(tmp_path):
-    """At :00 the keeper prints the dry-run sweep table (#2464, #2465, #2466).
+    """At :00 the keeper prints the dry-run sweep table (#2464-#2467).
 
     The sweep runs against the test session's real temp roots in dry-run,
     which never deletes or trims; its log and brief artifact are
-    redirected into the fixture home, and log and temp discovery into
-    empty fixture dirs so the machine's real logs and temp dirs stay out
-    of the assertion.
+    redirected into the fixture home, and log, temp and workspace
+    discovery into empty fixture dirs so the machine's real logs, temp
+    dirs and workspaces stay out of the assertion.
     """
     bare, checkout = make_heartbeat_remote(tmp_path)
     _seed_housekeeping(tmp_path / "seed", checkout)
@@ -972,6 +972,8 @@ def test_keeper_runs_the_housekeeping_inventory_once_an_hour(tmp_path):
     empty_logs.mkdir()
     empty_temp = tmp_path / "empty-temp"
     empty_temp.mkdir()
+    empty_workspaces = tmp_path / "empty-workspaces"
+    empty_workspaces.mkdir()
     result = run_keeper(
         checkout,
         home,
@@ -987,6 +989,9 @@ def test_keeper_runs_the_housekeeping_inventory_once_an_hour(tmp_path):
             ),
             "COMMAND_CENTER_HOUSEKEEPING_LOG_DIR": str(empty_logs),
             "COMMAND_CENTER_HOUSEKEEPING_TEMP_DIR": str(empty_temp),
+            "COMMAND_CENTER_HOUSEKEEPING_WORKSPACE_DIR": str(
+                empty_workspaces
+            ),
         },
     )
 
@@ -995,6 +1000,7 @@ def test_keeper_runs_the_housekeeping_inventory_once_an_hour(tmp_path):
     assert "# pytest total " in result.stdout
     assert "# log total " in result.stdout
     assert "# temp " in result.stdout
+    assert "# workspace " in result.stdout
     assert "path\tsize_bytes\taction\treason" in result.stdout
     assert (tmp_path / "housekeeping-brief.json").is_file()
 

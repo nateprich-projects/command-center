@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""Hourly disk housekeeping for pytest debris, logs and temp dirs
-(tickets 2464, 2465, 2466).
+"""Hourly disk housekeeping for pytest debris, logs, temp dirs and
+leftover workspaces (tickets 2464, 2465, 2466, 2467).
 
-Dry-run by default; ``--apply`` deletes and trims. Three sweeps share one
+Dry-run by default; ``--apply`` deletes and trims. Four sweeps share one
 ``path size action reason`` table, one housekeeping log and one
 funnel-brief warning artifact: the pytest numbered-dir sweep, the
-command-center log trim and the empty temp-dir sweep. The free-space gate
-is a separate ticket, and workspace deletion, the owner protocol, the
-evidence store, backups and restore tests are out per the slimmed
-2026-10-10 approval.
+command-center log trim, the empty temp-dir sweep and the leftover
+workspace flag listing. The free-space gate is a separate ticket, and
+workspace deletion, the owner protocol, the evidence store, backups and
+restore tests are out per the slimmed 2026-10-10 approval.
 
 What the pytest sweep does
 --------------------------
@@ -51,6 +51,21 @@ directories directly below, internal-disk only via the shared guard:
   owned by this user, and anything unreadable;
 * never touch symlinks, files, or non-matching names: they are not
   inventoried at all.
+
+What the workspace flag listing does
+------------------------------------
+Under the implement-workspaces root
+(``~/.claude/command-center-muse-implement-workspaces`` by default) it
+lists the leftover ``run.*`` directories directly below, internal-disk
+only via the shared guard:
+
+* every leftover ``run.*`` real dir gets one ``flag`` row carrying its
+  summed file bytes;
+* the listing never deletes: ``--apply`` leaves every workspace
+  untouched, and there is no would-delete state for this sweep;
+* symlinks, files and non-matching names are not inventoried at all;
+* removal stays where it is: the funnel watch archives leftovers to the
+  SSD as it did by hand on 2026-10-07, unchanged by this listing.
 
 Every run, dry-run or apply, prints a ``path size action reason`` table to
 stdout, appends deletes, trims and skip-alerts to the housekeeping log,
@@ -132,6 +147,9 @@ Safety notes
   than recursing when a dir became non-empty after the check.
 * Temp roots are world-writable (``/tmp``), so the root itself is not
   ownership-checked; every candidate dir is.
+* Workspace rows are flag-only inventory: no apply step touches them, so
+  a workspace can never be unlinked by any mode, root scoping or guard
+  failure in this file.
 """
 
 from __future__ import annotations
@@ -222,6 +240,15 @@ TEMP_AGE_SECONDS = 24 * 60 * 60
 #: Override the discovered temp dirs (single path). Tests use explicit
 #: ``--temp-root``; the keeper test uses this for a hermetic discovery.
 TEMP_DIR_ENV = "COMMAND_CENTER_HOUSEKEEPING_TEMP_DIR"
+
+#: Workspaces listed: leftover ``run.*`` dirs under the implement
+#: workspaces root. Flag-only: inventoried, never deleted.
+WORKSPACE_PATTERN = "run.*"
+WORKSPACE_DEFAULT = "~/.claude/command-center-muse-implement-workspaces"
+#: Override the discovered workspaces root (single path). Tests use
+#: explicit ``--workspace-root``; the keeper test uses this for a
+#: hermetic discovery.
+WORKSPACE_DIR_ENV = "COMMAND_CENTER_HOUSEKEEPING_WORKSPACE_DIR"
 
 
 def _utc_now() -> float:
@@ -366,6 +393,45 @@ def temp_candidate_dirs(root: Path) -> List[Path]:
         except OSError:
             continue
         if not fnmatch.fnmatch(entry.name, TEMP_PATTERN):
+            continue
+        found.append(Path(entry.path))
+    found.sort()
+    return found
+
+
+def workspace_roots() -> List[Path]:
+    """Confirmed workspaces root: the implement-workspaces dir or override.
+
+    ``COMMAND_CENTER_HOUSEKEEPING_WORKSPACE_DIR`` replaces discovery with
+    one explicit dir, so the keeper test lists a fixture instead of the
+    machine's real leftover workspaces.
+    """
+    override = os.environ.get(WORKSPACE_DIR_ENV)
+    if override:
+        return [Path(override)]
+    return [Path(os.path.expanduser(WORKSPACE_DEFAULT))]
+
+
+def workspace_candidate_dirs(root: Path) -> List[Path]:
+    """Sorted ``run.*`` real dirs directly under a workspaces root.
+
+    Skips symlinks, files and non-matching names. Non-recursive:
+    implement workspaces sit flat in the workspaces root.
+    """
+    found = []
+    try:
+        entries = list(os.scandir(root))
+    except OSError:
+        return []
+    for entry in entries:
+        try:
+            if entry.is_symlink():
+                continue
+            if not entry.is_dir(follow_symlinks=False):
+                continue
+        except OSError:
+            continue
+        if not fnmatch.fnmatch(entry.name, WORKSPACE_PATTERN):
             continue
         found.append(Path(entry.path))
     found.sort()
@@ -1142,6 +1208,39 @@ def apply_temp_deletions(
         )
 
 
+def plan_workspace_sweep(
+    roots: List[Path],
+) -> List[Dict[str, object]]:
+    """List leftover ``run.*`` workspaces across roots without touching them.
+
+    Each row carries ``path``, ``size_bytes`` (summed file bytes,
+    best-effort), ``action`` (always ``flag``) and ``reason``. There is
+    deliberately no apply step for these rows: ``--apply`` leaves every
+    workspace untouched, and removal stays with the funnel-watch SSD
+    archive path, which this listing does not change.
+    """
+    rows: List[Dict[str, object]] = []
+
+    for root in roots:
+        try:
+            entries = workspace_candidate_dirs(root)
+        except OSError:
+            continue
+        for path in entries:
+            rows.append({
+                "path": str(path),
+                "size_bytes": dir_size_bytes(path),
+                "action": "flag",
+                "reason": (
+                    "leftover implement workspace; flagged only, "
+                    "never deleted (funnel-watch archives to SSD)"
+                ),
+                "kind": "workspace",
+            })
+
+    return rows
+
+
 class HousekeepingLog:
     """Append-only ``key=value`` record of deletes, trims, skip-alerts and errors."""
 
@@ -1436,6 +1535,48 @@ def _resolve_temp_roots(
     return roots, notes
 
 
+def _resolve_workspace_roots(
+    explicit: List[str],
+) -> Tuple[List[Path], List[str]]:
+    """Workspaces roots: explicit ``--workspace-root`` values or discovery.
+
+    Returns ``(roots, notes)``; notes describe skipped roots for the table
+    header. Explicit SSD roots are refused outright; discovered problems
+    skip with a note. Listing only: no deletion path reads these roots.
+    """
+    notes: List[str] = []
+    if explicit:
+        roots = []
+        for value in explicit:
+            root = Path(value)
+            if not is_internal_disk(root):
+                raise SystemExit(
+                    "housekeeping: refusing non-internal-disk workspace "
+                    "root {}".format(value)
+                )
+            roots.append(root)
+        return roots, notes
+    roots = []
+    for root in workspace_roots():
+        if not is_internal_disk(root):
+            notes.append(
+                "skipped non-internal workspace root {}".format(root)
+            )
+            continue
+        if not root.is_dir():
+            notes.append("workspace root not present {}".format(root))
+            continue
+        if not root_owned_by_me(root):
+            notes.append(
+                "workspace root not owned by this user; skipped {}".format(
+                    root
+                )
+            )
+            continue
+        roots.append(root)
+    return roots, notes
+
+
 def run_pass(
     apply: bool = False,
     explicit_roots: Optional[List[str]] = None,
@@ -1445,18 +1586,29 @@ def run_pass(
     explicit_log_roots: Optional[List[str]] = None,
     lsof: Optional[str] = None,
     explicit_temp_roots: Optional[List[str]] = None,
+    explicit_workspace_roots: Optional[List[str]] = None,
 ) -> Tuple[
-    List[Dict[str, object]], int, bool, int, bool, List[str], bool, bool
+    List[Dict[str, object]],
+    int,
+    bool,
+    int,
+    bool,
+    List[str],
+    bool,
+    bool,
+    bool,
 ]:
     """Plan (and optionally apply) all sweeps; write log and warnings.
 
     Returns ``(rows, pytest_total, pytest_capped, log_total, log_capped,
-    notes, logs_swept, temps_swept)``. ``rows`` is pytest rows, then log
-    rows, then temp rows. Log and temp roots are their explicit values,
-    or the discovered dirs when no sweep was scoped explicitly; an
-    explicit run sweeps only the sweeps it was asked for, so fixtures
-    stay hermetic. Skip-alerts go to the housekeeping log and the brief
-    artifact in both modes.
+    notes, logs_swept, temps_swept, workspaces_swept)``. ``rows`` is
+    pytest rows, then log rows, then temp rows, then workspace rows. Log,
+    temp and workspace roots are their explicit values, or the discovered
+    dirs when no sweep was scoped explicitly; an explicit run sweeps only
+    the sweeps it was asked for, so fixtures stay hermetic. Workspace
+    rows are flag-only in both modes: no apply step touches them.
+    Skip-alerts go to the housekeeping log and the brief artifact in both
+    modes.
     """
     roots, notes = _resolve_roots(list(explicit_roots or []))
     if explicit_log_roots is not None:
@@ -1464,7 +1616,7 @@ def run_pass(
             list(explicit_log_roots)
         )
         logs_swept = True
-    elif explicit_roots is not None:
+    elif explicit_roots is not None or explicit_workspace_roots is not None:
         log_roots_resolved, log_notes = [], []
         logs_swept = False
     else:
@@ -1475,13 +1627,37 @@ def run_pass(
             list(explicit_temp_roots)
         )
         temps_swept = True
-    elif explicit_roots is not None or explicit_log_roots is not None:
+    elif (
+        explicit_roots is not None
+        or explicit_log_roots is not None
+        or explicit_workspace_roots is not None
+    ):
         temp_roots_resolved, temp_notes = [], []
         temps_swept = False
     else:
         temp_roots_resolved, temp_notes = _resolve_temp_roots([])
         temps_swept = True
-    notes = list(notes) + list(log_notes) + list(temp_notes)
+    if explicit_workspace_roots is not None:
+        workspace_roots_resolved, workspace_notes = (
+            _resolve_workspace_roots(list(explicit_workspace_roots))
+        )
+        workspaces_swept = True
+    elif (
+        explicit_roots is not None
+        or explicit_log_roots is not None
+        or explicit_temp_roots is not None
+    ):
+        workspace_roots_resolved, workspace_notes = [], []
+        workspaces_swept = False
+    else:
+        workspace_roots_resolved, workspace_notes = (
+            _resolve_workspace_roots([])
+        )
+        workspaces_swept = True
+    notes = (
+        list(notes) + list(log_notes) + list(temp_notes)
+        + list(workspace_notes)
+    )
     log = HousekeepingLog(log_path)
     pytest_rows, pytest_total, pytest_capped = plan_pytest_sweep(
         roots, now=now
@@ -1490,10 +1666,12 @@ def run_pass(
         log_roots_resolved, now=now, lsof=lsof
     )
     temp_rows = plan_temp_sweep(temp_roots_resolved, now=now)
+    workspace_rows = plan_workspace_sweep(workspace_roots_resolved)
     if apply:
         apply_deletions(pytest_rows, roots, log)
         apply_log_trims(log_rows, log_roots_resolved, log, now=now, lsof=lsof)
         apply_temp_deletions(temp_rows, temp_roots_resolved, log, now=now)
+        # No workspace apply step: flag rows stay flags under --apply.
     warnings = capped_warnings(
         pytest_rows, roots, pytest_capped, now=now
     ) + log_capped_warnings(log_rows, log_roots_resolved, log_capped, now=now)
@@ -1506,7 +1684,7 @@ def run_pass(
         )
     write_brief_warnings(warnings, brief_path)
     return (
-        pytest_rows + log_rows + temp_rows,
+        pytest_rows + log_rows + temp_rows + workspace_rows,
         pytest_total,
         pytest_capped,
         log_total,
@@ -1514,6 +1692,7 @@ def run_pass(
         notes,
         logs_swept,
         temps_swept,
+        workspaces_swept,
     )
 
 
@@ -1527,11 +1706,15 @@ def render_table(
     apply: bool,
     logs_swept: bool = True,
     temps_swept: bool = True,
+    workspaces_swept: bool = True,
 ) -> str:
     """The ``path size action reason`` inventory table for all sweeps."""
     pytest_rows = [row for row in rows if row.get("kind") == "pytest"]
     log_rows = [row for row in rows if row.get("kind") == "log"]
     temp_rows = [row for row in rows if row.get("kind") == "temp"]
+    workspace_rows = [
+        row for row in rows if row.get("kind") == "workspace"
+    ]
     lines = [
         "# housekeeping sweep ({})".format(
             "apply" if apply else "dry-run"
@@ -1559,6 +1742,12 @@ def render_table(
                 len(temp_rows)
             )
         )
+    if workspaces_swept:
+        lines.append(
+            "# workspace {} run.* dirs (flag-only, never deleted)".format(
+                len(workspace_rows)
+            )
+        )
     lines.extend("# note: {}".format(note) for note in notes)
     lines.append("path\tsize_bytes\taction\treason")
     for row in rows:
@@ -1579,8 +1768,9 @@ def render_table(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Sweep pytest numbered-dir debris, trim command-center logs "
-            "and remove empty muse-* temp dirs. "
+            "Sweep pytest numbered-dir debris, trim command-center logs, "
+            "remove empty muse-* temp dirs and flag leftover run.* "
+            "workspaces. "
             "Dry-run by default; --apply deletes and trims."
         )
     )
@@ -1619,6 +1809,17 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--workspace-root",
+        action="append",
+        default=None,
+        dest="workspace_root",
+        help=(
+            "list exactly this workspaces dir instead of discovering "
+            "the implement-workspaces dir (repeatable; internal disk "
+            "only; flag-only, never deleted)"
+        ),
+    )
+    parser.add_argument(
         "--log",
         default=None,
         help="housekeeping log path (default: {})".format(LOG_ENV),
@@ -1643,6 +1844,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             notes,
             logs_swept,
             temps_swept,
+            workspaces_swept,
         ) = run_pass(
             apply=args.apply,
             explicit_roots=args.root,
@@ -1650,6 +1852,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             brief_path=Path(args.brief) if args.brief else None,
             explicit_log_roots=args.log_root,
             explicit_temp_roots=args.temp_root,
+            explicit_workspace_roots=args.workspace_root,
         )
     except SystemExit as exc:
         print(str(exc), file=sys.stderr)
@@ -1668,6 +1871,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             args.apply,
             logs_swept,
             temps_swept,
+            workspaces_swept,
         )
     )
     return 0

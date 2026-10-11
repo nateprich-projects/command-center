@@ -656,14 +656,14 @@ def test_a_code_ticket_filed_none_does_not_warn():
 
 
 def test_breakdown_guidance_states_the_split_rule():
-    """#2489: the breakdown-validator seam states the split rule — a
+    """#2489: the breakdown guidance states the split rule — a
     claude-code-environment ticket holds only the Mac step, with code in
-    a separate none ticket with linked accept. The model-facing prompt
-    and sizing-skill prose under routines/ and skills/ are protected
-    paths this ticket does not name, so they are deliberately untouched
-    here and recorded as departures."""
-    source = (ROOT / "engine" / "breakdown.py").read_text()
-    normalized = " ".join(source.split())
+    a separate none ticket with linked accept. Read from the guidance
+    seam, not the validator: skills/breakdown/SKILL.md holds the full
+    split rule, while routines/muse-breakdown.md stays under its
+    500-word guard."""
+    guidance = (ROOT / "skills" / "breakdown" / "SKILL.md").read_text()
+    normalized = " ".join(guidance.split())
     assert "holds only the Mac step" in normalized
     assert "separate `none` ticket with linked accept" in normalized
 

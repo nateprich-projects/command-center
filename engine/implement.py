@@ -2633,6 +2633,21 @@ def write_declined_agent_needs(url: str, ref: str) -> None:
     breakdown_engine.write_needs(item_id, "agent", ref)
 
 
+def write_declined_calendar_wait_needs(url: str, ref: str) -> None:
+    """Keep a calendar-wait decline on any-agent work (Needs none, #2492).
+
+    A calendar wait names no Mac capability and no Nate action: the ticket
+    is plain code work that is not startable on this run. The route
+    preserves Needs none so the wait neither strands the ticket in a
+    session lane nor asks Nate; the next lane run re-reads the date and
+    either works the ticket or declines again.
+    """
+    from engine import breakdown as breakdown_engine
+
+    item_id = breakdown_engine.add_to_project(url)
+    breakdown_engine.write_needs(item_id, "none", ref)
+
+
 def mark_ticket_blocked(repo: str, number: int, *, blocked_by: Optional[int] = None,
                         cwd: pathlib.Path) -> None:
     """Label one ticket blocked, with the native edge when one exists.
@@ -4210,6 +4225,8 @@ def finish_declined(
         = write_declined_agent_needs,
         external_event_needs_effect: Callable[[str, str], None]
         = write_declined_external_event_needs,
+        calendar_wait_needs_effect: Callable[[str, str], None]
+        = write_declined_calendar_wait_needs,
         prerequisite_facts_effect: Callable[[str], Optional[Dict[str, object]]]
         = read_declined_prerequisite,
         clear_block_effect: Callable[..., None] = clear_declined_ticket_block,
@@ -4260,6 +4277,7 @@ def finish_declined(
         decline_class == "unsatisfiable-acceptance"
     )
     pending_gate_answer_routed = decline_class == "pending-gate-answer"
+    calendar_wait_routed = decline_class == "calendar-wait"
     prerequisite_open = False
     if decline_class == "prerequisite-ticket" and decline_target is not None:
         try:
@@ -4304,7 +4322,8 @@ def finish_declined(
     if (not prerequisite_recorded and not accept_conflict_routed
             and not false_unlanded_prerequisite_routed
             and not unsatisfiable_acceptance_routed
-            and not pending_gate_answer_routed):
+            and not pending_gate_answer_routed
+            and not calendar_wait_routed):
         # Unknown declines and failed prerequisite handoffs have no machine-
         # readable condition that can clear them. Keep the ticket blocked and
         # route its Unblock question through the funnel watch.
@@ -4326,6 +4345,16 @@ def finish_declined(
             resolved, context["number"], cwd=context["root"],
         )
         external_event_needs_effect(ticket["url"], ref)
+    elif calendar_wait_routed:
+        # A calendar wait is plain code work that is not startable on this
+        # run: clear any stale block and preserve Needs none, never a
+        # session lane (#2492). Only genuine Mac capability on the
+        # still-Claude list files claude-code-environment, and the decline
+        # route has no such writer.
+        clear_block_effect(
+            resolved, context["number"], cwd=context["root"],
+        )
+        calendar_wait_needs_effect(ticket["url"], ref)
     routing_failed = False
     if accept_conflict_routed:
         try:
@@ -4395,6 +4424,8 @@ def finish_declined(
             if not routing_failed else
             "; gate-answer route failed; ticket left blocked"
         )
+    elif calendar_wait_routed:
+        note += "; waiting on the calendar; Needs kept none"
     elif routing_failed:
         note += "; review routing failed; ticket left blocked"
     if extra_note:

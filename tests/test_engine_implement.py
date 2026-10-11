@@ -4705,6 +4705,138 @@ def test_classify_decline_reason_routes_unactionable_shapes(reason, expected):
     assert implement.classify_decline_reason(reason, REPO) == expected
 
 
+CALENDAR_WAIT_DECLINE_REASONS = [
+    "Waiting on the calendar event on 2026-11-01 before this ticket can "
+    "proceed. No source change was made.",
+    "The calendar window opens next week; waiting on the calendar to start "
+    "the rollout.",
+    "Waiting until 2026-11-01 for the scheduled window to open.",
+    "Blocked until 2026-11-01 for the calendar window; will retry after.",
+]
+
+
+@pytest.mark.parametrize("reason", CALENDAR_WAIT_DECLINE_REASONS)
+def test_classify_decline_reason_routes_calendar_wait(reason):
+    """A calendar-wait decline reads as a date wait, not unknown (#2492)."""
+    assert implement.classify_decline_reason(reason, REPO) == (
+        "calendar-wait", None)
+
+
+@pytest.mark.parametrize("reason", [
+    "Unlanded prerequisite #165 is still open; waiting on the calendar "
+    "window to retry.",
+    LIVE_1497_PENDING_GATE_ANSWER + " Waiting on the calendar to retry.",
+    "The ticket acceptance cannot be met by any change; waiting on the "
+    "calendar changes nothing.",
+])
+def test_classify_decline_reason_prefers_existing_shapes_over_calendar_wait(
+        reason):
+    """A dated prerequisite, gate answer or unsatisfiable acceptance keeps
+    its own route when a calendar wait rides along (#2492)."""
+    assert implement.classify_decline_reason(reason, REPO)[0] != (
+        "calendar-wait")
+
+
+@pytest.mark.parametrize("reason", CALENDAR_WAIT_DECLINE_REASONS)
+def test_finish_declined_preserves_none_for_calendar_wait(
+        tmp_path, monkeypatch, reason):
+    """Reproduction for #2492: a calendar-wait decline from none keeps Needs
+    none instead of stranding the ticket in a session lane, and lifts any
+    stale block."""
+    _, clone = make_clone(tmp_path)
+    monkeypatch.setattr(implement, "fetch_ticket", lambda repo, number: ticket(number))
+    effects = {"blocked": [], "cleared": [], "comments": [], "released": [],
+               "finished": [], "writes": []}
+
+    implement.finish_declined(
+        reason,
+        run="run-42",
+        repo=REPO,
+        cwd=clone,
+        release=effects["released"].append,
+        heartbeat_finish=lambda *args: effects["finished"].append(args),
+        block_effect=lambda *args, **kwargs: effects["blocked"].append(
+            (args, kwargs)),
+        comment_effect=lambda *args, **kwargs: effects["comments"].append(
+            (args, kwargs)),
+        needs_effect=lambda *args: pytest.fail(
+            "a calendar wait must not take the review route"),
+        declined_needs_effect=lambda *args: pytest.fail(
+            "a calendar wait must not take the blocked agent route"),
+        external_event_needs_effect=lambda *args: pytest.fail(
+            "a calendar wait preserves none, not external-event"),
+        calendar_wait_needs_effect=lambda url, ref: effects["writes"].append(
+            (url, ref)),
+        clear_block_effect=lambda repo, number, **kwargs:
+            effects["cleared"].append((repo, number, kwargs)),
+    )
+
+    assert effects["writes"] == [(ticket()["url"], REPO + "#42")]
+    assert effects["blocked"] == []
+    assert effects["cleared"] == [(REPO, 42, {"cwd": clone})]
+    assert effects["comments"][0][0][2] == "**Declined:** {}".format(reason)
+    assert effects["released"] == [REPO + "#42"]
+    assert effects["finished"][0][2] == "skipped-blocked"
+    assert "waiting on the calendar; Needs kept none" in (
+        effects["finished"][0][3])
+
+
+@pytest.mark.parametrize("reason", [
+    "Waiting on the calendar window; will verify with launchctl kickstart "
+    "after the date.",
+    "Waiting until 2026-11-01 for sudo -n -u jeffy maintenance to finish.",
+    "Waiting on the calendar event, then read the deploy key from the "
+    "Keychain.",
+    "Waiting on the calendar; the live config deploy follows the date.",
+])
+def test_calendar_wait_decline_never_files_claude_needs(
+        tmp_path, monkeypatch, reason):
+    """Only genuine Mac capability files claude-code-environment: even a
+    calendar wait naming Mac words stays on Needs none, because the decline
+    route has no session-lane writer (#2492)."""
+    _, clone = make_clone(tmp_path)
+    monkeypatch.setattr(implement, "fetch_ticket", lambda repo, number: ticket(number))
+    writes = []
+
+    implement.finish_declined(
+        reason,
+        run="run-42",
+        repo=REPO,
+        cwd=clone,
+        release=lambda target: None,
+        heartbeat_finish=lambda *args: None,
+        block_effect=lambda *args, **kwargs: pytest.fail(
+            "a calendar wait must not block"),
+        comment_effect=lambda *args, **kwargs: None,
+        needs_effect=lambda url, ref: writes.append("agent"),
+        declined_needs_effect=lambda url, ref: writes.append("agent"),
+        external_event_needs_effect=lambda url, ref: writes.append(
+            "external-event"),
+        calendar_wait_needs_effect=lambda url, ref: writes.append("none"),
+        clear_block_effect=lambda *args, **kwargs: None,
+    )
+
+    assert writes == ["none"]
+
+
+def test_write_declined_calendar_wait_needs_uses_canonical_field(monkeypatch):
+    from engine import breakdown as breakdown_engine
+
+    calls = []
+    monkeypatch.setattr(
+        breakdown_engine, "add_to_project", lambda url: "project-item-id")
+    monkeypatch.setattr(
+        breakdown_engine, "write_needs",
+        lambda item_id, needs, ref: calls.append((item_id, needs, ref)),
+    )
+
+    implement.write_declined_calendar_wait_needs(
+        ticket()["url"], REPO + "#42",
+    )
+
+    assert calls == [("project-item-id", "none", REPO + "#42")]
+
+
 @pytest.fixture
 def ff_225_landed_prerequisite_facts():
     """The #225 shape: five child tickets closed before its self-close."""

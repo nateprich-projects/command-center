@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-"""Hourly disk housekeeping for pytest debris (ticket 2464).
+"""Hourly disk housekeeping for pytest debris and logs (tickets 2464, 2465).
 
-Dry-run by default; ``--apply`` deletes. Only the pytest numbered-dir sweep
-is implemented here: logs, temp dirs and the free-space gate are separate
+Dry-run by default; ``--apply`` deletes and trims. Two sweeps share one
+``path size action reason`` table, one housekeeping log and one
+funnel-brief warning artifact: the pytest numbered-dir sweep and the
+command-center log trim. Temp dirs and the free-space gate are separate
 tickets, and workspace deletion, the owner protocol, the evidence store,
 backups and restore tests are out per the slimmed 2026-10-10 approval.
 
-What the sweep does
-------------------
+What the pytest sweep does
+--------------------------
 Under each pytest temp root it inspects the numbered ``pytest-N`` dirs:
 
 * keep the newest 3 by number (mirrors pytest's own
@@ -21,12 +23,27 @@ Under each pytest temp root it inspects the numbered ``pytest-N`` dirs:
   oldest first; when only protected dirs remain above the cap, skip and
   alert (housekeeping log plus funnel-brief warning) instead of evicting.
 
+What the log trim does
+---------------------
+Under each log root (``~/Library/Logs`` by default) it inspects the
+``command-center-*.log`` files, internal-disk only via the shared guard:
+
+* keep any file younger than 14 days as protected failure evidence;
+* keep any file held open by a live process (``lsof``, checked immediately
+  before trimming; uncertainty keeps, never trims);
+* keep any file at or under 25 MiB;
+* trim every other file to its newest 25 MiB;
+* cap total logs around 200 MiB by summed bytes; when protected files
+  alone still exceed the cap after every eligible trim, skip and alert
+  (housekeeping log plus funnel-brief warning) instead of evicting.
+
 Every run, dry-run or apply, prints a ``path size action reason`` table to
-stdout, appends deletes and skip-alerts to the housekeeping log, and
-rewrites the funnel-brief warning artifact with the current warnings
+stdout, appends deletes, trims and skip-alerts to the housekeeping log,
+and rewrites the funnel-brief warning artifact with the current warnings
 (possibly empty, which clears a stale alert). Findings are identical in
-both modes; only deletion differs. Nothing is deleted until enablement:
-the run-keeper wiring calls this without ``--apply``.
+both modes; only deletion and trimming differ. Nothing is deleted or
+trimmed until enablement: the run-keeper wiring calls this without
+``--apply``.
 
 First verification, recorded 2026-10-10 (ticket requirement)
 ------------------------------------------------------------
@@ -58,6 +75,24 @@ The sweep covers both roots: the current-context root plus the TMPDIR-unset
 fallback, deduplicated. Both are internal-disk only; any root resolving
 under ``/Volumes`` is refused.
 
+Log trim first verification, recorded 2026-10-11 (ticket requirement)
+---------------------------------------------------------------------
+The plan's hazard was "trimming a log while launchd holds it open loses
+output" (label: inferred). Confirmed on the Mac mini with the real
+holder check (``lsof -F0n``): a fixture file held open by the test
+process reports held (exit 0, path listed) and the plan marks it keep in
+both dry-run and apply, never trimmed; the same file closed reports
+unheld (exit 1, no output). The fixture proof lives in
+``tests/test_housekeeping.py::test_held_open_log_is_never_trimmed``.
+
+Sample of the confirmed log root ``~/Library/Logs`` (24
+``command-center-*.log`` files, ~340 MiB total): ``muse-implement.log``
+105 MiB held by 3 processes (2026-10-10, recent),
+``muse-implement-standard.log`` 105 MiB held by 3 (2026-10-10, recent),
+``muse-review-standard.log`` 100 MiB unheld (2026-09-20, old, trim
+candidate), ``muse-review.log`` 26 MiB unheld (2026-10-07, recent, kept).
+Old unheld large logs trim; recent or held logs keep.
+
 Safety notes
 ------------
 * ``pytest-current`` and any other symlink, ``garbage-*`` transient renames
@@ -70,23 +105,32 @@ Safety notes
 * Age is the numbered dir's own mtime: pytest tmp dirs are written during
   the run and abandoned after, so dir mtime approximates run end, with the
   14-day evidence window absorbing stragglers.
+* Log trim re-checks age and the held-open probe immediately before
+  trimming each file, keeps the newest 25 MiB via an atomic same-dir
+  rename, and never trims below 25 MiB to meet the total: protected
+  files alone over the cap mean skip and alert.
+* Log age is the file's own mtime; a trim updates it to the trim moment.
+  Files younger than 14 days are never trimmed, even over 25 MiB.
 """
 
 from __future__ import annotations
 
 import argparse
 import errno
+import fnmatch
 import getpass
 import json
 import os
 import re
 import shutil
+import stat
+import subprocess
 import sys
 import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 #: Mirrors pytest's ``tmp_path_retention_count`` default: its own cleanup
 #: already targets everything beyond these.
@@ -124,6 +168,30 @@ RETRY_ACTION = (
     "no action needed: deletions resume automatically once live runs "
     "finish and debris ages past 14 days; if the warning persists, a live "
     "run may be leaking pytest dirs"
+)
+
+#: Newest bytes kept per log file. Larger old unheld logs trim to this.
+LOG_PER_FILE_BYTES = 25 * 1024 * 1024
+#: Total log bytes allowed across all swept roots. "Around" because
+#: protected files alone may exceed it after every eligible trim; then
+#: the sweep skips and alerts instead of evicting.
+LOG_TOTAL_CAP_BYTES = 200 * 1024 * 1024
+#: Log files swept: launchd stdout/stderr logs. ``*.err.log`` matches
+#: because it ends in ``.log``.
+LOG_PATTERN = "command-center-*.log"
+
+#: Override the discovered log dir (single path). Tests use explicit
+#: ``--log-root``; the keeper test uses this for a hermetic discovery.
+LOG_DIR_ENV = "COMMAND_CENTER_HOUSEKEEPING_LOG_DIR"
+#: Override the ``lsof`` binary for the held-open probe. Follows the
+#: ``session_log_compress.py`` precedent (``COMMAND_CENTER_SESSION_LOG_LSOF``).
+LSOF_ENV = "COMMAND_CENTER_HOUSEKEEPING_LSOF"
+
+#: What to do when protected logs alone exceed the total cap.
+LOG_RETRY_ACTION = (
+    "no action needed: trims resume automatically once live runs "
+    "finish and logs age past 14 days; if the warning persists, a live "
+    "run may be leaking log output"
 )
 
 
@@ -185,6 +253,45 @@ def pytest_roots(user: Optional[str] = None) -> List[Path]:
             seen.add(str(root))
             ordered.append(root)
     return ordered
+
+
+def log_roots() -> List[Path]:
+    """Confirmed log dirs: ``~/Library/Logs`` or the test override.
+
+    ``COMMAND_CENTER_HOUSEKEEPING_LOG_DIR`` replaces discovery with one
+    explicit dir, so the keeper test sweeps a fixture instead of the
+    machine's real logs.
+    """
+    override = os.environ.get(LOG_DIR_ENV)
+    if override:
+        return [Path(override)]
+    return [Path(os.path.expanduser("~/Library/Logs"))]
+
+
+def log_files(root: Path) -> List[Path]:
+    """Sorted ``command-center-*.log`` regular files directly under a root.
+
+    Skips symlinks, dirs and non-matching names. Non-recursive: launchd
+    writes its logs flat in ``~/Library/Logs``.
+    """
+    found = []
+    try:
+        entries = list(os.scandir(root))
+    except OSError:
+        return []
+    for entry in entries:
+        try:
+            if entry.is_symlink():
+                continue
+            if not entry.is_file(follow_symlinks=False):
+                continue
+        except OSError:
+            continue
+        if not fnmatch.fnmatch(entry.name, LOG_PATTERN):
+            continue
+        found.append(Path(entry.path))
+    found.sort()
+    return found
 
 
 def is_internal_disk(path: Path) -> bool:
@@ -251,6 +358,112 @@ def pid_is_alive(pid: int) -> bool:
             return False
         return True
     return True
+
+
+def _resolve_lsof(explicit: Optional[str] = None) -> Optional[str]:
+    """The ``lsof`` binary for the held-open probe, if any."""
+    if explicit is not None:
+        return explicit or None
+    return os.environ.get(LSOF_ENV) or shutil.which("lsof")
+
+
+def _lsof_reports_open(path: Path, lsof: str) -> Optional[bool]:
+    """Whether ``lsof`` lists a holder for one path, or None when uncertain.
+
+    Exit 0 with the path listed means held; exit 1 with no output means
+    no holder. Anything else (stderr, another exit code, spawn failure)
+    is a failed probe, mirroring ``session_log_compress._open_paths``.
+    """
+    try:
+        result = subprocess.run(
+            [lsof, "-F0n", str(path)],
+            capture_output=True,
+            check=False,
+        )
+    except OSError:
+        return None
+    if result.stderr.strip() or result.returncode not in (0, 1):
+        return None
+    try:
+        wanted = os.path.realpath(os.fspath(path))
+    except OSError:
+        return None
+    for field in result.stdout.split(b"\0"):
+        field = field.lstrip(b"\n")
+        if field.startswith(b"n"):
+            name = os.fsdecode(field[1:].rstrip(b"\n"))
+            if name and os.path.realpath(name) == wanted:
+                return True
+    return False
+
+
+def _proc_reports_open(path: Path) -> Optional[bool]:
+    """Whether a ``/proc`` scan finds a holder, or None without ``/proc``.
+
+    Linux fallback when ``lsof`` is missing (CI runners). Unreadable
+    entries are skipped best-effort; a missing ``/proc`` (macOS) reads as
+    no information rather than no holder.
+    """
+    proc = Path("/proc")
+    try:
+        if not proc.is_dir():
+            return None
+    except OSError:
+        return None
+    try:
+        wanted = os.path.realpath(os.fspath(path))
+    except OSError:
+        return None
+    try:
+        pids = list(os.scandir(proc))
+    except OSError:
+        return None
+    for pid_entry in pids:
+        try:
+            if not pid_entry.name.isdigit():
+                continue
+            fds = os.scandir(os.path.join(proc, pid_entry.name, "fd"))
+        except OSError:
+            continue
+        try:
+            for fd_entry in fds:
+                try:
+                    target = os.readlink(fd_entry.path)
+                except OSError:
+                    continue
+                # Deleted-but-held files read as "path (deleted)".
+                if target.endswith(" (deleted)"):
+                    target = target[: -len(" (deleted)")]
+                try:
+                    if os.path.realpath(target) == wanted:
+                        return True
+                except OSError:
+                    continue
+        finally:
+            try:
+                fds.close()
+            except OSError:
+                pass
+    return False
+
+
+def log_is_held(path: Path, lsof: Optional[str] = None) -> bool:
+    """True when a log must be treated as held open by a live process.
+
+    ``lsof`` first, ``/proc`` when ``lsof`` is missing or its probe fails,
+    held on every uncertainty: a failed probe keeps, never trims. The
+    caller checks immediately before trimming, so a stale answer is at
+    most one trim behind a newly opened handle.
+    """
+    binary = _resolve_lsof(lsof)
+    if binary:
+        answer = _lsof_reports_open(path, binary)
+        if answer is not None:
+            return answer
+        fallback = _proc_reports_open(path)
+        return True if fallback is None else fallback
+    fallback = _proc_reports_open(path)
+    return True if fallback is None else fallback
 
 
 def dir_size_bytes(path: Path) -> int:
@@ -340,6 +553,7 @@ def plan_pytest_sweep(
                 "size_bytes": size,
                 "action": "keep",
                 "reason": "",
+                "kind": "pytest",
             }
             rows.append(row)
             if number in newest:
@@ -485,8 +699,230 @@ def apply_deletions(
         )
 
 
+def _log_stat(path: Path) -> Tuple[Optional[int], Optional[float], Optional[int]]:
+    """``(size, mtime, mode)`` for a log file, Nones when unreadable."""
+    try:
+        info = path.stat()
+    except OSError:
+        return None, None, None
+    if not stat.S_ISREG(info.st_mode):
+        return None, None, None
+    return info.st_size, info.st_mtime, stat.S_IMODE(info.st_mode)
+
+
+def plan_log_sweep(
+    roots: List[Path],
+    now: Optional[float] = None,
+    lsof: Optional[str] = None,
+) -> Tuple[List[Dict[str, object]], int, bool]:
+    """Plan the log trim across roots without touching anything.
+
+    Returns ``(rows, total_bytes, capped)``. Each row carries ``path``,
+    ``size_bytes``, ``action`` (``keep`` or ``would-trim``) and ``reason``.
+    Every old unheld file over 25 MiB is marked ``would-trim``; ``capped``
+    is True when protected files alone still exceed the 200 MiB total
+    after every eligible trim.
+    """
+    now = _utc_now() if now is None else float(now)
+    cutoff = now - EVIDENCE_SECONDS
+    rows: List[Dict[str, object]] = []
+    total = 0
+    reclaimable = 0
+
+    for root in roots:
+        try:
+            entries = log_files(root)
+        except OSError:
+            continue
+        for path in entries:
+            size, mtime, _mode = _log_stat(path)
+            if size is None:
+                row: Dict[str, object] = {
+                    "path": str(path),
+                    "size_bytes": 0,
+                    "action": "keep",
+                    "reason": "unreadable; kept",
+                    "kind": "log",
+                }
+                rows.append(row)
+                continue
+            total += size
+            row = {
+                "path": str(path),
+                "size_bytes": size,
+                "action": "keep",
+                "reason": "",
+                "kind": "log",
+            }
+            rows.append(row)
+            if mtime is None or mtime >= cutoff:
+                row["reason"] = (
+                    "failure evidence under {} days; kept".format(
+                        EVIDENCE_DAYS
+                    )
+                )
+                continue
+            if log_is_held(path, lsof=lsof):
+                row["reason"] = "held open by a live process; kept"
+                continue
+            if size <= LOG_PER_FILE_BYTES:
+                row["reason"] = "within {} per-file bound".format(
+                    _format_bytes(LOG_PER_FILE_BYTES)
+                )
+                continue
+            row["action"] = "would-trim"
+            row["reason"] = "older than {} days, unheld, over {} per-file".format(
+                EVIDENCE_DAYS, _format_bytes(LOG_PER_FILE_BYTES)
+            )
+            reclaimable += size - LOG_PER_FILE_BYTES
+
+    remaining = total - reclaimable
+    capped = remaining > LOG_TOTAL_CAP_BYTES
+    return rows, total, capped
+
+
+def _trim_file_to_tail(path: Path, keep_bytes: int, mode: Optional[int]) -> None:
+    """Replace a file with its newest ``keep_bytes`` bytes, atomically.
+
+    Reads the tail, writes a same-directory temp file, then renames over
+    the original. The mtime updates to the trim moment; the mode is
+    preserved when known.
+    """
+    with path.open("rb") as source:
+        source.seek(0, os.SEEK_END)
+        size = source.tell()
+        if size <= keep_bytes:
+            return
+        source.seek(size - keep_bytes)
+        tail = source.read()
+    fd, temp_name = tempfile.mkstemp(
+        prefix="." + path.name + ".",
+        suffix=".trim.tmp",
+        dir=str(path.parent),
+    )
+    try:
+        with os.fdopen(fd, "wb") as target:
+            if mode is not None:
+                try:
+                    os.fchmod(target.fileno(), mode)
+                except OSError:
+                    pass
+            target.write(tail)
+            target.flush()
+            os.fsync(target.fileno())
+        os.replace(temp_name, path)
+    except BaseException:
+        try:
+            os.unlink(temp_name)
+        except OSError:
+            pass
+        raise
+
+
+def apply_log_trims(
+    rows: List[Dict[str, object]],
+    roots: List[Path],
+    log: "HousekeepingLog",
+    now: Optional[float] = None,
+    lsof: Optional[str] = None,
+) -> None:
+    """Trim ``would-trim`` rows that still verify, in place.
+
+    Each target is re-checked immediately before trimming: still inside
+    a swept root, still on the internal disk, still old, still unheld,
+    still over the per-file bound. Anything that fails revalidation is
+    kept and logged instead.
+    """
+    now = _utc_now() if now is None else float(now)
+    cutoff = now - EVIDENCE_SECONDS
+    for row in rows:
+        if row.get("action") != "would-trim":
+            continue
+        path = Path(str(row["path"]))
+        size, mtime, mode = _log_stat(path)
+        if size is None or mtime is None:
+            row["action"] = "skip"
+            row["reason"] = "unreadable before trim; kept"
+            log.record(
+                "skip",
+                str(path),
+                int(row["size_bytes"]),
+                str(row["reason"]),
+            )
+            continue
+        if not any(_is_within(path, root) for root in roots):
+            row["action"] = "skip"
+            row["reason"] = "no longer inside a swept root; kept"
+            log.record(
+                "skip",
+                str(path),
+                int(row["size_bytes"]),
+                str(row["reason"]),
+            )
+            continue
+        if not is_internal_disk(path):
+            row["action"] = "skip"
+            row["reason"] = "not on the internal disk; kept"
+            log.record(
+                "skip",
+                str(path),
+                int(row["size_bytes"]),
+                str(row["reason"]),
+            )
+            continue
+        if mtime >= cutoff:
+            row["action"] = "skip"
+            row["reason"] = "written since the plan; failure evidence kept"
+            log.record(
+                "skip",
+                str(path),
+                int(row["size_bytes"]),
+                str(row["reason"]),
+            )
+            continue
+        if log_is_held(path, lsof=lsof):
+            row["action"] = "skip"
+            row["reason"] = "held open before trim; kept"
+            log.record(
+                "skip",
+                str(path),
+                int(row["size_bytes"]),
+                str(row["reason"]),
+            )
+            continue
+        if size <= LOG_PER_FILE_BYTES:
+            row["action"] = "skip"
+            row["reason"] = "shrank below the per-file bound; kept"
+            log.record(
+                "skip",
+                str(path),
+                int(row["size_bytes"]),
+                str(row["reason"]),
+            )
+            continue
+        try:
+            _trim_file_to_tail(path, LOG_PER_FILE_BYTES, mode)
+        except OSError as exc:
+            row["action"] = "error"
+            row["reason"] = "trim failed: {}".format(exc)
+            log.record(
+                "error",
+                str(path),
+                int(row["size_bytes"]),
+                str(row["reason"]),
+            )
+            continue
+        row["action"] = "trim"
+        row["reason"] = "{}. kept newest {}".format(
+            row["reason"], _format_bytes(LOG_PER_FILE_BYTES)
+        )
+        log.record(
+            "trim", str(path), int(row["size_bytes"]), str(row["reason"])
+        )
+
+
 class HousekeepingLog:
-    """Append-only ``key=value`` record of deletes, skip-alerts and errors."""
+    """Append-only ``key=value`` record of deletes, trims, skip-alerts and errors."""
 
     def __init__(self, path: Optional[Path] = None) -> None:
         self.path = path or LOG_PATH
@@ -562,6 +998,64 @@ def capped_warnings(
             "bytes": remaining_by_root[root_path],
             "cap_bytes": CAP_BYTES,
             "retry": RETRY_ACTION,
+        })
+    return warnings
+
+
+def log_capped_warnings(
+    rows: List[Dict[str, object]],
+    roots: List[Path],
+    capped: bool,
+    now: Optional[float] = None,
+) -> List[Dict[str, object]]:
+    """One warning per log root still holding protected bytes over the cap.
+
+    Empty when the plan meets the cap. Trimmed rows count at their
+    post-trim size (25 MiB); kept rows count whole. Each warning carries
+    the plan's timestamp, path, reason, bytes, cap and retry action.
+    """
+    if not capped:
+        return []
+    now = _utc_now() if now is None else float(now)
+    remaining_by_root: Dict[str, int] = {}
+    for row in rows:
+        if row.get("kind") != "log":
+            continue
+        if row.get("action") in ("would-trim", "trim"):
+            counted = min(int(row["size_bytes"]), LOG_PER_FILE_BYTES)
+        else:
+            counted = int(row["size_bytes"])
+        try:
+            resolved = os.path.realpath(str(row["path"]))
+        except OSError:
+            continue
+        for root in roots:
+            if _is_within(Path(resolved), root):
+                key = os.path.realpath(os.fspath(root))
+                remaining_by_root[key] = (
+                    remaining_by_root.get(key, 0) + counted
+                )
+                break
+    remaining_total = sum(remaining_by_root.values())
+    warnings = []
+    for root_path in sorted(remaining_by_root):
+        warnings.append({
+            "kind": "log-cap",
+            "recorded_at": _iso(now),
+            "path": root_path,
+            "reason": (
+                "log files keep {} over the {} cap after every "
+                "eligible trim; only protected files remain "
+                "(held open or failure evidence under "
+                "{} days)".format(
+                    _format_bytes(remaining_total),
+                    _format_bytes(LOG_TOTAL_CAP_BYTES),
+                    EVIDENCE_DAYS,
+                )
+            ),
+            "bytes": remaining_by_root[root_path],
+            "cap_bytes": LOG_TOTAL_CAP_BYTES,
+            "retry": LOG_RETRY_ACTION,
         })
     return warnings
 
@@ -646,24 +1140,92 @@ def _resolve_roots(explicit: List[str]) -> Tuple[List[Path], List[str]]:
     return roots, notes
 
 
+def _resolve_log_roots(
+    explicit: List[str],
+) -> Tuple[List[Path], List[str]]:
+    """Log roots: explicit ``--log-root`` values or the confirmed discovery.
+
+    Returns ``(roots, notes)``; notes describe skipped roots for the table
+    header. Explicit SSD roots are refused outright; discovered problems
+    skip with a note.
+    """
+    notes: List[str] = []
+    if explicit:
+        roots = []
+        for value in explicit:
+            root = Path(value)
+            if not is_internal_disk(root):
+                raise SystemExit(
+                    "housekeeping: refusing non-internal-disk log root {}".format(
+                        value
+                    )
+                )
+            roots.append(root)
+        return roots, notes
+    roots = []
+    for root in log_roots():
+        if not is_internal_disk(root):
+            notes.append("skipped non-internal log root {}".format(root))
+            continue
+        if not root.is_dir():
+            notes.append("log root not present {}".format(root))
+            continue
+        if not root_owned_by_me(root):
+            notes.append(
+                "log root not owned by this user; skipped {}".format(root)
+            )
+            continue
+        roots.append(root)
+    return roots, notes
+
+
 def run_pass(
     apply: bool = False,
     explicit_roots: Optional[List[str]] = None,
     log_path: Optional[Path] = None,
     brief_path: Optional[Path] = None,
     now: Optional[float] = None,
-) -> Tuple[List[Dict[str, object]], int, bool, List[str]]:
-    """Plan (and optionally apply) the pytest sweep; write log and warnings.
+    explicit_log_roots: Optional[List[str]] = None,
+    lsof: Optional[str] = None,
+) -> Tuple[
+    List[Dict[str, object]], int, bool, int, bool, List[str], bool
+]:
+    """Plan (and optionally apply) both sweeps; write log and warnings.
 
-    Returns ``(rows, total_bytes, capped, notes)``. Skip-alerts go to the
-    housekeeping log and the brief artifact in both modes.
+    Returns ``(rows, pytest_total, pytest_capped, log_total, log_capped,
+    notes, logs_swept)``. ``rows`` is pytest rows then log rows. Log
+    roots are explicit ``--log-root`` values, or the discovered
+    ``~/Library/Logs`` when pytest roots were also discovered; a pytest
+    explicit run sweeps no logs unless asked, so pytest fixtures stay
+    hermetic. Skip-alerts go to the housekeeping log and the brief
+    artifact in both modes.
     """
     roots, notes = _resolve_roots(list(explicit_roots or []))
+    if explicit_log_roots is not None:
+        log_roots_resolved, log_notes = _resolve_log_roots(
+            list(explicit_log_roots)
+        )
+        logs_swept = True
+    elif explicit_roots is not None:
+        log_roots_resolved, log_notes = [], []
+        logs_swept = False
+    else:
+        log_roots_resolved, log_notes = _resolve_log_roots([])
+        logs_swept = True
+    notes = list(notes) + list(log_notes)
     log = HousekeepingLog(log_path)
-    rows, total, capped = plan_pytest_sweep(roots, now=now)
+    pytest_rows, pytest_total, pytest_capped = plan_pytest_sweep(
+        roots, now=now
+    )
+    log_rows, log_total, log_capped = plan_log_sweep(
+        log_roots_resolved, now=now, lsof=lsof
+    )
     if apply:
-        apply_deletions(rows, roots, log)
-    warnings = capped_warnings(rows, roots, capped, now=now)
+        apply_deletions(pytest_rows, roots, log)
+        apply_log_trims(log_rows, log_roots_resolved, log, now=now, lsof=lsof)
+    warnings = capped_warnings(
+        pytest_rows, roots, pytest_capped, now=now
+    ) + log_capped_warnings(log_rows, log_roots_resolved, log_capped, now=now)
     for warning in warnings:
         log.record(
             "skip-alert",
@@ -672,28 +1234,51 @@ def run_pass(
             str(warning["reason"]),
         )
     write_brief_warnings(warnings, brief_path)
-    return rows, total, capped, notes
+    return (
+        pytest_rows + log_rows,
+        pytest_total,
+        pytest_capped,
+        log_total,
+        log_capped,
+        notes,
+        logs_swept,
+    )
 
 
 def render_table(
     rows: List[Dict[str, object]],
-    total: int,
-    capped: bool,
+    pytest_total: int,
+    pytest_capped: bool,
+    log_total: int,
+    log_capped: bool,
     notes: List[str],
     apply: bool,
+    logs_swept: bool = True,
 ) -> str:
-    """The ``path size action reason`` inventory table."""
+    """The ``path size action reason`` inventory table for both sweeps."""
+    pytest_rows = [row for row in rows if row.get("kind") != "log"]
+    log_rows = [row for row in rows if row.get("kind") == "log"]
     lines = [
-        "# housekeeping pytest sweep ({})".format(
+        "# housekeeping sweep ({})".format(
             "apply" if apply else "dry-run"
         ),
-        "# total {} across {} numbered dirs; cap {}; capped={}".format(
-            _format_bytes(total),
-            len(rows),
+        "# pytest total {} across {} numbered dirs; cap {}; capped={}".format(
+            _format_bytes(pytest_total),
+            len(pytest_rows),
             _format_bytes(CAP_BYTES),
-            "yes" if capped else "no",
+            "yes" if pytest_capped else "no",
         ),
     ]
+    if logs_swept:
+        lines.append(
+            "# log total {} across {} files; per-file {}; total cap {}; capped={}".format(
+                _format_bytes(log_total),
+                len(log_rows),
+                _format_bytes(LOG_PER_FILE_BYTES),
+                _format_bytes(LOG_TOTAL_CAP_BYTES),
+                "yes" if log_capped else "no",
+            )
+        )
     lines.extend("# note: {}".format(note) for note in notes)
     lines.append("path\tsize_bytes\taction\treason")
     for row in rows:
@@ -707,29 +1292,39 @@ def render_table(
     summary = ", ".join(
         "{} {}".format(counts[action], action) for action in sorted(counts)
     )
-    lines.append("# summary: {}".format(summary or "no numbered dirs"))
+    lines.append("# summary: {}".format(summary or "no rows"))
     return "\n".join(lines) + "\n"
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Sweep pytest numbered-dir debris. Dry-run by default; "
-            "--apply deletes."
+            "Sweep pytest numbered-dir debris and trim command-center logs. "
+            "Dry-run by default; --apply deletes and trims."
         )
     )
     parser.add_argument(
         "--apply",
         action="store_true",
-        help="delete planned dirs instead of only listing them",
+        help="delete and trim planned paths instead of only listing them",
     )
     parser.add_argument(
         "--root",
         action="append",
-        default=[],
+        default=None,
         help=(
-            "sweep exactly this root instead of discovering the confirmed "
-            "pytest temp roots (repeatable; internal disk only)"
+            "sweep exactly this pytest root instead of discovering the "
+            "confirmed pytest temp roots (repeatable; internal disk only)"
+        ),
+    )
+    parser.add_argument(
+        "--log-root",
+        action="append",
+        default=None,
+        dest="log_root",
+        help=(
+            "sweep exactly this log dir instead of discovering "
+            "~/Library/Logs (repeatable; internal disk only)"
         ),
     )
     parser.add_argument(
@@ -748,11 +1343,20 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Optional[List[str]] = None) -> int:
     args = build_parser().parse_args(argv)
     try:
-        rows, total, capped, notes = run_pass(
+        (
+            rows,
+            pytest_total,
+            pytest_capped,
+            log_total,
+            log_capped,
+            notes,
+            logs_swept,
+        ) = run_pass(
             apply=args.apply,
             explicit_roots=args.root,
             log_path=Path(args.log) if args.log else None,
             brief_path=Path(args.brief) if args.brief else None,
+            explicit_log_roots=args.log_root,
         )
     except SystemExit as exc:
         print(str(exc), file=sys.stderr)
@@ -761,7 +1365,16 @@ def main(argv: Optional[List[str]] = None) -> int:
         print("housekeeping: pass failed: {}".format(exc), file=sys.stderr)
         return 1
     sys.stdout.write(
-        render_table(rows, total, capped, notes, args.apply)
+        render_table(
+            rows,
+            pytest_total,
+            pytest_capped,
+            log_total,
+            log_capped,
+            notes,
+            args.apply,
+            logs_swept,
+        )
     )
     return 0
 

@@ -122,9 +122,9 @@ fault means that check could not run, never that nothing changed. Both are
 informational, not decision counts.
 
 When `housekeeping_warnings` is non-empty, show each warning's `path`,
-`reason` and `retry`: pytest debris the hourly sweep cannot clear because
-only protected dirs remain above the cap. It is informational, not a
-decision count.
+`reason` and `retry`: pytest debris or log files the hourly sweep cannot
+clear because only protected items remain above their cap. It is
+informational, not a decision count.
 
 Then `recorded_cause_regressions` and `command_center_ticket_pr_share` as
 portfolio signals: Broken numerator and denominator; ticket-branch numerator,

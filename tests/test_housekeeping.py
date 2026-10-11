@@ -6,6 +6,12 @@ recent failure evidence and uncertain locks are kept in both dry-run and
 ``--apply``. When only protected dirs remain above the cap the sweep
 skips and alerts through the housekeeping log and the funnel-brief
 warning artifact.
+
+The log trim keeps the newest 25 MiB per file and caps total logs around
+200 MiB: old unheld files over 25 MiB trim to their newest 25 MiB, while
+held-open files, recent failure evidence and small files are kept in
+both modes. When protected files alone exceed the total the sweep skips
+and alerts on both channels.
 """
 
 from __future__ import annotations
@@ -28,6 +34,7 @@ import housekeeping
 NOW = datetime(2026, 10, 10, 12, 0, tzinfo=timezone.utc).timestamp()
 DAY = 24 * 60 * 60
 GIB = 1024 * 1024 * 1024
+MIB = 1024 * 1024
 
 
 def _dead_pid() -> int:
@@ -63,15 +70,74 @@ def _make_numbered(
 def _run_pass(tmp_path, **kwargs):
     log = tmp_path / "housekeeping.log"
     brief = tmp_path / "housekeeping-brief.json"
-    rows, total, capped, notes = housekeeping.run_pass(
+    (
+        rows,
+        pytest_total,
+        pytest_capped,
+        log_total,
+        log_capped,
+        notes,
+        logs_swept,
+    ) = housekeeping.run_pass(
         log_path=log, brief_path=brief, now=NOW, **kwargs
     )
-    return rows, total, capped, notes, log, brief
+    return (
+        rows,
+        pytest_total,
+        pytest_capped,
+        log_total,
+        log_capped,
+        notes,
+        logs_swept,
+        log,
+        brief,
+    )
 
 
 def _by_name(rows, number):
     wanted = "pytest-{}".format(number)
     return next(row for row in rows if row["path"].endswith(wanted))
+
+
+def _make_log(root, name, age_days, size_bytes, sparse=False):
+    """Build a log fixture; the file mtime is set last.
+
+    Non-sparse files carry a head marker and a tail marker so a trim can
+    prove it kept the newest bytes. Sparse files (seek plus one byte)
+    give a large st_size without the disk write, for cap tests.
+    """
+    path = root / name
+    if sparse:
+        with path.open("wb") as handle:
+            handle.seek(size_bytes - 1)
+            handle.write(b"\0")
+    else:
+        head = b"HEAD-" + name.encode() + b"\n"
+        tail = b"TAIL-" + name.encode() + b"\n"
+        with path.open("wb") as handle:
+            handle.write(head)
+            remaining = size_bytes - len(head) - len(tail)
+            chunk = b"x" * (1024 * 1024)
+            while remaining > 0:
+                piece = chunk[: min(len(chunk), remaining)]
+                handle.write(piece)
+                remaining -= len(piece)
+            handle.write(tail)
+    stamp = NOW - age_days * DAY
+    os.utime(path, (stamp, stamp))
+    return path
+
+
+def _by_basename(rows, name):
+    return next(
+        row for row in rows if row["path"].endswith("/" + name)
+    )
+
+
+def _empty_pytest_root(tmp_path):
+    root = tmp_path / "pytest-of-empty"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
 
 
 def test_lock_pid_reading_treats_missing_and_bad_locks_as_uncertain(tmp_path):
@@ -112,11 +178,20 @@ def test_dead_old_dirs_beyond_newest_three_are_deleted_oldest_first(tmp_path):
         _make_numbered(root, number, pid_text=dead, age_days=20,
                        payload_bytes=payload)
 
-    rows, total, capped, _notes, _log, brief = _run_pass(
-        tmp_path, explicit_roots=[str(root)]
-    )
-    assert total == 5 * payload + 5 * len(dead)
-    assert capped is False
+    (
+        rows,
+        pytest_total,
+        pytest_capped,
+        _log_total,
+        _log_capped,
+        _notes,
+        logs_swept,
+        _log,
+        brief,
+    ) = _run_pass(tmp_path, explicit_roots=[str(root)])
+    assert logs_swept is False
+    assert pytest_total == 5 * payload + 5 * len(dead)
+    assert pytest_capped is False
     assert _by_name(rows, 1)["action"] == "would-delete"
     assert _by_name(rows, 2)["action"] == "would-delete"
     for number in (3, 4, 5):
@@ -125,7 +200,7 @@ def test_dead_old_dirs_beyond_newest_three_are_deleted_oldest_first(tmp_path):
         assert "newest 3" in row["reason"]
     assert json.loads(brief.read_text(encoding="utf-8")) == []
 
-    rows, _total, _capped, _notes, _log, _brief = _run_pass(
+    rows, _, _, _, _, _, _, _, _ = _run_pass(
         tmp_path, explicit_roots=[str(root)], apply=True
     )
     assert not (root / "pytest-1").exists()
@@ -147,10 +222,10 @@ def test_oldest_first_uses_mtime_not_number(tmp_path):
     for number in (3, 4, 5):
         _make_numbered(root, number, pid_text=dead, age_days=20)
 
-    rows, _total, capped, _notes, _log, _brief = _run_pass(
+    rows, _, pytest_capped, _, _, _, _, _, _ = _run_pass(
         tmp_path, explicit_roots=[str(root)]
     )
-    assert capped is False
+    assert pytest_capped is False
     assert _by_name(rows, 2)["action"] == "would-delete"
     assert _by_name(rows, 1)["action"] == "keep"
 
@@ -171,7 +246,7 @@ def test_alive_lock_and_recent_failure_are_kept_in_both_modes(tmp_path):
         for number in (3, 4, 5):
             _make_numbered(root, number, pid_text=dead, age_days=20)
 
-        rows, _total, capped, _notes, log, brief = _run_pass(
+        rows, _, pytest_capped, _, _, _, _, log, brief = _run_pass(
             tmp_path / mode,
             explicit_roots=[str(root)],
             apply=(mode == "apply"),
@@ -184,7 +259,7 @@ def test_alive_lock_and_recent_failure_are_kept_in_both_modes(tmp_path):
         assert "under 14 days" in _by_name(rows, 2)["reason"]
         # 4 GiB of protected debris: nothing eligible, so capped with
         # alerts on both channels.
-        assert capped is True
+        assert pytest_capped is True
         assert "action=skip-alert" in log.read_text(encoding="utf-8")
         warnings = json.loads(brief.read_text(encoding="utf-8"))
         assert len(warnings) == 1
@@ -207,7 +282,7 @@ def test_missing_and_unparseable_locks_are_never_deleted(tmp_path):
     for number in (3, 4, 5):
         _make_numbered(root, number, pid_text=dead, age_days=20)
 
-    rows, _total, capped, _notes, log, brief = _run_pass(
+    rows, _, pytest_capped, _, _, _, _, log, brief = _run_pass(
         tmp_path, explicit_roots=[str(root)], apply=True
     )
     assert missing.exists()
@@ -215,7 +290,7 @@ def test_missing_and_unparseable_locks_are_never_deleted(tmp_path):
     assert _by_name(rows, 1)["action"] == "keep"
     assert "uncertain" in _by_name(rows, 1)["reason"]
     assert _by_name(rows, 2)["action"] == "keep"
-    assert capped is True
+    assert pytest_capped is True
     assert "action=skip-alert" in log.read_text(encoding="utf-8")
     assert len(json.loads(brief.read_text(encoding="utf-8"))) == 1
 
@@ -237,14 +312,14 @@ def test_symlinks_garbage_and_non_dirs_are_untouched(tmp_path):
     for number in (2, 3, 4):
         _make_numbered(root, number, pid_text=dead, age_days=20)
 
-    rows, total, _capped, _notes, _log, _brief = _run_pass(
+    rows, pytest_total, _, _, _, _, _, _, _ = _run_pass(
         tmp_path, explicit_roots=[str(root)], apply=True
     )
     # Only the four numeric dirs are inventoried; the 4 GiB one is gone.
     assert sorted(row["path"] for row in rows) == [
         str(root / "pytest-{}".format(n)) for n in (1, 2, 3, 4)
     ]
-    assert total >= 4 * GIB
+    assert pytest_total >= 4 * GIB
     assert not target.exists()
     assert current.is_symlink()
     assert (garbage / "payload.bin").read_bytes() == b"x" * 1024
@@ -262,10 +337,10 @@ def test_clean_pass_clears_a_stale_brief_warning(tmp_path):
         json.dumps([{"kind": "pytest-cap", "stale": True}]), encoding="utf-8"
     )
 
-    _rows, _total, capped, _notes, _log, _brief = _run_pass(
+    _, _, pytest_capped, _, _, _, _, _, _ = _run_pass(
         tmp_path, explicit_roots=[str(root)]
     )
-    assert capped is False
+    assert pytest_capped is False
     assert json.loads(brief.read_text(encoding="utf-8")) == []
 
 
@@ -284,7 +359,8 @@ def test_cli_table_has_path_size_action_reason_columns(tmp_path, capsys):
     ])
     assert code == 0
     out = capsys.readouterr().out.splitlines()
-    assert out[0] == "# housekeeping pytest sweep (dry-run)"
+    assert out[0] == "# housekeeping sweep (dry-run)"
+    assert out[1].startswith("# pytest total ")
     assert out[2] == "path\tsize_bytes\taction\treason"
     body = dict(
         (line.split("\t")[0], line.split("\t")[1:]) for line in out[3:-1]
@@ -313,7 +389,7 @@ def test_cli_apply_banner_and_delete_action(tmp_path, capsys):
     assert code == 0
     assert not gone.exists()
     out = capsys.readouterr().out.splitlines()
-    assert out[0] == "# housekeeping pytest sweep (apply)"
+    assert out[0] == "# housekeeping sweep (apply)"
     assert "\tdelete\t" in "\n".join(out)
 
 
@@ -448,3 +524,247 @@ def test_brief_has_no_housekeeping_warnings_without_an_artifact(
     ) == 0
     brief = json.loads(capsys.readouterr().out)
     assert brief["housekeeping_warnings"] == []
+
+
+def test_held_open_log_is_never_trimmed(tmp_path):
+    """First verification: the real holder check blocks trim on an open file.
+
+    The fixture stays open in this process through plan and apply, so the
+    real ``lsof`` (or ``/proc`` where ``lsof`` is missing) must report it
+    held and the sweep must keep it in both modes without touching a byte.
+    """
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    target = _make_log(
+        logs, "command-center-held.log", 30, 30 * MIB
+    )
+    before = target.read_bytes()
+
+    for apply in (False, True):
+        with target.open("rb"):
+            assert housekeeping.log_is_held(target) is True
+            rows, _, _, log_total, log_capped, _, _, _, _ = _run_pass(
+                tmp_path,
+                explicit_roots=[str(_empty_pytest_root(tmp_path))],
+                explicit_log_roots=[str(logs)],
+                apply=apply,
+            )
+        row = _by_basename(rows, "command-center-held.log")
+        assert row["action"] == "keep"
+        assert "held open" in row["reason"]
+        assert log_total == 30 * MIB
+        assert log_capped is False
+        assert target.read_bytes() == before
+
+    # Closed, the same file reports unheld and becomes trim-eligible.
+    assert housekeeping.log_is_held(target) is False
+
+
+def test_old_unheld_log_trims_to_newest_25mib(tmp_path):
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    target = _make_log(
+        logs, "command-center-old.log", 30, 30 * MIB
+    )
+
+    rows, _, _, log_total, log_capped, _, _, _, _ = _run_pass(
+        tmp_path,
+        explicit_roots=[str(_empty_pytest_root(tmp_path))],
+        explicit_log_roots=[str(logs)],
+    )
+    assert log_total == 30 * MIB
+    assert log_capped is False
+    row = _by_basename(rows, "command-center-old.log")
+    assert row["action"] == "would-trim"
+    assert target.stat().st_size == 30 * MIB
+
+    rows, _, _, _, _, _, _, log_path, _ = _run_pass(
+        tmp_path,
+        explicit_roots=[str(_empty_pytest_root(tmp_path))],
+        explicit_log_roots=[str(logs)],
+        apply=True,
+    )
+    assert _by_basename(rows, "command-center-old.log")["action"] == "trim"
+    assert target.stat().st_size == 25 * MIB
+    content = target.read_bytes()
+    assert content.startswith(b"x" * 1024)
+    assert content.endswith(b"TAIL-command-center-old.log\n")
+    assert b"HEAD-command-center-old.log" not in content
+    assert "action=trim" in log_path.read_text(encoding="utf-8")
+
+
+def test_recent_and_small_logs_are_kept_in_both_modes(tmp_path):
+    """Recent failure evidence is never trimmed, even over 25 MiB."""
+    for mode in ("dry", "apply"):
+        logs = tmp_path / mode / "logs"
+        logs.mkdir(parents=True)
+        recent = _make_log(
+            logs, "command-center-recent.log", 1, 30 * MIB
+        )
+        small = _make_log(
+            logs, "command-center-small.log", 30, 1024
+        )
+
+        rows, _, _, log_total, log_capped, _, _, _, _ = _run_pass(
+            tmp_path / mode,
+            explicit_roots=[
+                str(_empty_pytest_root(tmp_path / mode))
+            ],
+            explicit_log_roots=[str(logs)],
+            apply=(mode == "apply"),
+        )
+        assert recent.stat().st_size == 30 * MIB
+        assert small.stat().st_size == 1024
+        assert _by_basename(rows, "command-center-recent.log")["action"] == (
+            "keep"
+        )
+        assert "under 14 days" in _by_basename(
+            rows, "command-center-recent.log"
+        )["reason"]
+        assert _by_basename(rows, "command-center-small.log")["action"] == (
+            "keep"
+        )
+        assert log_total == 30 * MIB + 1024
+        assert log_capped is False
+
+
+def test_log_total_cap_skips_and_alerts_when_only_protected_remain(
+    tmp_path,
+):
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    # 240 MiB of protected bytes: one recent, one held open. Nothing is
+    # eligible, so the 200 MiB total cannot be met.
+    recent = _make_log(
+        logs, "command-center-recent.log", 1, 120 * MIB, sparse=True
+    )
+    held = _make_log(
+        logs, "command-center-held.log", 30, 120 * MIB, sparse=True
+    )
+
+    with held.open("rb"):
+        (
+            rows,
+            _,
+            _,
+            log_total,
+            log_capped,
+            _,
+            _,
+            log_path,
+            brief,
+        ) = _run_pass(
+            tmp_path,
+            explicit_roots=[str(_empty_pytest_root(tmp_path))],
+            explicit_log_roots=[str(logs)],
+            apply=True,
+        )
+        assert recent.exists()
+        assert held.exists()
+        assert _by_basename(rows, "command-center-recent.log")["action"] == (
+            "keep"
+        )
+        assert _by_basename(rows, "command-center-held.log")["action"] == (
+            "keep"
+        )
+        assert log_total == 240 * MIB
+        assert log_capped is True
+        assert "action=skip-alert" in log_path.read_text(encoding="utf-8")
+        warnings = json.loads(brief.read_text(encoding="utf-8"))
+        assert len(warnings) == 1
+        warning = warnings[0]
+        assert warning["kind"] == "log-cap"
+        assert warning["path"] == os.path.realpath(logs)
+        assert warning["cap_bytes"] == housekeeping.LOG_TOTAL_CAP_BYTES
+        assert warning["bytes"] == 240 * MIB
+        assert "recorded_at" in warning and "retry" in warning
+
+
+def test_log_trim_meets_total_cap_without_alert(tmp_path):
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    # 210 MiB total, all eligible; trims bring it well under the cap.
+    _make_log(logs, "command-center-a.log", 30, 30 * MIB, sparse=True)
+    _make_log(logs, "command-center-b.log", 30, 30 * MIB, sparse=True)
+    _make_log(logs, "command-center-c.log", 30, 150 * MIB, sparse=True)
+
+    rows, _, _, log_total, log_capped, _, _, _, brief = _run_pass(
+        tmp_path,
+        explicit_roots=[str(_empty_pytest_root(tmp_path))],
+        explicit_log_roots=[str(logs)],
+        apply=True,
+    )
+    assert log_total == 210 * MIB
+    # Each 30 MiB file trims to 25 MiB (5 MiB reclaimed each); the 150 MiB
+    # file trims to 25 MiB (125 MiB reclaimed). Remaining 75 MiB.
+    assert log_capped is False
+    assert _by_basename(rows, "command-center-a.log")["action"] == "trim"
+    assert _by_basename(rows, "command-center-b.log")["action"] == "trim"
+    assert _by_basename(rows, "command-center-c.log")["action"] == "trim"
+    assert json.loads(brief.read_text(encoding="utf-8")) == []
+
+
+def test_log_files_skip_symlinks_dirs_and_nonmatching(tmp_path):
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    target = _make_log(logs, "command-center-real.log", 30, 1024)
+    (logs / "command-center-dir.log").mkdir()
+    (logs / "other.log").write_text("not ours", encoding="utf-8")
+    (logs / "command-center-link.log").symlink_to(target)
+
+    rows, _, _, log_total, _, _, _, _, _ = _run_pass(
+        tmp_path,
+        explicit_roots=[str(_empty_pytest_root(tmp_path))],
+        explicit_log_roots=[str(logs)],
+    )
+    assert [row["path"] for row in rows] == [str(target)]
+    assert log_total == 1024
+
+
+def test_log_holder_probe_fails_closed_on_uncertainty(
+    tmp_path, monkeypatch
+):
+    target = tmp_path / "command-center-x.log"
+    target.write_text("x", encoding="utf-8")
+    # A missing lsof binary and no /proc scan result must read as held.
+    monkeypatch.setattr(
+        housekeeping, "_proc_reports_open", lambda path: None
+    )
+    assert housekeeping.log_is_held(target, lsof="/nonexistent-lsof") is True
+    # A probe that errors (stderr, bad exit) also reads as held.
+    monkeypatch.setattr(
+        housekeeping, "_lsof_reports_open", lambda path, lsof: None
+    )
+    assert housekeeping.log_is_held(target, lsof="/bin/true") is True
+
+
+def test_cli_log_table_and_log_root_guard(tmp_path, capsys):
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    _make_log(logs, "command-center-old.log", 30, 30 * MIB, sparse=True)
+    empty = _empty_pytest_root(tmp_path)
+
+    code = housekeeping.main([
+        "--root", str(empty),
+        "--log-root", str(logs),
+        "--log", str(tmp_path / "housekeeping.log"),
+        "--brief", str(tmp_path / "housekeeping-brief.json"),
+    ])
+    assert code == 0
+    out = capsys.readouterr().out.splitlines()
+    assert out[0] == "# housekeeping sweep (dry-run)"
+    assert out[1].startswith("# pytest total ")
+    assert out[2].startswith("# log total ")
+    assert "per-file 25.0 MiB" in out[2] and "total cap 200.0 MiB" in out[2]
+    header = out.index("path\tsize_bytes\taction\treason")
+    body = "\n".join(out[header + 1:])
+    assert "command-center-old.log" in body
+    assert "\twould-trim\t" in body
+
+    code = housekeeping.main([
+        "--log-root", "/Volumes/External SSD/logs",
+        "--log", str(tmp_path / "housekeeping.log"),
+        "--brief", str(tmp_path / "housekeeping-brief.json"),
+    ])
+    assert code == 2
+    assert "refusing non-internal-disk log root" in capsys.readouterr().err

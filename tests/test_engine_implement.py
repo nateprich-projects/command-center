@@ -2754,6 +2754,94 @@ def test_human_step_title_for_claude_code_environment_names_environment():
             "Claude Code environment step: Approve the OAuth app")
 
 
+MUSE_MAY_STEP_ACTIONS = [
+    # Live runs are any-agent work under the middle line (#2491).
+    "Do a live run of the funnel and post the heartbeat as evidence",
+    "Run the funnel live and post the evidence",
+    # Reads of logs, journals and session stores are any-agent work.
+    "Read the session logs to confirm the run finished",
+    "Read the usage journal for the window spend",
+    "Read the Muse session store for the failed run",
+    # Corpus replays are any-agent work.
+    "Replay the review corpus with both seeds",
+]
+
+
+@pytest.mark.parametrize("action", MUSE_MAY_STEP_ACTIONS)
+def test_muse_may_steps_no_longer_file_claude(action):
+    """Reproduction for #2491: a blocked step the middle line gives any
+    agent must not file claude-code-environment, even when the implementer
+    claims the Claude Code environment reason."""
+    assert implement.needs_for_human_step(
+        "a Claude Code environment", action) == "none"
+
+
+STILL_CLAUDE_STEP_ACTIONS = [
+    "Kickstart the funnel-watch agent",
+    "Load the replacement plist with launchctl load after bootout",
+    "Run sudo -n -u jeffy personal-ops-admin status",
+    "Read the deploy key from the Keychain without printing it",
+    "Deploy the new plist and confirm it loads",
+    "Edit the live config for the watch agent",
+    "Read the routine prompt in ~/.claude for the watch",
+    "Check the statusline after the reinstall",
+    "Run the osascript prompt for consent",
+    "Open a Claude Code cloud thread to approve the deploy",
+]
+
+
+@pytest.mark.parametrize("action", STILL_CLAUDE_STEP_ACTIONS)
+def test_genuine_mac_steps_still_file_claude(action):
+    """Steps on the still-Claude list keep filing claude-code-environment
+    (#2491): the middle line moves only the Muse-may steps."""
+    assert implement.needs_for_human_step(
+        "a Claude Code environment", action) == "claude-code-environment"
+
+
+@pytest.mark.parametrize("action", [
+    # Any-agent language beside a still-Claude signal stays Claude.
+    "Check the launchd logs after kickstart",
+    "Run the funnel live on the new plist and confirm it loads",
+    "Tail the session log after sudo -n -u jeffy restarts the job",
+    "Read the session log after _personalops restarts the job",
+])
+def test_still_claude_signal_wins_over_any_agent_language(action):
+    """A blocked step mixing any-agent language with genuine Mac work
+    stays claude-code-environment (#2491)."""
+    assert implement.needs_for_human_step(
+        "a Claude Code environment", action) == "claude-code-environment"
+
+
+@pytest.mark.parametrize("action", MUSE_MAY_STEP_ACTIONS)
+def test_nate_reasons_ignore_step_wording(action):
+    """Nate's four reasons always file human, whatever the action names:
+    the middle-line reroute applies only to the Claude reason (#2491)."""
+    assert implement.needs_for_human_step(
+        "entering a credential", action) == "human"
+
+
+def test_unrecognized_claude_step_keeps_session_needs():
+    """A Claude-claimed step matching neither list keeps the claimed
+    reason's Needs: the matcher is heuristic, so unknown steps stay
+    where the implementer put them (#2491)."""
+    assert implement.needs_for_human_step(
+        "a Claude Code environment", "Approve the OAuth app") == (
+            "claude-code-environment")
+
+
+def test_human_step_body_names_any_agent_for_none_needs():
+    """A rerouted step names any agent as its actor, never Nate and never
+    a Claude session (#2491)."""
+    body = implement.render_human_step_body(
+        parent_number=7, ticket_number=42,
+        reason="a Claude Code environment",
+        action="Do a live run of the funnel",
+        needs="none",
+    )
+    assert "Action any agent must perform: Do a live run of the funnel." in (
+        body)
+
+
 def _four_hundred_char_action() -> str:
     """A ~400-character word-separated action like the one that failed #2340."""
     return " ".join("step-{:03d}".format(n) for n in range(50))
@@ -3136,6 +3224,61 @@ def test_finish_blocked_on_human_files_the_step_for_its_reason(
               if needs == "claude-code-environment" else "Human step")
     assert titles == ["{}: Kickstart the job".format(prefix)]
     assert "Action {} must perform: Kickstart the job.".format(actor) in body
+
+
+@pytest.mark.parametrize("action", MUSE_MAY_STEP_ACTIONS)
+def test_finish_blocked_on_human_routes_muse_may_step_to_none(
+        tmp_path, monkeypatch, action):
+    """End to end for #2491: a live run, log/journal/session-store read or
+    corpus replay claimed as Claude work files Needs=none through the
+    any-agent effect, titled and bodied for any agent, never for Claude."""
+    from engine import breakdown as breakdown_engine
+
+    _, clone = make_clone(tmp_path)
+    monkeypatch.setattr(implement, "fetch_ticket", lambda repo, number: ticket(number))
+    fields = []
+    monkeypatch.setattr(
+        breakdown_engine, "add_to_project", lambda url: "step-item-id")
+    monkeypatch.setattr(
+        funnel, "write_project_select",
+        lambda item_id, field, value, ref: fields.append(
+            (item_id, field, value, ref)))
+    monkeypatch.setattr(
+        breakdown_engine, "write_needs",
+        lambda item_id, value, ref: fields.append(
+            (item_id, "Needs", value, ref)))
+    titles = []
+    bodies = []
+
+    def create(repo, parent, title, body, **kwargs):
+        titles.append(title)
+        bodies.append(body)
+        return {"number": 43, "ref": "{}#43".format(repo),
+                "url": "https://github.com/{}/issues/43".format(repo)}
+
+    implement.finish_blocked_on_human(
+        blocked(reason="a Claude Code environment",
+                action=action)["blocked_on_human"],
+        run="run-42", repo=REPO, cwd=clone,
+        release=lambda ref: None,
+        heartbeat_finish=lambda *args: None,
+        create_effect=create,
+        block_effect=lambda *args, **kwargs: None,
+        comment_effect=lambda *args, **kwargs: None,
+        sub_issues_effect=lambda repo, number: [],
+    )
+
+    assert fields == [
+        ("step-item-id", "Origin", "agent", REPO + "#43"),
+        ("step-item-id", "Risk", "standard", REPO + "#43"),
+        ("step-item-id", "Needs", "none", REPO + "#43"),
+    ]
+    title, = titles
+    assert title == "Human step: {}".format(action)
+    body, = bodies
+    assert "Action any agent must perform: {}.".format(
+        action.rstrip().rstrip(".")) in body
+    assert "a Claude Code session on the Mac mini" not in body
 
 
 def test_finish_blocked_on_human_requires_a_parent(tmp_path, monkeypatch):

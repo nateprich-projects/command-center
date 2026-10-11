@@ -192,6 +192,67 @@ HUMAN_STEP_NEEDS = {
     for reason in BLOCKED_ON_HUMAN_REASONS
 }
 
+#: Steps the middle line gives any agent even though a blocked implementer
+#: might file them as Claude work (#2491): live runs, reads of logs,
+#: journals and session stores, and corpus replays. Matched against the
+#: blocked action's wording with word boundaries, so `catalog`, `dialog`,
+#: `login` and `backlog` never read as log work. The match is heuristic,
+#: so a still-Claude signal wins and anything unrecognized keeps the
+#: claimed reason's Needs.
+ANY_AGENT_STEP_RES = (
+    re.compile(r"(?i)\blive[ _-]*runs?\b"),
+    re.compile(r"(?i)\bruns?(?:ning)?\b.{0,30}\blive\b"),
+    re.compile(r"(?i)\blogs?\b"),
+    re.compile(r"(?i)\bjournals?\b"),
+    re.compile(r"(?i)\bsession[ _-]*stores?\b"),
+    re.compile(r"(?i)\bsession[ _-]*logs?\b"),
+    re.compile(r"(?i)\bcorpuses?\b"),
+    re.compile(r"(?i)\breplay(?:s|ed|ing)?\b"),
+)
+
+#: Genuine Mac signals from the middle line's still-Claude list (#2491):
+#: live config edits and deploys, `~/.claude` and the statusline,
+#: launchctl verbs, sudo -n -u jeffy and _personalops, Keychain,
+#: osascript, Desktop scheduled tasks, and Claude Code cloud threads.
+#: Checked before ANY_AGENT_STEP_RES so a step mixing both vocabularies
+#: stays claude-code-environment.
+STILL_CLAUDE_RES = (
+    re.compile(r"(?i)\blive[ _-]*config\b"),
+    re.compile(r"(?i)\b(?:re-?)?deploy(?:s|ed|ing|ments?)?\b"),
+    re.compile(r"~/\.claude\b"),
+    re.compile(r"(?i)\bstatusline\b"),
+    re.compile(r"(?i)\blaunchctl\b"),
+    re.compile(r"(?i)\b(?:bootout|kickstart|bootstrap)\b"),
+    re.compile(r"(?i)\bplist\b"),
+    re.compile(r"(?i)\bsudo\b"),
+    re.compile(r"(?i)_personalops\b"),
+    re.compile(r"(?i)\bjeffy\b"),
+    re.compile(r"(?i)\bkeychain\b"),
+    re.compile(r"(?i)\bosascript\b"),
+    re.compile(r"(?i)\bdesktop[ _-]*scheduled[ _-]*tasks?\b"),
+    re.compile(r"(?i)\bcloud[ _-]*threads?\b"),
+)
+
+
+def needs_for_human_step(reason: str, action: str) -> str:
+    """Route one blocked step to its Needs value under the middle line.
+
+    Nate's four reasons always file ``human``. A step claimed for the
+    Claude Code environment files ``claude-code-environment`` unless its
+    action reads as Muse-may work — a live run, a log/journal/session-store
+    read, or a corpus replay — with no still-Claude signal, in which case
+    it files ``none`` so any agent can take it (#2491). Unrecognized
+    wording keeps the claimed reason's Needs.
+    """
+    if reason != CLAUDE_CODE_ENVIRONMENT_REASON:
+        return HUMAN_STEP_NEEDS[reason]
+    text = action if isinstance(action, str) else ""
+    if any(pattern.search(text) for pattern in STILL_CLAUDE_RES):
+        return "claude-code-environment"
+    if any(pattern.search(text) for pattern in ANY_AGENT_STEP_RES):
+        return "none"
+    return HUMAN_STEP_NEEDS[reason]
+
 
 def fetch_ticket(repo: str, number: int) -> dict:
     """Read the ticket and its native parent identity."""
@@ -2445,21 +2506,29 @@ def render_human_step_title(action: str, *, needs: str) -> str:
 
 
 def render_human_step_body(*, parent_number: int, ticket_number: int,
-                           reason: str, action: str) -> str:
+                           reason: str, action: str,
+                           needs: Optional[str] = None) -> str:
     """Render the human-step sub-issue body with its reason as prose.
 
     The ``Human step: <reason>`` line is prose for Nate to read, not a
     marker: the body scanner is deleted (#826) and the machine signal is
     the Needs Project field, written alongside by ``finish_blocked_on_human``.
     A step a Claude Code session can do names the session as its actor,
-    not Nate (#1901).
+    not Nate (#1901); a step the middle line gives any agent names any
+    agent (#2491). ``needs`` defaults to the reason's mapping so existing
+    callers read unchanged.
     """
     doing = action.rstrip()
     if not doing.endswith("."):
         doing += "."
-    who = ("a Claude Code session on the Mac mini"
-           if HUMAN_STEP_NEEDS.get(reason) == "claude-code-environment"
-           else "Nate")
+    effective = (needs if needs is not None
+                 else HUMAN_STEP_NEEDS.get(reason))
+    if effective == "claude-code-environment":
+        who = "a Claude Code session on the Mac mini"
+    elif effective == "none":
+        who = "any agent"
+    else:
+        who = "Nate"
     return "\n".join([
         "Part of #{}; discovered while implementing #{}.".format(
             parent_number, ticket_number),
@@ -2519,7 +2588,8 @@ def write_human_step_needs(url: str, ref: str, needs: str = "human") -> None:
     already present (as breakdown's ``add_to_project`` does), then one
     mutation sets the field. Without this the new ticket would read as
     unset and miss the human_steps section (#826). ``needs`` is ``human``
-    for Nate's steps and ``claude-code-environment`` for a session's (#1901).
+    for Nate's steps, ``claude-code-environment`` for a session's (#1901),
+    and ``none`` for a rerouted any-agent step (#2491).
     """
     from engine import breakdown as breakdown_engine
 
@@ -2532,6 +2602,11 @@ def write_human_step_needs(url: str, ref: str, needs: str = "human") -> None:
 def write_session_step_needs(url: str, ref: str) -> None:
     """Route a new step to a Claude Code session on the Mac mini (#1901)."""
     write_human_step_needs(url, ref, needs="claude-code-environment")
+
+
+def write_any_agent_step_needs(url: str, ref: str) -> None:
+    """Route a rerouted step to any agent (Needs none, #2491)."""
+    write_human_step_needs(url, ref, needs="none")
 
 
 def write_declined_needs(url: str, ref: str) -> None:
@@ -3943,6 +4018,8 @@ def finish_blocked_on_human(
         needs_effect: Callable[[str, str], None] = write_human_step_needs,
         session_needs_effect: Callable[[str, str], None]
         = write_session_step_needs,
+        any_agent_needs_effect: Callable[[str, str], None]
+        = write_any_agent_step_needs,
         sub_issues_effect: Callable[[str, int], List[Dict[str, object]]]
         = read_parent_sub_issues,
         comments_effect: Callable[[str, int], List[str]]
@@ -3961,8 +4038,10 @@ def finish_blocked_on_human(
     clean Git head matches the ticket's remote branch; other work stays (#1856).
     A failure after the sub-issue exists names it, so the retry starts
     from GitHub's truth rather than filing a second one. The step's Needs
-    follows its reason: ``session_needs_effect`` for a step a Claude Code
-    session can do, ``needs_effect`` for Nate's (#1901).
+    follows its reason and wording (``needs_for_human_step``):
+    ``session_needs_effect`` for a step a Claude Code session can do,
+    ``any_agent_needs_effect`` for Muse-may work the middle line gives any
+    agent (#2491), ``needs_effect`` for Nate's (#1901).
 
     The ticket's ``**Blocked on #N:**`` record is posted before its label
     and blocked-by edge (#2168), so a labelled ticket's current record is
@@ -4007,17 +4086,20 @@ def finish_blocked_on_human(
             head_effect=head_effect, route_needs_effect=route_needs_effect,
             human_needs_effect=human_needs_effect, extra_note=extra_note,
             wip_sha=wip_sha)
-    step_needs = HUMAN_STEP_NEEDS[blocked["reason"]]
+    step_needs = needs_for_human_step(blocked["reason"], blocked["action"])
     title = render_human_step_title(
         blocked["action"], needs=step_needs)
     body = render_human_step_body(
         parent_number=parent_number, ticket_number=context["number"],
-        reason=blocked["reason"], action=blocked["action"])
+        reason=blocked["reason"], action=blocked["action"],
+        needs=step_needs)
     created = create_effect(
         resolved, parent_number, title, body, cwd=context["root"])
     try:
         if step_needs == "claude-code-environment":
             session_needs_effect(created["url"], created["ref"])
+        elif step_needs == "none":
+            any_agent_needs_effect(created["url"], created["ref"])
         else:
             needs_effect(created["url"], created["ref"])
         blocked_comment = block_record.render_blocked(

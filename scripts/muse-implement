@@ -412,7 +412,12 @@ if ! mkdir -p "$WORKSPACE_ROOT" \
     --outcome errored --note "could not create a fresh implementation workspace" >&2
   exit 1
 fi
-if ! "$GH_BIN" repo clone "$BEGIN_REPO" "$WORKSPACE"; then
+# A main-only clone: a full clone plus a full fetch pulls the heartbeat
+# branch (tens of thousands of commits, about 2.2 GiB) into every workspace,
+# where main alone is a few MiB (#2463). Everything after `--` reaches
+# `git clone`, so only the default branch and no tags are downloaded.
+if ! "$GH_BIN" repo clone "$BEGIN_REPO" "$WORKSPACE" -- \
+    --single-branch --no-tags; then
   echo "muse-implement: could not clone $BEGIN_REPO into the fresh workspace" >&2
   release_ticket
   python3 "$REPO/heartbeat.py" finish --agent muse --run "$BEGIN_RUN" \
@@ -422,15 +427,8 @@ fi
 
 # Put the clone on the ticket branch before the model sees it. A remote
 # branch continues in place — never reset, so no earlier push is lost — and
-# otherwise the branch starts fresh from origin/main.
-if ! git -C "$WORKSPACE" fetch --quiet origin 2>"$DIAG_FILE"; then
-  fetch_err="$(cat "$DIAG_FILE")"
-  echo "muse-implement: could not fetch origin in the fresh workspace: $fetch_err" >&2
-  release_ticket
-  python3 "$REPO/heartbeat.py" finish --agent muse --run "$BEGIN_RUN" \
-    --outcome errored --note "could not fetch origin for $BEGIN_REF: $fetch_err" >&2
-  exit 1
-fi
+# otherwise the branch starts fresh from origin/main. Each fetch names its
+# ref, so no other branch — in particular heartbeat — is downloaded.
 git -C "$WORKSPACE" ls-remote --exit-code --heads origin \
   "refs/heads/$TICKET_BRANCH" >/dev/null 2>"$DIAG_FILE"
 ls_status=$?
@@ -443,6 +441,32 @@ if (( ls_status != 0 && ls_status != 2 )); then
   exit 1
 fi
 if (( ls_status == 0 )); then
+  FETCH_REFS=("+refs/heads/main:refs/remotes/origin/main"
+    "+refs/heads/$TICKET_BRANCH:refs/remotes/origin/$TICKET_BRANCH")
+else
+  FETCH_REFS=("+refs/heads/main:refs/remotes/origin/main")
+fi
+if ! git -C "$WORKSPACE" fetch --quiet origin "${FETCH_REFS[@]}" 2>"$DIAG_FILE"; then
+  fetch_err="$(cat "$DIAG_FILE")"
+  echo "muse-implement: could not fetch origin in the fresh workspace: $fetch_err" >&2
+  release_ticket
+  python3 "$REPO/heartbeat.py" finish --agent muse --run "$BEGIN_RUN" \
+    --outcome errored --note "could not fetch origin for $BEGIN_REF: $fetch_err" >&2
+  exit 1
+fi
+if (( ls_status == 0 )); then
+  # A single-branch clone tracks only main, so the ticket ref just fetched
+  # is not a branch `switch --track` accepts until it joins the fetch
+  # refspec. This is local config only; the objects are already here.
+  if ! git -C "$WORKSPACE" remote set-branches --add origin \
+      "$TICKET_BRANCH" 2>"$DIAG_FILE"; then
+    track_err="$(cat "$DIAG_FILE")"
+    echo "muse-implement: could not track remote $TICKET_BRANCH in the fresh workspace: $track_err" >&2
+    release_ticket
+    python3 "$REPO/heartbeat.py" finish --agent muse --run "$BEGIN_RUN" \
+      --outcome errored --note "could not track remote $TICKET_BRANCH for $BEGIN_REF: $track_err" >&2
+    exit 1
+  fi
   SWITCH_ARGS=(-c "$TICKET_BRANCH" --track "origin/$TICKET_BRANCH")
 else
   SWITCH_ARGS=(--no-track -c "$TICKET_BRANCH" origin/main)

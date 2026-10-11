@@ -141,7 +141,17 @@ GH_STUB = (
     "#!/bin/bash\n"
     "printf '%s\\n' \"$*\" >> \"$GH_LOG\"\n"
     "if [[ \"${GH_STATUS:-0}\" -ne 0 ]]; then exit \"$GH_STATUS\"; fi\n"
-    "git clone --quiet \"$CLONE_SOURCE\" \"$4\"\n"
+    "# Like the real gh, everything after `--` reaches git clone, so the\n"
+    "# runner's single-branch flags shape this fixture clone for real.\n"
+    "clone_flags=''\n"
+    "after_dashdash=0\n"
+    "for argument in \"$@\"; do\n"
+    "  if (( after_dashdash )); then clone_flags=\"$clone_flags $argument\"; fi\n"
+    "  if [[ \"$argument\" == '--' ]]; then after_dashdash=1; fi\n"
+    "done\n"
+    "# Unquoted on purpose: the flag list carries no spaces, and an empty\n"
+    "# list must expand to no words on bash 3.2 as well as newer shells.\n"
+    "git clone --quiet $clone_flags \"$CLONE_SOURCE\" \"$4\"\n"
 )
 
 MUSE_STUB = (
@@ -244,7 +254,7 @@ def _run_git(*args, cwd=None):
                           capture_output=True, text=True)
 
 
-def _seed_remote(base, *, ticket_branch=False):
+def _seed_remote(base, *, ticket_branch=False, heartbeat_branch=False):
     """A fixture origin with a seed commit on main, cloned by the fake gh."""
     remote = base / "remote.git"
     seed = base / "seed"
@@ -267,12 +277,19 @@ def _seed_remote(base, *, ticket_branch=False):
         _run_git("commit", "--quiet", "-m", "earlier work", cwd=seed)
         _run_git("push", "--quiet", "-u", "origin",
                  "ticket/{}".format(TICKET), cwd=seed)
+    if heartbeat_branch:
+        _run_git("switch", "--quiet", "-c", "heartbeat", "main", cwd=seed)
+        (seed / "heartbeat-marker").write_text("heartbeat only\n")
+        _run_git("add", "heartbeat-marker", cwd=seed)
+        _run_git("commit", "--quiet", "-m", "heartbeat-only-marker", cwd=seed)
+        _run_git("push", "--quiet", "-u", "origin", "heartbeat", cwd=seed)
     return remote
 
 
 def _stubbed_runner(tmp_path, begin, *, packet=None, bound_seconds=20,
                     gh_status=0, muse_body=None, gh_body=None,
-                    routine_body=None, ticket_branch=False, extra_env=None,
+                    routine_body=None, ticket_branch=False,
+                    heartbeat_branch=False, extra_env=None,
                     muse_model_body=None, wait=True):
     """Run the implementer against stub funnel/heartbeat/packet/finish/gh/muse.
 
@@ -303,7 +320,8 @@ def _stubbed_runner(tmp_path, begin, *, packet=None, bound_seconds=20,
         muse_model_body if muse_model_body is not None
         else (ROOT / "muse_model.py").read_text())
 
-    remote = _seed_remote(tmp_path, ticket_branch=ticket_branch)
+    remote = _seed_remote(tmp_path, ticket_branch=ticket_branch,
+                          heartbeat_branch=heartbeat_branch)
 
     gh = tmp_path / "gh"
     _executable(gh, gh_body or GH_STUB)
@@ -384,8 +402,10 @@ def test_the_happy_path_runs_packet_model_and_finish_in_order(tmp_path):
     )
     assert (repo / "muse.branch.1").read_text().strip() == "ticket/42"
     assert (repo / "muse.upstream.1").read_text().strip() == "none"
-    assert (repo / "gh.log").read_text() == "repo clone example/widgets {}\n".format(
-        workspace
+    assert (repo / "gh.log").read_text() == (
+        "repo clone example/widgets {} -- --single-branch --no-tags\n".format(
+            workspace
+        )
     )
 
     # The writer shape: a shell for tests, the prompt by file, no reviewer
@@ -464,6 +484,56 @@ def test_a_remote_ticket_branch_continues_in_place(tmp_path):
     assert proc.returncode == 0, proc.stderr
     assert (repo / "muse.branch.1").read_text().strip() == "ticket/42"
     assert (repo / "muse.upstream.1").read_text().strip() == "origin/ticket/42"
+
+
+@pytest.mark.parametrize("ticket_branch", (False, True),
+                         ids=("fresh", "continued"))
+def test_the_workspace_clone_and_fetch_never_pull_heartbeat(
+        tmp_path, ticket_branch):
+    """#2463: a main-only clone plus a narrow fetch, so the bulky heartbeat
+    branch on the origin never reaches the workspace."""
+    muse_body = (
+        "#!/bin/bash\n"
+        "set -eu\n"
+        "workspace=''\n"
+        "previous=''\n"
+        "for argument in \"$@\"; do\n"
+        "  if [[ \"$previous\" == '--workspace' ]]; then "
+        "workspace=\"$argument\"; fi\n"
+        "  previous=\"$argument\"\n"
+        "done\n"
+        "git -C \"$workspace\" for-each-ref --format='%(refname)' "
+        "refs/remotes/ > \"$MUSE_REFS\"\n"
+        "git -C \"$workspace\" log --all --format=%s "
+        "| grep -c heartbeat-only-marker > \"$MUSE_HEARTBEAT_COMMITS\" "
+        "|| true\n"
+        "printf '%s' \"$MUSE_ANSWER\" > \"$workspace/answer.json\"\n"
+    )
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), ticket_branch=ticket_branch,
+        heartbeat_branch=True, muse_body=muse_body,
+        extra_env={
+            "MUSE_REFS": str(tmp_path / "runner-repo" / "muse.refs"),
+            "MUSE_HEARTBEAT_COMMITS": str(
+                tmp_path / "runner-repo" / "muse.heartbeat-commits"),
+        },
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    refs = (repo / "muse.refs").read_text().splitlines()
+    assert "refs/remotes/origin/main" in refs
+    assert "refs/remotes/origin/heartbeat" not in refs
+    if ticket_branch:
+        assert "refs/remotes/origin/ticket/42" in refs
+    else:
+        assert "refs/remotes/origin/ticket/42" not in refs
+    assert (repo / "muse.heartbeat-commits").read_text().strip() == "0"
+    workspace = _calls(repo, "finish")[0].split(" :: ")[0]
+    assert (repo / "gh.log").read_text() == (
+        "repo clone example/widgets {} -- --single-branch --no-tags\n".format(
+            workspace
+        )
+    )
 
 
 def test_the_runner_reads_the_routine_at_run_time():
@@ -1088,7 +1158,14 @@ def test_a_fresh_workspace_resolves_uid_and_pushes_over_ssh(tmp_path):
         "set -eu\n"
         "printf '%s\\n' \"$*\" >> \"$GH_LOG\"\n"
         "workspace=\"${4:?workspace argument missing}\"\n"
-        "git clone --quiet \"$CLONE_SOURCE\" \"$workspace\"\n"
+        "clone_flags=''\n"
+        "after_dashdash=0\n"
+        "for argument in \"$@\"; do\n"
+        "  if (( after_dashdash )); then "
+        "clone_flags=\"$clone_flags $argument\"; fi\n"
+        "  if [[ \"$argument\" == '--' ]]; then after_dashdash=1; fi\n"
+        "done\n"
+        "git clone --quiet $clone_flags \"$CLONE_SOURCE\" \"$workspace\"\n"
         "git -C \"$workspace\" remote set-url origin "
         "ssh://git@forge/muse-regression.git\n"
     )

@@ -2803,6 +2803,7 @@ def test_genuine_mac_steps_still_file_claude(action):
     "Check the launchd logs after kickstart",
     "Run the funnel live on the new plist and confirm it loads",
     "Tail the session log after sudo -n -u jeffy restarts the job",
+    "Read the session log after _personalops restarts the job",
 ])
 def test_still_claude_signal_wins_over_any_agent_language(action):
     """A blocked step mixing any-agent language with genuine Mac work

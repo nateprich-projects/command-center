@@ -212,9 +212,10 @@ ANY_AGENT_STEP_RES = (
 
 #: Genuine Mac signals from the middle line's still-Claude list (#2491):
 #: live config edits and deploys, `~/.claude` and the statusline,
-#: launchctl verbs, sudo, Keychain, osascript, Desktop scheduled tasks,
-#: and Claude Code cloud threads. Checked before ANY_AGENT_STEP_RES so a
-#: step mixing both vocabularies stays claude-code-environment.
+#: launchctl verbs, sudo -n -u jeffy and _personalops, Keychain,
+#: osascript, Desktop scheduled tasks, and Claude Code cloud threads.
+#: Checked before ANY_AGENT_STEP_RES so a step mixing both vocabularies
+#: stays claude-code-environment.
 STILL_CLAUDE_RES = (
     re.compile(r"(?i)\blive[ _-]*config\b"),
     re.compile(r"(?i)\b(?:re-?)?deploy(?:s|ed|ing|ments?)?\b"),
@@ -224,6 +225,8 @@ STILL_CLAUDE_RES = (
     re.compile(r"(?i)\b(?:bootout|kickstart|bootstrap)\b"),
     re.compile(r"(?i)\bplist\b"),
     re.compile(r"(?i)\bsudo\b"),
+    re.compile(r"(?i)_personalops\b"),
+    re.compile(r"(?i)\bjeffy\b"),
     re.compile(r"(?i)\bkeychain\b"),
     re.compile(r"(?i)\bosascript\b"),
     re.compile(r"(?i)\bdesktop[ _-]*scheduled[ _-]*tasks?\b"),

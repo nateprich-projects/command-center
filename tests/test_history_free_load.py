@@ -36,6 +36,7 @@ EXPECTED = {
     "unpin": False,
     "park": False,
     "answer-gates": False,
+    "answer-ticket": False,
     "comment": False,
     "capture": False,
     "next-review": False,
@@ -60,6 +61,8 @@ ARGV = {
     "unpin": ["unpin", "4"],
     "park": ["park", "4", "--reason", "no longer earns its place"],
     "answer-gates": ["answer-gates", "4", "--answer", "No."],
+    "answer-ticket": ["answer-ticket", "3", "--answer", "Yes.", "--outcome",
+                      "lift"],
     "comment": ["comment", "2", "--voice", "agent", "--body", "note"],
     "capture": ["capture", "an idea", "--origin", "nate-relayed"],
     "next-review": ["next-review"],
@@ -387,6 +390,9 @@ PARITY = [
     (["park", "4", "--reason", "no longer earns its place"], 0),
     (["park", "4", "--reason", "later", "--wake-date", "2099-01-01"], 0),
     (["answer-gates", "4", "--answer", "No. It relays mine."], 0),
+    # Node 3 is blocked but the fixture serves no comments, so there is no
+    # active question to answer: full and compact loads refuse alike.
+    (["answer-ticket", "3", "--answer", "Yes.", "--outcome", "lift"], 2),
     (["comment", "3", "--voice", "agent", "--body", "a note"], 0),
     (["comment", "2", "--voice", "agent", "--needs-decision",
       "Which one?"], 0),

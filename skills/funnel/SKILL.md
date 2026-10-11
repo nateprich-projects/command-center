@@ -87,6 +87,17 @@ writes the `blocked` label and a canonical block comment, which lifts itself
 when the condition is met. Dry run unless `--yes`; it refuses a project that
 closes itself, since the unattended close ignores `blocked` (#1724).
 
+### Answer a ticket's Needs-a-decision block
+
+A ticket's `**Needs a decision:**` block is answered only with
+`funnel answer-ticket <ref> --answer "<his verbatim answer>"
+--outcome lift|replace [--condition "<canonical>"]`: one comment quotes the
+answer and either lifts the blocked state or replaces it with one canonical
+condition (`Blocked until YYYY-MM-DD`, `Blocked on #N [and #M ...]`, or
+`Blocked until event {...}`). Never answer in prose, and never hand-edit the
+`blocked` label or the block comment: a prose answer leaves the ticket
+blocked (#2484). Plan Gates questions stay on `funnel answer-gates`.
+
 ### Adopt an explicit Proposed class at approval
 
 With Class unset, `approve --yes` adopts exactly one non-empty whole-line

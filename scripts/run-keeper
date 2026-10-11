@@ -146,6 +146,16 @@ if [ -f "$REPO/session_log_compress.py" ] && \
   fi
 fi
 
+# Hourly pytest-debris inventory (#2464). Dry-run only: it prints the sweep
+# table and records skip-alerts, but deletes nothing until Nate reviews a
+# real inventory and enables --apply at enablement.
+if [ -f "$REPO/housekeeping.py" ] && \
+   [ "$("$KEEPER_DATE" +%M 2>/dev/null || true)" = "00" ]; then
+  if ! PYTHONDONTWRITEBYTECODE=1 python3 "$REPO/housekeeping.py"; then
+    echo "run-keeper: housekeeping pass failed" >&2
+  fi
+fi
+
 health_line="timestamp=$timestamp user_processes=$user_processes maxprocperuid=$maxprocperuid load_1=$load_1 load_5=$load_5 load_15=$load_15 codex=$(has_process_family codex) claude=$(has_process_family claude) muse=$(has_process_family muse) $reap_fields"
 
 # The installed Codex prompt for one automation, compared or written.

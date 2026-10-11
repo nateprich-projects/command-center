@@ -87,6 +87,7 @@ from block_record import (
 )
 import nightly_watch
 import price_watch
+import housekeeping
 
 # --------------------------------------------------------------------------
 # Configuration. These are the only knobs; everything else is derived.
@@ -924,6 +925,7 @@ BRIEF_PURE_SECTIONS = frozenset({
     "price_changes",
     "model_releases",
     "watch_faults",
+    "housekeeping_warnings",
 })
 
 # No brief section feeds a gate any more: the merge gate reads the
@@ -17821,6 +17823,10 @@ def cmd_brief(
             "watch_faults",
             lambda: recent_watch_values()["watch_faults"],
         )
+        housekeeping_warnings = section(
+            "housekeeping_warnings",
+            lambda: housekeeping.brief_warnings(),
+        )
 
         # The reader-bound sections have now had their deadline-bounded turn.
         # These renderers use only the loaded Project items and preloaded PR
@@ -17861,6 +17867,7 @@ def cmd_brief(
         price_changes = pure_values["price_changes"]
         model_releases = pure_values["model_releases"]
         watch_faults = pure_values["watch_faults"]
+        housekeeping_warnings = pure_values["housekeeping_warnings"]
         pending_wakes = pending_wakes_json(parked)
 
         blocked_comment_errors = [
@@ -17944,6 +17951,7 @@ def cmd_brief(
             "price_changes": price_changes,
             "model_releases": model_releases,
             "watch_faults": watch_faults,
+            "housekeeping_warnings": housekeeping_warnings,
             "rejected_merges": rejected,
             "degraded": degraded,
             "timings": timings,

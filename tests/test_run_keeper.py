@@ -943,3 +943,74 @@ exit 1
     assert recent_automation.read_bytes() == recent_bytes
     assert live_automation.read_bytes() == live_bytes
     assert claude_transcript.read_bytes() == claude_bytes
+
+
+def _seed_housekeeping(seed: Path, checkout: Path) -> None:
+    (seed / "housekeeping.py").write_bytes(
+        (ROOT / "housekeeping.py").read_bytes()
+    )
+    commit_and_push(seed, "housekeeping")
+    run_git("-C", str(checkout), "pull", "--ff-only")
+
+
+def test_keeper_runs_the_housekeeping_inventory_once_an_hour(tmp_path):
+    """At :00 the keeper prints the dry-run sweep table (#2464).
+
+    The sweep runs against the test session's real temp roots in dry-run,
+    which never deletes; its log and brief artifact are redirected into the
+    fixture home.
+    """
+    bare, checkout = make_heartbeat_remote(tmp_path)
+    _seed_housekeeping(tmp_path / "seed", checkout)
+    home = tmp_path / "home"
+    tools, _launchctl_log = make_tools(tmp_path)
+    write_executable(tools / "date", "printf '%s\\n' 00\n")
+
+    result = run_keeper(
+        checkout,
+        home,
+        tools,
+        tools / "launchctl",
+        extra_env={
+            "COMMAND_CENTER_KEEPER_DATE": str(tools / "date"),
+            "COMMAND_CENTER_HOUSEKEEPING_LOG": str(
+                tmp_path / "housekeeping.log"
+            ),
+            "COMMAND_CENTER_HOUSEKEEPING_BRIEF": str(
+                tmp_path / "housekeeping-brief.json"
+            ),
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "# housekeeping pytest sweep (dry-run)" in result.stdout
+    assert "path\tsize_bytes\taction\treason" in result.stdout
+    assert (tmp_path / "housekeeping-brief.json").is_file()
+
+
+def test_keeper_skips_housekeeping_between_hours(tmp_path):
+    bare, checkout = make_heartbeat_remote(tmp_path)
+    _seed_housekeeping(tmp_path / "seed", checkout)
+    home = tmp_path / "home"
+    tools, _launchctl_log = make_tools(tmp_path)
+    write_executable(tools / "date", "printf '%s\\n' 30\n")
+
+    result = run_keeper(
+        checkout,
+        home,
+        tools,
+        tools / "launchctl",
+        extra_env={
+            "COMMAND_CENTER_KEEPER_DATE": str(tools / "date"),
+            "COMMAND_CENTER_HOUSEKEEPING_LOG": str(
+                tmp_path / "housekeeping.log"
+            ),
+            "COMMAND_CENTER_HOUSEKEEPING_BRIEF": str(
+                tmp_path / "housekeeping-brief.json"
+            ),
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "housekeeping pytest sweep" not in result.stdout
+    assert not (tmp_path / "housekeeping-brief.json").exists()

@@ -144,6 +144,8 @@ BODY_READERS: Dict[str, str] = {
         "the watchdog's own open issue, found by the marker in its body",
     ".github/scripts/watchdog.py:main":
         "the watchdog's own open issue, found by the marker in its body",
+    ".github/scripts/overseer_filing.py:extract_routing_block":
+        "an overseer-filed issue body, read only when its author is trusted",
 }
 
 #: Render a marker into text the funnel posts, or cut it out of text shown to
@@ -186,6 +188,7 @@ WRITERS = frozenset({
     # finish_declined, close_declined_defer_note_proof and
     # finish_blocked_on_human render through block_record's writers (#2168).
     "engine/implement.py:render_evidence_block",
+    ".github/scripts/overseer_filing.py:failure_comment",
 })
 
 TRUST_FILTERS = frozenset({"trusted_comment", "trusted_comments"})

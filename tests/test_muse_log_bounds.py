@@ -52,6 +52,9 @@ def _runner(tmp_path: Path, lane):
         "    fh.write('finished\\n')\n"
         "print('runner-output')\n"
     )
+    # The real module, not a stub: the SSD gate execs it before begin.
+    (repo / "test_env.py").write_text(
+        (ROOT / "test_env.py").read_text())
 
     log_dir = tmp_path / "Library" / "Logs"
     log_dir.mkdir(parents=True, exist_ok=True)

@@ -180,6 +180,25 @@ if [[ -z "$PACKET_FILE" || -z "$PROMPT_FILE" || -z "$DIAG_FILE" \
   exit 1
 fi
 
+# SSD test scratch (#2530): the model's pytest debris and bytecode land on
+# the external volume, never the internal disk. Without it the run refuses
+# here, before claiming anything — the same fail-loud shape as the scratch
+# setup above. The paths reach only the model child below; this runner's
+# own scratch stays where it is.
+if ! MUSE_SSD_EXPORTS="$(python3 "$REPO/test_env.py" --export MUSE_TEST_SSD)"; then
+  echo "muse-implement: no SSD test scratch; refusing the run" >&2
+  exit 1
+fi
+if [[ -z "$MUSE_SSD_EXPORTS" ]]; then
+  echo "muse-implement: empty SSD test environment; refusing the run" >&2
+  exit 1
+fi
+eval "$MUSE_SSD_EXPORTS"
+if [[ -z "${MUSE_TEST_SSD_TMPDIR:-}" || -z "${MUSE_TEST_SSD_PYCACHE:-}" ]]; then
+  echo "muse-implement: incomplete SSD test environment; refusing the run" >&2
+  exit 1
+fi
+
 # The funnel session serves heartbeat start, so it must inherit the model's
 # session ID and this runner's PID before begin can bind a claim.
 MUSE_EXEC=("$MUSE_BIN" exec)
@@ -546,7 +565,10 @@ rm -f "$killed_marker" "$MUSE_COMPLETED_MARKER" "$MUSE_MONITOR_ERROR_MARKER"
 tail -f "$MUSE_JSON_FILE" &
 MUSE_JSON_TAIL_PID=$!
 
-perl -e 'setpgrp(0, 0); exec @ARGV or die "exec: $!"' "${MUSE_EXEC[@]}" \
+TMPDIR="$MUSE_TEST_SSD_TMPDIR" \
+  PYTHONPYCACHEPREFIX="$MUSE_TEST_SSD_PYCACHE" \
+  PYTHONDONTWRITEBYTECODE=1 \
+  perl -e 'setpgrp(0, 0); exec @ARGV or die "exec: $!"' "${MUSE_EXEC[@]}" \
   --model "$MUSE_MODEL" \
   --reasoning-effort "$EFFORT" \
   --sandbox-network enabled \

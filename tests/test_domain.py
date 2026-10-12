@@ -2,13 +2,20 @@
 
 from __future__ import annotations
 
+import json
 import pathlib
 import sys
+from datetime import datetime, timezone
+
+import pytest
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 import funnel  # noqa: E402
+from engine import shape  # noqa: E402
+
+NOW = datetime(2026, 10, 11, 12, 0, 0, tzinfo=timezone.utc)
 
 
 def item(**values):
@@ -159,3 +166,77 @@ def test_project_check_names_a_missing_domain_option(monkeypatch):
     result = funnel.check_project_fields()
     assert not result.ok
     assert "Domain is missing option AFL" in result.found
+
+
+def shape_idea(number, repo, **values):
+    defaults = dict(
+        title="An idea", url="https://example.invalid/{}".format(number),
+        state="OPEN", status="Ideas", klass="Maintenance", origin="agent",
+        risk="standard", needs="none", body="Captured note.",
+        labels=["needs-shaping"],
+    )
+    defaults.update(values)
+    return funnel.Item(repo=repo, number=number, **defaults)
+
+
+def shape_answer(**values):
+    data = {
+        "decided_from_precedent": [
+            {"claim": "reviews stay human-gated",
+             "source": "plan.md ladder"},
+        ],
+        "decided_by_agent": [
+            {"decision": "validate strictly",
+             "alternative": "accept unknown fields",
+             "why": "unknown fields signal a confused model"},
+        ],
+        "needs_nate": {
+            "exposure": None, "gates": None, "scope": None,
+            "preference": None,
+        },
+        "proposed_class": "Maintenance",
+        "plan_markdown": "# Plan\n\nDo the thing.\n",
+        "escalated_risk": [],
+        "depends_on": [],
+        "premises": [
+            {"claim": "reviews stay human-gated",
+             "evidence": "plan.md:42", "label": "documented"},
+        ],
+    }
+    data.update(values)
+    return data
+
+
+def test_shape_refuses_a_fantasy_gm_idea_without_a_domain():
+    idea = shape_idea(42, "owner/Fantasy-GM")
+    assert funnel.needs_domain(idea) is True
+    with pytest.raises(shape.ShapeError, match="Domain"):
+        shape.shape_decision([idea], idea, shape_answer())
+
+
+def test_shape_passes_a_fantasy_gm_idea_with_a_domain():
+    for domain in ("League", "AFL"):
+        idea = shape_idea(42, "owner/Fantasy-GM", domain=domain)
+        record = shape.shape_decision([idea], idea, shape_answer())
+        assert record.status == "Ready"
+
+
+def test_shape_leaves_defaulted_repos_unaffected():
+    idea = shape_idea(42, "owner/command-center")
+    assert funnel.needs_domain(idea) is False
+    record = shape.shape_decision([idea], idea, shape_answer())
+    assert record.status == "Ready"
+
+
+def test_brief_flags_fantasy_gm_projects_missing_a_domain(
+        monkeypatch, capsys):
+    naked = item(repo="owner/Fantasy-GM", number=10, status="Ready",
+                 klass="Maintenance")
+    domained = item(repo="owner/Fantasy-GM", number=11, status="Ready",
+                    klass="Maintenance", domain="League")
+    defaulted = item(repo="owner/command-center", number=12, status="Ready",
+                     klass="Maintenance")
+    monkeypatch.setattr(funnel, "unattended_merges", lambda now: [])
+    assert funnel.cmd_brief([naked, domained, defaulted], NOW) == 0
+    brief = json.loads(capsys.readouterr().out)
+    assert [row["ref"] for row in brief["needs_domain"]] == [naked.ref]

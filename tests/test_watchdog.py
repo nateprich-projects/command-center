@@ -1220,11 +1220,14 @@ def test_the_watchdog_note_does_not_call_an_unreadable_file_never_run(
 
 # -- one live watchdog alert with supersede (#2500) ---------------------------
 #
-# The watchdog used to PATCH-update a single marker-matched issue in place, so
-# #1252 stayed open beside newer #2034 and the match could touch issues the
-# watchdog never wrote. An alert now opens one new owned issue per incident
-# and closes every superseded owned alert, leaving exactly one live; recovery
-# closes every live owned alert.
+# Pre-change open path, verified in main() at b0a20b5: with problems and a
+# marker-matched open issue, PATCH-update that one issue's body in place; with
+# problems and no marker match, POST one new issue; never close a superseded
+# alert. An older owned alert therefore survives beside a newer one whenever
+# it is not the list's first marker-matched hit, and the marker-only match
+# could touch issues the watchdog never wrote. An alert now opens one new
+# owned issue per incident and closes every superseded owned alert, leaving
+# exactly one live; recovery closes every live owned alert.
 
 
 def test_owned_alert_needs_marker_and_title_prefix():

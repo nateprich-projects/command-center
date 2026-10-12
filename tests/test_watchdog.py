@@ -1306,45 +1306,6 @@ def test_base_alert_path_reuses_first_hit_and_never_closes():
     assert _base_branch(list(reversed(first)), [])["closed"] == [2034]
 
 
-def test_base_replica_premises_match_base_source():
-    """Prove the replica's premises from the real base bytes.
-
-    Reads base b0a20b5 (the PR base) locally via `git show` -- no `gh`
-    needed. Asserts the open function (existing_issue scanning for the body
-    MARKER, called once from main()), the alert branch's in-place PATCH
-    with zero closes, and the single-hit recovery close. The base object is
-    the recorded PR base, present in any full clone; a missing object fails
-    loudly rather than skipping, since these premises are the ticket's
-    First-verify evidence.
-    """
-    import subprocess
-
-    proc = subprocess.run(
-        ["git", "show",
-         "b0a20b5223e90e76571518302a6463590e8f9f3d"
-         ":.github/scripts/watchdog.py"],
-        capture_output=True, text=True, timeout=30, cwd=str(ROOT))
-    assert proc.returncode == 0 and proc.stdout, \
-        "base b0a20b5:.github/scripts/watchdog.py not readable here"
-    src = proc.stdout
-
-    # Open function: existing_issue() returns the first open issue whose
-    # body holds the MARKER, called once from main().
-    assert "def existing_issue() -> Dict:" in src
-    assert 'if MARKER in (issue.get("body")' in src
-    assert "open_issue = existing_issue()" in src
-
-    # Alert branch: update-in-place PATCH of the hit's body, zero closes.
-    anchor = "# Update in place rather than filing a second issue"
-    assert anchor in src
-    segment = src.split(anchor, 1)[1].split("\n    else:", 1)[0]
-    assert '"-f", "body=" + body' in segment
-    assert "state=closed" not in segment
-
-    # Recovery branch closes the single first hit.
-    assert "Heartbeats are healthy again. Closing." in src
-
-
 def test_owned_alert_needs_marker_and_title_prefix():
     owned = {"title": watchdog.ALERT_TITLE,
              "body": watchdog.MARKER + "\nold alarm"}

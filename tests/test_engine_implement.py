@@ -2843,9 +2843,28 @@ CALENDAR_WAIT_STEP_ACTIONS = [
 def test_calendar_wait_steps_no_longer_file_claude(action):
     """Reproduction for #2492: a calendar-wait blocked step names no Mac
     capability, so it must not file claude-code-environment even when the
-    implementer claims the Claude Code environment reason."""
+    implementer claims the Claude Code environment reason. Before the
+    calendar-wait rule this wording matched neither the any-agent nor the
+    still-Claude list, so it fell through to the claimed reason's Needs
+    (claude-code-environment) -- the Claude-only mislabel on #1712/#1715."""
     assert implement.needs_for_human_step(
         "a Claude Code environment", action) == "none"
+
+
+@pytest.mark.parametrize("action", CALENDAR_WAIT_STEP_ACTIONS)
+def test_calendar_wait_steps_reach_none_only_through_calendar_rule(action):
+    """Pins the #2492 base behavior: these calendar-wait wordings match no
+    any-agent and no still-Claude signal, and the Claude reason's fallback
+    Needs is claude-code-environment -- so without CALENDAR_WAIT_STEP_RES
+    they filed Claude-only, and the calendar rule is what moves them."""
+    assert implement.HUMAN_STEP_NEEDS["a Claude Code environment"] == (
+        "claude-code-environment")
+    assert not any(pattern.search(action)
+                   for pattern in implement.ANY_AGENT_STEP_RES)
+    assert not any(pattern.search(action)
+                   for pattern in implement.STILL_CLAUDE_RES)
+    assert any(pattern.search(action)
+               for pattern in implement.CALENDAR_WAIT_STEP_RES)
 
 
 @pytest.mark.parametrize("action", [
@@ -2862,7 +2881,10 @@ def test_calendar_wait_with_mac_signal_stays_claude(action):
 
 def test_calendar_wait_restore_reason():
     """Restores of #1712 and #1715 where still open carry the ticket's
-    reason for Needs none (#2492)."""
+    reason for Needs none (#2492). Per the 2026-10-11 verify-first record
+    both are CLOSED with no labels and no Project item, so that conditional
+    is vacuous and no remote restore runs; the exact reason string is pinned
+    here for the future calendar-wait decline records that carry it."""
     assert implement.CALENDAR_WAIT_RESTORE_REASON == (
         "Code-only fix; no Mac capability needed, startable by any agent.")
 
@@ -4780,7 +4802,11 @@ def test_finish_declined_preserves_none_for_calendar_wait(
         tmp_path, monkeypatch, reason):
     """Reproduction for #2492: a calendar-wait decline from none keeps Needs
     none instead of stranding the ticket in a session lane, and lifts any
-    stale block."""
+    stale block. Before the calendar-wait class this reason classified as
+    unknown, which overwrote none with blocked plus Needs agent; the
+    Claude-only half of the #1712/#1715 history is pinned at the
+    blocked-step seam by the calendar-rule-only test above, since the
+    decline route itself never wrote claude-code-environment."""
     _, clone = make_clone(tmp_path)
     monkeypatch.setattr(implement, "fetch_ticket", lambda repo, number: ticket(number))
     effects = {"blocked": [], "cleared": [], "comments": [], "released": [],

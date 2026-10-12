@@ -238,7 +238,10 @@ STILL_CLAUDE_RES = (
 #: ticket is plain code work that is not startable on this run, as in
 #: #1712 and #1715. Matched against the blocked action's wording; a
 #: still-Claude signal still wins, so a wait naming genuine Mac work keeps
-#: the session lane.
+#: the session lane. Verification record (packet issue thread, 2026-10-11
+#: verify-first read from GitHub on the Mac): #1712 and #1715 are both
+#: CLOSED with no labels and no Project item, so neither holds a Needs
+#: value and the conditional restore "where still open" is vacuous.
 CALENDAR_WAIT_STEP_RES = (
     re.compile(r"(?i)\bcalendar\b"),
     re.compile(r"(?i)\bwait(?:ing|s|ed)?\b.{0,40}\buntil\b.{0,40}"
@@ -2649,7 +2652,12 @@ def write_declined_agent_needs(url: str, ref: str) -> None:
 
 
 #: Reason recorded when a calendar-wait mislabel is restored to Needs
-#: none (#2492): #1712 and #1715 where still open carry this reason.
+#: none (#2492): #1712 and #1715 where still open carry this reason. Per
+#: the 2026-10-11 verify-first record both are CLOSED (no labels, no
+#: Project item), so the conditional restore is vacuous and closed history
+#: is left untouched per the parent plan's rejection of bulk rewrites of
+#: closed tickets; the reason rides on future calendar-wait decline records
+#: (see ``finish_declined``) instead.
 CALENDAR_WAIT_RESTORE_REASON = (
     "Code-only fix; no Mac capability needed, startable by any agent.")
 
@@ -2662,10 +2670,12 @@ def write_declined_calendar_wait_needs(url: str, ref: str) -> None:
     #1715. The route preserves Needs none so the wait neither strands the
     ticket in a session lane nor asks Nate; the next lane run re-reads the
     date and either works the ticket or declines again. Restores of those
-    tickets where still open carry CALENDAR_WAIT_RESTORE_REASON. The Needs
-    single-select has no reason subfield, so the reason rides on the
-    ticket-visible ``**Declined:**`` record (appended by ``finish_declined``)
-    and the heartbeat note, not on the ``write_needs`` call itself.
+    tickets where still open carry CALENDAR_WAIT_RESTORE_REASON; per the
+    2026-10-11 verify-first record both are CLOSED with no Project item,
+    so that conditional is vacuous here. The Needs single-select has no
+    reason subfield, so the reason rides on the ticket-visible
+    ``**Declined:**`` record (appended by ``finish_declined``) and the
+    heartbeat note, not on the ``write_needs`` call itself.
     """
     from engine import breakdown as breakdown_engine
 
@@ -4377,9 +4387,13 @@ def finish_declined(
     elif calendar_wait_routed:
         # A calendar wait is plain code work that is not startable on this
         # run: clear any stale block and preserve Needs none, never a
-        # session lane (#2492). Only genuine Mac capability on the
-        # still-Claude list files claude-code-environment, and the decline
-        # route has no such writer.
+        # session lane (#2492). Before this route the same decline read as
+        # unknown, which overwrote none with blocked plus Needs agent; the
+        # Claude-only half of the #1712/#1715 history reproduced at the
+        # blocked-step seam, where unrecognized calendar wording kept the
+        # claimed claude-code-environment Needs (see needs_for_human_step).
+        # Only genuine Mac capability on the still-Claude list files
+        # claude-code-environment, and the decline route has no such writer.
         clear_block_effect(
             resolved, context["number"], cwd=context["root"],
         )

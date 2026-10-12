@@ -238,10 +238,16 @@ STILL_CLAUDE_RES = (
 #: ticket is plain code work that is not startable on this run, as in
 #: #1712 and #1715. Matched against the blocked action's wording; a
 #: still-Claude signal still wins, so a wait naming genuine Mac work keeps
-#: the session lane. Verification record (packet issue thread, 2026-10-11
-#: verify-first read from GitHub on the Mac): #1712 and #1715 are both
-#: CLOSED with no labels and no Project item, so neither holds a Needs
-#: value and the conditional restore "where still open" is vacuous.
+#: the session lane. In this lane a calendar-wait decline arrives either as
+#: a blocked human step (finish_blocked_on_human) or as a decline record
+#: (finish_declined): the Claude-only mislabel was filed at the former,
+#: where unrecognized calendar wording fell through to the claimed Claude
+#: Needs, while the latter read the same wait as unknown to blocked plus
+#: Needs agent; the fix preserves none at both. Verification record
+#: (packet issue thread, 2026-10-11 verify-first read from GitHub on the
+#: Mac): #1712 and #1715 are both CLOSED with no labels and no Project
+#: item, so neither holds a Needs value and the conditional restore
+#: "where still open" is vacuous.
 CALENDAR_WAIT_STEP_RES = (
     re.compile(r"(?i)\bcalendar\b"),
     re.compile(r"(?i)\bwait(?:ing|s|ed)?\b.{0,40}\buntil\b.{0,40}"

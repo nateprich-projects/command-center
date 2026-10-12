@@ -1220,22 +1220,67 @@ def test_the_watchdog_note_does_not_call_an_unreadable_file_never_run(
 
 # -- one live watchdog alert with supersede (#2500) ---------------------------
 #
-# First-verify evidence, base b0a20b5, open function = main() inline (no
-# open_alert helper there; existing_issue() returns the first open issue
-# whose body holds MARKER). Alert branch (problems non-empty): a marker hit
-# is PATCH-reused in place ("updated #N", body= rewritten, zero closes,
-# zero creates); with no marker hit, one POST creates the alert. So the old
-# path never closes a superseded alert -- "never reuses or closes" in the
-# ticket means never opens new-plus-close. Probe driving base main() with
-# two owned alerts open, both list orders: first-hit=1252 PATCHes 1252,
-# closes 0, creates 0; first-hit=2034 PATCHes 2034, closes 0, creates 0.
-# Either order strands the other alert, which is why measured-open #1252
-# and #2034 (plan #2487 premises) coexisted regardless of which the list
-# returned first -- no live title/body read needed. Marker-only matching
-# could also touch issues the watchdog never wrote. New behavior: an alert
-# opens one new owned issue per incident, then closes every superseded
-# owned alert (order-independent, exactly one live); recovery closes every
-# live owned alert.
+# First-verify record, base b0a20b5 (read locally via `git show`; no `gh`
+# in this checkout per runner rules, so live #1252/#2034 title/body and
+# issues?state=open ordering were not readable here). Open function at base
+# = main() inline: no open_alert/close_alert helpers exist there, and
+# existing_issue() returns the first open issue whose body holds MARKER.
+# Base alert branch (problems non-empty): a marker hit is PATCH-reused in
+# place ("updated #N", body= rewritten, zero closes, zero creates); with no
+# marker hit, one POST creates the alert. So base DOES PATCH-reuse the
+# first hit -- the ticket's "never reuses or closes" holds for closes, not
+# literally for reuse: the alert branch never closes a superseded alert,
+# and the recovery branch closes only the single first hit. Either list
+# order therefore leaves two owned alerts open side by side (at most the
+# first hit is touched), which is the measured #1252/#2034 coexistence in
+# the plan #2487 premises (measured-open premise only; fixtures below model
+# owned alerts synthetically). Marker-only matching could also touch issues
+# the watchdog never wrote. The executable probe is
+# test_base_open_path_never_closes_superseded_both_orders below, a faithful
+# replica of the base branch driven in both list orders. New behavior: an
+# alert opens one new owned issue per incident, then closes every
+# superseded owned alert (order-independent, exactly one live); recovery
+# closes every live owned alert.
+
+
+def _base_branch(open_issues, problems):
+    """Faithful replica of the base b0a20b5 main() open/recovery branch.
+
+    Base reads the open list once via existing_issue() (first issue whose
+    body holds MARKER). Alert branch: hit -> PATCH that one issue's body in
+    place; no hit -> POST one new issue; never a close. Recovery branch:
+    close the single first hit only. Returns the (patched, created, closed)
+    numbers so both list orders are drivable as executable evidence.
+    """
+    hit = next(
+        (issue for issue in open_issues
+         if watchdog.MARKER in (issue.get("body") or "")),
+        None,
+    )
+    if not problems:
+        return {"patched": [], "created": 0,
+                "closed": [hit["number"]] if hit else []}
+    if hit:
+        return {"patched": [hit["number"]], "created": 0, "closed": []}
+    return {"patched": [], "created": 1, "closed": []}
+
+
+def test_base_open_path_never_closes_superseded_both_orders():
+    """Executable First-verify probe: the base branch strands the second
+    owned alert in both list orders, so #1252/#2034 coexistence follows from
+    zero closes alone with no claim about which issue was untouched."""
+    first = [
+        {"number": 1252, "body": watchdog.MARKER + "\nold alarm"},
+        {"number": 2034, "body": watchdog.MARKER + "\nnewer alarm"},
+    ]
+    for ordering in (first, list(reversed(first))):
+        result = _base_branch(ordering, ["`codex`: Nothing recorded for 3d11h."])
+        assert result["closed"] == []
+        assert result["created"] == 0
+        assert result["patched"] == [ordering[0]["number"]]
+    # Recovery strands the second alert too: only the first hit closes.
+    assert _base_branch(first, [])["closed"] == [1252]
+    assert _base_branch(list(reversed(first)), [])["closed"] == [2034]
 
 
 def test_owned_alert_needs_marker_and_title_prefix():

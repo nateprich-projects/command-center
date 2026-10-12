@@ -26,8 +26,6 @@ import uuid
 
 import pytest
 
-import test_env
-
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "scripts" / "muse-implement"
@@ -163,11 +161,6 @@ MUSE_STUB = (
     "if [[ -f \"$count_file\" ]]; then n=$(($(cat \"$count_file\") + 1)); fi\n"
     "printf '%s' \"$n\" > \"$count_file\"\n"
     "printf '%s\\n' \"$@\" > \"$MUSE_ARGS.$n\"\n"
-    "printf 'TMPDIR=%s\\n' \"$TMPDIR\" > \"$MUSE_TEST_ENV.$n\"\n"
-    "printf 'PYTHONPYCACHEPREFIX=%s\\n' \"$PYTHONPYCACHEPREFIX\" "
-    ">> \"$MUSE_TEST_ENV.$n\"\n"
-    "printf 'PYTHONDONTWRITEBYTECODE=%s\\n' \"$PYTHONDONTWRITEBYTECODE\" "
-    ">> \"$MUSE_TEST_ENV.$n\"\n"
     "workspace=''\n"
     "prompt_file=''\n"
     "previous=''\n"
@@ -326,8 +319,6 @@ def _stubbed_runner(tmp_path, begin, *, packet=None, bound_seconds=20,
     (repo / "muse_model.py").write_text(
         muse_model_body if muse_model_body is not None
         else (ROOT / "muse_model.py").read_text())
-    # The real module, not a stub: the SSD gate execs it before begin.
-    (repo / "test_env.py").write_text((ROOT / "test_env.py").read_text())
 
     remote = _seed_remote(tmp_path, ticket_branch=ticket_branch,
                           heartbeat_branch=heartbeat_branch)
@@ -356,7 +347,6 @@ def _stubbed_runner(tmp_path, begin, *, packet=None, bound_seconds=20,
         MUSE_BRANCH=str(repo / "muse.branch"),
         MUSE_UPSTREAM=str(repo / "muse.upstream"),
         MUSE_ANSWER=ANSWER,
-        MUSE_TEST_ENV=str(repo / "muse.test-env"),
     )
     if extra_env:
         env.update(extra_env)
@@ -652,40 +642,6 @@ def test_a_missing_routine_refuses_before_begin(tmp_path):
     assert proc.returncode == 1
     assert "refusing to run without a prompt" in proc.stderr
     assert not (repo / "funnel.calls").exists()
-
-
-def _model_test_env(repo, n=1):
-    pairs = {}
-    lines = (repo / "muse.test-env.{}".format(n)).read_text().splitlines()
-    for line in lines:
-        key, _, value = line.partition("=")
-        pairs[key] = value
-    return pairs
-
-
-def test_the_model_runs_on_ssd_test_scratch(tmp_path):
-    """#2530: the model's pytest debris and bytecode land on the volume."""
-    proc, repo = _stubbed_runner(tmp_path, _begin())
-
-    assert proc.returncode == 0, proc.stderr
-    ssd = pathlib.Path(os.environ[test_env.SSD_ROOT_ENV_VAR])
-    seen = _model_test_env(repo)
-    assert seen["TMPDIR"] == str(ssd / test_env.TMP_SUBDIR)
-    assert seen["PYTHONPYCACHEPREFIX"] == str(ssd / test_env.PYCACHE_SUBDIR)
-    assert seen["PYTHONDONTWRITEBYTECODE"] == "1"
-
-
-def test_a_missing_ssd_refuses_before_begin(tmp_path):
-    """#2530: no silent fallback to the internal disk."""
-    proc, repo = _stubbed_runner(
-        tmp_path, _begin(),
-        extra_env={test_env.SSD_ROOT_ENV_VAR:
-                   str(tmp_path / "no-such-volume")})
-
-    assert proc.returncode == 1
-    assert "SSD test scratch" in proc.stderr
-    assert _calls(repo, "funnel") == []
-    assert _muse_calls(repo) == 0
 
 
 @pytest.mark.parametrize("placeholders", (0, 2))

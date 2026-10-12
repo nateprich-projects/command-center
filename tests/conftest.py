@@ -114,26 +114,6 @@ def codex_settings_match(monkeypatch):
                         lambda directory: "skipped: stubbed in tests")
     yield real
 
-@pytest.fixture(autouse=True)
-def test_ssd_isolation(monkeypatch, tmp_path_factory):
-    """Every test's SSD test scratch is a fixture directory (#2530).
-
-    ``test_env.prepare`` and the two muse runners refuse without a
-    scratch volume, and the suite must pass on machines without
-    ``/Volumes/ClaudeScratch`` (CI runs on hobby-linux) without ever
-    touching the real volume on machines with it. A test that needs a
-    missing volume points the override at a path it never creates.
-
-    The directory lives outside every test's ``tmp_path`` so tests
-    asserting their ``tmp_path`` stays empty see no fixture debris.
-    """
-    import test_env
-
-    ssd = tmp_path_factory.mktemp("test-ssd")
-    monkeypatch.setenv(test_env.SSD_ROOT_ENV_VAR, str(ssd))
-    yield ssd
-
-
 @pytest.fixture
 def resolver_clearing():
     """Build a copy of the real resolver with some repositories cleared.

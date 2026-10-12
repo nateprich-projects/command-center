@@ -249,25 +249,6 @@ if [[ ! -r "$MUSE_CALL_BIN" ]]; then
   echo "muse-review-engine: cannot read $MUSE_CALL_BIN — continuing without Muse session capture" >&2
 fi
 
-# SSD test scratch (#2530): any pytest debris and bytecode from a model
-# call lands on the external volume, never the internal disk. Without it
-# the run refuses here, before claiming anything — the same fail-loud
-# shape as the scratch setup below. The paths reach only the model
-# children; this runner's own scratch stays where it is.
-if ! REVIEW_SSD_EXPORTS="$(python3 "$REPO/test_env.py" --export REVIEW_TEST_SSD)"; then
-  echo "muse-review-engine: no SSD test scratch; refusing the run" >&2
-  exit 1
-fi
-if [[ -z "$REVIEW_SSD_EXPORTS" ]]; then
-  echo "muse-review-engine: empty SSD test environment; refusing the run" >&2
-  exit 1
-fi
-eval "$REVIEW_SSD_EXPORTS"
-if [[ -z "${REVIEW_TEST_SSD_TMPDIR:-}" || -z "${REVIEW_TEST_SSD_PYCACHE:-}" ]]; then
-  echo "muse-review-engine: incomplete SSD test environment; refusing the run" >&2
-  exit 1
-fi
-
 # One owner-only directory per run, holding every scratch file including the
 # packet, removed whole when the run ends (#1240). Two reasons it is a
 # directory rather than six loose files in a shared temp root:
@@ -700,10 +681,7 @@ call_model_files() {
     fi
     raw_answer_path="${answer_path}.muse-jsonl"
     # CALL_EFFORT: the lane's effort, or the lister's inside it (#1887).
-    TMPDIR="$REVIEW_TEST_SSD_TMPDIR" \
-      PYTHONPYCACHEPREFIX="$REVIEW_TEST_SSD_PYCACHE" \
-      PYTHONDONTWRITEBYTECODE=1 \
-      "${muse_exec[@]}" \
+    "${muse_exec[@]}" \
       --reasoning-effort "$CALL_EFFORT" \
       --disable-shell \
       --disable-write \

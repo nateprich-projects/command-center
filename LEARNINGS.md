@@ -8,18 +8,6 @@ Label confidence honestly: `measured` means observed with the evidence quoted,
 `documented` means a vendor claims it and it was not verified, `inferred` means it could
 be wrong. Mislabelling `inferred` as `measured` is how a wrong belief becomes permanent.
 
-### A mounted APFS volume can stop answering while `diskutil` still calls it healthy
-
-**2026-10-11 · Mac mini, `/Volumes/ClaudeScratch` · measured**
-
-While building #2530, `ls /Volumes/ClaudeScratch` produced no output in 20 s (killed by
-timeout; a second attempt hung the same way), yet `diskutil info` on the same mount
-reported `Mounted: Yes`, SMART `Verified`, on `/dev/disk7s1`. A Go/no-go check for an
-external volume therefore cannot be "is it mounted" alone: every call into the volume,
-even a stat, has to run under a timeout, and a timeout has to refuse loudly rather than
-wait. That is why `test_env.prepare` runs its whole probe — mount check, mkdir, write
-probe — in a worker thread with a 20 s bound.
-
 ### Muse's `exec --session-id` resumes a used session and refuses one in use
 
 **2026-09-24 · Muse Code CLI · measured**

@@ -40,7 +40,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import funnel  # noqa: E402
 
 import block_record  # noqa: E402
-import test_env  # noqa: E402
 from decline_classifier import (  # noqa: E402
     DECLINE_REVIEW_ROUTING_MARKER,
     classify_decline_reason,
@@ -155,13 +154,6 @@ class EnvironmentSetupError(ImplementError):
         super().__init__(
             "finish environment error: {}{}; lock sha256 {}".format(
                 step, detail, lock_sha256))
-
-
-class TestEnvironmentError(ImplementError):
-    """SSD test scratch was unavailable, so no test ran (#2530)."""
-
-    def __init__(self, detail: str):
-        super().__init__("test environment error: {}".format(detail))
 
 
 class MergeConflictError(ImplementError):
@@ -1494,14 +1486,6 @@ def run_tests(root: pathlib.Path,
     # instead, honouring the checkout's .python-version pin (#1024).
     python = pinned_interpreter(root)
     env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1", PYTHON=python)
-    # Every test runs on SSD scratch (#2530): TMPDIR roots pytest's
-    # basetemp there, and the prefix catches bytecode when anything
-    # unsets the no-cache guard. A missing volume refuses loudly here
-    # rather than filling the internal disk.
-    try:
-        env.update(test_env.prepare())
-    except test_env.TestEnvError as exc:
-        raise TestEnvironmentError(str(exc)) from None
     # Whatever ultimately invokes pytest inherits the no-cache guard, so a
     # resolved `make test` cannot leave .pytest_cache/ for the explicit stage.
     extra = env.get("PYTEST_ADDOPTS", "").strip()
@@ -3353,14 +3337,6 @@ def _failure_note(exc: ImplementError, kept: str = "", *, repo: str) -> str:
             note += " | " + (
                 _member_kept(kept) if not _is_public_repo(repo) else kept)
         return note
-    if isinstance(exc, TestEnvironmentError):
-        # Machine state, not a test result: the note names the volume
-        # so the next run knows no test ran (#2530).
-        note = str(exc)
-        if kept:
-            note += " | " + (
-                _member_kept(kept) if not _is_public_repo(repo) else kept)
-        return note
     if isinstance(exc, TestCommandStartError):
         note = str(exc)
         if kept:
@@ -3893,15 +3869,13 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
             ref=ref, run=run, agent=agent,
             reason=("merge conflict with origin/main" if conflict else
                     "test environment setup failed"
-                    if isinstance(exc, (EnvironmentSetupError,
-                                       TestEnvironmentError)) else
+                    if isinstance(exc, EnvironmentSetupError) else
                     "tests failed" if phase == "tests" else
                     "checkpoint retry"),
         )
         posted = None
         if (phase == "tests" and not conflict
-                and not isinstance(exc, (EnvironmentSetupError,
-                                         TestEnvironmentError))
+                and not isinstance(exc, EnvironmentSetupError)
                 and not _is_public_repo(resolved)):
             # The ids leave the public note, so they go to the ticket, and
             # before the release: the run that claims it next reads them in

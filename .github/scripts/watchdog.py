@@ -53,6 +53,7 @@ import agent_health as _agent_health  # noqa: E402
 REPO = os.environ.get("GITHUB_REPOSITORY", "nateprich-projects/command-center")
 BRANCH = "heartbeat"
 MARKER = "<!-- command-center-watchdog -->"
+ALERT_TITLE = "Scheduled runs need attention"
 
 # Keep the existing watchdog names as compatibility hooks for its calibration
 # tests and callers. The values live in the shared module so the Actions job and
@@ -361,12 +362,50 @@ def note(agent: str, rows: List[Dict], now: Optional[float] = None) -> str:
     return " ".join(notes)
 
 
-def existing_issue() -> Dict:
+def is_watchdog_alert(issue: Dict) -> bool:
+    """True only for an alert issue the watchdog itself owns.
+
+    Ownership needs both the watchdog-written body marker and the alert
+    title prefix. Either alone is not enough: a foreign issue may quote the
+    marker, and an unrelated issue may share the title. Matching only owned
+    issues keeps reuse and supersede closes off non-watchdog issues.
+    """
+    title = issue.get("title")
+    if not isinstance(title, str) or not title.startswith(ALERT_TITLE):
+        return False
+    return MARKER in (issue.get("body") or "")
+
+
+def owned_alerts() -> List[Dict]:
+    """Every open watchdog-owned alert issue, newest or oldest first."""
     raw = gh("api", "repos/{}/issues?state=open&per_page=100".format(REPO))
-    for issue in json.loads(raw):
-        if MARKER in (issue.get("body") or ""):
-            return issue
-    return {}
+    return [issue for issue in json.loads(raw) if is_watchdog_alert(issue)]
+
+
+def existing_issue() -> Dict:
+    """Compatibility hook: the first live watchdog-owned alert, if any."""
+    owned = owned_alerts()
+    return owned[0] if owned else {}
+
+
+def open_alert(body: str) -> Dict:
+    """Open one new watchdog-owned alert issue for the current incident."""
+    return json.loads(gh(
+        "api", "-X", "POST", "repos/{}/issues".format(REPO),
+        "-f", "title=" + ALERT_TITLE,
+        "-f", "body=" + body,
+        "-f", "labels[]=blocked",
+    ))
+
+
+def close_alert(number, comment: str) -> None:
+    """Comment on and close one watchdog-owned alert issue."""
+    gh("api", "-X", "POST",
+       "repos/{}/issues/{}/comments".format(REPO, number),
+       "-f", "body=" + comment)
+    gh("api", "-X", "PATCH",
+       "repos/{}/issues/{}".format(REPO, number),
+       "-f", "state=closed", "-f", "state_reason=completed")
 
 
 def main() -> int:
@@ -386,18 +425,16 @@ def main() -> int:
         if info:
             print("note: " + info)
 
-    open_issue = existing_issue()
+    owned = owned_alerts()
 
     if not problems:
-        if open_issue:
-            gh("api", "-X", "POST",
-               "repos/{}/issues/{}/comments".format(REPO, open_issue["number"]),
-               "-f", "body=Heartbeats are healthy again. Closing.")
-            gh("api", "-X", "PATCH",
-               "repos/{}/issues/{}".format(REPO, open_issue["number"]),
-               "-f", "state=closed", "-f", "state_reason=completed")
-            print("recovered; closed #{}".format(open_issue["number"]))
-        else:
+        # The alarmed silence condition cleared: close every live owned
+        # alert so no stale alert stays open beside the recovery.
+        for issue in owned:
+            close_alert(issue["number"],
+                        "Heartbeats are healthy again. Closing.")
+            print("recovered; closed #{}".format(issue["number"]))
+        if not owned:
             print("healthy")
         return 0
 
@@ -411,21 +448,19 @@ def main() -> int:
            "", "It closes itself once the heartbeats recover."]
     )
 
-    if open_issue:
-        # Update in place rather than filing a second issue: a watchdog that
-        # files one alert an hour is a watchdog nobody reads.
-        gh("api", "-X", "PATCH",
-           "repos/{}/issues/{}".format(REPO, open_issue["number"]),
-           "-f", "body=" + body)
-        print("updated #{}".format(open_issue["number"]))
-    else:
-        created = json.loads(gh(
-            "api", "-X", "POST", "repos/{}/issues".format(REPO),
-            "-f", "title=Scheduled runs need attention",
-            "-f", "body=" + body,
-            "-f", "labels[]=blocked",
-        ))
-        print("opened #{}".format(created["number"]))
+    # One live alert: open a new issue per incident, then close every
+    # superseded watchdog-owned alert so exactly one stays open. The new
+    # issue opens first, so a failed open never closes the live alert out
+    # from under an active alarm.
+    created = open_alert(body)
+    print("opened #{}".format(created["number"]))
+    for issue in owned:
+        close_alert(
+            issue["number"],
+            "Superseded by #{}: a new watchdog alert was opened for the "
+            "current incident so exactly one alert stays live. "
+            "Closing.".format(created["number"]))
+        print("superseded; closed #{}".format(issue["number"]))
 
     for problem in problems:
         print("  " + problem)

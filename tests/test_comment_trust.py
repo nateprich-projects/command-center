@@ -140,8 +140,9 @@ BODY_READERS: Dict[str, str] = {
         "edit; its evidence block is implementer-reported (#1812)",
     "engine/migrate_canonical_fields.py:infer_values": _PLAN_BODY,
     "engine/migrate_canonical_fields.py:trim_routing_prose": _PLAN_BODY,
-    ".github/scripts/watchdog.py:existing_issue":
-        "the watchdog's own open issue, found by the marker in its body",
+    ".github/scripts/watchdog.py:is_watchdog_alert":
+        "the watchdog's own open issue, found by the marker in its body "
+        "plus the alert title prefix",
     ".github/scripts/watchdog.py:main":
         "the watchdog's own open issue, found by the marker in its body",
 }

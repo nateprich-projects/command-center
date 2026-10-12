@@ -29,13 +29,14 @@ def test_default_root_is_the_external_scratch_volume():
     assert test_env.DEFAULT_SSD_ROOT == "/Volumes/ClaudeScratch"
 
 
-def test_prepare_roots_temp_and_bytecode_on_the_volume(tmp_path, monkeypatch):
-    _override(monkeypatch, tmp_path / "test-ssd")
+def test_prepare_roots_temp_and_bytecode_on_the_volume(test_ssd_isolation,
+                                                      monkeypatch):
+    _override(monkeypatch, test_ssd_isolation)
 
     env = test_env.prepare()
 
-    tmpdir = tmp_path / "test-ssd" / test_env.TMP_SUBDIR
-    pycache = tmp_path / "test-ssd" / test_env.PYCACHE_SUBDIR
+    tmpdir = test_ssd_isolation / test_env.TMP_SUBDIR
+    pycache = test_ssd_isolation / test_env.PYCACHE_SUBDIR
     assert env == {"TMPDIR": str(tmpdir),
                    "PYTHONPYCACHEPREFIX": str(pycache),
                    "PYTHONDONTWRITEBYTECODE": "1"}
@@ -45,8 +46,8 @@ def test_prepare_roots_temp_and_bytecode_on_the_volume(tmp_path, monkeypatch):
     assert stat.S_IMODE(pycache.stat().st_mode) == 0o700
 
 
-def test_prepare_is_idempotent(tmp_path, monkeypatch):
-    _override(monkeypatch, tmp_path / "test-ssd")
+def test_prepare_is_idempotent(test_ssd_isolation, monkeypatch):
+    _override(monkeypatch, test_ssd_isolation)
 
     assert test_env.prepare() == test_env.prepare()
 
@@ -71,8 +72,8 @@ def test_file_at_the_root_refuses(tmp_path, monkeypatch):
         test_env.prepare()
 
 
-def test_unwritable_volume_refuses(tmp_path, monkeypatch):
-    _override(monkeypatch, tmp_path / "test-ssd")
+def test_unwritable_volume_refuses(test_ssd_isolation, monkeypatch):
+    _override(monkeypatch, test_ssd_isolation)
 
     def denied(*args, **kwargs):
         raise PermissionError("Operation not permitted")
@@ -82,8 +83,9 @@ def test_unwritable_volume_refuses(tmp_path, monkeypatch):
         test_env.prepare()
 
 
-def test_file_blocking_a_scratch_dir_refuses(tmp_path, monkeypatch):
-    ssd = tmp_path / "test-ssd"
+def test_file_blocking_a_scratch_dir_refuses(test_ssd_isolation,
+                                               monkeypatch):
+    ssd = test_ssd_isolation
     (ssd / test_env.TMP_SUBDIR).write_text("not a directory\n")
     _override(monkeypatch, ssd)
 
@@ -91,8 +93,8 @@ def test_file_blocking_a_scratch_dir_refuses(tmp_path, monkeypatch):
         test_env.prepare()
 
 
-def test_failed_write_probe_refuses(tmp_path, monkeypatch):
-    _override(monkeypatch, tmp_path / "test-ssd")
+def test_failed_write_probe_refuses(test_ssd_isolation, monkeypatch):
+    _override(monkeypatch, test_ssd_isolation)
 
     def probe_failed(**kwargs):
         raise OSError("Read-only file system")
@@ -124,8 +126,9 @@ def test_mounted_default_root_passes(tmp_path, monkeypatch):
     assert env["TMPDIR"] == str(plain / test_env.TMP_SUBDIR)
 
 
-def test_wedged_volume_refuses_within_the_timeout(tmp_path, monkeypatch):
-    _override(monkeypatch, tmp_path / "test-ssd")
+def test_wedged_volume_refuses_within_the_timeout(test_ssd_isolation,
+                                                    monkeypatch):
+    _override(monkeypatch, test_ssd_isolation)
 
     def wedged(root, *, override):
         import time
@@ -137,17 +140,18 @@ def test_wedged_volume_refuses_within_the_timeout(tmp_path, monkeypatch):
         test_env.prepare(timeout=0.05)
 
 
-def test_export_prints_evalable_assignments(tmp_path, monkeypatch, capsys):
-    _override(monkeypatch, tmp_path / "test-ssd")
+def test_export_prints_evalable_assignments(test_ssd_isolation, monkeypatch,
+                                             capsys):
+    _override(monkeypatch, test_ssd_isolation)
 
     assert test_env.export_main(["--export", "PROBE"]) == 0
 
     out = capsys.readouterr().out.splitlines()
     assert out == [
         "PROBE_TMPDIR={}".format(shlex.quote(str(
-            tmp_path / "test-ssd" / test_env.TMP_SUBDIR))),
+            test_ssd_isolation / test_env.TMP_SUBDIR))),
         "PROBE_PYCACHE={}".format(shlex.quote(str(
-            tmp_path / "test-ssd" / test_env.PYCACHE_SUBDIR))),
+            test_ssd_isolation / test_env.PYCACHE_SUBDIR))),
     ]
 
 
@@ -168,9 +172,10 @@ def test_export_rejects_a_non_variable_prefix(capsys):
     assert excinfo.value.code == 2
 
 
-def test_pytest_debris_lands_on_the_volume(tmp_path, monkeypatch):
+def test_pytest_debris_lands_on_the_volume(tmp_path, test_ssd_isolation,
+                                            monkeypatch):
     """A real pytest under the prepared env numbers its dirs on SSD paths."""
-    _override(monkeypatch, tmp_path / "test-ssd")
+    _override(monkeypatch, test_ssd_isolation)
     env = test_env.prepare()
     suite = tmp_path / "suite"
     suite.mkdir()
@@ -190,22 +195,27 @@ def test_pytest_debris_lands_on_the_volume(tmp_path, monkeypatch):
 
     assert proc.returncode == 0, proc.stdout + proc.stderr
     markers = list(
-        (tmp_path / "test-ssd" / test_env.TMP_SUBDIR).rglob("marker.txt"))
+        (test_ssd_isolation / test_env.TMP_SUBDIR).rglob("marker.txt"))
     assert len(markers) == 1
 
 
-def test_bytecode_lands_on_the_volume(tmp_path, monkeypatch):
+def test_bytecode_lands_on_the_volume(tmp_path, test_ssd_isolation,
+                                       monkeypatch):
     """A real import under the prefix writes its cache to SSD paths."""
-    _override(monkeypatch, tmp_path / "test-ssd")
+    _override(monkeypatch, test_ssd_isolation)
     env = test_env.prepare()
     del env["PYTHONDONTWRITEBYTECODE"]
+    # The lane itself runs with the no-cache guard set; the child must
+    # not inherit it or no .pyc is written and the prefix proves nothing.
+    child = dict(os.environ, **env)
+    child.pop("PYTHONDONTWRITEBYTECODE", None)
     package = tmp_path / "package"
     package.mkdir()
     (package / "mod_probe_ssd.py").write_text("VALUE = 42\n")
 
     proc = subprocess.run(
         [sys.executable, "-c", "import mod_probe_ssd"],
-        env=dict(os.environ, **env),
+        env=child,
         cwd=str(package),
         capture_output=True,
         text=True,
@@ -217,7 +227,7 @@ def test_bytecode_lands_on_the_volume(tmp_path, monkeypatch):
     # is our module's own cache plus nothing beside its source.
     caches = [
         path for path in
-        (tmp_path / "test-ssd" / test_env.PYCACHE_SUBDIR).rglob("*.pyc")
+        (test_ssd_isolation / test_env.PYCACHE_SUBDIR).rglob("*.pyc")
         if path.name.startswith("mod_probe_ssd.")]
     assert len(caches) == 1
     assert not list(package.rglob("__pycache__"))

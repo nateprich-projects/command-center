@@ -20,6 +20,10 @@ are resolved live from the Project: nothing is hardcoded.
 
 Fail-closed rules, in order:
 
+- Filed by anyone outside TRUSTED_FILING_AUTHORS: not an overseer-filed
+  issue. Exit quietly with no writes and no comment, before the routing
+  block is read. command-center is public, so a stranger's routing block
+  must never become Project routing.
 - No routing marker: not an overseer-filed issue. Exit quietly with no
   writes and no comment. Every human- and agent-filed issue in the repo
   passes through here and must be untouched.
@@ -29,8 +33,8 @@ Fail-closed rules, in order:
 - Any transport failure: no comment is trusted, the run exits nonzero.
 
 Triggers (see the workflow): `issues: opened` in this repo carries the body
-in the event; `repository_dispatch` type `overseer-filed` and
-`workflow_dispatch` carry `issue_repo` plus `issue_number` and the body is
+and author in the event; `repository_dispatch` type `overseer-filed` and
+`workflow_dispatch` carry `issue_repo` plus `issue_number` and both are
 refetched. Dispatches for repos outside OVERSEER_REPOS are refused.
 """
 
@@ -59,6 +63,14 @@ OVERSEER_REPOS = frozenset({
     "nateprich-projects/The-League",
     "nateprich-projects/AFL",
 })
+
+#: Logins that may file an issue this workflow routes (#2512).
+#: command-center is public, so a routing block is read only when its
+#: issue's author is one of these; anything else skips silently with no
+#: writes and no comment. Today that is the funnel's trusted-author set
+#: alone: if the cloud overseer threads ever file as a distinct login,
+#: name it here.
+TRUSTED_FILING_AUTHORS = frozenset(funnel.TRUSTED_COMMENT_AUTHORS)
 
 FIXED_STATUS = "Ideas"
 FIXED_ORIGIN = "agent"
@@ -166,6 +178,16 @@ def validate_routing(block: Dict) -> Tuple[Optional[Dict[str, str]],
     return values, None
 
 
+def trusted_filing_author(author: Optional[str]) -> bool:
+    """Whether an issue author may carry a routing block (#2512).
+
+    Fail closed: an issue with no readable author is untrusted, like an
+    unreadable comment author (#1787). GitHub logins are unique regardless
+    of case, so the comparison ignores it.
+    """
+    return author is not None and author.lower() in TRUSTED_FILING_AUTHORS
+
+
 def gh(*args: str) -> str:
     proc = subprocess.run(["gh"] + list(args),
                           capture_output=True, text=True)
@@ -188,8 +210,13 @@ def gh_graphql(query: str, **variables) -> dict:
     return data
 
 
-def resolve_event() -> Tuple[str, int, Optional[str]]:
-    """Return ``(issue_repo, issue_number, body_or_None)`` for this run."""
+def resolve_event() -> Tuple[str, int, Optional[str], Optional[str]]:
+    """Return ``(issue_repo, issue_number, body, author)`` for this run.
+
+    ``body`` and ``author`` arrive in the ``issues`` event; dispatches
+    carry only the repo and number, so both are None and the caller
+    refetches them.
+    """
     event_name = os.environ.get("GITHUB_EVENT_NAME", "")
     event_path = os.environ.get("GITHUB_EVENT_PATH", "")
     with open(event_path, encoding="utf-8") as handle:
@@ -201,12 +228,14 @@ def resolve_event() -> Tuple[str, int, Optional[str]]:
             str(repository.get("full_name") or ""),
             int(issue.get("number")),
             issue.get("body"),
+            funnel.comment_author(issue),
         )
     if event_name == "workflow_dispatch":
         inputs = event.get("inputs") or {}
         return (
             str(inputs.get("issue_repo") or ""),
             int(inputs.get("issue_number")),
+            None,
             None,
         )
     if event_name == "repository_dispatch":
@@ -215,13 +244,17 @@ def resolve_event() -> Tuple[str, int, Optional[str]]:
             str(payload.get("issue_repo") or ""),
             int(payload.get("issue_number")),
             None,
+            None,
         )
     raise RuntimeError("unsupported event {}".format(event_name or "unknown"))
 
 
-def fetch_issue_body(repo: str, number: int) -> str:
+def fetch_issue(repo: str, number: int) -> Tuple[str, Optional[str]]:
+    """The body's text and its author's login for one issue, over REST."""
     payload = json.loads(gh("api", "repos/{}/issues/{}".format(repo, number)))
-    return str(payload.get("body") or "")
+    if not isinstance(payload, dict):
+        raise RuntimeError("issue read returned no object")
+    return str(payload.get("body") or ""), funnel.comment_author(payload)
 
 
 def project_selects() -> Tuple[str, Dict[str, Dict[str, str]]]:
@@ -356,7 +389,7 @@ def main() -> int:
         print("overseer_filing: GH_TOKEN (PROJECT_FILING_TOKEN) is not set")
         return 2
     try:
-        repo, number, body = resolve_event()
+        repo, number, body, author = resolve_event()
     except (KeyError, TypeError, ValueError, RuntimeError) as exc:
         print("overseer_filing: cannot resolve the filed issue: {}".format(exc))
         return 2
@@ -367,10 +400,14 @@ def main() -> int:
     ref = "{}/issues/{}".format(repo, number)
     if body is None:
         try:
-            body = fetch_issue_body(repo, number)
+            body, author = fetch_issue(repo, number)
         except (RuntimeError, ValueError) as exc:
             print("overseer_filing: cannot read {}: {}".format(ref, exc))
             return 1
+    if not trusted_filing_author(author):
+        print("overseer_filing: {} was filed by {}; skipping".format(
+            ref, "@" + author if author else "an unknown author"))
+        return 0
     block, block_error = extract_routing_block(body or "")
     if block is None and block_error is None:
         print("overseer_filing: {} carries no routing block; skipping".format(

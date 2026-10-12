@@ -10,8 +10,10 @@ name: overseer-filing
 # other overseer repos (Fantasy-GM, The-League, AFL) arrive by dispatch:
 # `repository_dispatch` type `overseer-filed` with client_payload
 # `issue_repo` and `issue_number`, or the equivalent `workflow_dispatch`
-# inputs. An unknown or missing routing value fails closed: the item is left
-# unset and a comment says why; routing is never defaulted.
+# inputs. An issue filed by anyone outside the trusted authors is skipped
+# before the block is read, with no writes and no comment. An unknown or
+# missing routing value fails closed: the item is left unset and a comment
+# says why; routing is never defaulted.
 
 on:
   issues:

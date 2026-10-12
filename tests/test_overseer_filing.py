@@ -2,9 +2,10 @@
 
 The workflow files issues the cloud overseers create over repo-scoped REST,
 which cannot reach user-owned Projects (probe 2 failed, #2438). These tests
-prove the fail-closed contract: no routing block means no writes and no
-comment, and a malformed, missing or unknown routing value leaves the item
-unset with a comment saying why. Routing is never defaulted.
+prove the fail-closed contract: an issue filed by anyone outside the trusted
+authors is skipped before the block is read, no routing block means no writes
+and no comment, and a malformed, missing or unknown routing value leaves the
+item unset with a comment saying why. Routing is never defaulted.
 """
 
 from __future__ import annotations
@@ -281,8 +282,10 @@ def _event_file(tmp_path, name, payload):
     return path
 
 
-def _issues_event(number=7, body="plain human issue", repo=REPO):
-    return {"issue": {"number": number, "body": body},
+def _issues_event(number=7, body="plain human issue", repo=REPO,
+                  author="nateprich"):
+    return {"issue": {"number": number, "body": body,
+                      "user": {"login": author}},
             "repository": {"full_name": repo}}
 
 
@@ -324,6 +327,17 @@ def test_main_skips_unmarked_issues_without_writes(monkeypatch, tmp_path,
     assert status == 0
     assert fake.calls == []
     assert "no routing block" in capsys.readouterr().out
+
+
+def test_main_ignores_a_valid_block_from_an_untrusted_author(monkeypatch,
+                                                             tmp_path):
+    fake = _GhFake()
+    status = _run_main(
+        monkeypatch, tmp_path, fake, "issues",
+        _issues_event(body=_body(VALID), author="mallory"))
+    assert status == 0
+    assert fake.writes() == []
+    assert fake.comments() == []
 
 
 def test_main_files_valid_block_with_all_five_fields(monkeypatch, tmp_path):
@@ -388,7 +402,8 @@ def test_main_validates_every_write_before_any_write(monkeypatch, tmp_path):
 def test_main_supports_workflow_dispatch(monkeypatch, tmp_path):
     def dispatch_gh(*args):
         if args[:2] == ("api", "repos/{}/issues/9".format(REPO)):
-            return json.dumps({"body": _body(VALID)})
+            return json.dumps({"body": _body(VALID),
+                               "user": {"login": "nateprich"}})
         return _GhFake.__call__(fake, *args)
 
     fake = _GhFake()
@@ -408,7 +423,8 @@ def test_main_supports_repository_dispatch(monkeypatch, tmp_path):
 
     def dispatch_gh(*args):
         if args[:2] == ("api", "repos/{}/issues/11".format(REPO)):
-            return json.dumps({"body": _body(VALID)})
+            return json.dumps({"body": _body(VALID),
+                               "user": {"login": "nateprich"}})
         return _GhFake.__call__(fake, *args)
 
     monkeypatch.setenv("GH_TOKEN", "filing-token")

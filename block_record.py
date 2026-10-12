@@ -569,6 +569,79 @@ def render_needs_decision(question: object) -> str:
     return "{} {}".format(NEEDS_DECISION_PREFIX, words)
 
 
+#: A ticket's Needs-a-decision answer. Nate's verbatim answer opens the
+#: comment as a blockquote; this header follows so the current-block reader
+#: can supersede the question it answers. A canonical blocked header after
+#: it replaces the block instead of lifting it (#2484).
+TICKET_ANSWER_PREFIX = "**Answered:**"
+TICKET_ANSWER_RE = re.compile(
+    r"(?m)^" + re.escape(TICKET_ANSWER_PREFIX) + r"[ \t]*(?P<record>.*)$"
+)
+_TICKET_ANSWER_BLOCK_RE = re.compile(
+    r"(?m)^" + re.escape(BLOCK_COMMENT_PREFIX)
+)
+
+
+def _blockquote_answer(value: object) -> str:
+    """Nate's verbatim answer as a blockquote, one ``> `` per line.
+
+    Quoting keeps a header-shaped answer line from becoming a record: every
+    line starts with ``> ``, so no line-anchored header regex can match
+    inside it. ``<!--`` is escaped as in ``inert_comment_text`` so quoted
+    text carries no marker; GitHub renders the entity back.
+    """
+    text = "" if value is None else str(value)
+    if not text.strip():
+        raise ValueError("a ticket answer must quote Nate's non-empty answer")
+    quoted = []
+    for line in text.strip().splitlines():
+        clean = line.replace("<!--", "&lt;!--")
+        quoted.append("> " + clean if clean.strip() else ">")
+    return "\n".join(quoted)
+
+
+def render_ticket_answer(answer: object, question: object) -> str:
+    """Quote the verbatim answer, then the record that supersedes it.
+
+    The question is inert like any model-carried text; a blank question or
+    answer is refused. The result reads back through ``parse_ticket_answer``;
+    a replacement block is appended by the caller, never here, so a lift can
+    never smuggle one in.
+    """
+    words = inert_comment_text(question)
+    if not words:
+        raise ValueError("a ticket answer must name the question it answers")
+    return "{}\n\n{} {}".format(
+        _blockquote_answer(answer), TICKET_ANSWER_PREFIX, words)
+
+
+def parse_ticket_answer(
+    body: object,
+) -> Optional[Tuple[List[str], Optional[date], Optional[str],
+                    Optional[Dict[str, str]]]]:
+    """Read one ticket-decision answer comment, or None when it has none.
+
+    A lift carries no replacement condition, so it reads as empty refs, no
+    date, no reason and no event — the same cleared shape a newer Declined
+    leaves behind. A replace carries one canonical blocked header after the
+    answer record, parsed with the ordinary block reader so the brief and
+    the gates read exactly what the command wrote. A blocked line that fails
+    that reader carries no condition rather than failing the answer: the
+    question is answered either way.
+    """
+    if not isinstance(body, str):
+        return None
+    if TICKET_ANSWER_RE.search(body) is None:
+        return None
+    block_at = _TICKET_ANSWER_BLOCK_RE.search(body)
+    if block_at is None:
+        return ([], None, None, None)
+    parsed = _parse_block_comment_details([body[block_at.start():]])
+    if parsed is None:
+        return ([], None, None, None)
+    return parsed
+
+
 def render_declined(reason: object) -> str:
     """``**Declined:** reason``, the implement runner's decline record."""
     return "{} {}".format(DECLINED_PREFIX, inert_comment_text(reason))

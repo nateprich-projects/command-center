@@ -54,6 +54,7 @@ TEXT_PARSERS = frozenset({
     "block_record.py:parse_block_comment",
     "block_record.py:parse_shaped_hold_comment",
     "block_record.py:parse_shaped_hold_clear_comment",
+    "block_record.py:parse_ticket_answer",
     "block_record.py:unparseable_block_comment_lines",
     "funnel.py:parse_needs_decision_comment",
     "block_record.py:parse_decline_comment",
@@ -80,6 +81,8 @@ COMMENT_READERS: Dict[str, str] = {
     "funnel.py:_current_block_comment_details": "funnel.py:_load_block_comment",
     "funnel.py:_current_shaped_hold_clear":
         "funnel.py:_current_shaped_hold_clear",
+    "funnel.py:_newest_ticket_answer":
+        "funnel.py:_newest_ticket_answer",
     "funnel.py:_self_approval_markers": "funnel.py:_self_approval_markers",
     "funnel.py:_parked_item_json": "funnel.py:_parked_item_json",
     "funnel.py:_latest_park_comment": "funnel.py:_latest_park_comment",
@@ -159,6 +162,7 @@ WRITERS = frozenset({
     "funnel.py:shape_risk_block",
     "funnel.py:clear_satisfied_blocks",
     "funnel.py:cmd_release_shaped_hold",
+    "funnel.py:cmd_answer_ticket",
     # funnel.py's block, hold and needs-decision writers and the breakdown's
     # apply_question render through these, so name no marker themselves
     # (#2169).
@@ -168,6 +172,7 @@ WRITERS = frozenset({
     "block_record.py:render_explicit_shaped_hold_release",
     "block_record.py:render_blocked_until_event",
     "block_record.py:render_needs_decision",
+    "block_record.py:render_ticket_answer",
     "block_record.py:render_declined",
     "funnel.py:_write_verdict",
     "funnel.py:cmd_park",

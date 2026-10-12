@@ -73,6 +73,7 @@ from block_record import (  # noqa: F401 -- re-exported under the old names
     parse_decline_comment,
     parse_shaped_hold_clear_comment,
     parse_shaped_hold_comment,
+    parse_ticket_answer,
     shaped_hold_id,
     shaped_plan_version,
     unparseable_block_comment_lines,
@@ -81,7 +82,8 @@ from block_record import (  # noqa: F401 -- re-exported under the old names
 # funnel's block, hold and needs-decision writers render through the owner
 # too, so their reasons are inert and their headers read back (#2169).
 from block_record import (
-    render_blocked, render_needs_decision, render_shaped_hold,
+    render_blocked, render_blocked_until_event, render_needs_decision,
+    render_shaped_hold, render_ticket_answer,
     render_conditioned_shaped_hold_clear,
     render_explicit_shaped_hold_release,
 )
@@ -19350,6 +19352,342 @@ def cmd_comment(items: List[Item], now: datetime, ref: str, body: str,
     return 0
 
 
+def _ticket_answer_text(value: str) -> str:
+    """Keep Nate's verbatim answer, refusing blanks before loading GitHub."""
+    if not isinstance(value, str) or not value.strip():
+        raise argparse.ArgumentTypeError(
+            "a non-empty verbatim answer is required"
+        )
+    return value
+
+
+#: The --condition forms an answer-ticket replace accepts: exactly one of
+#: these fixed prefixes (#2484). The event form carries the canonical event
+#: header's JSON spec after its prefix, so the brief and the gates read back
+#: the same condition the command wrote.
+TICKET_ANSWER_CONDITION_FORMS = (
+    '"Blocked until YYYY-MM-DD", "Blocked on #N [and #M ...]", or '
+    '"Blocked until event {...}"'
+)
+
+
+def _ticket_answer_condition(value: str) -> Tuple[str, object]:
+    """Parse --condition into ("until", date), ("on", [refs]), ("event", spec).
+
+    Anything else — prose, a bare date, or a blocked line with a
+    non-canonical prefix — is refused before GitHub is read, so a
+    replacement the brief and the gates cannot parse can never be written.
+    """
+    text = value.strip() if isinstance(value, str) else ""
+    if text.startswith("Blocked until event"):
+        raw = text[len("Blocked until event"):].strip()
+        try:
+            spec = json.loads(raw, object_pairs_hook=_unique_json_object)
+            valid = _parse_block_event_spec(json.dumps(spec))
+        except (TypeError, ValueError):
+            valid = None
+        if valid is None:
+            raise argparse.ArgumentTypeError(
+                "a replacement event must be 'Blocked until event' plus the "
+                "canonical event JSON spec (agent, job, outcome \"errored\", "
+                "after timestamp)"
+            )
+        return ("event", spec)
+    if text.startswith("Blocked until "):
+        raw = text[len("Blocked until "):].strip()
+        if not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", raw):
+            raise argparse.ArgumentTypeError(
+                "a replacement date must be 'Blocked until YYYY-MM-DD'"
+            )
+        try:
+            until = date.fromisoformat(raw)
+        except ValueError:
+            raise argparse.ArgumentTypeError(
+                "a replacement date must be a valid YYYY-MM-DD calendar date"
+            )
+        return ("until", until)
+    if text.startswith("Blocked on "):
+        raw = text[len("Blocked on "):].strip()
+        if not raw:
+            raise argparse.ArgumentTypeError(
+                "a replacement reference must be 'Blocked on #N [and #M ...]'"
+            )
+        try:
+            refs = [_blocked_reference(part) for part in raw.split(" and ")]
+        except argparse.ArgumentTypeError as exc:
+            raise argparse.ArgumentTypeError(
+                "a replacement reference must be 'Blocked on #N "
+                "[and #M ...]': {}".format(exc)
+            )
+        return ("on", refs)
+    raise argparse.ArgumentTypeError(
+        "a replacement condition must be one of: {}".format(
+            TICKET_ANSWER_CONDITION_FORMS)
+    )
+
+
+def _ticket_answer_comment_body(answer: str, question: str, outcome: str,
+                                condition: Optional[Tuple[str, object]] = None,
+                                ) -> str:
+    """Render one lift-or-replace answer comment through block_record (#2484).
+
+    The verbatim quote opens the comment and the Answered record follows; a
+    replace appends exactly one canonical blocked header with the answered
+    question as its reason. Nothing else is rendered: no label, field, or
+    second issue is touched by this body.
+    """
+    try:
+        body = render_ticket_answer(answer, question)
+    except (TypeError, ValueError) as exc:
+        raise GitHubError(str(exc))
+    if outcome == "lift":
+        return body
+    kind, value = condition
+    try:
+        if kind == "until":
+            replacement = render_blocked(question, until=value)
+        elif kind == "on":
+            replacement = render_blocked(question, on=value)
+        else:
+            replacement = render_blocked_until_event(value, question)
+    except (TypeError, ValueError) as exc:
+        raise GitHubError(str(exc))
+    return "{}\n\n{}".format(body, replacement)
+
+
+def _newest_ticket_answer(
+    rows: object,
+) -> Optional[Tuple[List[str], Optional[date], Optional[str],
+                    Optional[Dict[str, str]]]]:
+    """The parsed ticket answer when the thread's newest record is one (#2495).
+
+    Only the owner account's comments may carry the Answered marker (#1788).
+    Record ordering matches ``_current_block_comment_details``: newest by
+    creation time, the later comment winning a tie, body order when any
+    record lacks a time. Later prose is not a record, so it never hides a
+    stranded answer.
+    """
+    records = []
+    for index, comment in enumerate(trusted_comments(rows)):
+        body = str(comment.get("body") or "")
+        answered = parse_ticket_answer(body)
+        if answered is not None:
+            # Checked first: a replace answer carries a canonical blocked
+            # header too, and only this command writes Answered lines — a
+            # question is inerted onto one line and a quote is blockquoted —
+            # so the marker unambiguously names this command's record.
+            records.append(
+                (parse_time(comment.get("createdAt")), index, answered))
+            continue
+        if (
+            parse_shaped_hold_comment(body) is not None
+            or _parse_block_comment_details([body]) is not None
+            or NEEDS_DECISION_RE.match(body)
+            or body.lstrip().startswith(DECLINED_PREFIX)
+        ):
+            records.append((parse_time(comment.get("createdAt")), index, None))
+    if not records:
+        return None
+    if all(at is not None for at, _, _ in records):
+        return max(records, key=lambda record: record[:2])[2]
+    return records[-1][2]
+
+
+def _finish_recorded_ticket_answer(item: Item, outcome: str) -> bool:
+    """Finish the label move of an already-recorded ticket answer (#2495).
+
+    When the answer comment landed but its label move never did, re-running
+    the identical command completes only the label move: no second comment,
+    no hand edit. Returns True when a stranded label move was completed and
+    False when the live thread shows no recorded answer to finish. A recorded
+    outcome that disagrees with the requested one refuses rather than
+    finishing the wrong move.
+    """
+    payload = _gh_json(
+        "gh", "issue", "view", str(item.number), "--repo", item.repo,
+        "--json", "state,labels,comments",
+    )
+    if not isinstance(payload, Mapping):
+        return False
+    if not isinstance(payload.get("comments"), list):
+        return False
+    if not isinstance(payload.get("labels"), list):
+        return False
+    if str(payload.get("state") or "").upper() not in ("", "OPEN"):
+        return False
+    labels = []
+    for label in payload["labels"]:
+        name = label.get("name") if isinstance(label, Mapping) else label
+        if isinstance(name, str):
+            labels.append(name)
+    answered = _newest_ticket_answer(payload["comments"])
+    if answered is None:
+        return False
+    refs, until, reason, event = answered
+    recorded = (
+        "lift" if not refs and until is None and event is None else "replace")
+    if recorded != outcome:
+        raise GitHubError(
+            "recorded answer on {} stands as {}; re-run with --outcome {} "
+            "to finish its label move".format(item.ref, recorded, recorded))
+    if recorded == "lift" and "blocked" not in labels:
+        return False
+    if recorded == "replace" and "blocked" in labels:
+        return False
+    if recorded == "lift":
+        edit_args = [
+            "gh", "issue", "edit", str(item.number), "--repo", item.repo,
+            "--remove-label", "blocked",
+        ]
+    else:
+        edit_args = [
+            "gh", "issue", "edit", str(item.number), "--repo", item.repo,
+            "--add-label", "blocked",
+        ]
+    edit = _run_gh(edit_args, capture_output=True, text=True)
+    if edit.returncode != 0:
+        raise GitHubError(
+            "recorded answer stands on {}, but its {} label move failed: "
+            "{}".format(item.ref, recorded, edit.stderr.strip()))
+    if recorded == "lift":
+        item.labels = [
+            label for label in item.labels if label != "blocked"]
+    elif "blocked" not in item.labels:
+        item.labels.append("blocked")
+    item.block_references = refs
+    item.blocked_until = until
+    item.block_reason = reason
+    item.block_event = event
+    item.needs_decision = None
+    print("{} recorded answer finished ({} label move)\n{}".format(
+        item.ref, recorded, item.url))
+    return True
+
+
+def cmd_answer_ticket(items: List[Item], now: datetime, ref: str,
+                      answer: str, outcome: str,
+                      condition: Optional[Tuple[str, object]] = None,
+                      run: Optional[str] = None,
+                      agent: Optional[str] = None) -> int:
+    """Record Nate's answer to a ticket's Needs-a-decision block (#2484).
+
+    The sole ticket answer path: one comment quotes the verbatim answer and
+    supersedes the active question, then a lift removes the blocked label
+    while a replace keeps it under one canonical replacement condition.
+    The comment goes first so a refused post changes nothing; a refused
+    label edit reports that the answer was recorded without its label move,
+    and re-running the identical command finishes that stranded label move
+    without posting the answer twice. No other label, field, or issue is
+    written, and the answer is kept nowhere but the comment: GitHub is the
+    state.
+    """
+    item = find(items, ref)
+    if outcome not in ("lift", "replace"):
+        raise GitHubError(
+            "answer outcome must be lift or replace, not {!r}".format(outcome))
+    if outcome == "replace" and condition is None:
+        raise GitHubError(
+            "a replace answer needs --condition: {}".format(
+                TICKET_ANSWER_CONDITION_FORMS))
+    if outcome == "lift" and condition is not None:
+        raise GitHubError("a lift answer takes no --condition")
+    if item.state != "OPEN":
+        raise GitHubError(
+            "{} is {}; a closed ticket takes no answer".format(
+                item.ref, item.state)
+        )
+    if item.parent is None:
+        raise GitHubError(
+            "{} is a project; a plan Gates answer belongs to "
+            "answer-gates".format(item.ref)
+        )
+    if not item.item_id:
+        raise GitHubError("{} is not in the Project".format(item.ref))
+    question = item.needs_decision
+    if question is None:
+        # No open question, but the live thread may hold this command's
+        # recorded answer with its label move still stranded: re-running the
+        # identical command finishes only that move, never a second comment.
+        if _finish_recorded_ticket_answer(item, outcome):
+            return 0
+        raise GitHubError(
+            "{} has no active Needs-a-decision block to answer".format(
+                item.ref)
+        )
+    if not item.is_blocked:
+        raise GitHubError(
+            "{} carries no blocked label; a decision answer lifts or "
+            "replaces the blocked state".format(item.ref)
+        )
+    if not isinstance(answer, str) or not answer.strip():
+        raise GitHubError("a non-empty verbatim answer is required")
+    body = _ticket_answer_comment_body(answer, question, outcome, condition)
+    parsed = parse_ticket_answer(body)
+    if parsed is None:
+        # Unreachable through this path, and checked anyway: the reader is
+        # the whole point of the write, and a record it rejects would leave
+        # the question open while the thread claims otherwise.
+        raise GitHubError(
+            "built {} but the ticket-answer reader rejects the "
+            "record".format(item.ref)
+        )
+    refs, until, reason, event = parsed
+    if outcome == "replace" and not refs and until is None and event is None:
+        raise GitHubError(
+            "built {} but the replacement condition does not parse "
+            "back".format(item.ref)
+        )
+    comment = _run_gh(
+        ["gh", "issue", "comment", str(item.number), "--repo", item.repo,
+         "--body", append_provenance(
+             body, "nate-relayed", at=now, run=run, agent=agent)],
+        capture_output=True, text=True,
+    )
+    if comment.returncode != 0:
+        raise GitHubError(comment.stderr.strip())
+    if outcome == "lift":
+        edit = _run_gh(
+            [
+                "gh", "issue", "edit", str(item.number), "--repo", item.repo,
+                "--remove-label", "blocked",
+            ],
+            capture_output=True, text=True,
+        )
+        if edit.returncode != 0:
+            raise GitHubError(
+                "recorded the answer on {}, but could not remove its blocked "
+                "label: {}".format(item.ref, edit.stderr.strip())
+            )
+        if item.is_blocked:
+            item.labels = [
+                label for label in item.labels if label != "blocked"]
+    else:
+        edit = _run_gh(
+            [
+                "gh", "issue", "edit", str(item.number), "--repo", item.repo,
+                "--add-label", "blocked",
+            ],
+            capture_output=True, text=True,
+        )
+        if edit.returncode != 0:
+            raise GitHubError(
+                "recorded the answer on {}, but could not keep its blocked "
+                "label: {}".format(item.ref, edit.stderr.strip())
+            )
+        if not item.is_blocked:
+            item.labels.append("blocked")
+    # Keep the same-session item aligned with what GitHub now holds, through
+    # the same reader the next load uses.
+    item.block_references = refs
+    item.blocked_until = until
+    item.block_reason = reason
+    item.block_event = event
+    item.needs_decision = None
+    print("{} decision answered ({})\n{}".format(
+        item.ref, outcome, item.url))
+    return 0
+
+
 def cmd_reject(items: List[Item], now: datetime, pr: str, note: Optional[str]) -> int:
     """Record that a merged PR turned out to be broken.
 
@@ -20096,6 +20434,12 @@ def _current_block_comment_details(
                       parse_needs_decision_comment([body]), None)
         elif body.lstrip().startswith(DECLINED_PREFIX):
             fields = ([], None, None, None, None, None)
+        elif parse_ticket_answer(body) is not None:
+            # A recorded answer supersedes the question it answers (#2484).
+            # A lift carries no condition; a replace carries one canonical
+            # blocked header, parsed with the ordinary block reader.
+            answered = parse_ticket_answer(body)
+            fields = answered + (None, None)
         else:
             continue
         records.append((parse_time(comment.get("createdAt")), index, fields))
@@ -24781,6 +25125,9 @@ PROJECT_LOAD_READS_HISTORY: Dict[str, bool] = {
     "park": False,
     # Rewrites the plan body's Gates section from the body alone.
     "answer-gates": False,
+    # Posts one answer comment and adds or removes the blocked label; reads
+    # no history field.
+    "answer-ticket": False,
     # Posts a comment, optionally applying the blocked label.
     "comment": False,
     # Creates an issue and sets its fields; it reads no loaded item.
@@ -25049,6 +25396,34 @@ def main(argv: Optional[Sequence[str]] = None, *,
         "--agent", default=None,
         help="agent that heard the answer; otherwise read the heartbeat spool",
     )
+    answer_ticket = sub.add_parser(
+        "answer-ticket",
+        help="record Nate's answer to a ticket's Needs-a-decision block",
+    )
+    answer_ticket.add_argument(
+        "ref", help="issue number, owner/repo#number, or URL")
+    answer_ticket.add_argument(
+        "--answer", required=True, type=_ticket_answer_text,
+        help="Nate's answer verbatim, not a paraphrase of it",
+    )
+    answer_ticket.add_argument(
+        "--outcome", required=True, choices=("lift", "replace"),
+        help="lift removes the blocked label; replace keeps it under "
+             "--condition",
+    )
+    answer_ticket.add_argument(
+        "--condition", type=_ticket_answer_condition, default=None,
+        help="canonical replacement for --outcome replace: {}".format(
+            TICKET_ANSWER_CONDITION_FORMS),
+    )
+    answer_ticket.add_argument(
+        "--run", default=None,
+        help="heartbeat run id; otherwise infer a unique open local start",
+    )
+    answer_ticket.add_argument(
+        "--agent", default=None,
+        help="agent that heard the answer; otherwise read the heartbeat spool",
+    )
     comment = sub.add_parser(
         "comment", help="post an issue comment with an explicit voice"
     )
@@ -25191,6 +25566,13 @@ def main(argv: Optional[Sequence[str]] = None, *,
         if args.release and args.confirmed and not args.instruction:
             parser.error("--instruction is required for a confirmed --release")
 
+    if args.command == "answer-ticket":
+        if args.outcome == "replace" and args.condition is None:
+            parser.error(
+                "answer-ticket --outcome replace needs --condition: {}".format(
+                    TICKET_ANSWER_CONDITION_FORMS))
+        if args.outcome == "lift" and args.condition is not None:
+            parser.error("answer-ticket --outcome lift takes no --condition")
     if args.command == "comment":
         if args.blocked_on and args.because is None:
             parser.error("--because is required with --blocked-on")
@@ -25566,6 +25948,10 @@ def main(argv: Optional[Sequence[str]] = None, *,
         if args.command == "answer-gates":
             return cmd_answer_gates(items, now, args.ref, args.answer,
                                     args.decider, args.run, args.agent)
+        if args.command == "answer-ticket":
+            return cmd_answer_ticket(items, now, args.ref, args.answer,
+                                     args.outcome, args.condition,
+                                     args.run, args.agent)
         if args.command == "hold":
             if args.release:
                 return cmd_release_shaped_hold(

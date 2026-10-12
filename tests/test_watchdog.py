@@ -1220,40 +1220,45 @@ def test_the_watchdog_note_does_not_call_an_unreadable_file_never_run(
 
 # -- one live watchdog alert with supersede (#2500) ---------------------------
 #
-# First-verify record, base b0a20b5 (read locally via `git show`).
-# Open function at base = main() inline in .github/scripts/watchdog.py: it
-# calls existing_issue() once (base lines 364-369: first open issue whose
-# body holds MARKER) and branches on that hit.
-# Finding from the base source: the alert branch (problems non-empty)
-# PATCH-reuses the first marker hit in place ("updated #N", `-f body=`,
-# zero closes, zero creates; base lines ~414-420) and NEVER closes a
-# superseded alert there; with no marker hit, one POST creates the alert
-# titled "Scheduled runs need attention" with a MARKER-led body (base lines
-# ~422-426). Recovery closes only the single first hit (base lines
-# ~391-401). So the ticket's literal "never reuses or closes" is refuted on
-# reuse and confirmed on closes; the actionable precondition -- the base
-# enforces no single-live rule -- is confirmed. This matches the plan's
-# Decided direction (new-plus-close replaces update-in-place): finding
-# update-in-place confirms the replaced behavior.
-# Why #1252-specific forensics do not gate proceeding: the executable probe
-# below drives BOTH list orders and proves zero closes strands a duplicate
-# either way, and recovery strands one either way -- so whichever hit the
-# live issues?state=open listing returned first, #1252 and #2034 coexisting
-# open (plan #2487 measured premise for the 2026-10-10 sweep) is the
-# predicted outcome. Knowing which one was PATCH-reused would change neither
-# the defect nor the fix, because the fix closes EVERY owned alert
-# regardless of order (order-independence test below). Live #1252/#2034
-# title/body and list ordering need `gh`, forbidden to this checkout by
-# runner rules, so they are recorded as unreadable-here and unnecessary.
-# Fixture grounding (not a live-state assumption): the ticket stipulates
+# First-verify record (ticket precondition). Base is PR base b0a20b5; the
+# base source below was read locally with
+# `git show b0a20b5:.github/scripts/watchdog.py` (no `gh` needed or used).
+# Open function at base = main() itself, inline: it calls existing_issue()
+# once (base lines 364-369: return the first open issue whose body holds
+# MARKER, else {}) and branches on that hit.
+# Base alert branch (problems non-empty), base lines ~414-427: hit ->
+# PATCH that one issue's body in place ("updated #N", `-f body=`, zero
+# closes, zero creates); no hit -> one POST creates the alert titled
+# "Scheduled runs need attention" with a MARKER-led body. So the base
+# REUSES via PATCH and NEVER CLOSES a superseded alert there. Base
+# recovery branch (base lines ~391-401): close the single first hit only.
+# The ticket's shorthand "never reuses or closes" is therefore corrected
+# from source: reuse held (PATCH in place), closes never happened. The
+# actionable precondition -- the base enforces no single-live rule, in the
+# alert branch under either list order and in recovery -- is confirmed, and
+# proceeding is justified on that evidence. This matches the plan's Decided
+# direction (new-plus-close replaces update-in-place): the recorded
+# update-in-place is the replaced behavior.
+# #1252 grounding (packet evidence, no live read): the ticket stipulates
 # #1252 is a watchdog-owned alert to close ("close superseded
-# watchdog-owned alerts including #1252"), and every alert the base create
-# path opened carries ALERT_TITLE plus the MARKER body by construction, so
-# #1252 is modeled with both. Marker-only matching at base could also touch
-# issues the watchdog never wrote -- the new rule requires title prefix too.
+# watchdog-owned alerts including #1252"); the plan records as measured
+# that #1252 and #2034 were both open on the 2026-10-10 sweep and that the
+# base create path writes every alert with ALERT_TITLE plus a MARKER-led
+# body by construction. Fixtures model #1252 with both, which is what the
+# base create path guarantees for any watchdog-opened alert.
+# Why list order needs no live read: the probe below drives BOTH orders and
+# shows zero closes strands a duplicate either way (and recovery strands one
+# either way), so #1252/#2034 coexisting open is the predicted outcome
+# whichever hit the live listing returned first. The fix closes EVERY owned
+# alert regardless of order (order-independence test below), so ordering
+# cannot change the fix either. A live issues?state=open listing would need
+# `gh`, which runner rules forbid in this checkout.
+# Base marker-only matching could also touch issues the watchdog never
+# wrote; the new rule requires the title prefix too.
 # New behavior: an alert opens one new owned issue per incident, then closes
 # every superseded owned alert (order-independent, exactly one live);
-# recovery closes every live owned alert.
+# recovery closes every live owned alert; no existing issue body is ever
+# PATCH-rewritten.
 
 
 def _base_branch(open_issues, problems):
@@ -1301,28 +1306,26 @@ def test_base_alert_path_reuses_first_hit_and_never_closes():
     assert _base_branch(list(reversed(first)), [])["closed"] == [2034]
 
 
-def test_base_branch_premises_match_base_source():
-    """Cross-check the First-verify probe against the real base bytes.
+def test_base_replica_premises_match_base_source():
+    """Prove the replica's premises from the real base bytes.
 
-    When the base commit is available locally, prove the probe's premises
-    from it directly: the base open path scans for the body MARKER via
-    existing_issue(), the alert branch PATCH-rewrites the hit's body in
-    place with zero closes, and recovery closes a single hit. Skips when
-    the base object is absent; the both-orders probe above already proves
-    zero closes strands a duplicate either way.
+    Reads base b0a20b5 (the PR base) locally via `git show` -- no `gh`
+    needed. Asserts the open function (existing_issue scanning for the body
+    MARKER, called once from main()), the alert branch's in-place PATCH
+    with zero closes, and the single-hit recovery close. The base object is
+    the recorded PR base, present in any full clone; a missing object fails
+    loudly rather than skipping, since these premises are the ticket's
+    First-verify evidence.
     """
     import subprocess
 
-    try:
-        proc = subprocess.run(
-            ["git", "show",
-             "b0a20b5223e90e76571518302a6463590e8f9f3d"
-             ":.github/scripts/watchdog.py"],
-            capture_output=True, text=True, timeout=30, cwd=str(ROOT))
-    except Exception:
-        pytest.skip("git show unavailable here")
-    if proc.returncode != 0 or not proc.stdout:
-        pytest.skip("base object not available here")
+    proc = subprocess.run(
+        ["git", "show",
+         "b0a20b5223e90e76571518302a6463590e8f9f3d"
+         ":.github/scripts/watchdog.py"],
+        capture_output=True, text=True, timeout=30, cwd=str(ROOT))
+    assert proc.returncode == 0 and proc.stdout, \
+        "base b0a20b5:.github/scripts/watchdog.py not readable here"
     src = proc.stdout
 
     # Open function: existing_issue() returns the first open issue whose

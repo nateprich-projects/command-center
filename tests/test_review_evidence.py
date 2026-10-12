@@ -130,6 +130,16 @@ def evidence(repo, base_sha, tmp_path):
     return record
 
 
+def test_run_one_reraises_ssd_setup_failure(tmp_path, monkeypatch):
+    """#2530: an SSD outage is an error, never a shared failure."""
+    def refused(root, commands=None, **kwargs):
+        raise implement.TestEnvironmentError("SSD test scratch is gone")
+
+    monkeypatch.setattr(implement, "run_tests", refused)
+    with pytest.raises(implement.TestEnvironmentError):
+        review_evidence._run_one(tmp_path, ["python3", "-m", "pytest", "-q"])
+
+
 def test_a_merge_only_failure_blocks(tmp_path, log):
     # The base adds a test of double(3); the head changes double so that
     # test breaks. Each passes alone; only the merge fails.

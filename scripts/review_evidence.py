@@ -400,9 +400,12 @@ def _run_one(root: pathlib.Path, argv: Sequence[str],
             implement.run_tests(root, commands=[list(argv)])
         else:
             implement.run_tests(root, commands=[list(argv)], timeout=timeout)
-    except implement.TestCommandStartError:
-        # Preserve the failure kind so the finish can use its fixed,
-        # path-free heartbeat reason.
+    except (implement.TestCommandStartError,
+            implement.TestEnvironmentError):
+        # Preserve the failure kind so the finish names the setup
+        # failure instead of a test result. Without this an SSD outage
+        # would read as shared failures and the finish would pass
+        # untested.
         raise
     except implement.CommandTimeoutError as exc:
         if timeout is not None:

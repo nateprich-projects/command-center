@@ -31,6 +31,7 @@ import pytest
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 import funnel  # noqa: E402
+import test_env
 from engine import review_prompts  # noqa: E402
 
 SCRIPT = ROOT / "scripts" / "muse-review-engine"
@@ -531,6 +532,11 @@ MUSE_STUB = (
     "if [[ -f \"$count_file\" ]]; then n=$(($(cat \"$count_file\") + 1)); fi\n"
     "printf '%s' \"$n\" > \"$count_file\"\n"
     "printf '%s\\n' \"$@\" > \"$MUSE_ARGS.$n\"\n"
+    "printf 'TMPDIR=%s\\n' \"$TMPDIR\" > \"$MUSE_TEST_ENV.$n\"\n"
+    "printf 'PYTHONPYCACHEPREFIX=%s\\n' \"$PYTHONPYCACHEPREFIX\" "
+    ">> \"$MUSE_TEST_ENV.$n\"\n"
+    "printf 'PYTHONDONTWRITEBYTECODE=%s\\n' \"$PYTHONDONTWRITEBYTECODE\" "
+    ">> \"$MUSE_TEST_ENV.$n\"\n"
     "rmdir \"$count_lock\"\n"
     "prompt_file=\"\"\n"
     "previous=\"\"\n"
@@ -895,6 +901,8 @@ def _stub_repo(tmp_path, begin, packet, *, answers=(), routine_body=None,
         muse_model_body if muse_model_body is not None
         else (ROOT / "muse_model.py").read_text())
     (repo / "muse_call.py").write_text((ROOT / "muse_call.py").read_text())
+    # The real module, not a stub: the SSD gate execs it before begin.
+    (repo / "test_env.py").write_text((ROOT / "test_env.py").read_text())
     if muse_call_body is not None:
         (repo / "muse_call_fault.py").write_text(muse_call_body)
     (repo / "breakdown-packet").write_text(_issue_packet_stub("breakdown"))
@@ -919,6 +927,7 @@ def _stub_repo(tmp_path, begin, packet, *, answers=(), routine_body=None,
         MUSE_COUNT=str(repo / "muse.count"),
         MUSE_ARGS=str(repo / "muse.args"),
         MUSE_PROMPT=str(repo / "muse.prompt"),
+        MUSE_TEST_ENV=str(repo / "muse.test-env"),
         GH_LOG=str(repo / "gh.log"),
         GH_BODY=str(repo / "gh.body"),
         PAIRED_TRIAL_LOG=str(repo / "paired-trial.log"),
@@ -1121,6 +1130,43 @@ def test_a_missing_routine_refuses_before_begin(tmp_path):
     assert proc.returncode == 1
     assert "refusing to run without a prompt" in proc.stderr
     assert not (repo / "funnel.calls").exists()
+
+
+def _model_test_env(repo, n=1):
+    pairs = {}
+    lines = (repo / "muse.test-env.{}".format(n)).read_text().splitlines()
+    for line in lines:
+        key, _, value = line.partition("=")
+        pairs[key] = value
+    return pairs
+
+
+def test_model_calls_run_on_ssd_test_scratch(tmp_path):
+    """#2530: the judges' pytest debris and bytecode land on the volume."""
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), _packet(),
+        answers=_review_answers(_judge_answer()))
+
+    assert proc.returncode == 0, proc.stderr
+    assert _muse_calls(repo) >= 1
+    ssd = pathlib.Path(os.environ[test_env.SSD_ROOT_ENV_VAR])
+    seen = _model_test_env(repo)
+    assert seen["TMPDIR"] == str(ssd / test_env.TMP_SUBDIR)
+    assert seen["PYTHONPYCACHEPREFIX"] == str(ssd / test_env.PYCACHE_SUBDIR)
+    assert seen["PYTHONDONTWRITEBYTECODE"] == "1"
+
+
+def test_a_missing_ssd_refuses_before_begin(tmp_path):
+    """#2530: no silent fallback to the internal disk."""
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), _packet(),
+        extra_env={test_env.SSD_ROOT_ENV_VAR:
+                   str(tmp_path / "no-such-volume")})
+
+    assert proc.returncode == 1
+    assert "SSD test scratch" in proc.stderr
+    assert not (repo / "funnel.calls").exists()
+    assert _muse_calls(repo) == 0
 
 
 def test_a_routine_without_the_packet_placeholder_is_refused(tmp_path):

@@ -4817,6 +4817,8 @@ def test_finish_declined_preserves_none_for_calendar_wait(
     assert effects["finished"][0][2] == "skipped-blocked"
     assert "waiting on the calendar; Needs kept none" in (
         effects["finished"][0][3])
+    assert implement.CALENDAR_WAIT_RESTORE_REASON in (
+        effects["finished"][0][3])
 
 
 @pytest.mark.parametrize("reason", [

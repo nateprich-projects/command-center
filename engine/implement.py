@@ -4447,7 +4447,8 @@ def finish_declined(
             "; gate-answer route failed; ticket left blocked"
         )
     elif calendar_wait_routed:
-        note += "; waiting on the calendar; Needs kept none"
+        note += ("; waiting on the calendar; Needs kept none "
+                 "(" + CALENDAR_WAIT_RESTORE_REASON + ")")
     elif routing_failed:
         note += "; review routing failed; ticket left blocked"
     if extra_note:

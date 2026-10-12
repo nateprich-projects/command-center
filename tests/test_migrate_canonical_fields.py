@@ -298,3 +298,92 @@ def test_class_extension_refuses_success_when_an_option_id_did_not_survive(
     with pytest.raises(migrate.MigrationError,
                        match=r"lost .*Investigate \(opt-investigate\)"):
         migrate.ensure_class_options(apply=True)
+
+
+# -- Domain field creation (#2526) --------------------------------------------
+
+class FakeDomainProject:
+    """Project fields with or without Domain; field-create appends the field
+    with minted option IDs, as GitHub does."""
+
+    def __init__(self, domain_options=None):
+        self.domain_options = (
+            None if domain_options is None
+            else [dict(option) for option in domain_options])
+        self.commands = []
+        self.queries = []
+
+    def graphql(self, query, **variables):
+        self.queries.append(query)
+        nodes = [
+            {"id": "status-field", "name": "Status", "options": []},
+        ]
+        if self.domain_options is not None:
+            nodes.append({
+                "id": "domain-field", "name": "Domain",
+                "options": [dict(option) for option in self.domain_options],
+            })
+        return {"user": {"projectV2": {"fields": {"nodes": nodes}}}}
+
+    def run(self, args):
+        self.commands.append(list(args))
+        assert args[:3] == ["gh", "project", "field-create"]
+        name_index = list(args).index("--name") + 1
+        options_index = list(args).index("--single-select-options") + 1
+        assert args[name_index] == "Domain"
+        self.domain_options = [
+            {"id": "minted-{}".format(index), "name": name,
+             "description": "", "color": "GRAY"}
+            for index, name in enumerate(args[options_index].split(","))
+        ]
+
+
+def test_domain_dry_run_plans_the_create_on_a_project_without_domain(
+        monkeypatch):
+    project = FakeDomainProject()
+    monkeypatch.setattr(funnel, "gh_graphql", project.graphql)
+    monkeypatch.setattr(migrate, "_run", project.run)
+
+    assert migrate.ensure_domain_field(apply=False) == [
+        "create Domain ({})".format(", ".join(funnel.DOMAIN_OPTIONS))]
+
+    assert project.commands == []
+
+
+def test_domain_apply_creates_the_field_then_reruns_as_a_no_op(
+        monkeypatch):
+    project = FakeDomainProject()
+    monkeypatch.setattr(funnel, "gh_graphql", project.graphql)
+    monkeypatch.setattr(migrate, "_run", project.run)
+
+    assert migrate.ensure_domain_field(apply=True) == [
+        "create Domain ({})".format(", ".join(funnel.DOMAIN_OPTIONS))]
+
+    [command] = project.commands
+    options_index = command.index("--single-select-options") + 1
+    assert command[options_index].split(",") == list(funnel.DOMAIN_OPTIONS)
+    assert [option["name"] for option in project.domain_options] == list(
+        funnel.DOMAIN_OPTIONS)
+
+    assert migrate.ensure_domain_field(apply=True) == []
+    assert len(project.commands) == 1
+
+
+def test_domain_leaves_an_existing_field_and_its_option_ids_untouched(
+        monkeypatch):
+    before = [
+        {"id": "opt-{}".format(name), "name": name,
+         "description": "kept", "color": "BLUE"}
+        for name in funnel.DOMAIN_OPTIONS
+    ]
+    project = FakeDomainProject(before)
+    monkeypatch.setattr(funnel, "gh_graphql", project.graphql)
+    monkeypatch.setattr(migrate, "_run", project.run)
+
+    assert migrate.ensure_domain_field(apply=False) == []
+    assert migrate.ensure_domain_field(apply=True) == []
+
+    assert project.commands == []
+    assert project.domain_options == before
+    assert all("updateProjectV2Field" not in query
+               for query in project.queries)

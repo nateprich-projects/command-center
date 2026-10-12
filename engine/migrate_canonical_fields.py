@@ -8,7 +8,8 @@ from GitHub and are safe to re-run.
 
 ``ensure_class_options`` is separate from both: it extends the existing Class
 field to every ladder class (Bug, #1845; phases and the Improve rename,
-#2425) and touches no row.
+#2425) and touches no row. ``ensure_domain_field`` is likewise separate: it
+creates the Domain single-select (#2407, #2526) and touches no row.
 """
 
 from __future__ import annotations
@@ -297,6 +298,37 @@ def ensure_class_options(*, apply: bool) -> List[str]:
         raise MigrationError(
             "Class verification failed: lost {}; absent {}".format(
                 ", ".join(lost) or "none", ", ".join(absent) or "none"))
+    return changes
+
+
+def ensure_domain_field(*, apply: bool) -> List[str]:
+    """Create the Project's Domain field; return the changes.
+
+    #2407 adds a Domain single-select defaulted from the repository, but
+    nothing created it and the live Project has no Domain field. This
+    creates it with every domain the plan names (``funnel.DOMAIN_OPTIONS``)
+    when it is missing, and leaves an existing field and its option ids
+    untouched, so re-running it is a no-op. It never resubmits the option
+    set, so no assignment can be orphaned. Dry run unless ``apply``; from
+    the repository root::
+
+        python3 -c 'from engine import migrate_canonical_fields as m; print(m.ensure_domain_field(apply=True))'
+
+    After the write it re-reads the field and refuses to report success
+    unless Domain is there with every option.
+    """
+    field = _one_field(_fields(), "Domain")
+    if field is not None:
+        return []
+    changes = ["create Domain ({})".format(
+        ", ".join(funnel.DOMAIN_OPTIONS))]
+    if not apply:
+        return changes
+    _create_field("Domain", funnel.DOMAIN_OPTIONS)
+    verified = _one_field(_fields(), "Domain")
+    if verified is None or not set(funnel.DOMAIN_OPTIONS).issubset(
+            funnel._field_options(verified)):
+        raise MigrationError("schema verification failed for Domain")
     return changes
 
 

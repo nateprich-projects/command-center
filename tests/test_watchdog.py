@@ -1301,6 +1301,47 @@ def test_base_alert_path_reuses_first_hit_and_never_closes():
     assert _base_branch(list(reversed(first)), [])["closed"] == [2034]
 
 
+def test_base_branch_premises_match_base_source():
+    """Cross-check the First-verify probe against the real base bytes.
+
+    When the base commit is available locally, prove the probe's premises
+    from it directly: the base open path scans for the body MARKER via
+    existing_issue(), the alert branch PATCH-rewrites the hit's body in
+    place with zero closes, and recovery closes a single hit. Skips when
+    the base object is absent; the both-orders probe above already proves
+    zero closes strands a duplicate either way.
+    """
+    import subprocess
+
+    try:
+        proc = subprocess.run(
+            ["git", "show",
+             "b0a20b5223e90e76571518302a6463590e8f9f3d"
+             ":.github/scripts/watchdog.py"],
+            capture_output=True, text=True, timeout=30, cwd=str(ROOT))
+    except Exception:
+        pytest.skip("git show unavailable here")
+    if proc.returncode != 0 or not proc.stdout:
+        pytest.skip("base object not available here")
+    src = proc.stdout
+
+    # Open function: existing_issue() returns the first open issue whose
+    # body holds the MARKER, called once from main().
+    assert "def existing_issue() -> Dict:" in src
+    assert 'if MARKER in (issue.get("body")' in src
+    assert "open_issue = existing_issue()" in src
+
+    # Alert branch: update-in-place PATCH of the hit's body, zero closes.
+    anchor = "# Update in place rather than filing a second issue"
+    assert anchor in src
+    segment = src.split(anchor, 1)[1].split("\n    else:", 1)[0]
+    assert '"-f", "body=" + body' in segment
+    assert "state=closed" not in segment
+
+    # Recovery branch closes the single first hit.
+    assert "Heartbeats are healthy again. Closing." in src
+
+
 def test_owned_alert_needs_marker_and_title_prefix():
     owned = {"title": watchdog.ALERT_TITLE,
              "body": watchdog.MARKER + "\nold alarm"}

@@ -944,6 +944,7 @@ BRIEF_SECTION_BUDGETS = {
     "closed_with_access_vocabulary": 0.25,
     "unclassed_captures": 0.25,
     "needs_class": 0.25,
+    "needs_domain": 0.25,
     "awaiting_breakdown": 0.25,
     "stranded": 0.25,
     "stale_locks_taken_over": 0.25,
@@ -1006,6 +1007,7 @@ BRIEF_PURE_SECTIONS = frozenset({
     "closed_with_access_vocabulary",
     "unclassed_captures",
     "needs_class",
+    "needs_domain",
     "awaiting_breakdown",
     "stranded",
     "stale_locks_taken_over",
@@ -17847,6 +17849,10 @@ def cmd_brief(
             "needs_class",
             lambda: [item_json(i, now, by_ref) for i in items if needs_class(i)],
         )
+        domain_needs = section(
+            "needs_domain",
+            lambda: [item_json(i, now, by_ref) for i in items if needs_domain(i)],
+        )
         breakdown = section(
             "awaiting_breakdown",
             lambda: [
@@ -17961,6 +17967,7 @@ def cmd_brief(
         closed_access = pure_values["closed_with_access_vocabulary"]
         unclassed = pure_values["unclassed_captures"]
         needs = pure_values["needs_class"]
+        domain_needs = pure_values["needs_domain"]
         breakdown = pure_values["awaiting_breakdown"]
         stranded = pure_values["stranded"]
         stale = pure_values["stale_locks_taken_over"]
@@ -18023,6 +18030,7 @@ def cmd_brief(
             "closed_with_access_vocabulary": closed_access,
             "unclassed_captures": unclassed,
             "needs_class": needs,
+            "needs_domain": domain_needs,
             "awaiting_breakdown": breakdown,
             "stranded": stranded,
             "in_motion": [i.ref for i in running] if running is not None else None,

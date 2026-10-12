@@ -1255,7 +1255,18 @@ def decision_record(
     issue state. The model's escalated-risk declaration inside the answer
     and the escalated-risk scan of the rendered plan complete it. Pure
     apart from its arguments; it does not review the answer.
+
+    A Fantasy-GM project without an explicit Domain is refused here
+    (#2527): ``funnel.needs_domain`` is the check, and shaping writes
+    nothing, so the idea stays in Ideas until the Domain field names
+    League or AFL.
     """
+    short = item.repo.rsplit("/", 1)[-1] if isinstance(item.repo, str) else ""
+    if short == funnel.FANTASY_GM_REPO and funnel.needs_domain(item):
+        raise ShapeError(
+            "refusing to shape {}: Fantasy-GM projects need an explicit "
+            "Domain (League or AFL) before Shaped; set the Domain field "
+            "and reshape".format(item.ref))
     inputs = shape_inputs(items, item, answer)
     # `decide` consumes the typed declaration separately. Keep it out of the
     # wording scan so the durable Risk rationale does not report the same

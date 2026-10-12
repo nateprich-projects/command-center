@@ -1220,14 +1220,22 @@ def test_the_watchdog_note_does_not_call_an_unreadable_file_never_run(
 
 # -- one live watchdog alert with supersede (#2500) ---------------------------
 #
-# Pre-change open path, verified in main() at b0a20b5: with problems and a
-# marker-matched open issue, PATCH-update that one issue's body in place; with
-# problems and no marker match, POST one new issue; never close a superseded
-# alert. An older owned alert therefore survives beside a newer one whenever
-# it is not the list's first marker-matched hit, and the marker-only match
-# could touch issues the watchdog never wrote. An alert now opens one new
-# owned issue per incident and closes every superseded owned alert, leaving
-# exactly one live; recovery closes every live owned alert.
+# First-verify evidence, base b0a20b5, open function = main() inline (no
+# open_alert helper there; existing_issue() returns the first open issue
+# whose body holds MARKER). Alert branch (problems non-empty): a marker hit
+# is PATCH-reused in place ("updated #N", body= rewritten, zero closes,
+# zero creates); with no marker hit, one POST creates the alert. So the old
+# path never closes a superseded alert -- "never reuses or closes" in the
+# ticket means never opens new-plus-close. Probe driving base main() with
+# two owned alerts open, both list orders: first-hit=1252 PATCHes 1252,
+# closes 0, creates 0; first-hit=2034 PATCHes 2034, closes 0, creates 0.
+# Either order strands the other alert, which is why measured-open #1252
+# and #2034 (plan #2487 premises) coexisted regardless of which the list
+# returned first -- no live title/body read needed. Marker-only matching
+# could also touch issues the watchdog never wrote. New behavior: an alert
+# opens one new owned issue per incident, then closes every superseded
+# owned alert (order-independent, exactly one live); recovery closes every
+# live owned alert.
 
 
 def test_owned_alert_needs_marker_and_title_prefix():
@@ -1315,6 +1323,30 @@ def test_new_alarm_opens_one_alert_and_closes_superseded(monkeypatch):
     comments = [call for call in calls if "/comments" in " ".join(call)]
     assert len(comments) == 2
     assert all("#2035" in " ".join(call) for call in comments)
+
+
+def test_new_alarm_supersede_is_list_order_independent(monkeypatch):
+    """The pre-change path PATCHed whichever owned alert the list returned
+    first and stranded the other, so the fix must not depend on #1252 vs
+    #2034 ordering: reversed listing still opens one alert and closes both
+    owned ones, leaving exactly one live."""
+    calls = []
+    monkeypatch.setattr(watchdog.heartbeat, "PROVIDERS", {"codex": "openai"})
+    monkeypatch.setattr(watchdog, "records", lambda agent: [])
+    monkeypatch.setattr(
+        watchdog, "assess",
+        lambda agent, rows, now: ["`codex`: Nothing recorded for 3d11h."])
+    monkeypatch.setattr(
+        watchdog, "gh",
+        _alert_gh(calls, list(reversed(_mixed_open_issues())), 2035))
+
+    assert watchdog.main() == 0
+
+    creates = [call for call in calls
+               if call[1:3] == ("-X", "POST")
+               and call[3].endswith("/issues")]
+    assert len(creates) == 1
+    assert _closed_numbers(calls) == [1252, 2034]
 
 
 def test_recovery_closes_every_live_owned_alert(monkeypatch):

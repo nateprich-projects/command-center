@@ -87,6 +87,23 @@ writes the `blocked` label and a canonical block comment, which lifts itself
 when the condition is met. Dry run unless `--yes`; it refuses a project that
 closes itself, since the unattended close ignores `blocked` (#1724).
 
+### Answering a ticket's Needs-a-decision block
+
+A ticket Needs-a-decision block is that block on a sub-issue. Answer every
+one only with:
+
+```bash
+funnel answer-ticket <ticket-ref> --answer "<verbatim>" --outcome lift|replace [--condition "<canonical>"]
+```
+
+`--answer` is Nate's answer verbatim, never a paraphrase. `--outcome lift`
+removes the `blocked` label with no replacement; `--outcome replace` keeps it
+under exactly one canonical `--condition`: `Blocked until YYYY-MM-DD`,
+`Blocked on #N [and #M ...]`, or `Blocked until event {...}`. Never answer
+one of these questions with a detached prose comment, a hand label edit, or
+a hand block edit: prose is not a record the brief and the gates read, so the
+block stays open. Plan Gates questions stay on `answer-gates`.
+
 ### Adopt an explicit Proposed class at approval
 
 With Class unset, `approve --yes` adopts exactly one non-empty whole-line

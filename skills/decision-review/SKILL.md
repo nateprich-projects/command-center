@@ -52,6 +52,23 @@ Never pass on your own view of the item. If this session shaped, built or review
 4. **Don't ask what the agents can settle.** Anything that should go back for more work goes back on his answer, with the work named.
 5. **Record the detail where agents read it.** The verification and the review go into the GitHub comment that records his answer, not into the box.
 
+## Recording his answer on a ticket
+
+A ticket Needs-a-decision block is that block on a sub-issue. When his
+answer resolves one, record it only with:
+
+```bash
+funnel answer-ticket <ticket-ref> --answer "<verbatim>" --outcome lift|replace [--condition "<canonical>"]
+```
+
+`--answer` is his answer verbatim, never a paraphrase. `--outcome lift`
+removes the `blocked` label with no replacement; `--outcome replace` keeps it
+under exactly one canonical `--condition`: `Blocked until YYYY-MM-DD`,
+`Blocked on #N [and #M ...]`, or `Blocked until event {...}`. Never record
+one of these answers as a detached prose comment, and never move its label
+or block by hand edit: a prose answer leaves the Needs-a-decision block in
+place. Plan Gates questions stay on `answer-gates`.
+
 ## Not this skill
 
 - Reviewing a PR's code: use `independent-review`.

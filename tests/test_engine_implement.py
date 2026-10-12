@@ -4812,7 +4812,9 @@ def test_finish_declined_preserves_none_for_calendar_wait(
     assert effects["writes"] == [(ticket()["url"], REPO + "#42")]
     assert effects["blocked"] == []
     assert effects["cleared"] == [(REPO, 42, {"cwd": clone})]
-    assert effects["comments"][0][0][2] == "**Declined:** {}".format(reason)
+    assert effects["comments"][0][0][2] == (
+        "**Declined:** {}".format(reason)
+        + "\n\n" + implement.CALENDAR_WAIT_RESTORE_REASON)
     assert effects["released"] == [REPO + "#42"]
     assert effects["finished"][0][2] == "skipped-blocked"
     assert "waiting on the calendar; Needs kept none" in (

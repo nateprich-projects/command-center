@@ -2662,7 +2662,10 @@ def write_declined_calendar_wait_needs(url: str, ref: str) -> None:
     #1715. The route preserves Needs none so the wait neither strands the
     ticket in a session lane nor asks Nate; the next lane run re-reads the
     date and either works the ticket or declines again. Restores of those
-    tickets where still open carry CALENDAR_WAIT_RESTORE_REASON.
+    tickets where still open carry CALENDAR_WAIT_RESTORE_REASON. The Needs
+    single-select has no reason subfield, so the reason rides on the
+    ticket-visible ``**Declined:**`` record (appended by ``finish_declined``)
+    and the heartbeat note, not on the ``write_needs`` call itself.
     """
     from engine import breakdown as breakdown_engine
 
@@ -4325,6 +4328,10 @@ def finish_declined(
     declined_comment = block_record.render_declined(reason)
     if prerequisite_evidence is not None:
         declined_comment += "\n\n" + prerequisite_evidence
+    if calendar_wait_routed:
+        # The Needs single-select carries no reason text, so the required
+        # restore reason rides on the ticket-visible decline record (#2492).
+        declined_comment += "\n\n" + CALENDAR_WAIT_RESTORE_REASON
     comment_effect(resolved, context["number"], declined_comment,
                    run=run, agent=agent, cwd=context["root"])
     if accept_conflict_routed:

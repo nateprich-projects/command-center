@@ -2867,6 +2867,23 @@ def test_calendar_wait_steps_reach_none_only_through_calendar_rule(action):
                for pattern in implement.CALENDAR_WAIT_STEP_RES)
 
 
+@pytest.mark.parametrize("action", CALENDAR_WAIT_STEP_ACTIONS)
+def test_calendar_wait_step_filed_claude_without_calendar_rule(
+        action, monkeypatch):
+    """Executes the #2492 old-code outcome at the Claude-writing seam: with
+    the calendar-wait rule neutralized, the same wording falls through to
+    the claimed reason's Needs (claude-code-environment). Paired with
+    test_calendar_wait_steps_no_longer_file_claude, this is the red-green
+    reproduction -- old code filed Claude-only, fixed code preserves none.
+    The old outcome lives at this blocked-step seam (needs_for_human_step),
+    which is the only implement-lane writer of claude-code-environment for
+    such wording; the decline seam (finish_declined) read the same wait as
+    unknown and stranded it blocked plus Needs agent."""
+    monkeypatch.setattr(implement, "CALENDAR_WAIT_STEP_RES", ())
+    assert implement.needs_for_human_step(
+        "a Claude Code environment", action) == "claude-code-environment"
+
+
 @pytest.mark.parametrize("action", [
     "Waiting on the calendar event; then kickstart the agent with launchctl",
     "Waiting until 2026-11-01 for sudo -n -u jeffy maintenance to finish",
@@ -4780,6 +4797,24 @@ def test_classify_decline_reason_routes_calendar_wait(reason):
     """A calendar-wait decline reads as a date wait, not unknown (#2492)."""
     assert implement.classify_decline_reason(reason, REPO) == (
         "calendar-wait", None)
+
+
+@pytest.mark.parametrize("reason", CALENDAR_WAIT_DECLINE_REASONS)
+def test_classify_decline_reason_read_unknown_without_calendar_rule(
+        reason, monkeypatch):
+    """Executes the #2492 old-code classification at the decline seam: with
+    the calendar-wait patterns neutralized, the same reason reads as
+    unknown -- which finish_declined routed to blocked plus Needs agent,
+    never to the session lane. The decline seam therefore never wrote
+    claude-code-environment; the Claude-only mislabel on #1712/#1715 lived
+    at the blocked-step seam (see
+    test_calendar_wait_step_filed_claude_without_calendar_rule), and the
+    fixed code preserves none at both seams."""
+    import decline_classifier
+
+    monkeypatch.setattr(decline_classifier, "_DECLINED_CALENDAR_WAIT", ())
+    assert implement.classify_decline_reason(reason, REPO) == (
+        "unknown", None)
 
 
 @pytest.mark.parametrize("reason", [

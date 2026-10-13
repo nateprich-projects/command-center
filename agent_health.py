@@ -475,6 +475,7 @@ def assess(
     error_threshold: Optional[int] = None,
     hold_until: Optional[float] = None,
     regressions_only: bool = False,
+    paused: bool = False,
 ) -> List[str]:
     """Return raised conditions in the watchdog's existing wording.
 
@@ -491,6 +492,13 @@ def assess(
 
     Every other condition is unchanged by a hold. A park explains a gap in
     records; it does not explain a run that died or three that errored.
+
+    ``paused`` is an intentionally stopped schedule (a Codex automation Nate
+    paused, #2499). It raises no silence condition — relative or absolute
+    floor — and nothing in its place. Every other condition is unchanged by
+    it, for the same reason: a pause explains a gap in records, not a run
+    that died or three that errored, so a stale flag cannot suppress an
+    active stuck agent. Defaults off so existing callers read as before.
 
     ``regressions_only`` is used by the brief: it suppresses floor and
     unclassified finishes and requires the recorded runtime head so every
@@ -587,7 +595,7 @@ def assess(
                 agent, _hold_stamp(hold_until), int(inferred[1])
             )
         )
-    elif not auth_outage_open and inferred is not None:
+    elif not paused and not auth_outage_open and inferred is not None:
         normal, latest, record_count = inferred
         if hold_until is not None:
             # The park is over. Silence since the reset is the honest gap;
@@ -618,7 +626,12 @@ def assess(
             "`{}`: parked until {} (provider quota); no silence alarm while "
             "the park holds.".format(agent, _hold_stamp(hold_until))
         )
-    elif not auth_outage_open and inferred is None and agent not in retired:
+    elif (
+        not paused
+        and not auth_outage_open
+        and inferred is None
+        and agent not in retired
+    ):
         timestamps = [
             float(row["ts"])
             for row in rows

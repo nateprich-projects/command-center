@@ -1247,8 +1247,11 @@ def test_the_watchdog_note_does_not_call_an_unreadable_file_never_run(
 # reuse while it holds for closes. The executable
 # test_base_premises_match_base_source below proves these premises from
 # the real base bytes when the base object is present, and skips where the
-# checkout is shallow; test_base_alert_path_* drives both list orders from
-# a faithful replica so no live #1252 read is needed.
+# checkout is shallow; test_base_main_from_base_bytes_* executes the real
+# base main() itself (not a replica) across both list orders and all three
+# branches, and test_base_alert_path_* keeps a faithful replica driving
+# both list orders so shallow checkouts still hold executable evidence.
+# No live #1252 read is needed in any of them.
 # #1252 grounding (packet evidence, no live read): the ticket stipulates
 # #1252 is a watchdog-owned alert to close ("close superseded
 # watchdog-owned alerts including #1252"); the plan records as measured
@@ -1362,6 +1365,119 @@ def test_base_alert_path_reuses_first_hit_and_never_closes():
     # Recovery strands the second alert too: only the first hit closes.
     assert _base_branch(first, [])["closed"] == [1252]
     assert _base_branch(list(reversed(first)), [])["closed"] == [2034]
+
+
+_BASE_SHA = "b0a20b5223e90e76571518302a6463590e8f9f3d"
+
+
+def _load_base_watchdog():
+    """Execute the real base b0a20b5 watchdog bytes as a separate module.
+
+    Returns None where the base object is absent (shallow checkout), in
+    which case the callers skip and the replica probe above remains the
+    evidence. Raises if the base bytes are present but do not execute.
+    """
+    import subprocess
+    import types
+
+    proc = subprocess.run(
+        ["git", "show", _BASE_SHA + ":.github/scripts/watchdog.py"],
+        capture_output=True, text=True, timeout=30, cwd=str(ROOT))
+    if proc.returncode != 0 or not proc.stdout:
+        return None
+    mod = types.ModuleType("watchdog_base_b0a20b5")
+    mod.__file__ = str(ROOT / ".github" / "scripts" / "watchdog.py")
+    sys.modules[mod.__name__] = mod
+    try:
+        exec(compile(proc.stdout, mod.__file__ + "@" + _BASE_SHA[:7], "exec"),
+             mod.__dict__)
+    except Exception:
+        sys.modules.pop(mod.__name__, None)
+        raise
+    return mod
+
+
+def _drive_base_main(monkeypatch, base, open_issues, problems,
+                     created_number=2035):
+    """Run the real base main() with a stubbed open-issue list and alarm."""
+    calls = []
+
+    def fake_gh(*args):
+        calls.append(args)
+        joined = " ".join(args)
+        if "issues?state=open" in joined:
+            return json.dumps(open_issues)
+        if "/comments" in joined:
+            return "{}"
+        if args[1:3] == ("-X", "PATCH"):
+            return "{}"
+        if args[1:3] == ("-X", "POST"):
+            return json.dumps({"number": created_number})
+        raise AssertionError("unexpected base gh call: {}".format(args))
+
+    monkeypatch.setattr(base.heartbeat, "PROVIDERS", {"codex": "openai"})
+    monkeypatch.setattr(base.heartbeat, "RETIRED_AGENTS", (), raising=False)
+    monkeypatch.setattr(base, "records", lambda agent: [])
+    monkeypatch.setattr(
+        base, "assess",
+        lambda agent, rows, now, _problems=list(problems): list(_problems))
+    monkeypatch.setattr(base, "gh", fake_gh)
+
+    assert base.main() == 0
+    return calls
+
+
+def _base_posts(calls):
+    return [call for call in calls
+            if call[1:3] == ("-X", "POST") and call[3].endswith("/issues")]
+
+
+def _base_closes(calls):
+    return [call for call in calls if "state=closed" in " ".join(call)]
+
+
+def test_base_main_from_base_bytes_reuses_hit_and_never_closes(monkeypatch):
+    """First-verify from the real base main(): hit PATCH-reuses, never closes.
+
+    Executes base b0a20b5 main() itself with two owned alerts open, in both
+    list orders: the alert branch PATCH-rewrites the first marker hit in
+    place with zero creates and zero closes either way, so a duplicate alert
+    strands open whichever hit the live listing returned first. The no-hit
+    open path POSTs exactly one new alert with zero PATCH and zero closes,
+    and recovery closes only the first hit either way.
+    """
+    base = _load_base_watchdog()
+    if base is None:
+        pytest.skip("base b0a20b5:.github/scripts/watchdog.py not readable here")
+    assert base.MARKER == watchdog.MARKER
+
+    problem = "`codex`: Nothing recorded for 3d11h."
+    first = [
+        {"number": 1252, "body": base.MARKER + "\nold alarm"},
+        {"number": 2034, "body": base.MARKER + "\nnewer alarm"},
+    ]
+    for ordering in (first, list(reversed(first))):
+        calls = _drive_base_main(monkeypatch, base, ordering, [problem])
+        patches = [call for call in calls if call[1:3] == ("-X", "PATCH")]
+        assert len(patches) == 1
+        assert str(ordering[0]["number"]) in patches[0][3]
+        assert "body=" in " ".join(patches[0])
+        assert _base_posts(calls) == []
+        assert _base_closes(calls) == []
+
+    calls = _drive_base_main(monkeypatch, base, [], [problem])
+    creates = _base_posts(calls)
+    assert len(creates) == 1
+    assert "title=Scheduled runs need attention" in creates[0]
+    assert not [call for call in calls if call[1:3] == ("-X", "PATCH")]
+    assert _base_closes(calls) == []
+
+    for ordering in (first, list(reversed(first))):
+        calls = _drive_base_main(monkeypatch, base, ordering, [])
+        assert _base_posts(calls) == []
+        closed = sorted(
+            int(call[3].rsplit("/", 1)[-1]) for call in _base_closes(calls))
+        assert closed == [ordering[0]["number"]]
 
 
 def test_owned_alert_needs_marker_and_title_prefix():

@@ -2884,6 +2884,119 @@ def test_calendar_wait_step_filed_claude_without_calendar_rule(
         "a Claude Code environment", action) == "claude-code-environment"
 
 
+@pytest.mark.parametrize("action", CALENDAR_WAIT_STEP_ACTIONS)
+def test_finish_blocked_on_human_routes_calendar_wait_to_none(
+        tmp_path, monkeypatch, action):
+    """End to end for #2492: a calendar-wait blocked step claimed as Claude
+    work files Needs=none through the any-agent effect, never the session
+    lane. This is the decline route's blocked-step arrival
+    (finish_blocked_on_human), where the #1712/#1715 Claude-only mislabel
+    was actually filed."""
+    from engine import breakdown as breakdown_engine
+
+    _, clone = make_clone(tmp_path)
+    monkeypatch.setattr(implement, "fetch_ticket", lambda repo, number: ticket(number))
+    fields = []
+    monkeypatch.setattr(
+        breakdown_engine, "add_to_project", lambda url: "step-item-id")
+    monkeypatch.setattr(
+        funnel, "write_project_select",
+        lambda item_id, field, value, ref: fields.append(
+            (item_id, field, value, ref)))
+    monkeypatch.setattr(
+        breakdown_engine, "write_needs",
+        lambda item_id, value, ref: fields.append(
+            (item_id, "Needs", value, ref)))
+    titles = []
+    bodies = []
+
+    def create(repo, parent, title, body, **kwargs):
+        titles.append(title)
+        bodies.append(body)
+        return {"number": 43, "ref": "{}#43".format(repo),
+                "url": "https://github.com/{}/issues/43".format(repo)}
+
+    implement.finish_blocked_on_human(
+        blocked(reason="a Claude Code environment",
+                action=action)["blocked_on_human"],
+        run="run-42", repo=REPO, cwd=clone,
+        release=lambda ref: None,
+        heartbeat_finish=lambda *args: None,
+        create_effect=create,
+        block_effect=lambda *args, **kwargs: None,
+        comment_effect=lambda *args, **kwargs: None,
+        sub_issues_effect=lambda repo, number: [],
+    )
+
+    assert fields == [
+        ("step-item-id", "Origin", "agent", REPO + "#43"),
+        ("step-item-id", "Risk", "standard", REPO + "#43"),
+        ("step-item-id", "Needs", "none", REPO + "#43"),
+    ]
+    title, = titles
+    assert title == "Human step: {}".format(action)
+    body, = bodies
+    assert "Action any agent must perform:" in body
+    assert "a Claude Code session on the Mac mini" not in body
+
+
+@pytest.mark.parametrize("action", CALENDAR_WAIT_STEP_ACTIONS)
+def test_finish_blocked_on_human_filed_claude_without_calendar_rule(
+        tmp_path, monkeypatch, action):
+    """Executes the #2492 old-code outcome end to end: with the
+    calendar-wait rule neutralized, finish_blocked_on_human files the same
+    calendar-wait step as Needs=claude-code-environment. Paired with
+    test_finish_blocked_on_human_routes_calendar_wait_to_none, this is the
+    red-green reproduction through the lane's actual blocked-step arrival --
+    old code set Claude-only, fixed code preserves none."""
+    from engine import breakdown as breakdown_engine
+
+    _, clone = make_clone(tmp_path)
+    monkeypatch.setattr(implement, "fetch_ticket", lambda repo, number: ticket(number))
+    monkeypatch.setattr(implement, "CALENDAR_WAIT_STEP_RES", ())
+    fields = []
+    monkeypatch.setattr(
+        breakdown_engine, "add_to_project", lambda url: "step-item-id")
+    monkeypatch.setattr(
+        funnel, "write_project_select",
+        lambda item_id, field, value, ref: fields.append(
+            (item_id, field, value, ref)))
+    monkeypatch.setattr(
+        breakdown_engine, "write_needs",
+        lambda item_id, value, ref: fields.append(
+            (item_id, "Needs", value, ref)))
+    titles = []
+    bodies = []
+
+    def create(repo, parent, title, body, **kwargs):
+        titles.append(title)
+        bodies.append(body)
+        return {"number": 43, "ref": "{}#43".format(repo),
+                "url": "https://github.com/{}/issues/43".format(repo)}
+
+    implement.finish_blocked_on_human(
+        blocked(reason="a Claude Code environment",
+                action=action)["blocked_on_human"],
+        run="run-42", repo=REPO, cwd=clone,
+        release=lambda ref: None,
+        heartbeat_finish=lambda *args: None,
+        create_effect=create,
+        block_effect=lambda *args, **kwargs: None,
+        comment_effect=lambda *args, **kwargs: None,
+        sub_issues_effect=lambda repo, number: [],
+    )
+
+    assert fields == [
+        ("step-item-id", "Origin", "agent", REPO + "#43"),
+        ("step-item-id", "Risk", "standard", REPO + "#43"),
+        ("step-item-id", "Needs", "claude-code-environment", REPO + "#43"),
+    ]
+    title, = titles
+    assert title == "Claude Code environment step: {}".format(action)
+    body, = bodies
+    assert "a Claude Code session on the Mac mini" in body
+
+
 def test_calendar_wait_lane_old_sets_claude_fixed_keeps_none(monkeypatch):
     """Lane-level red-green for #2492: one calendar wait across both seams.
 

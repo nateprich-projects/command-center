@@ -1215,6 +1215,11 @@ def ticket_asks(ticket: Optional[dict], path: str) -> bool:
     return bool(rule) and rule in text
 
 
+#: Verified admission gate engine/review.py:1201 `ticket_asks`: `if path in
+#: text` on the title/body text, else `rule = protected_rule_for(path)`
+#: and `return bool(rule) and rule in text` -- explicit-path-only, so
+#: description prose never admits a protected touch.
+#:
 #: Narrow prose alias for the observed #2489/#2515 pair: a judge demand
 #: phrased around the breakdown skill's guidance without spelling its path.
 #: Deliberately not a general description resolver (plan #2515 rejects a

@@ -51,12 +51,27 @@ ORDINARY_DEMAND = ("The writer sizes single-file tickets to a right-sized "
                    "plan in engine/breakdown.py")
 
 
+def _restrain(requirements, ticket):
+    """Judge restraint, failing red (not no-signal) when the fix is absent.
+
+    On the pre-fix base ``restrain_protected_demands`` does not exist; a
+    bare attribute call would fail with ``has no attribute`` and classify
+    as no signal, proving nothing. Asserting presence first fails with an
+    assertion describing the wedge, which classifies as red.
+    """
+    restrain = getattr(review, "restrain_protected_demands", None)
+    assert restrain is not None, (
+        "wedge present: judge restraint missing so a description-named "
+        "seam cannot pass both precheck_protected and the judge")
+    return restrain(requirements, ticket)
+
+
 def test_ticket_asks_admits_only_a_spelled_out_path():
     """engine/review.py ticket_asks is explicit-path-only.
 
-    Predicate (engine/review.py ``ticket_asks``): ``if path in text`` on the
-    title/body text, else the touched path's protected rule in the text.
-    Description prose never admits.
+    Verified at engine/review.py:1201 ``ticket_asks``: ``if path in text``
+    on the title/body text, else ``rule = protected_rule_for(path)`` and
+    ``return bool(rule) and rule in text``. Description prose never admits.
     """
     assert review.ticket_asks(DESCRIPTION_TICKET, SEAM) is False
     assert review.ticket_asks(EXPLICIT_TICKET, SEAM) is True
@@ -82,29 +97,29 @@ def test_precheck_passes_a_diff_that_leaves_the_seam_alone():
 
 
 def test_restraint_drops_the_unadmitted_guidance_demand():
-    kept = review.restrain_protected_demands(
+    kept = _restrain(
         [GUIDANCE_DEMAND, ORDINARY_DEMAND], DESCRIPTION_TICKET)
     assert kept == [ORDINARY_DEMAND]
 
 
 def test_restraint_keeps_a_demand_the_ticket_admits():
     """Negative 2: the judge still requires guidance the ticket did intend."""
-    kept = review.restrain_protected_demands(
+    kept = _restrain(
         [GUIDANCE_DEMAND, ORDINARY_DEMAND], EXPLICIT_TICKET)
     assert kept == [GUIDANCE_DEMAND, ORDINARY_DEMAND]
 
 
 def test_restraint_keeps_literal_demands_the_ticket_admits():
     demand = "Record the sizing rule in skills/breakdown/SKILL.md"
-    assert review.restrain_protected_demands(
+    assert _restrain(
         [demand], EXPLICIT_TICKET) == [demand]
-    assert review.restrain_protected_demands(
+    assert _restrain(
         [demand], DESCRIPTION_TICKET) == []
 
 
 def test_restraint_never_drops_does_not_break_rows():
     row = "Does not break: keep skills/breakdown/SKILL.md sizing stable"
-    assert review.restrain_protected_demands(
+    assert _restrain(
         [row], DESCRIPTION_TICKET) == [row]
 
 
@@ -115,7 +130,7 @@ def test_one_diff_passes_both_gates_after_restraint():
         "ticket": DESCRIPTION_TICKET,
         "protected": {"touched": []},
     }) == []
-    kept = review.restrain_protected_demands(
+    kept = _restrain(
         [GUIDANCE_DEMAND, ORDINARY_DEMAND], DESCRIPTION_TICKET)
     assert GUIDANCE_DEMAND not in kept
     assert kept == [ORDINARY_DEMAND]

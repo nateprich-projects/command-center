@@ -309,7 +309,8 @@ def health_line(agent: str, rows: List[Dict], now: float) -> str:
     )
 
 
-def assess(agent: str, rows: List[Dict], now: float) -> List[str]:
+def assess(agent: str, rows: List[Dict], now: float,
+           paused: bool = False) -> List[str]:
     """Compatibility wrapper around the shared heartbeat assessment."""
     problems = _agent_health.assess(
         agent,
@@ -325,6 +326,7 @@ def assess(agent: str, rows: List[Dict], now: float) -> List[str]:
         dying_threshold=DYING_THRESHOLD,
         week=WEEK,
         error_threshold=ERROR_THRESHOLD,
+        paused=paused,
     )
     runtime_problem = _runtime_lag_problem(agent, rows, now)
     if runtime_problem:
@@ -411,8 +413,13 @@ def close_alert(number, comment: str) -> None:
 def main() -> int:
     now = time.time()
     problems = []
+    retired = set(getattr(heartbeat, "RETIRED_AGENTS", ()))
+    # Paused is not retired: a paused schedule may resume, so a paused lane
+    # is still assessed and skips only its silence alarm. Dying or errored
+    # runs still file, so a stale flag cannot suppress a stuck agent (#2499).
+    paused = set(heartbeat.paused_agents()) - retired
     for agent in sorted(heartbeat.PROVIDERS):
-        if agent in getattr(heartbeat, "RETIRED_AGENTS", ()):
+        if agent in retired:
             continue  # a stopped schedule is not a dying one (#431)
         try:
             rows = records(agent)
@@ -420,7 +427,7 @@ def main() -> int:
             problems.append("`{}`: heartbeat unreadable ({}).".format(
                 agent, str(exc) or type(exc).__name__))
             continue
-        problems += assess(agent, rows, now)
+        problems += assess(agent, rows, now, paused=(agent in paused))
         info = note(agent, rows, now)
         if info:
             print("note: " + info)

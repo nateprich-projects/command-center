@@ -1328,7 +1328,7 @@ def test_new_alarm_opens_one_alert_and_closes_superseded(monkeypatch):
     monkeypatch.setattr(watchdog, "records", lambda agent: [])
     monkeypatch.setattr(
         watchdog, "assess",
-        lambda agent, rows, now: ["`codex`: Nothing recorded for 3d11h."])
+        lambda agent, rows, now, paused=False: ["`codex`: Nothing recorded for 3d11h."])
     monkeypatch.setattr(
         watchdog, "gh", _alert_gh(calls, _mixed_open_issues(), 2035))
 
@@ -1361,7 +1361,7 @@ def test_new_alarm_supersede_is_list_order_independent(monkeypatch):
     monkeypatch.setattr(watchdog, "records", lambda agent: [])
     monkeypatch.setattr(
         watchdog, "assess",
-        lambda agent, rows, now: ["`codex`: Nothing recorded for 3d11h."])
+        lambda agent, rows, now, paused=False: ["`codex`: Nothing recorded for 3d11h."])
     monkeypatch.setattr(
         watchdog, "gh",
         _alert_gh(calls, list(reversed(_mixed_open_issues())), 2035))
@@ -1404,7 +1404,7 @@ def test_recovery_leaves_foreign_issues_untouched(monkeypatch):
             watchdog.heartbeat, "PROVIDERS", {"codex": "openai"})
         monkeypatch.setattr(watchdog, "records", lambda agent: [])
         monkeypatch.setattr(
-            watchdog, "assess", lambda a, r, n, p=problems: list(p))
+            watchdog, "assess", lambda a, r, n, p=problems, paused=False: list(p))
         monkeypatch.setattr(
             watchdog, "gh", _alert_gh(calls, _mixed_open_issues(), 2035))
 

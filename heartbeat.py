@@ -285,6 +285,31 @@ def retired_agents(now: Optional[float] = None) -> frozenset:
 #: reads it and the zcode lapse needs no edit.
 RETIRED_AGENTS = retired_agents()
 
+#: Schedules paused on purpose outside the repo (#2003, #2487). Codex
+#: implements both tiers from its in-app Scheduled automations; while those
+#: automations sit PAUSED the lane records nothing, and that silence is the
+#: pause working rather than a lane that died. The app holds the ACTIVE/PAUSED
+#: state where no checkout can read it, so the intent is recorded here — one
+#: canonical roster beside `retired_agents`, which the brief already reads —
+#: and the watchdog adapts it into its silence check without reading vendor
+#: automation files directly. Paused is not retired: a paused schedule may
+#: resume, so a paused lane is still assessed for runs that died or errored
+#: and skips only its silence alarm (#2499).
+PAUSED_AGENTS = frozenset({"codex"})
+
+
+def paused_agents(now: Optional[float] = None) -> frozenset:
+    """Agents whose schedules are paused on purpose, as of ``now``.
+
+    The thin adapter over `PAUSED_AGENTS`: vendor automation state (a Codex
+    Scheduled automation reading PAUSED instead of ACTIVE) enters the shared
+    roster here, so the watchdog and the brief cannot disagree about it.
+    ``now`` keeps the `retired_agents` call shape; a pause carries no
+    recorded cutoff, so it is unused.
+    """
+    del now
+    return PAUSED_AGENTS
+
 #: Which application ran it. Distinct from provider and model: one provider can
 #: be reached through more than one harness, and harnesses differ in ways that
 #: change outcomes — agent loop, tool selection, context handling, retries.

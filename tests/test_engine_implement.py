@@ -2829,6 +2829,225 @@ def test_unrecognized_claude_step_keeps_session_needs():
             "claude-code-environment")
 
 
+CALENDAR_WAIT_STEP_ACTIONS = [
+    "Waiting on the calendar event on 2026-11-01 before this ticket can "
+    "proceed",
+    "The calendar window opens next week; waiting on the calendar to start "
+    "the rollout",
+    "Waiting until 2026-11-01 for the scheduled window to open",
+    "Blocked until 2026-11-01 for the calendar window; will retry after",
+]
+
+
+@pytest.mark.parametrize("action", CALENDAR_WAIT_STEP_ACTIONS)
+def test_calendar_wait_steps_no_longer_file_claude(action):
+    """Reproduction for #2492: a calendar-wait blocked step names no Mac
+    capability, so it must not file claude-code-environment even when the
+    implementer claims the Claude Code environment reason. Before the
+    calendar-wait rule this wording matched neither the any-agent nor the
+    still-Claude list, so it fell through to the claimed reason's Needs
+    (claude-code-environment) -- the Claude-only mislabel on #1712/#1715."""
+    assert implement.needs_for_human_step(
+        "a Claude Code environment", action) == "none"
+
+
+@pytest.mark.parametrize("action", CALENDAR_WAIT_STEP_ACTIONS)
+def test_calendar_wait_steps_reach_none_only_through_calendar_rule(action):
+    """Pins the #2492 base behavior: these calendar-wait wordings match no
+    any-agent and no still-Claude signal, and the Claude reason's fallback
+    Needs is claude-code-environment -- so without CALENDAR_WAIT_STEP_RES
+    they filed Claude-only, and the calendar rule is what moves them."""
+    assert implement.HUMAN_STEP_NEEDS["a Claude Code environment"] == (
+        "claude-code-environment")
+    assert not any(pattern.search(action)
+                   for pattern in implement.ANY_AGENT_STEP_RES)
+    assert not any(pattern.search(action)
+                   for pattern in implement.STILL_CLAUDE_RES)
+    assert any(pattern.search(action)
+               for pattern in implement.CALENDAR_WAIT_STEP_RES)
+
+
+@pytest.mark.parametrize("action", CALENDAR_WAIT_STEP_ACTIONS)
+def test_calendar_wait_step_filed_claude_without_calendar_rule(
+        action, monkeypatch):
+    """Executes the #2492 old-code outcome at the Claude-writing seam: with
+    the calendar-wait rule neutralized, the same wording falls through to
+    the claimed reason's Needs (claude-code-environment). Paired with
+    test_calendar_wait_steps_no_longer_file_claude, this is the red-green
+    reproduction -- old code filed Claude-only, fixed code preserves none.
+    The old outcome lives at this blocked-step seam (needs_for_human_step),
+    which is the only implement-lane writer of claude-code-environment for
+    such wording; the decline seam (finish_declined) read the same wait as
+    unknown and stranded it blocked plus Needs agent."""
+    monkeypatch.setattr(implement, "CALENDAR_WAIT_STEP_RES", ())
+    assert implement.needs_for_human_step(
+        "a Claude Code environment", action) == "claude-code-environment"
+
+
+@pytest.mark.parametrize("action", CALENDAR_WAIT_STEP_ACTIONS)
+def test_finish_blocked_on_human_routes_calendar_wait_to_none(
+        tmp_path, monkeypatch, action):
+    """End to end for #2492: a calendar-wait blocked step claimed as Claude
+    work files Needs=none through the any-agent effect, never the session
+    lane. This is the decline route's blocked-step arrival
+    (finish_blocked_on_human), where the #1712/#1715 Claude-only mislabel
+    was actually filed."""
+    from engine import breakdown as breakdown_engine
+
+    _, clone = make_clone(tmp_path)
+    monkeypatch.setattr(implement, "fetch_ticket", lambda repo, number: ticket(number))
+    fields = []
+    monkeypatch.setattr(
+        breakdown_engine, "add_to_project", lambda url: "step-item-id")
+    monkeypatch.setattr(
+        funnel, "write_project_select",
+        lambda item_id, field, value, ref: fields.append(
+            (item_id, field, value, ref)))
+    monkeypatch.setattr(
+        breakdown_engine, "write_needs",
+        lambda item_id, value, ref: fields.append(
+            (item_id, "Needs", value, ref)))
+    titles = []
+    bodies = []
+
+    def create(repo, parent, title, body, **kwargs):
+        titles.append(title)
+        bodies.append(body)
+        return {"number": 43, "ref": "{}#43".format(repo),
+                "url": "https://github.com/{}/issues/43".format(repo)}
+
+    implement.finish_blocked_on_human(
+        blocked(reason="a Claude Code environment",
+                action=action)["blocked_on_human"],
+        run="run-42", repo=REPO, cwd=clone,
+        release=lambda ref: None,
+        heartbeat_finish=lambda *args: None,
+        create_effect=create,
+        block_effect=lambda *args, **kwargs: None,
+        comment_effect=lambda *args, **kwargs: None,
+        sub_issues_effect=lambda repo, number: [],
+    )
+
+    assert fields == [
+        ("step-item-id", "Origin", "agent", REPO + "#43"),
+        ("step-item-id", "Risk", "standard", REPO + "#43"),
+        ("step-item-id", "Needs", "none", REPO + "#43"),
+    ]
+    title, = titles
+    assert title == "Human step: {}".format(action)
+    body, = bodies
+    assert "Action any agent must perform:" in body
+    assert "a Claude Code session on the Mac mini" not in body
+
+
+@pytest.mark.parametrize("action", CALENDAR_WAIT_STEP_ACTIONS)
+def test_finish_blocked_on_human_filed_claude_without_calendar_rule(
+        tmp_path, monkeypatch, action):
+    """Executes the #2492 old-code outcome end to end: with the
+    calendar-wait rule neutralized, finish_blocked_on_human files the same
+    calendar-wait step as Needs=claude-code-environment. Paired with
+    test_finish_blocked_on_human_routes_calendar_wait_to_none, this is the
+    red-green reproduction through the lane's actual blocked-step arrival --
+    old code set Claude-only, fixed code preserves none."""
+    from engine import breakdown as breakdown_engine
+
+    _, clone = make_clone(tmp_path)
+    monkeypatch.setattr(implement, "fetch_ticket", lambda repo, number: ticket(number))
+    monkeypatch.setattr(implement, "CALENDAR_WAIT_STEP_RES", ())
+    fields = []
+    monkeypatch.setattr(
+        breakdown_engine, "add_to_project", lambda url: "step-item-id")
+    monkeypatch.setattr(
+        funnel, "write_project_select",
+        lambda item_id, field, value, ref: fields.append(
+            (item_id, field, value, ref)))
+    monkeypatch.setattr(
+        breakdown_engine, "write_needs",
+        lambda item_id, value, ref: fields.append(
+            (item_id, "Needs", value, ref)))
+    titles = []
+    bodies = []
+
+    def create(repo, parent, title, body, **kwargs):
+        titles.append(title)
+        bodies.append(body)
+        return {"number": 43, "ref": "{}#43".format(repo),
+                "url": "https://github.com/{}/issues/43".format(repo)}
+
+    implement.finish_blocked_on_human(
+        blocked(reason="a Claude Code environment",
+                action=action)["blocked_on_human"],
+        run="run-42", repo=REPO, cwd=clone,
+        release=lambda ref: None,
+        heartbeat_finish=lambda *args: None,
+        create_effect=create,
+        block_effect=lambda *args, **kwargs: None,
+        comment_effect=lambda *args, **kwargs: None,
+        sub_issues_effect=lambda repo, number: [],
+    )
+
+    assert fields == [
+        ("step-item-id", "Origin", "agent", REPO + "#43"),
+        ("step-item-id", "Risk", "standard", REPO + "#43"),
+        ("step-item-id", "Needs", "claude-code-environment", REPO + "#43"),
+    ]
+    title, = titles
+    assert title == "Claude Code environment step: {}".format(action)
+    body, = bodies
+    assert "a Claude Code session on the Mac mini" in body
+
+
+def test_calendar_wait_lane_old_sets_claude_fixed_keeps_none(monkeypatch):
+    """Lane-level red-green for #2492: one calendar wait across both seams.
+
+    A calendar-wait decline from none travels this lane either as a blocked
+    human step or as a decline record. On the old code the blocked-step seam
+    filed the Claude-only mislabel (unrecognized calendar wording fell
+    through to the claimed claude-code-environment Needs) while the decline
+    seam stranded the ticket blocked plus Needs agent; the fix preserves
+    none at both. This pins the full route the amended Accept reproduces --
+    old code sets Claude-only, fixed code keeps none -- at the seams where
+    each half actually happened, since the decline seam itself never had a
+    session-lane writer."""
+    import decline_classifier
+
+    action = CALENDAR_WAIT_STEP_ACTIONS[0]
+    reason = action + ". No source change was made."
+    monkeypatch.setattr(implement, "CALENDAR_WAIT_STEP_RES", ())
+    monkeypatch.setattr(decline_classifier, "_DECLINED_CALENDAR_WAIT", ())
+    assert implement.needs_for_human_step(
+        "a Claude Code environment", action) == "claude-code-environment"
+    assert implement.classify_decline_reason(reason, REPO) == (
+        "unknown", None)
+    monkeypatch.undo()
+    assert implement.needs_for_human_step(
+        "a Claude Code environment", action) == "none"
+    assert implement.classify_decline_reason(reason, REPO) == (
+        "calendar-wait", None)
+
+
+@pytest.mark.parametrize("action", [
+    "Waiting on the calendar event; then kickstart the agent with launchctl",
+    "Waiting until 2026-11-01 for sudo -n -u jeffy maintenance to finish",
+    "Waiting on the calendar; the live config deploy follows the date",
+])
+def test_calendar_wait_with_mac_signal_stays_claude(action):
+    """A calendar wait naming genuine Mac work stays
+    claude-code-environment: only the still-Claude list files it (#2492)."""
+    assert implement.needs_for_human_step(
+        "a Claude Code environment", action) == "claude-code-environment"
+
+
+def test_calendar_wait_restore_reason():
+    """Restores of #1712 and #1715 where still open carry the ticket's
+    reason for Needs none (#2492). Per the 2026-10-11 verify-first record
+    both are CLOSED with no labels and no Project item, so that conditional
+    is vacuous and no remote restore runs; the exact reason string is pinned
+    here for the future calendar-wait decline records that carry it."""
+    assert implement.CALENDAR_WAIT_RESTORE_REASON == (
+        "Code-only fix; no Mac capability needed, startable by any agent.")
+
+
 def test_human_step_body_names_any_agent_for_none_needs():
     """A rerouted step names any agent as its actor, never Nate and never
     a Claude session (#2491)."""
@@ -4703,6 +4922,195 @@ def test_classify_decline_reason_routes_only_pointed_accept_conflicts(
 ])
 def test_classify_decline_reason_routes_unactionable_shapes(reason, expected):
     assert implement.classify_decline_reason(reason, REPO) == expected
+
+
+CALENDAR_WAIT_DECLINE_REASONS = [
+    "Waiting on the calendar event on 2026-11-01 before this ticket can "
+    "proceed. No source change was made.",
+    "The calendar window opens next week; waiting on the calendar to start "
+    "the rollout.",
+    "Waiting until 2026-11-01 for the scheduled window to open.",
+    "Blocked until 2026-11-01 for the calendar window; will retry after.",
+]
+
+
+@pytest.mark.parametrize("reason", CALENDAR_WAIT_DECLINE_REASONS)
+def test_classify_decline_reason_routes_calendar_wait(reason):
+    """A calendar-wait decline reads as a date wait, not unknown (#2492)."""
+    assert implement.classify_decline_reason(reason, REPO) == (
+        "calendar-wait", None)
+
+
+@pytest.mark.parametrize("reason", CALENDAR_WAIT_DECLINE_REASONS)
+def test_classify_decline_reason_read_unknown_without_calendar_rule(
+        reason, monkeypatch):
+    """Executes the #2492 old-code classification at the decline seam: with
+    the calendar-wait patterns neutralized, the same reason reads as
+    unknown -- which finish_declined routed to blocked plus Needs agent,
+    never to the session lane. The decline seam therefore never wrote
+    claude-code-environment; the Claude-only mislabel on #1712/#1715 lived
+    at the blocked-step seam (see
+    test_calendar_wait_step_filed_claude_without_calendar_rule), and the
+    fixed code preserves none for plain waits at both seams (genuine-Mac
+    waits keep the session lane at both)."""
+    import decline_classifier
+
+    monkeypatch.setattr(decline_classifier, "_DECLINED_CALENDAR_WAIT", ())
+    assert implement.classify_decline_reason(reason, REPO) == (
+        "unknown", None)
+
+
+@pytest.mark.parametrize("reason", [
+    "Unlanded prerequisite #165 is still open; waiting on the calendar "
+    "window to retry.",
+    LIVE_1497_PENDING_GATE_ANSWER + " Waiting on the calendar to retry.",
+    "The ticket acceptance cannot be met by any change; waiting on the "
+    "calendar changes nothing.",
+])
+def test_classify_decline_reason_prefers_existing_shapes_over_calendar_wait(
+        reason):
+    """A dated prerequisite, gate answer or unsatisfiable acceptance keeps
+    its own route when a calendar wait rides along (#2492)."""
+    assert implement.classify_decline_reason(reason, REPO)[0] != (
+        "calendar-wait")
+
+
+@pytest.mark.parametrize("reason", CALENDAR_WAIT_DECLINE_REASONS)
+def test_finish_declined_preserves_none_for_calendar_wait(
+        tmp_path, monkeypatch, reason):
+    """Reproduction for #2492: a calendar-wait decline from none keeps Needs
+    none instead of stranding the ticket in a session lane, and lifts any
+    stale block. Before the calendar-wait class this reason classified as
+    unknown, which overwrote none with blocked plus Needs agent; the
+    Claude-only half of the #1712/#1715 history is pinned at the
+    blocked-step seam by the calendar-rule-only test above, since the
+    old decline route never wrote claude-code-environment (genuine-Mac
+    waits now keep the session lane there too)."""
+    _, clone = make_clone(tmp_path)
+    monkeypatch.setattr(implement, "fetch_ticket", lambda repo, number: ticket(number))
+    effects = {"blocked": [], "cleared": [], "comments": [], "released": [],
+               "finished": [], "writes": []}
+
+    implement.finish_declined(
+        reason,
+        run="run-42",
+        repo=REPO,
+        cwd=clone,
+        release=effects["released"].append,
+        heartbeat_finish=lambda *args: effects["finished"].append(args),
+        block_effect=lambda *args, **kwargs: effects["blocked"].append(
+            (args, kwargs)),
+        comment_effect=lambda *args, **kwargs: effects["comments"].append(
+            (args, kwargs)),
+        needs_effect=lambda *args: pytest.fail(
+            "a calendar wait must not take the review route"),
+        declined_needs_effect=lambda *args: pytest.fail(
+            "a calendar wait must not take the blocked agent route"),
+        external_event_needs_effect=lambda *args: pytest.fail(
+            "a calendar wait preserves none, not external-event"),
+        calendar_wait_needs_effect=lambda url, ref: effects["writes"].append(
+            (url, ref)),
+        clear_block_effect=lambda repo, number, **kwargs:
+            effects["cleared"].append((repo, number, kwargs)),
+    )
+
+    assert effects["writes"] == [(ticket()["url"], REPO + "#42")]
+    assert effects["blocked"] == []
+    assert effects["cleared"] == [(REPO, 42, {"cwd": clone})]
+    assert effects["comments"][0][0][2] == (
+        "**Declined:** {}".format(reason)
+        + "\n\n" + implement.CALENDAR_WAIT_RESTORE_REASON)
+    assert effects["released"] == [REPO + "#42"]
+    assert effects["finished"][0][2] == "skipped-blocked"
+    assert "waiting on the calendar; Needs kept none" in (
+        effects["finished"][0][3])
+    assert implement.CALENDAR_WAIT_RESTORE_REASON in (
+        effects["finished"][0][3])
+
+
+@pytest.mark.parametrize("reason", [
+    "Waiting on the calendar window; will verify with launchctl kickstart "
+    "after the date.",
+    "Waiting until 2026-11-01 for sudo -n -u jeffy maintenance to finish.",
+    "Waiting on the calendar event, then read the deploy key from the "
+    "Keychain.",
+    "Waiting on the calendar; the live config deploy follows the date.",
+])
+def test_calendar_wait_decline_files_claude_needs_for_genuine_mac(
+        tmp_path, monkeypatch, reason):
+    """A calendar wait naming genuine Mac capability keeps the session
+    lane: still-Claude wording wins over the plain none route at the
+    decline seam, as it already does at the blocked-step seam (#2492)."""
+    _, clone = make_clone(tmp_path)
+    monkeypatch.setattr(implement, "fetch_ticket", lambda repo, number: ticket(number))
+    writes = []
+    effects = {"blocked": [], "cleared": [], "comments": [], "finished": []}
+
+    implement.finish_declined(
+        reason,
+        run="run-42",
+        repo=REPO,
+        cwd=clone,
+        release=lambda target: None,
+        heartbeat_finish=lambda *args: effects["finished"].append(args),
+        block_effect=lambda *args, **kwargs: effects["blocked"].append(
+            (args, kwargs)),
+        comment_effect=lambda *args, **kwargs: effects["comments"].append(
+            (args, kwargs)),
+        needs_effect=lambda url, ref: writes.append("agent"),
+        declined_needs_effect=lambda url, ref: writes.append("agent"),
+        external_event_needs_effect=lambda url, ref: writes.append(
+            "external-event"),
+        calendar_wait_needs_effect=lambda url, ref: writes.append("none"),
+        session_needs_effect=lambda url, ref: writes.append(
+            "claude-code-environment"),
+        clear_block_effect=lambda repo, number, **kwargs:
+            effects["cleared"].append((repo, number, kwargs)),
+    )
+
+    assert writes == ["claude-code-environment"]
+    assert effects["blocked"] == []
+    assert effects["cleared"] == [(REPO, 42, {"cwd": clone})]
+    assert implement.CALENDAR_WAIT_RESTORE_REASON not in (
+        effects["comments"][0][0][2])
+    assert "Needs claude-code-environment" in effects["finished"][0][3]
+
+
+def test_write_declined_session_needs_uses_canonical_field(monkeypatch):
+    from engine import breakdown as breakdown_engine
+
+    calls = []
+    monkeypatch.setattr(
+        breakdown_engine, "add_to_project", lambda url: "project-item-id")
+    monkeypatch.setattr(
+        breakdown_engine, "write_needs",
+        lambda item_id, needs, ref: calls.append((item_id, needs, ref)),
+    )
+
+    implement.write_declined_session_needs(
+        ticket()["url"], REPO + "#42",
+    )
+
+    assert calls == [(
+        "project-item-id", "claude-code-environment", REPO + "#42")]
+
+
+def test_write_declined_calendar_wait_needs_uses_canonical_field(monkeypatch):
+    from engine import breakdown as breakdown_engine
+
+    calls = []
+    monkeypatch.setattr(
+        breakdown_engine, "add_to_project", lambda url: "project-item-id")
+    monkeypatch.setattr(
+        breakdown_engine, "write_needs",
+        lambda item_id, needs, ref: calls.append((item_id, needs, ref)),
+    )
+
+    implement.write_declined_calendar_wait_needs(
+        ticket()["url"], REPO + "#42",
+    )
+
+    assert calls == [("project-item-id", "none", REPO + "#42")]
 
 
 @pytest.fixture

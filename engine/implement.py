@@ -234,15 +234,37 @@ STILL_CLAUDE_RES = (
 )
 
 
+#: Calendar waits name no Mac capability and no Nate action (#2492): the
+#: ticket is plain code work that is not startable on this run, as in
+#: #1712 and #1715. Matched against the blocked action's wording; a
+#: still-Claude signal still wins, so a wait naming genuine Mac work keeps
+#: the session lane. In this lane a calendar-wait decline arrives either as
+#: a blocked human step (finish_blocked_on_human) or as a decline record
+#: (finish_declined): the Claude-only mislabel was filed at the former,
+#: where unrecognized calendar wording fell through to the claimed Claude
+#: Needs, while the latter read the same wait as unknown to blocked plus
+#: Needs agent; the fix preserves none at both. Verification record
+#: (packet issue thread, 2026-10-11 verify-first read from GitHub on the
+#: Mac): #1712 and #1715 are both CLOSED with no labels and no Project
+#: item, so neither holds a Needs value and the conditional restore
+#: "where still open" is vacuous.
+CALENDAR_WAIT_STEP_RES = (
+    re.compile(r"(?i)\bcalendar\b"),
+    re.compile(r"(?i)\bwait(?:ing|s|ed)?\b.{0,40}\buntil\b.{0,40}"
+               r"\b\d{4}-\d{2}-\d{2}\b"),
+    re.compile(r"(?i)\bblocked\b.{0,40}\buntil\b.{0,40}\b\d{4}-\d{2}-\d{2}\b"),
+)
+
+
 def needs_for_human_step(reason: str, action: str) -> str:
     """Route one blocked step to its Needs value under the middle line.
 
     Nate's four reasons always file ``human``. A step claimed for the
     Claude Code environment files ``claude-code-environment`` unless its
     action reads as Muse-may work — a live run, a log/journal/session-store
-    read, or a corpus replay — with no still-Claude signal, in which case
-    it files ``none`` so any agent can take it (#2491). Unrecognized
-    wording keeps the claimed reason's Needs.
+    read, or a corpus replay — or as a calendar wait, with no still-Claude
+    signal, in which case it files ``none`` so any agent can take it
+    (#2491, #2492). Unrecognized wording keeps the claimed reason's Needs.
     """
     if reason != CLAUDE_CODE_ENVIRONMENT_REASON:
         return HUMAN_STEP_NEEDS[reason]
@@ -250,6 +272,8 @@ def needs_for_human_step(reason: str, action: str) -> str:
     if any(pattern.search(text) for pattern in STILL_CLAUDE_RES):
         return "claude-code-environment"
     if any(pattern.search(text) for pattern in ANY_AGENT_STEP_RES):
+        return "none"
+    if any(pattern.search(text) for pattern in CALENDAR_WAIT_STEP_RES):
         return "none"
     return HUMAN_STEP_NEEDS[reason]
 
@@ -2633,6 +2657,53 @@ def write_declined_agent_needs(url: str, ref: str) -> None:
     breakdown_engine.write_needs(item_id, "agent", ref)
 
 
+#: Reason recorded when a calendar-wait mislabel is restored to Needs
+#: none (#2492): #1712 and #1715 where still open carry this reason. Per
+#: the 2026-10-11 verify-first record both are CLOSED (no labels, no
+#: Project item), so the conditional restore is vacuous and closed history
+#: is left untouched per the parent plan's rejection of bulk rewrites of
+#: closed tickets; the reason rides on future calendar-wait decline records
+#: (see ``finish_declined``) instead.
+CALENDAR_WAIT_RESTORE_REASON = (
+    "Code-only fix; no Mac capability needed, startable by any agent.")
+
+
+def write_declined_session_needs(url: str, ref: str) -> None:
+    """Keep a genuine-Mac calendar wait in the session lane (#2492).
+
+    A calendar-wait decline naming still-Claude capability is Mac work
+    waiting on a date, not plain code work: it files
+    ``claude-code-environment`` so only a Claude Code session takes it
+    after the date, instead of stranding Mac-only work on Needs none
+    where any agent could start it.
+    """
+    from engine import breakdown as breakdown_engine
+
+    item_id = breakdown_engine.add_to_project(url)
+    breakdown_engine.write_needs(item_id, "claude-code-environment", ref)
+
+
+def write_declined_calendar_wait_needs(url: str, ref: str) -> None:
+    """Keep a calendar-wait decline on any-agent work (Needs none, #2492).
+
+    A calendar wait names no Mac capability and no Nate action: the ticket
+    is plain code work that is not startable on this run, as in #1712 and
+    #1715. The route preserves Needs none so the wait neither strands the
+    ticket in a session lane nor asks Nate; the next lane run re-reads the
+    date and either works the ticket or declines again. Restores of those
+    tickets where still open carry CALENDAR_WAIT_RESTORE_REASON; per the
+    2026-10-11 verify-first record both are CLOSED with no Project item,
+    so that conditional is vacuous here. The Needs single-select has no
+    reason subfield, so the reason rides on the ticket-visible
+    ``**Declined:**`` record (appended by ``finish_declined``) and the
+    heartbeat note, not on the ``write_needs`` call itself.
+    """
+    from engine import breakdown as breakdown_engine
+
+    item_id = breakdown_engine.add_to_project(url)
+    breakdown_engine.write_needs(item_id, "none", ref)
+
+
 def mark_ticket_blocked(repo: str, number: int, *, blocked_by: Optional[int] = None,
                         cwd: pathlib.Path) -> None:
     """Label one ticket blocked, with the native edge when one exists.
@@ -4210,6 +4281,10 @@ def finish_declined(
         = write_declined_agent_needs,
         external_event_needs_effect: Callable[[str, str], None]
         = write_declined_external_event_needs,
+        calendar_wait_needs_effect: Callable[[str, str], None]
+        = write_declined_calendar_wait_needs,
+        session_needs_effect: Callable[[str, str], None]
+        = write_declined_session_needs,
         prerequisite_facts_effect: Callable[[str], Optional[Dict[str, object]]]
         = read_declined_prerequisite,
         clear_block_effect: Callable[..., None] = clear_declined_ticket_block,
@@ -4260,6 +4335,7 @@ def finish_declined(
         decline_class == "unsatisfiable-acceptance"
     )
     pending_gate_answer_routed = decline_class == "pending-gate-answer"
+    calendar_wait_routed = decline_class == "calendar-wait"
     prerequisite_open = False
     if decline_class == "prerequisite-ticket" and decline_target is not None:
         try:
@@ -4285,6 +4361,20 @@ def finish_declined(
     declined_comment = block_record.render_declined(reason)
     if prerequisite_evidence is not None:
         declined_comment += "\n\n" + prerequisite_evidence
+    # A calendar wait naming genuine Mac capability on the still-Claude
+    # list is session-lane work waiting on a date, not plain code work:
+    # it keeps claude-code-environment at both seams (#2492). Checked
+    # here so the decline record, the Needs write and the finish note
+    # all agree; mirrors needs_for_human_step, where still-Claude wins.
+    calendar_wait_is_session = (
+        calendar_wait_routed
+        and any(pattern.search(reason or "")
+                for pattern in STILL_CLAUDE_RES)
+    )
+    if calendar_wait_routed and not calendar_wait_is_session:
+        # The Needs single-select carries no reason text, so the required
+        # restore reason rides on the ticket-visible decline record (#2492).
+        declined_comment += "\n\n" + CALENDAR_WAIT_RESTORE_REASON
     comment_effect(resolved, context["number"], declined_comment,
                    run=run, agent=agent, cwd=context["root"])
     if accept_conflict_routed:
@@ -4304,7 +4394,8 @@ def finish_declined(
     if (not prerequisite_recorded and not accept_conflict_routed
             and not false_unlanded_prerequisite_routed
             and not unsatisfiable_acceptance_routed
-            and not pending_gate_answer_routed):
+            and not pending_gate_answer_routed
+            and not calendar_wait_routed):
         # Unknown declines and failed prerequisite handoffs have no machine-
         # readable condition that can clear them. Keep the ticket blocked and
         # route its Unblock question through the funnel watch.
@@ -4326,6 +4417,24 @@ def finish_declined(
             resolved, context["number"], cwd=context["root"],
         )
         external_event_needs_effect(ticket["url"], ref)
+    elif calendar_wait_routed:
+        # A plain calendar wait is code work that is not startable on this
+        # run: clear any stale block and preserve Needs none (#2492).
+        # Before this route the same decline read as unknown, which
+        # overwrote none with blocked plus Needs agent; the Claude-only
+        # half of the #1712/#1715 history reproduced at the blocked-step
+        # seam, where unrecognized calendar wording kept the claimed
+        # claude-code-environment Needs (see needs_for_human_step). A
+        # wait naming genuine Mac capability on the still-Claude list
+        # keeps the session lane instead, so Mac-only work never sits
+        # on Needs none where any agent could start it.
+        clear_block_effect(
+            resolved, context["number"], cwd=context["root"],
+        )
+        if calendar_wait_is_session:
+            session_needs_effect(ticket["url"], ref)
+        else:
+            calendar_wait_needs_effect(ticket["url"], ref)
     routing_failed = False
     if accept_conflict_routed:
         try:
@@ -4395,6 +4504,13 @@ def finish_declined(
             if not routing_failed else
             "; gate-answer route failed; ticket left blocked"
         )
+    elif calendar_wait_routed:
+        if calendar_wait_is_session:
+            note += ("; waiting on the calendar; "
+                     "Needs claude-code-environment for genuine Mac work")
+        else:
+            note += ("; waiting on the calendar; Needs kept none "
+                     "(" + CALENDAR_WAIT_RESTORE_REASON + ")")
     elif routing_failed:
         note += "; review routing failed; ticket left blocked"
     if extra_note:

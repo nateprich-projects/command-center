@@ -123,6 +123,30 @@ _DECLINED_NO_CHANGE_CAN_CLEAR = re.compile(
     r"make\b.{0,100}\b(?:clear|meet|satisfy)\b",
     re.IGNORECASE | re.DOTALL,
 )
+#: A calendar wait: the run declines because the work starts on a future
+#: calendar date or event (#2492). Either order of the wait and the calendar
+#: mention, or a wait/blocked-until ISO date, reads as a date wait. Checked
+#: only when no other shape matched, so a dated prerequisite, gate answer or
+#: unsatisfiable acceptance keeps its own route.
+_DECLINED_CALENDAR_WAIT = (
+    re.compile(
+        r"\bwait(?:ing|s|ed)?\b.{0,80}\bcalendar\b",
+        re.IGNORECASE | re.DOTALL,
+    ),
+    re.compile(
+        r"\bcalendar\b.{0,80}\bwait(?:ing|s|ed)?\b",
+        re.IGNORECASE | re.DOTALL,
+    ),
+    re.compile(
+        r"\bwait(?:ing|s|ed)?\b.{0,40}\buntil\b.{0,40}"
+        r"\b\d{4}-\d{2}-\d{2}\b",
+        re.IGNORECASE | re.DOTALL,
+    ),
+    re.compile(
+        r"\bblocked\b.{0,40}\buntil\b.{0,40}\b\d{4}-\d{2}-\d{2}\b",
+        re.IGNORECASE | re.DOTALL,
+    ),
+)
 _DECLINED_ACCEPTANCE_TERM = re.compile(
     r"\b(?:accept|acceptance)(?:\s+(?:condition|criteria|requirement))?\b",
     re.IGNORECASE,
@@ -288,4 +312,6 @@ def classify_decline_reason(reason: str, ticket_repo: str,
     if (_is_defer_note_proof_reason(reason)
             and _accepts_defer_note_proof(ticket_body)):
         return "defer-note-proof", None
+    if any(pattern.search(reason or "") for pattern in _DECLINED_CALENDAR_WAIT):
+        return "calendar-wait", None
     return "unknown", None

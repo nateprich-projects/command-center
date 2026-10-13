@@ -78,6 +78,30 @@ except ImportError:  # pragma: no cover - the schedule Mac and CI are Unix
 
 SNAPSHOT_KEY = "snapshot"
 METRICS_KEY = "metrics"
+#: Cloudflare KV rejects one value over 25 MiB with a 413 (code 10024), which
+#: froze metrics publishing once the series outgrew it (#2516). The publisher
+#: asks metrics.py for a series under a smaller target and never attempts a
+#: PUT it knows the limit would reject.
+KV_VALUE_LIMIT_BYTES = 25 * 1024 * 1024
+METRICS_PUBLISH_TARGET_BYTES = 20 * 1024 * 1024
+#: Leaf arrays the dashboard page reads; numerators/denominators are
+#: diagnostics the page never renders, so dropping them is the last lever.
+#: This ladder mirrors metrics.SERIES_BUDGET_LADDER without importing it (the
+#: publisher must not be able to touch agent runs even by accident); the
+#: contract test in tests/test_publisher.py pins the two copies together.
+METRICS_SERIES_READING_KEYS = ("daily", "r7", "r28", "delta")
+METRICS_SERIES_PART_KEYS = ("numerators", "denominators")
+METRICS_SERIES_BUDGET_LADDER = (
+    (60, 7, True),
+    (45, 7, True),
+    (30, 7, True),
+    (30, 14, True),
+    (21, 14, True),
+    (21, 28, True),
+    (14, 28, True),
+    (7, 28, True),
+    (7, 28, False),
+)
 REFRESH_KEY = "refresh-requested"
 KV_BINDING = "FUNNEL_SNAPSHOT"
 #: Standing snapshot regeneration cadence. Refresh requests use the same value
@@ -682,11 +706,83 @@ def _resolve_brief_timeout(cli_value: Optional[float]) -> float:
     return timeout
 
 
+def _encode_series(payload: Dict) -> bytes:
+    """Encode a series envelope exactly as the publisher PUTs it."""
+    return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def _downsample_series_envelope(payload: Dict, recent: int,
+                                stride: int, keep_parts: bool) -> Dict:
+    """Rewrite a v1 envelope as a bounded v2 envelope (#2516).
+
+    A stdlib-only mirror of metrics' budget transform, kept here so the
+    publisher can bound any emit shape without importing metrics: recent
+    full-resolution days plus stride-subsampled ``older_*`` buckets, with
+    every ``days`` label kept so positions stay stable.
+    """
+    days = list(payload["days"])
+    split = max(0, len(days) - recent)
+
+    def convert(node: object) -> object:
+        if isinstance(node, dict) and all(
+            isinstance(node.get(key), list)
+            for key in METRICS_SERIES_READING_KEYS
+        ):
+            leaf: Dict = {"kind": node.get("kind")}
+            for key in METRICS_SERIES_READING_KEYS:
+                values = node[key]
+                leaf[key] = values[split:]
+                leaf["older_" + key] = values[:split][::stride]
+            if keep_parts:
+                for key in METRICS_SERIES_PART_KEYS:
+                    if isinstance(node.get(key), list):
+                        leaf[key] = node[key][split:]
+                        leaf["older_" + key] = node[key][:split][::stride]
+            for key in ("gap", "source"):
+                if node.get(key) is not None:
+                    leaf[key] = node[key]
+            return leaf
+        if isinstance(node, dict):
+            return {key: convert(value) for key, value in node.items()}
+        return node
+
+    return {
+        "schema_version": 2,
+        "as_of": payload.get("as_of"),
+        "start_date": payload.get("start_date"),
+        "days": days,
+        "recent_days": len(days) - split,
+        "stride": stride,
+        "source_updated_at": payload.get("source_updated_at"),
+        "metrics": convert(payload.get("metrics", {})),
+    }
+
+
+def _bound_series_bytes(payload: Dict) -> Optional[bytes]:
+    """Fit an oversize v1 envelope under the KV value limit, if possible."""
+    if (
+        not isinstance(payload, dict)
+        or payload.get("schema_version") != 1
+        or not isinstance(payload.get("days"), list)
+        or not isinstance(payload.get("metrics"), dict)
+    ):
+        return None
+    bounded: Optional[bytes] = None
+    for recent, stride, keep_parts in METRICS_SERIES_BUDGET_LADDER:
+        candidate = _encode_series(
+            _downsample_series_envelope(payload, recent, stride, keep_parts))
+        bounded = candidate
+        if len(candidate) <= METRICS_PUBLISH_TARGET_BYTES:
+            return candidate
+    return bounded
+
+
 def _metrics_series_bytes(metrics_py: Path) -> bytes:
     """Run the read-only series command and validate its JSON envelope."""
     try:
         result = subprocess.run(
-            [sys.executable, str(metrics_py), "series"],
+            [sys.executable, str(metrics_py), "series",
+             "--max-bytes", str(METRICS_PUBLISH_TARGET_BYTES)],
             capture_output=True,
             text=True,
             timeout=DEFAULT_METRICS_TIMEOUT_SECONDS,
@@ -708,12 +804,21 @@ def _metrics_series_bytes(metrics_py: Path) -> bytes:
         raise PublisherError("metrics.py series returned invalid JSON: {}".format(exc))
     if (
         not isinstance(payload, dict)
-        or payload.get("schema_version") != 1
+        or payload.get("schema_version") not in (1, 2)
         or not isinstance(payload.get("days"), list)
         or not isinstance(payload.get("metrics"), dict)
     ):
         raise PublisherError("metrics.py series returned an invalid schema")
-    return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    raw = _encode_series(payload)
+    if len(raw) <= METRICS_PUBLISH_TARGET_BYTES:
+        return raw
+    bounded = _bound_series_bytes(payload)
+    if bounded is not None and len(bounded) <= KV_VALUE_LIMIT_BYTES:
+        log("bounded metrics series from {} to {} bytes".format(len(raw), len(bounded)))
+        return bounded
+    raise PublisherError(
+        "metrics series ({} bytes) exceeds the {}-byte KV value limit; "
+        "not publishing".format(len(raw), KV_VALUE_LIMIT_BYTES))
 
 
 def publish_metrics_series(kv: KVClient, metrics_py: Path) -> None:

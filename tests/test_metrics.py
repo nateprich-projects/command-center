@@ -1034,6 +1034,116 @@ def test_live_derive_appends_before_remeasuring_recent_rows(monkeypatch, capsys)
     }
 
 
+def _budget_envelope(leaves, days=90):
+    """A v1-shaped envelope with deterministic long-float readings."""
+    values = [float(index) + 0.123456789 for index in range(days)]
+    tree = {}
+    for number in range(leaves):
+        tree["leaf%d" % number] = {
+            "kind": "sum",
+            "daily": list(values),
+            "r7": list(values),
+            "r28": list(values),
+            "delta": list(values),
+            "numerators": list(values),
+            "denominators": [1.0] * days,
+        }
+    return {
+        "schema_version": 1,
+        "as_of": "2026-10-11",
+        "start_date": "2026-07-14",
+        "days": ["day%02d" % index for index in range(days)],
+        "source_updated_at": "2026-10-11T08:24:00Z",
+        "metrics": tree,
+    }
+
+
+def test_series_budget_passes_small_series_through_unchanged():
+    payload = _budget_envelope(2)
+
+    assert metrics.apply_series_budget(payload) is payload
+    assert payload["schema_version"] == 1
+
+
+def test_series_budget_rejects_a_non_v1_envelope():
+    with pytest.raises(metrics.MetricsError):
+        metrics.apply_series_budget({"schema_version": 2})
+
+
+def test_series_budget_keeps_recent_days_exact_and_downsamples_older():
+    payload = _budget_envelope(2)
+    original = payload["metrics"]["leaf0"]
+
+    bounded = metrics.apply_series_budget(payload, 11000)
+
+    assert bounded["schema_version"] == 2
+    assert bounded["days"] == payload["days"]
+    assert bounded["recent_days"] == 60
+    assert bounded["stride"] == 7
+    leaf = bounded["metrics"]["leaf0"]
+    assert leaf["kind"] == "sum"
+    assert leaf["daily"] == original["daily"][-60:]
+    assert leaf["r7"] == original["r7"][-60:]
+    assert leaf["older_daily"] == original["daily"][:30][::7]
+    assert leaf["older_r28"] == original["r28"][:30][::7]
+    assert leaf["numerators"] == original["numerators"][-60:]
+    assert leaf["older_denominators"] == original["denominators"][:30][::7]
+
+
+def test_series_budget_can_shed_part_arrays_as_a_last_lever():
+    payload = _budget_envelope(1)
+
+    bounded = metrics._downsample_series(payload, 60, 7, False)
+    leaf = bounded["metrics"]["leaf0"]
+
+    assert "numerators" not in leaf
+    assert "denominators" not in leaf
+    assert leaf["daily"] == payload["metrics"]["leaf0"]["daily"][-60:]
+    assert leaf["older_daily"] == payload["metrics"]["leaf0"]["daily"][:30][::7]
+
+
+def test_series_budget_holds_simulated_growth_under_target_with_headroom():
+    assert metrics.SERIES_PUBLISH_TARGET_BYTES < metrics.KV_VALUE_LIMIT_BYTES
+    earlier = _budget_envelope(3600)
+    later = _budget_envelope(4000)
+    assert metrics._series_envelope_size(later) > metrics.SERIES_PUBLISH_TARGET_BYTES
+
+    bounded_earlier = metrics.apply_series_budget(earlier)
+    bounded_later = metrics.apply_series_budget(later)
+
+    for bounded in (bounded_earlier, bounded_later):
+        assert bounded["schema_version"] == 2
+        assert (
+            metrics._series_envelope_size(bounded)
+            <= metrics.SERIES_PUBLISH_TARGET_BYTES
+        )
+    # The later, larger series still fits with room to spare: headroom is
+    # the target-to-limit gap, not a hover at the 413 line.
+    assert (
+        metrics._series_envelope_size(bounded_later)
+        <= metrics.KV_VALUE_LIMIT_BYTES
+        - (metrics.KV_VALUE_LIMIT_BYTES - metrics.SERIES_PUBLISH_TARGET_BYTES)
+    )
+    leaf = bounded_later["metrics"]["leaf0"]
+    original = later["metrics"]["leaf0"]
+    recent = bounded_later["recent_days"]
+    assert leaf["daily"] == original["daily"][-recent:]
+
+
+def test_series_cli_bounds_to_max_bytes(capsys):
+    fixture = FIXTURES / "metrics_series.jsonl"
+
+    result = metrics.main([
+        "series", "--rows", str(fixture), "--now", "2026-09-24T23:00:00Z",
+        "--max-bytes", "500",
+    ])
+
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["schema_version"] == 2
+    assert len(payload["days"]) == 90
+
+
 def test_series_never_blends_b3_rows_from_the_retired_definition():
     snapshot, ledgers, usage, outcomes, commits, lines = _inputs()
     day = datetime(2026, 9, 20, tzinfo=timezone.utc)

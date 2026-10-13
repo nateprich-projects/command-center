@@ -40,6 +40,40 @@ METRICS_PATH = "metrics.jsonl"
 AGENTS = ("muse", "claude", "codex")
 HOUR_SECONDS = 60 * 60
 SERIES_DAYS = 90
+#: Cloudflare KV rejects one value over 25 MiB with a 413 (code 10024), which
+#: froze metrics publishing once the 90-day series outgrew it (#2516). The
+#: series publishes under a smaller target so ordinary daily growth keeps
+#: headroom instead of hovering at the limit.
+KV_VALUE_LIMIT_BYTES = 25 * 1024 * 1024
+SERIES_PUBLISH_TARGET_BYTES = 20 * 1024 * 1024
+#: Recent days kept at full daily resolution. The dashboard charts the newest
+#: 56 days, so the default keeps that window plus margin; the budget ladder
+#: below only shrinks it while the series still does not fit.
+SERIES_RECENT_DAYS = 60
+SERIES_MIN_RECENT_DAYS = 7
+#: Older days are stride-subsampled from the already rolled-up arrays (r7 and
+#: r28 stay true values at their sampled dates). The ladder only widens the
+#: stride while the series still does not fit.
+SERIES_DOWNSAMPLE_STRIDE = 7
+SERIES_MAX_DOWNSAMPLE_STRIDE = 28
+#: Leaf arrays the dashboard page reads. Numerators/denominators are
+#: diagnostics the page never renders, so dropping them is the last lever.
+SERIES_READING_KEYS = ("daily", "r7", "r28", "delta")
+SERIES_PART_KEYS = ("numerators", "denominators")
+#: (recent full-resolution days, older-day stride, keep numerators/denominators).
+#: publisher.py mirrors this ladder without importing this module; the
+#: contract test in tests/test_publisher.py pins the two copies together.
+SERIES_BUDGET_LADDER = (
+    (SERIES_RECENT_DAYS, SERIES_DOWNSAMPLE_STRIDE, True),
+    (45, SERIES_DOWNSAMPLE_STRIDE, True),
+    (30, SERIES_DOWNSAMPLE_STRIDE, True),
+    (30, 14, True),
+    (21, 14, True),
+    (21, SERIES_MAX_DOWNSAMPLE_STRIDE, True),
+    (14, SERIES_MAX_DOWNSAMPLE_STRIDE, True),
+    (SERIES_MIN_RECENT_DAYS, SERIES_MAX_DOWNSAMPLE_STRIDE, True),
+    (SERIES_MIN_RECENT_DAYS, SERIES_MAX_DOWNSAMPLE_STRIDE, False),
+)
 STORE_BACKOFF = (1, 3, 7)
 FINISH_OUTCOMES = (
     "done", "nothing-to-do", "errored", "skipped-over-pace",
@@ -2484,6 +2518,95 @@ def series_from_rows(rows: Sequence[Mapping[str, object]],
     }
 
 
+def _series_envelope_size(payload: Mapping[str, object]) -> int:
+    """Encoded size of a series envelope as the publisher PUTs it."""
+    return len(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+
+
+def _subsample_series_values(values: Sequence[object], stride: int) -> List[object]:
+    return [value for index, value in enumerate(values) if index % stride == 0]
+
+
+def _downsample_series(payload: Mapping[str, object], recent: int,
+                       stride: int, keep_parts: bool) -> Dict[str, object]:
+    """Rewrite a v1 envelope as a bounded v2 envelope.
+
+    ``days`` keeps every label so positions stay stable; each series leaf
+    keeps its newest ``recent`` values at daily resolution plus
+    stride-subsampled ``older_*`` buckets for the earlier days. The worker
+    expands the buckets back to daily alignment, so the page that indexes
+    every leaf array by day position renders unchanged.
+    """
+    days = list(payload["days"])
+    split = max(0, len(days) - recent)
+
+    def convert(node: object) -> object:
+        if isinstance(node, Mapping) and all(
+            isinstance(node.get(key), list) for key in SERIES_READING_KEYS
+        ):
+            leaf: Dict[str, object] = {"kind": node.get("kind")}
+            for key in SERIES_READING_KEYS:
+                values = node[key]
+                assert isinstance(values, list)
+                leaf[key] = values[split:]
+                leaf["older_" + key] = _subsample_series_values(values[:split], stride)
+            if keep_parts:
+                for key in SERIES_PART_KEYS:
+                    if isinstance(node.get(key), list):
+                        part = node[key]
+                        assert isinstance(part, list)
+                        leaf[key] = part[split:]
+                        leaf["older_" + key] = _subsample_series_values(part[:split], stride)
+            for key in ("gap", "source"):
+                if node.get(key) is not None:
+                    leaf[key] = node[key]
+            return leaf
+        if isinstance(node, Mapping):
+            return {key: convert(value) for key, value in node.items()}
+        return node
+
+    return {
+        "schema_version": 2,
+        "as_of": payload.get("as_of"),
+        "start_date": payload.get("start_date"),
+        "days": days,
+        "recent_days": len(days) - split,
+        "stride": stride,
+        "source_updated_at": payload.get("source_updated_at"),
+        "metrics": convert(payload.get("metrics", {})),
+    }
+
+
+def apply_series_budget(payload: Mapping[str, object],
+                        max_bytes: Optional[int] = SERIES_PUBLISH_TARGET_BYTES
+                        ) -> Mapping[str, object]:
+    """Fit a v1 series envelope under ``max_bytes`` (#2518).
+
+    Envelopes already under budget pass through unchanged, still schema
+    version 1. Oversize envelopes come back as schema version 2 with recent
+    full-resolution days and downsampled older days; the first ladder rung
+    that fits wins, so growth only ever costs older resolution, never the
+    publish itself.
+    """
+    if (
+        not isinstance(payload, Mapping)
+        or payload.get("schema_version") != 1
+        or not isinstance(payload.get("days"), list)
+        or not isinstance(payload.get("metrics"), Mapping)
+    ):
+        raise MetricsError("metrics series budget needs a v1 series envelope")
+    if max_bytes is None or max_bytes <= 0 or _series_envelope_size(payload) <= max_bytes:
+        return payload
+    bounded = _downsample_series(
+        payload, SERIES_RECENT_DAYS, SERIES_DOWNSAMPLE_STRIDE, True)
+    for recent, stride, keep_parts in SERIES_BUDGET_LADDER:
+        candidate = _downsample_series(payload, recent, stride, keep_parts)
+        bounded = candidate
+        if _series_envelope_size(candidate) <= max_bytes:
+            return candidate
+    return bounded
+
+
 def append_rows(
     existing: Sequence[Mapping[str, object]], row: Mapping[str, object]
 ) -> Tuple[List[Dict], int]:
@@ -3042,6 +3165,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     series = sub.add_parser("series", help="roll hourly facts into 90 daily values")
     series.add_argument("--rows", help="fixture hourly metrics JSONL; default reads the heartbeat branch")
     series.add_argument("--now", help="UTC timestamp anchoring the 90-day window")
+    series.add_argument(
+        "--max-bytes", type=int, default=SERIES_PUBLISH_TARGET_BYTES,
+        help="bound the envelope under this many bytes before printing "
+             "(#2518); 0 or negative prints the unbounded v1 series",
+    )
     args = parser.parse_args(argv)
     try:
         if args.command == "backfill":
@@ -3049,7 +3177,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if args.command == "series":
             now = _parse_now(args.now) or datetime.now(timezone.utc)
             rows = _read_jsonl(args.rows) if args.rows else _read_remote()[0]
-            result = series_from_rows(rows, now)
+            result = apply_series_budget(series_from_rows(rows, now), args.max_bytes)
             print(json.dumps(result, indent=2, sort_keys=True))
             return 0
 

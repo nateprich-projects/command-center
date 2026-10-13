@@ -4951,7 +4951,8 @@ def test_classify_decline_reason_read_unknown_without_calendar_rule(
     claude-code-environment; the Claude-only mislabel on #1712/#1715 lived
     at the blocked-step seam (see
     test_calendar_wait_step_filed_claude_without_calendar_rule), and the
-    fixed code preserves none at both seams."""
+    fixed code preserves none for plain waits at both seams (genuine-Mac
+    waits keep the session lane at both)."""
     import decline_classifier
 
     monkeypatch.setattr(decline_classifier, "_DECLINED_CALENDAR_WAIT", ())
@@ -4983,7 +4984,8 @@ def test_finish_declined_preserves_none_for_calendar_wait(
     unknown, which overwrote none with blocked plus Needs agent; the
     Claude-only half of the #1712/#1715 history is pinned at the
     blocked-step seam by the calendar-rule-only test above, since the
-    decline route itself never wrote claude-code-environment."""
+    old decline route never wrote claude-code-environment (genuine-Mac
+    waits now keep the session lane there too)."""
     _, clone = make_clone(tmp_path)
     monkeypatch.setattr(implement, "fetch_ticket", lambda repo, number: ticket(number))
     effects = {"blocked": [], "cleared": [], "comments": [], "released": [],
@@ -5034,14 +5036,15 @@ def test_finish_declined_preserves_none_for_calendar_wait(
     "Keychain.",
     "Waiting on the calendar; the live config deploy follows the date.",
 ])
-def test_calendar_wait_decline_never_files_claude_needs(
+def test_calendar_wait_decline_files_claude_needs_for_genuine_mac(
         tmp_path, monkeypatch, reason):
-    """Only genuine Mac capability files claude-code-environment: even a
-    calendar wait naming Mac words stays on Needs none, because the decline
-    route has no session-lane writer (#2492)."""
+    """A calendar wait naming genuine Mac capability keeps the session
+    lane: still-Claude wording wins over the plain none route at the
+    decline seam, as it already does at the blocked-step seam (#2492)."""
     _, clone = make_clone(tmp_path)
     monkeypatch.setattr(implement, "fetch_ticket", lambda repo, number: ticket(number))
     writes = []
+    effects = {"blocked": [], "cleared": [], "comments": [], "finished": []}
 
     implement.finish_declined(
         reason,
@@ -5049,19 +5052,47 @@ def test_calendar_wait_decline_never_files_claude_needs(
         repo=REPO,
         cwd=clone,
         release=lambda target: None,
-        heartbeat_finish=lambda *args: None,
-        block_effect=lambda *args, **kwargs: pytest.fail(
-            "a calendar wait must not block"),
-        comment_effect=lambda *args, **kwargs: None,
+        heartbeat_finish=lambda *args: effects["finished"].append(args),
+        block_effect=lambda *args, **kwargs: effects["blocked"].append(
+            (args, kwargs)),
+        comment_effect=lambda *args, **kwargs: effects["comments"].append(
+            (args, kwargs)),
         needs_effect=lambda url, ref: writes.append("agent"),
         declined_needs_effect=lambda url, ref: writes.append("agent"),
         external_event_needs_effect=lambda url, ref: writes.append(
             "external-event"),
         calendar_wait_needs_effect=lambda url, ref: writes.append("none"),
-        clear_block_effect=lambda *args, **kwargs: None,
+        session_needs_effect=lambda url, ref: writes.append(
+            "claude-code-environment"),
+        clear_block_effect=lambda repo, number, **kwargs:
+            effects["cleared"].append((repo, number, kwargs)),
     )
 
-    assert writes == ["none"]
+    assert writes == ["claude-code-environment"]
+    assert effects["blocked"] == []
+    assert effects["cleared"] == [(REPO, 42, {"cwd": clone})]
+    assert implement.CALENDAR_WAIT_RESTORE_REASON not in (
+        effects["comments"][0][0][2])
+    assert "Needs claude-code-environment" in effects["finished"][0][3]
+
+
+def test_write_declined_session_needs_uses_canonical_field(monkeypatch):
+    from engine import breakdown as breakdown_engine
+
+    calls = []
+    monkeypatch.setattr(
+        breakdown_engine, "add_to_project", lambda url: "project-item-id")
+    monkeypatch.setattr(
+        breakdown_engine, "write_needs",
+        lambda item_id, needs, ref: calls.append((item_id, needs, ref)),
+    )
+
+    implement.write_declined_session_needs(
+        ticket()["url"], REPO + "#42",
+    )
+
+    assert calls == [(
+        "project-item-id", "claude-code-environment", REPO + "#42")]
 
 
 def test_write_declined_calendar_wait_needs_uses_canonical_field(monkeypatch):

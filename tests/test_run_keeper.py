@@ -38,13 +38,38 @@ DEPLOY_PLIST = "com.nateprich.command-center-funnel-deploy.plist"
 UNTOUCHED_PLIST = "com.nateprich.command-center-muse-review.plist"
 
 
-def run_git(*args, cwd=None):
+def run_git(*args, cwd=None, env=None):
+    full_env = os.environ.copy()
+    if env:
+        full_env.update(env)
     return subprocess.run(
         ["/usr/bin/git", *args],
         cwd=cwd,
         check=True,
         capture_output=True,
         text=True,
+        env=full_env,
+    )
+
+
+def read_config(repo: Path, key: str, env=None) -> str | None:
+    """One git config value, or None when it is unset."""
+    full_env = os.environ.copy()
+    if env:
+        full_env.update(env)
+    proc = subprocess.run(
+        ["/usr/bin/git", "-C", str(repo), "config", key],
+        capture_output=True,
+        text=True,
+        env=full_env,
+    )
+    return proc.stdout.strip() if proc.returncode == 0 else None
+
+
+def count_objects(repo: Path) -> dict:
+    out = run_git("-C", str(repo), "count-objects", "-v").stdout
+    return dict(
+        line.split(": ", 1) for line in out.splitlines() if ": " in line
     )
 
 
@@ -164,6 +189,10 @@ def test_keeper_appends_one_parseable_line_per_run(tmp_path):
             "COMMAND_CENTER_SENTINEL_SYSCTL": str(tools / "sysctl"),
             "COMMAND_CENTER_SENTINEL_UPTIME": str(tools / "uptime"),
             "COMMAND_CENTER_SENTINEL_FILE": "sentinel.log",
+            # The keeper registers the clone for scheduled maintenance, which
+            # writes the global git config: keep that write in a fake home
+            # rather than the developer's real ~/.gitconfig (#2561).
+            "HOME": str(tmp_path / "home"),
         }
     )
 
@@ -1031,3 +1060,138 @@ def test_keeper_skips_housekeeping_between_hours(tmp_path):
     assert result.returncode == 0, result.stderr
     assert "housekeeping sweep" not in result.stdout
     assert not (tmp_path / "housekeeping-brief.json").exists()
+
+
+def test_keeper_configures_run_clone_maintenance_suppression(tmp_path):
+    """The keeper converges a fresh run clone on suppressed foreground
+    maintenance plus scheduled registration (#2561)."""
+    bare, checkout = make_heartbeat_remote(tmp_path)
+    for key in ("maintenance.auto", "gc.auto", "fetch.unpackLimit"):
+        assert read_config(checkout, key) is None
+
+    home = tmp_path / "home"
+    home.mkdir(parents=True)
+    tools, _launchctl_log = make_tools(tmp_path)
+    result = run_keeper(checkout, home, tools, tools / "launchctl")
+    assert result.returncode == 0, result.stderr
+
+    assert read_config(checkout, "maintenance.auto") == "false"
+    assert read_config(checkout, "gc.auto") == "0"
+    assert read_config(checkout, "fetch.unpackLimit") == "1"
+    registered = run_git(
+        "config", "--global", "--get-all", "maintenance.repo",
+        cwd=str(tmp_path), env={"HOME": str(home)},
+    ).stdout.splitlines()
+    assert str(checkout) in registered
+
+    # A linked sentinel worktree shares the main clone's config, so it
+    # inherits the suppression without its own setup.
+    worktree = tmp_path / "sentinel-wt"
+    run_git("-C", str(checkout), "worktree", "add", "--detach",
+            str(worktree), "origin/heartbeat")
+    try:
+        assert read_config(worktree, "maintenance.auto") == "false"
+        assert read_config(worktree, "gc.auto") == "0"
+        assert read_config(worktree, "fetch.unpackLimit") == "1"
+    finally:
+        run_git("-C", str(checkout), "worktree", "remove", "--force",
+                str(worktree))
+
+
+def test_default_clone_spawns_auto_maintenance_on_heartbeat_fetch(tmp_path):
+    """Premise for #2561, as a standing check: with default settings, a
+    routine heartbeat fetch spawns `git maintenance run --auto` and lands
+    the fetched blobs as loose objects. If git ever stops doing that, the
+    suppression has nothing to suppress and this test says so."""
+    bare, checkout = make_heartbeat_remote(tmp_path)
+    seed = tmp_path / "seed"
+    home = tmp_path / "home"
+    home.mkdir()
+    env = {"HOME": str(home)}
+    assert read_config(checkout, "maintenance.auto") is None
+    assert read_config(checkout, "gc.auto") is None
+    assert read_config(checkout, "fetch.unpackLimit") is None
+
+    baseline = count_objects(checkout)
+    run_git("-C", str(seed), "checkout", "heartbeat")
+    for i in range(3):
+        with (seed / ".keep").open("a") as handle:
+            handle.write("remote %d\n" % i)
+        run_git("-C", str(seed), "commit", "-am", "remote %d" % i)
+        run_git("-C", str(seed), "push", "origin", "heartbeat")
+        trace = tmp_path / ("fetch-%d.log" % i)
+        run_git("-C", str(checkout), "fetch", "origin", "heartbeat",
+                env={**env, "GIT_TRACE": str(trace)})
+        assert "maintenance run --auto" in trace.read_text()
+
+    after = count_objects(checkout)
+    assert after["in-pack"] == "0"
+    assert int(after["count"]) - int(baseline["count"]) == 9
+
+
+def test_keeper_suppresses_auto_maintenance_under_heartbeat_load(tmp_path):
+    """Under simulated heartbeat fetch plus sentinel commit load, the
+    keeper-configured clone spawns no automatic maintenance, keeps fetches
+    packed, and still compacts on the schedule (#2561)."""
+    bare, checkout = make_heartbeat_remote(tmp_path)
+    seed = tmp_path / "seed"
+    home = tmp_path / "home"
+    home.mkdir(parents=True)
+    tools, _launchctl_log = make_tools(tmp_path)
+    result = run_keeper(checkout, home, tools, tools / "launchctl")
+    assert result.returncode == 0, result.stderr
+    env = {"HOME": str(home)}
+
+    # Remote writers commit behind the keeper's own sentinel push, so the
+    # seed fast-forwards before appending, the way a writer would.
+    run_git("-C", str(seed), "checkout", "heartbeat")
+    run_git("-C", str(seed), "pull", "--ff-only", "origin", "heartbeat")
+    before = count_objects(checkout)
+    traces = []
+    for i in range(5):
+        with (seed / ".keep").open("a") as handle:
+            handle.write("remote %d\n" % i)
+        run_git("-C", str(seed), "commit", "-am", "remote %d" % i)
+        run_git("-C", str(seed), "push", "origin", "heartbeat")
+        trace = tmp_path / ("load-fetch-%d.log" % i)
+        run_git("-C", str(checkout), "fetch", "origin", "heartbeat",
+                env={**env, "GIT_TRACE": str(trace)})
+        traces.append(trace)
+
+    fetched = count_objects(checkout)
+    assert int(fetched["count"]) == int(before["count"])
+    assert int(fetched["in-pack"]) - int(before["in-pack"]) == 15
+
+    # One sentinel commit from a linked worktree, the keeper's own shape:
+    # append, commit, push from a fresh checkout of the fetched tip.
+    worktree = tmp_path / "sentinel-wt"
+    run_git("-C", str(checkout), "worktree", "add", "--detach",
+            str(worktree), "origin/heartbeat")
+    try:
+        with (worktree / "sentinel.log").open("a") as handle:
+            handle.write("sentinel probe\n")
+        commit_trace = tmp_path / "load-commit.log"
+        run_git("-C", str(worktree), "add", "--", "sentinel.log")
+        run_git("-C", str(worktree),
+                "-c", "user.name=test",
+                "-c", "user.email=test@example.com",
+                "commit", "-m", "heartbeat: sentinel probe",
+                env={**env, "GIT_TRACE": str(commit_trace)})
+        traces.append(commit_trace)
+        run_git("-C", str(worktree), "push", "origin", "HEAD:heartbeat")
+    finally:
+        run_git("-C", str(checkout), "worktree", "remove", "--force",
+                str(worktree))
+
+    # The overlap check: no routine command spawned automatic maintenance,
+    # so there is nothing to pile up.
+    for trace in traces:
+        assert "maintenance run --auto" not in trace.read_text()
+
+    # The scheduled compactor still packs what the sentinel left loose.
+    packed_before = count_objects(checkout)
+    scheduled = run_git("-C", str(checkout), "maintenance", "run",
+                        "--schedule=daily", env=env)
+    assert scheduled.returncode == 0
+    packed_after = count_objects(checkout)
+    assert int(packed_after["in-pack"]) > int(packed_before["in-pack"])

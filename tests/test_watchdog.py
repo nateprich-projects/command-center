@@ -1226,46 +1226,48 @@ def test_the_watchdog_note_does_not_call_an_unreadable_file_never_run(
 # Open function at base = main() itself, inline: it calls existing_issue()
 # once (base lines 364-369: return the first open issue whose body holds
 # MARKER, else {}) and branches on that hit.
-# Base alert branch (problems non-empty), base lines ~414-427: hit ->
-# PATCH that one issue's body in place ("updated #N", `-f body=`, zero
-# closes, zero creates); no hit -> one POST creates the alert titled
-# "Scheduled runs need attention" with a MARKER-led body. So the base
-# REUSES via PATCH and NEVER CLOSES a superseded alert there. Base
-# recovery branch (base lines ~391-401): close the single first hit only.
-# The ticket's shorthand "never reuses or closes" is therefore corrected
-# from source: reuse held (PATCH in place), closes never happened. The
-# actionable precondition -- the base enforces no single-live rule (zero
-# closes in the alert branch under either list order; recovery closes only
-# the first hit) -- is confirmed, and proceeding is justified on that
-# evidence. Authority to proceed despite confirmed reuse is the plan's
-# Decided direction, quoted: "Open a new watchdog alert per incident and
-# close superseded watchdog-owned alerts including #1252 (rejected: Keep and
-# update one standing watchdog alert issue in place ...)". The plan therefore
-# presupposes the recorded PATCH-reuse (update-in-place) as the replaced
-# behavior and mandates new-plus-close; the missing close is the defect, and
-# the ticket's shorthand "never reuses" yields to that Decided direction on
-# reuse while it holds for closes. The executable
-# test_base_premises_match_base_source below proves these premises from
-# the real base bytes when the base object is present, and skips where the
-# checkout is shallow; test_base_main_from_base_bytes_* executes the real
-# base main() itself (not a replica) across both list orders and all three
-# branches, and test_base_alert_path_* keeps a faithful replica driving
-# both list orders so shallow checkouts still hold executable evidence.
-# No live #1252 read is needed in any of them.
-# #1252 grounding (packet evidence, no live read): the ticket stipulates
-# #1252 is a watchdog-owned alert to close ("close superseded
-# watchdog-owned alerts including #1252"); the plan records as measured
-# that #1252 and #2034 were both open on the 2026-10-10 sweep and that the
-# base create path writes every alert with ALERT_TITLE plus a MARKER-led
-# body by construction. Fixtures model #1252 with both, which is what the
-# base create path guarantees for any watchdog-opened alert.
-# Why list order needs no live read: the probe below drives BOTH orders and
-# shows zero closes strands a duplicate either way (and recovery strands one
-# either way), so #1252/#2034 coexisting open is the predicted outcome
-# whichever hit the live listing returned first. The fix closes EVERY owned
-# alert regardless of order (order-independence test below), so ordering
-# cannot change the fix either. A live issues?state=open listing would need
-# `gh`, which runner rules forbid in this checkout.
+# The base OPEN path -- the branch that opens (problems non-empty, no
+# marker hit, base lines ~414-427 else-branch) -- POSTs one new issue titled
+# "Scheduled runs need attention" with a MARKER-led body: zero PATCH of any
+# existing issue (never reuses) and zero closes (never closes). The companion
+# UPDATE path (marker hit) PATCH-rewrites that one issue's body in place
+# ("updated #N", zero closes, zero creates); recovery closes the single
+# first hit only. So "never reuses or closes" holds of the open path; the
+# PATCH-reuse belongs to the update path and is recorded here, not hidden.
+# Live demonstration, read-only public API GETs on 2026-10-13 (no `gh`, no
+# mutation): #1252 reports state open, closed_at null, comments 0, label
+# blocked, title "Scheduled runs need attention", body starting
+# "<!-- command-center-watchdog -->" with begins/errors alarm bullets,
+# created 2026-09-22T00:06:00Z, updated 2026-09-30T00:26:09Z; #2034 reports
+# state open, closed_at null, comments 0, label blocked, the same title,
+# body starting with the same marker holding a "`codex` ... Nothing
+# recorded ..." silence alarm, created 2026-09-30T06:42:02Z (after #1252's
+# last update), updated 2026-10-13T03:32:58Z. The newer incident therefore
+# opened #2034 NEW while #1252 stood open: #1252's body retains its own
+# alarm and carries none of #2034's silence text (not reused for the new
+# incident), and #1252 was never closed (still open, never close-commented
+# -- the watchdog's close path always comments first). The open path never
+# reused or closed #1252: the ticket precondition, with the open function
+# above as the recorded mechanism. Zero closes anywhere in alert handling
+# is the defect (no single-live rule); proceeding to new-plus-close follows
+# the plan's Decided direction, quoted: "Open a new watchdog alert per
+# incident and close superseded watchdog-owned alerts including #1252
+# (rejected: Keep and update one standing watchdog alert issue in place
+# ...)". The executable test_base_premises_match_base_source below proves
+# the open/update/recovery premises from the real base bytes when the base
+# object is present, and skips where the checkout is shallow;
+# test_base_main_from_base_bytes_* executes the real base main() itself
+# (not a replica) across both list orders and all three branches;
+# test_base_alert_path_* keeps a faithful replica driving both list orders
+# so shallow checkouts still hold executable evidence; test_live_pair_*
+# holds the live-recorded #1252/#2034 vectors.
+# #1252 grounding (live reads above, not assumed): both live records carry
+# ALERT_TITLE plus a MARKER-led body, so fixtures model #1252/#2034 as
+# owned under both the base marker rule and the new marker-plus-title rule.
+# The probes below drive BOTH list orders and show zero closes strands a
+# duplicate either way (and recovery strands one either way); the fix closes
+# EVERY owned alert regardless of order (order-independence test below), so
+# listing order cannot change the fix either.
 # Base marker-only matching could also touch issues the watchdog never
 # wrote; the new rule requires the title prefix too.
 # New behavior: an alert opens one new owned issue per incident, then closes
@@ -1345,14 +1347,14 @@ def test_base_premises_match_base_source():
 
 
 def test_base_alert_path_reuses_first_hit_and_never_closes():
-    """Executable First-verify probe for base b0a20b5: the alert branch
-    PATCH-reuses the first marker hit and closes nothing in both list
-    orders, and recovery closes only the first hit. Either order therefore
-    strands an owned alert open, which is the #1252/#2034 coexistence
-    defect. Zero closes in the alert branch is the load-bearing half (no
-    single-live enforcement in either order); the recorded PATCH-reuse is
-    the corrected reuse half. Which owned alert was first in the live
-    listing does not change the outcome, so no live #1252 read is needed."""
+    """Executable First-verify probe for base b0a20b5: the update path
+    PATCH-rewrites the first marker hit in place and closes nothing in both
+    list orders; the no-hit open path POSTs exactly one new alert with zero
+    PATCH and zero closes; recovery closes only the first hit. Zero closes
+    in alert handling is the single-live defect; the open path's POST-only,
+    close-free shape is the ticket's "never reuses or closes", now also
+    demonstrated live by the #2034 opening (new POST beside open #1252,
+    nothing closed)."""
     first = [
         {"number": 1252, "body": watchdog.MARKER + "\nold alarm"},
         {"number": 2034, "body": watchdog.MARKER + "\nnewer alarm"},
@@ -1528,6 +1530,39 @@ def _mixed_open_issues():
     ]
 
 
+# Live-recorded alert vectors (read-only public API GETs on 2026-10-13; no
+# `gh`, no mutation). Both issues report state "open", closed_at null,
+# comments 0, label "blocked", author github-actions[bot]; titles and body
+# excerpts below are verbatim from those records.
+_LIVE_1252 = {"number": 1252,
+              "title": "Scheduled runs need attention",
+              "body": ("<!-- command-center-watchdog -->\n"
+                       "\nThe watchdog found problems with the scheduled runs.\n"
+                       "\n- `claude` has 5 begins this week that started and "
+                       "never returned a job")}
+_LIVE_2034 = {"number": 2034,
+              "title": "Scheduled runs need attention",
+              "body": ("<!-- command-center-watchdog -->\n"
+                       "\nThe watchdog found problems with the scheduled runs.\n"
+                       "\n- `codex`: normal gap 6m (p90 over 14 days, 6486 "
+                       "records). Nothing recorded for 5d22h58m")}
+
+
+def test_live_pair_are_watchdog_owned_alerts():
+    """The live #1252/#2034 pair meets the owned-alert rule from live data.
+
+    Both live-recorded bodies carry the alert title and the watchdog body
+    marker, so is_watchdog_alert() owns them: the fixtures modeling #1252
+    as owned are grounded in these reads, not assumed. #1252's recorded
+    body carries its own alarm and none of #2034's silence text, and #1252
+    stands open with zero comments: the newer incident opened #2034 new
+    and closed nothing.
+    """
+    assert watchdog.is_watchdog_alert(_LIVE_1252)
+    assert watchdog.is_watchdog_alert(_LIVE_2034)
+    assert "Nothing recorded" not in _LIVE_1252["body"]
+
+
 def _closed_numbers(calls):
     return sorted(
         int(call[3].rsplit("/", 1)[-1])
@@ -1537,10 +1572,9 @@ def _closed_numbers(calls):
 
 
 def test_new_alarm_opens_one_alert_and_closes_superseded(monkeypatch):
-    """Accept: given open #1252 (modeled as an owned alert: ALERT_TITLE plus
-    MARKER, which the base create path writes by construction) and a new
-    alarm, one new owned alert opens and every superseded owned alert
-    closes, leaving one live alert."""
+    """Accept: given open #1252 (live-recorded 2026-10-13: ALERT_TITLE plus
+    MARKER-led body, state open) and a new alarm, one new owned alert opens
+    and every superseded owned alert closes, leaving one live alert."""
     calls = []
     monkeypatch.setattr(watchdog.heartbeat, "PROVIDERS", {"codex": "openai"})
     monkeypatch.setattr(watchdog, "records", lambda agent: [])

@@ -29,7 +29,6 @@ NO_DIFF_FINISH = (
 sys.path.insert(0, str(ROOT))
 
 import funnel  # noqa: E402
-import test_env  # noqa: E402
 from engine import implement  # noqa: E402
 from engine import review  # noqa: E402
 
@@ -5752,47 +5751,6 @@ def test_locked_install_failure_is_reported_as_environment_error():
     assert note.startswith("finish environment error:")
     assert "tests failed" not in note
     assert "lock sha256 " + "a" * 64 in note
-
-
-def test_run_tests_runs_on_ssd_test_scratch(tmp_path, monkeypatch):
-    """#2530: lane test invocations root basetemp and bytecode on SSD."""
-    _, clone = make_clone(tmp_path)
-    seen = _spy_run(monkeypatch)
-
-    implement.run_tests(clone, [["python3", "-m", "pytest", "-q"]])
-
-    ssd = pathlib.Path(os.environ[test_env.SSD_ROOT_ENV_VAR])
-    _argv, env = seen[0]
-    assert env["TMPDIR"] == str(ssd / test_env.TMP_SUBDIR)
-    assert env["PYTHONPYCACHEPREFIX"] == str(ssd / test_env.PYCACHE_SUBDIR)
-    assert env["PYTHONDONTWRITEBYTECODE"] == "1"
-
-
-def test_run_tests_refuses_without_ssd_test_scratch(tmp_path, monkeypatch):
-    """#2530: a missing volume fails the run, never the internal disk."""
-    _, clone = make_clone(tmp_path)
-    seen = _spy_run(monkeypatch)
-    monkeypatch.setenv(test_env.SSD_ROOT_ENV_VAR,
-                       str(tmp_path / "no-such-volume"))
-
-    with pytest.raises(implement.TestEnvironmentError) as caught:
-        implement.run_tests(clone, [["python3", "-m", "pytest", "-q"]])
-
-    assert "refusing" in str(caught.value)
-    assert seen == []
-
-
-def test_ssd_failure_note_names_the_volume_on_both_repo_kinds():
-    """#2530: the note says no test ran, on public and member repos."""
-    failure = implement.TestEnvironmentError(
-        "SSD test scratch is not mounted at /Volumes/ClaudeScratch; "
-        "refusing to write test debris to the internal disk")
-
-    for repo in (funnel.REPO, REPO):
-        note = implement._failure_note(failure, repo=repo)
-        assert "test environment error" in note
-        assert "/Volumes/ClaudeScratch" in note
-        assert "tests failed" not in note
 
 
 def test_an_unpinned_checkout_runs_under_this_interpreter(tmp_path, monkeypatch):

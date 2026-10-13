@@ -1243,3 +1243,13 @@ def test_cli_workspace_table_and_workspace_root_guard(tmp_path, capsys):
     ])
     assert code == 2
     assert "refusing non-internal-disk workspace root" in capsys.readouterr().err
+
+
+def test_dir_size_bytes_counts_hard_linked_inode_once(tmp_path):
+    target = tmp_path / "debris"
+    target.mkdir()
+    original = target / "payload.bin"
+    original.write_bytes(b"x" * 65536)
+    os.link(original, target / "payload.link-a")
+    os.link(original, target / "payload.link-b")
+    assert housekeeping.dir_size_bytes(target) == 65536

@@ -110,7 +110,7 @@ def test_the_watchdog_skips_retired_agents(monkeypatch, capsys):
     monkeypatch.setattr(watchdog.heartbeat, "RETIRED_AGENTS",
                         watchdog.heartbeat.retired_agents(ZAI_CUTOFF))
     monkeypatch.setattr(watchdog, "records", lambda agent: seen.append(agent) or [])
-    monkeypatch.setattr(watchdog, "existing_issue", lambda: {})
+    monkeypatch.setattr(watchdog, "owned_alerts", lambda: [])
     monkeypatch.setattr(watchdog, "gh", lambda *a: "")
 
     watchdog.main()

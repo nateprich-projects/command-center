@@ -2905,7 +2905,8 @@ import sys
 sys.path.insert(0, sys.argv[1])
 from engine.review import (ReviewJudgeError,
                            normalize_plan_premise_requirements,
-                           omit_review_process_requirements)
+                           omit_review_process_requirements,
+                           restrain_protected_demands)
 
 answer_path, out_path, packet_path = sys.argv[2], sys.argv[3], sys.argv[4]
 
@@ -2951,6 +2952,10 @@ try:
     requirements = omit_review_process_requirements(requirements)
 except ReviewJudgeError as exc:
     malformed(str(exc))
+# Judge restraint (#2515, ticket #2517): exclude demands on protected
+# ground the ticket does not admit, so a description-named seam cannot
+# wedge the review between a precheck rejection and a judge rejection.
+requirements = restrain_protected_demands(requirements, packet.get("ticket"))
 if not requirements:
     malformed("'requirements' must name at least one requirement")
 with open(out_path, "w") as handle:

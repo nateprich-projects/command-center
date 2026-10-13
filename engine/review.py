@@ -1215,6 +1215,90 @@ def ticket_asks(ticket: Optional[dict], path: str) -> bool:
     return bool(rule) and rule in text
 
 
+#: Narrow prose alias for the observed #2489/#2515 pair: a judge demand
+#: phrased around the breakdown skill's guidance without spelling its path.
+#: Deliberately not a general description resolver (plan #2515 rejects a
+#: broad one): only this observed wording maps to its protected file.
+BREAKDOWN_GUIDANCE_RE = re.compile(
+    r"breakdown[\s\S]{0,40}guidance|guidance[\s\S]{0,40}breakdown",
+    re.IGNORECASE)
+
+#: Path-looking tokens a lister demand may name a protected file with.
+_PATH_TOKEN_RE = re.compile(r"[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+/?")
+
+#: Scoped re-review rows judge prior findings, not ticket demands, so the
+#: restraint below never applies to them.
+SCOPED_REREVIEW_REQUIREMENT_PREFIXES = (
+    "Prior blocking item addressed",
+    "No new blocking defect",
+)
+
+
+def _requirement_protected_markers(requirement: str) -> List[str]:
+    """Protected markers a judge demand names, or an empty list.
+
+    A marker is a concrete protected file the demand spells out, a
+    protected directory rule it names, or the one observed prose alias
+    (breakdown guidance -> skills/breakdown/SKILL.md). Description prose
+    beyond that alias never counts: admission stays checkable.
+    """
+    markers: List[str] = []
+    for rule in PROTECTED_PATHS:
+        if rule in requirement and rule not in markers:
+            markers.append(rule)
+    for match in _PATH_TOKEN_RE.finditer(requirement):
+        token = match.group(0).strip(".,:;!?)'\"")
+        if token and protected_rule_for(token) and token not in markers:
+            markers.append(token)
+    if (BREAKDOWN_GUIDANCE_RE.search(requirement)
+            and "skills/breakdown/SKILL.md" not in markers):
+        markers.append("skills/breakdown/SKILL.md")
+    return markers
+
+
+def _protected_marker_admitted(ticket: Optional[dict], marker: str) -> bool:
+    """Whether the ticket admits a protected marker by explicit spelling."""
+    if not ticket:
+        return False
+    if marker.endswith("/"):
+        text = "{}\n{}".format(ticket.get("title") or "",
+                               ticket.get("body") or "")
+        return marker in text
+    return ticket_asks(ticket, marker)
+
+
+def restrain_protected_demands(requirements: Sequence[str],
+                               ticket: Optional[dict]) -> List[str]:
+    """Exclude judge demands on protected ground the ticket does not admit.
+
+    Agreement restored on the judge side (#2515, ticket #2517):
+    ``ticket_asks`` stays explicit-path-only, so a description-named seam
+    never authorizes a protected edit at precheck; the lister/judge side
+    must then not demand that edit either, or no diff can pass. A demand
+    naming a protected marker the ticket does not admit is dropped, unless
+    it also names one the ticket does admit. ``Does not break:`` rows and
+    scoped re-review rows are never demands to implement, so they are kept.
+    """
+    kept = []
+    for requirement in _canonical_requirements(requirements):
+        markers = _requirement_protected_markers(requirement)
+        if not markers:
+            kept.append(requirement)
+            continue
+        lowered = requirement.strip().casefold()
+        if lowered.startswith("does not break:"):
+            kept.append(requirement)
+            continue
+        if any(lowered.startswith(prefix.casefold())
+               for prefix in SCOPED_REREVIEW_REQUIREMENT_PREFIXES):
+            kept.append(requirement)
+            continue
+        if any(_protected_marker_admitted(ticket, marker)
+               for marker in markers):
+            kept.append(requirement)
+    return kept
+
+
 def merged_overlap(candidate_files: Sequence[str],
                    merged_prs: Sequence[dict],
                    head_date_value: Optional[str],

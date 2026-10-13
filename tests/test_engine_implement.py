@@ -2884,6 +2884,35 @@ def test_calendar_wait_step_filed_claude_without_calendar_rule(
         "a Claude Code environment", action) == "claude-code-environment"
 
 
+def test_calendar_wait_lane_old_sets_claude_fixed_keeps_none(monkeypatch):
+    """Lane-level red-green for #2492: one calendar wait across both seams.
+
+    A calendar-wait decline from none travels this lane either as a blocked
+    human step or as a decline record. On the old code the blocked-step seam
+    filed the Claude-only mislabel (unrecognized calendar wording fell
+    through to the claimed claude-code-environment Needs) while the decline
+    seam stranded the ticket blocked plus Needs agent; the fix preserves
+    none at both. This pins the full route the amended Accept reproduces --
+    old code sets Claude-only, fixed code keeps none -- at the seams where
+    each half actually happened, since the decline seam itself never had a
+    session-lane writer."""
+    import decline_classifier
+
+    action = CALENDAR_WAIT_STEP_ACTIONS[0]
+    reason = action + ". No source change was made."
+    monkeypatch.setattr(implement, "CALENDAR_WAIT_STEP_RES", ())
+    monkeypatch.setattr(decline_classifier, "_DECLINED_CALENDAR_WAIT", ())
+    assert implement.needs_for_human_step(
+        "a Claude Code environment", action) == "claude-code-environment"
+    assert implement.classify_decline_reason(reason, REPO) == (
+        "unknown", None)
+    monkeypatch.undo()
+    assert implement.needs_for_human_step(
+        "a Claude Code environment", action) == "none"
+    assert implement.classify_decline_reason(reason, REPO) == (
+        "calendar-wait", None)
+
+
 @pytest.mark.parametrize("action", [
     "Waiting on the calendar event; then kickstart the agent with launchctl",
     "Waiting until 2026-11-01 for sudo -n -u jeffy maintenance to finish",

@@ -1238,9 +1238,13 @@ def test_the_watchdog_note_does_not_call_an_unreadable_file_never_run(
 # closes in the alert branch under either list order; recovery closes only
 # the first hit) -- is confirmed, and proceeding is justified on that
 # evidence. Authority to proceed despite confirmed reuse is the plan's
-# Decided direction (new-plus-close replaces update-in-place, rejecting the
-# standing update-in-place behavior): the recorded PATCH-reuse is the
-# replaced behavior, and the missing close is the defect. The executable
+# Decided direction, quoted: "Open a new watchdog alert per incident and
+# close superseded watchdog-owned alerts including #1252 (rejected: Keep and
+# update one standing watchdog alert issue in place ...)". The plan therefore
+# presupposes the recorded PATCH-reuse (update-in-place) as the replaced
+# behavior and mandates new-plus-close; the missing close is the defect, and
+# the ticket's shorthand "never reuses" yields to that Decided direction on
+# reuse while it holds for closes. The executable
 # test_base_premises_match_base_source below proves these premises from
 # the real base bytes when the base object is present, and skips where the
 # checkout is shallow; test_base_alert_path_* drives both list orders from

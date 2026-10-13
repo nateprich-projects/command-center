@@ -27,6 +27,7 @@ from pathlib import Path
 
 import pytest
 
+import metrics
 import publisher
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -351,6 +352,159 @@ def test_publishes_metrics_series_under_its_own_key(
     assert kv.values["snapshot"] == entry_path.read_bytes()
     assert json.loads(kv.values["metrics"]) == series
     assert len(kv.puts_to("metrics")) == 1
+
+
+def test_metrics_guard_mirrors_the_metrics_budget_contract():
+    """The publisher's stdlib-only copy must match metrics' own bound."""
+    assert publisher.KV_VALUE_LIMIT_BYTES == metrics.KV_VALUE_LIMIT_BYTES
+    assert (
+        publisher.METRICS_PUBLISH_TARGET_BYTES
+        == metrics.SERIES_PUBLISH_TARGET_BYTES
+    )
+    assert (
+        list(publisher.METRICS_SERIES_BUDGET_LADDER)
+        == [tuple(rung) for rung in metrics.SERIES_BUDGET_LADDER]
+    )
+    assert tuple(publisher.METRICS_SERIES_READING_KEYS) == tuple(
+        metrics.SERIES_READING_KEYS)
+    assert tuple(publisher.METRICS_SERIES_PART_KEYS) == tuple(
+        metrics.SERIES_PART_KEYS)
+
+
+def _oversize_v1_series(path, leaves=3600, days=90):
+    """An unbounded-shaped series over the publish target, under the limit."""
+    values = [float(index) + 0.123456789 for index in range(days)]
+    tree = {}
+    for number in range(leaves):
+        tree["leaf%d" % number] = {
+            "kind": "sum",
+            "daily": list(values),
+            "r7": list(values),
+            "r28": list(values),
+            "delta": list(values),
+            "numerators": list(values),
+            "denominators": [1.0] * days,
+        }
+    series = {
+        "schema_version": 1,
+        "as_of": "2026-10-11",
+        "start_date": "2026-07-14",
+        "days": ["day%02d" % index for index in range(days)],
+        "source_updated_at": "2026-10-11T08:24:00Z",
+        "metrics": tree,
+    }
+    raw = json.dumps(series, sort_keys=True, separators=(",", ":")).encode()
+    assert len(raw) > publisher.METRICS_PUBLISH_TARGET_BYTES
+    assert len(raw) <= publisher.KV_VALUE_LIMIT_BYTES
+    path.write_text(json.dumps(series))
+    return series, raw
+
+
+def test_publishes_bounded_series_when_emit_exceeds_target(
+    tmp_path, kv, monkeypatch, capsys
+):
+    """Reproduction (#2518): the full unbounded-shaped series publishes
+    under the KV limit with no oversize PUT attempted."""
+    spool = tmp_path / "spool"
+    spool.mkdir()
+    _, snapshot = write_spool_entry(spool, "entry.json", seconds_ago=60)
+    argv, _ = base_argv(tmp_path, kv, spool)
+    series, raw = _oversize_v1_series(tmp_path / "series.json")
+    metrics_path = Path(argv[argv.index("--metrics-py") + 1])
+    metrics_path.write_text(
+        "import json\nprint(open(r'''{}''').read())\n".format(
+            tmp_path / "series.json"))
+
+    code, _, err = run_publisher(argv, monkeypatch, capsys, with_metrics=True)
+
+    assert code == 0, err
+    stored = json.loads(kv.values["metrics"])
+    assert stored["schema_version"] == 2
+    assert stored["days"] == series["days"]
+    assert (
+        len(kv.values["metrics"]) <= publisher.METRICS_PUBLISH_TARGET_BYTES
+    )
+    for method, _key, body in kv.calls:
+        if method == "PUT":
+            assert len(body) <= publisher.KV_VALUE_LIMIT_BYTES
+    recent = stored["recent_days"]
+    split = len(series["days"]) - recent
+    leaf = stored["metrics"]["leaf0"]
+    original = series["metrics"]["leaf0"]
+    assert leaf["daily"] == original["daily"][-recent:]
+    assert leaf["older_daily"] == original["daily"][:split][::stored["stride"]]
+    assert json.loads(kv.values["snapshot"]) == snapshot
+
+
+def test_publishes_small_bounded_schema_unchanged(
+    tmp_path, kv, monkeypatch, capsys
+):
+    spool = tmp_path / "spool"
+    spool.mkdir()
+    write_spool_entry(spool, "entry.json", seconds_ago=60)
+    argv, _ = base_argv(tmp_path, kv, spool)
+    series = {
+        "schema_version": 2,
+        "as_of": "2026-10-11",
+        "start_date": "2026-07-14",
+        "days": ["2026-10-10", "2026-10-11"],
+        "recent_days": 2,
+        "stride": 7,
+        "metrics": {"A": {"leaf": {
+            "kind": "sum",
+            "daily": [1, 2],
+            "r7": [1, 2],
+            "r28": [1, 2],
+            "delta": [0, 0],
+            "older_daily": [0],
+            "older_r7": [0],
+            "older_r28": [0],
+            "older_delta": [0],
+        }}},
+    }
+    metrics_path = Path(argv[argv.index("--metrics-py") + 1])
+    write_fake_series(metrics_path, series)
+
+    code, _, err = run_publisher(argv, monkeypatch, capsys, with_metrics=True)
+
+    assert code == 0, err
+    assert json.loads(kv.values["metrics"]) == series
+    assert len(kv.puts_to("metrics")) == 1
+
+
+def test_skips_metrics_put_when_series_stays_over_limit(
+    tmp_path, kv, monkeypatch, capsys
+):
+    """The guard never attempts a PUT the KV limit would reject with a 413:
+    an unboundable series is skipped with a warning, and the snapshot still
+    publishes."""
+    spool = tmp_path / "spool"
+    spool.mkdir()
+    _, snapshot = write_spool_entry(spool, "entry.json", seconds_ago=60)
+    argv, _ = base_argv(tmp_path, kv, spool)
+    series = {
+        "schema_version": 1,
+        "as_of": "2026-10-11",
+        "days": ["2026-10-%02d" % day for day in range(1, 11)],
+        "metrics": {"leaf": {
+            "kind": "sum",
+            "daily": list(range(10)),
+            "r7": list(range(10)),
+            "r28": list(range(10)),
+            "delta": list(range(10)),
+        }},
+    }
+    metrics_path = Path(argv[argv.index("--metrics-py") + 1])
+    write_fake_series(metrics_path, series)
+    monkeypatch.setattr(publisher, "METRICS_PUBLISH_TARGET_BYTES", 100)
+    monkeypatch.setattr(publisher, "_bound_series_bytes", lambda _payload: None)
+
+    code, _, err = run_publisher(argv, monkeypatch, capsys, with_metrics=True)
+
+    assert code == 0, err
+    assert kv.puts_to("metrics") == []
+    assert "exceeds" in err
+    assert json.loads(kv.values["snapshot"]) == snapshot
 
 
 def test_skips_publish_when_remote_snapshot_is_current(

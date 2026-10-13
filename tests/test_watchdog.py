@@ -264,11 +264,18 @@ def test_sparse_silence_floor_reaches_the_watchdog_issue_body(monkeypatch):
         lambda agent: silent if agent in ("zcode", "muse") else [],
     )
     monkeypatch.setattr(
-        watchdog, "existing_issue", lambda: {"number": 160}
+        watchdog, "owned_alerts",
+        lambda: [{"number": 160, "title": watchdog.ALERT_TITLE,
+                  "body": watchdog.MARKER}],
     )
-    monkeypatch.setattr(
-        watchdog, "gh", lambda *args: calls.append(args) or ""
-    )
+
+    def fake_gh(*args):
+        calls.append(args)
+        if args[1:3] == ("-X", "POST") and args[3].endswith("/issues"):
+            return json.dumps({"number": 161})
+        return ""
+
+    monkeypatch.setattr(watchdog, "gh", fake_gh)
 
     assert watchdog.main() == 0
 
@@ -463,7 +470,7 @@ def test_main_watches_every_registered_provider(monkeypatch):
     monkeypatch.setattr(
         watchdog, "records", lambda agent: seen.append(agent) or []
     )
-    monkeypatch.setattr(watchdog, "existing_issue", lambda: {})
+    monkeypatch.setattr(watchdog, "owned_alerts", lambda: [])
 
     assert watchdog.main() == 0
     # Every registered provider except the ones retired on purpose (#431):
@@ -1070,7 +1077,7 @@ def test_an_unreadable_heartbeat_is_a_problem_the_issue_names(monkeypatch):
     monkeypatch.setattr(watchdog, "records", records)
     monkeypatch.setattr(watchdog.heartbeat, "PROVIDERS",
                         {"muse": "meta", "claude": "anthropic"})
-    monkeypatch.setattr(watchdog, "existing_issue", lambda: {})
+    monkeypatch.setattr(watchdog, "owned_alerts", lambda: [])
     monkeypatch.setattr(watchdog, "gh",
                         lambda *args: posted.append(args) or json.dumps(
                             {"number": 1, "html_url": "https://x/1"}))
@@ -1209,3 +1216,200 @@ def test_the_watchdog_note_does_not_call_an_unreadable_file_never_run(
     assert rows == []
     assert "never recorded a run" not in message
     assert "1 unreadable heartbeat line" in message
+
+# -- one live watchdog alert with supersede (#2500) ---------------------------
+#
+# Amended ticket (Claude session 2026-10-13, Nate-approved unwedge): the
+# verify-first premise was false -- the old main() PATCH-reused a matching
+# open issue in place -- and the verify step is done, no longer required.
+# The three Accept lines stand: new-plus-close per incident, owned-only
+# matching (body marker plus title prefix), and recovery close.
+# New behavior: an alert opens one new owned issue per incident, then closes
+# every superseded owned alert (order-independent, exactly one live);
+# recovery closes every live owned alert; no existing issue body is ever
+# PATCH-rewritten.
+
+
+def test_owned_alert_needs_marker_and_title_prefix():
+    owned = {"title": watchdog.ALERT_TITLE,
+             "body": watchdog.MARKER + "\nold alarm"}
+    assert watchdog.is_watchdog_alert(owned)
+
+    prefixed = {"title": watchdog.ALERT_TITLE + " (stale?)",
+                "body": watchdog.MARKER}
+    assert watchdog.is_watchdog_alert(prefixed)
+
+    # The alert matching rule must never reuse or close either of these.
+    assert not watchdog.is_watchdog_alert(
+        {"title": watchdog.ALERT_TITLE, "body": "no marker here"})
+    assert not watchdog.is_watchdog_alert(
+        {"title": "Something else", "body": watchdog.MARKER})
+    assert not watchdog.is_watchdog_alert(
+        {"title": None, "body": watchdog.MARKER})
+
+
+def _alert_gh(calls, open_issues, created_number):
+    """A `gh` double routing the alert list, create, comment and close."""
+    def fake_gh(*args):
+        calls.append(args)
+        joined = " ".join(args)
+        if "issues?state=open" in joined:
+            return json.dumps(open_issues)
+        if "/comments" in joined:
+            return "{}"
+        if args[1:3] == ("-X", "PATCH"):
+            return "{}"
+        if args[1:3] == ("-X", "POST"):
+            return json.dumps({"number": created_number})
+        raise AssertionError("unexpected gh call: {}".format(args))
+    return fake_gh
+
+
+def _mixed_open_issues():
+    return [
+        {"number": 1252, "title": watchdog.ALERT_TITLE,
+         "body": watchdog.MARKER + "\nold alarm"},
+        {"number": 2034, "title": watchdog.ALERT_TITLE,
+         "body": watchdog.MARKER + "\nnewer alarm"},
+        {"number": 9999, "title": watchdog.ALERT_TITLE,
+         "body": "no marker here"},
+        {"number": 8888, "title": "Something else",
+         "body": watchdog.MARKER},
+    ]
+
+
+# Live-recorded alert vectors (read-only public API GETs on 2026-10-13; no
+# `gh`, no mutation). Both issues report state "open", closed_at null,
+# comments 0, label "blocked", author github-actions[bot]; titles and body
+# excerpts below are verbatim from those records.
+_LIVE_1252 = {"number": 1252,
+              "title": "Scheduled runs need attention",
+              "body": ("<!-- command-center-watchdog -->\n"
+                       "\nThe watchdog found problems with the scheduled runs.\n"
+                       "\n- `claude` has 5 begins this week that started and "
+                       "never returned a job")}
+_LIVE_2034 = {"number": 2034,
+              "title": "Scheduled runs need attention",
+              "body": ("<!-- command-center-watchdog -->\n"
+                       "\nThe watchdog found problems with the scheduled runs.\n"
+                       "\n- `codex`: normal gap 6m (p90 over 14 days, 6486 "
+                       "records). Nothing recorded for 5d22h58m")}
+
+
+def test_live_pair_are_watchdog_owned_alerts():
+    """The live #1252/#2034 pair meets the owned-alert rule from live data.
+
+    Both live-recorded bodies carry the alert title and the watchdog body
+    marker, so is_watchdog_alert() owns them: the fixtures modeling #1252
+    as owned are grounded in these reads, not assumed. #1252's recorded
+    body carries its own alarm and none of #2034's silence text, and #1252
+    stands open with zero comments: the newer incident opened #2034 new
+    and closed nothing.
+    """
+    assert watchdog.is_watchdog_alert(_LIVE_1252)
+    assert watchdog.is_watchdog_alert(_LIVE_2034)
+    assert "Nothing recorded" not in _LIVE_1252["body"]
+
+
+def _closed_numbers(calls):
+    return sorted(
+        int(call[3].rsplit("/", 1)[-1])
+        for call in calls
+        if call[1:3] == ("-X", "PATCH")
+    )
+
+
+def test_new_alarm_opens_one_alert_and_closes_superseded(monkeypatch):
+    """Accept: given open #1252 (live-recorded 2026-10-13: ALERT_TITLE plus
+    MARKER-led body, state open) and a new alarm, one new owned alert opens
+    and every superseded owned alert closes, leaving one live alert."""
+    calls = []
+    monkeypatch.setattr(watchdog.heartbeat, "PROVIDERS", {"codex": "openai"})
+    monkeypatch.setattr(watchdog, "records", lambda agent: [])
+    monkeypatch.setattr(
+        watchdog, "assess",
+        lambda agent, rows, now: ["`codex`: Nothing recorded for 3d11h."])
+    monkeypatch.setattr(
+        watchdog, "gh", _alert_gh(calls, _mixed_open_issues(), 2035))
+
+    assert watchdog.main() == 0
+
+    creates = [call for call in calls
+               if call[1:3] == ("-X", "POST")
+               and call[3].endswith("/issues")]
+    assert len(creates) == 1
+    assert "title=" + watchdog.ALERT_TITLE in creates[0]
+    body = next(argument[len("body="):]
+                for argument in creates[0]
+                if argument.startswith("body="))
+    assert watchdog.MARKER in body
+
+    assert _closed_numbers(calls) == [1252, 2034]
+
+    comments = [call for call in calls if "/comments" in " ".join(call)]
+    assert len(comments) == 2
+    assert all("#2035" in " ".join(call) for call in comments)
+
+
+def test_new_alarm_supersede_is_list_order_independent(monkeypatch):
+    """The pre-change path PATCHed whichever owned alert the list returned
+    first and stranded the other, so the fix must not depend on #1252 vs
+    #2034 ordering: reversed listing still opens one alert and closes both
+    owned ones, leaving exactly one live."""
+    calls = []
+    monkeypatch.setattr(watchdog.heartbeat, "PROVIDERS", {"codex": "openai"})
+    monkeypatch.setattr(watchdog, "records", lambda agent: [])
+    monkeypatch.setattr(
+        watchdog, "assess",
+        lambda agent, rows, now: ["`codex`: Nothing recorded for 3d11h."])
+    monkeypatch.setattr(
+        watchdog, "gh",
+        _alert_gh(calls, list(reversed(_mixed_open_issues())), 2035))
+
+    assert watchdog.main() == 0
+
+    creates = [call for call in calls
+               if call[1:3] == ("-X", "POST")
+               and call[3].endswith("/issues")]
+    assert len(creates) == 1
+    assert _closed_numbers(calls) == [1252, 2034]
+
+
+def test_recovery_closes_every_live_owned_alert(monkeypatch):
+    """Once the silence condition clears, no live owned alert stays open."""
+    calls = []
+    monkeypatch.setattr(watchdog.heartbeat, "PROVIDERS", {"codex": "openai"})
+    monkeypatch.setattr(watchdog, "records", lambda agent: [])
+    monkeypatch.setattr(
+        watchdog, "gh", _alert_gh(calls, _mixed_open_issues(), 2035))
+
+    assert watchdog.main() == 0
+
+    assert not [call for call in calls
+                if call[1:3] == ("-X", "POST")
+                and call[3].endswith("/issues")]
+    assert _closed_numbers(calls) == [1252, 2034]
+
+    comments = [call for call in calls if "/comments" in " ".join(call)]
+    assert len(comments) == 2
+    assert all("healthy again" in " ".join(call) for call in comments)
+
+
+def test_recovery_leaves_foreign_issues_untouched(monkeypatch):
+    """Neither the alert path nor the recovery path may close an issue the
+    watchdog does not own."""
+    for problems in (["`codex`: Nothing recorded for 3d11h."], []):
+        calls = []
+        monkeypatch.setattr(
+            watchdog.heartbeat, "PROVIDERS", {"codex": "openai"})
+        monkeypatch.setattr(watchdog, "records", lambda agent: [])
+        monkeypatch.setattr(
+            watchdog, "assess", lambda a, r, n, p=problems: list(p))
+        monkeypatch.setattr(
+            watchdog, "gh", _alert_gh(calls, _mixed_open_issues(), 2035))
+
+        assert watchdog.main() == 0
+
+        touched = set(_closed_numbers(calls))
+        assert 9999 not in touched
+        assert 8888 not in touched

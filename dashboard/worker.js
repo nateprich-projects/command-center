@@ -211,6 +211,124 @@ async function isAuthorized(request, env) {
   );
 }
 
+// Metrics series shapes. The publisher stores the full-resolution v1
+// envelope ({schema_version: 1, days, metrics} with every leaf array aligned
+// to days). Once the series outgrew the KV value limit, metrics.py publishes
+// a bounded v2 envelope instead: the same full `days` labels, but each leaf
+// keeps only its newest `recent_days` values at daily resolution plus
+// stride-subsampled `older_*` buckets for the earlier days. Expand those
+// buckets back to daily alignment (each bucket value repeated across the
+// days it covers) so the page, which indexes every leaf array by day
+// position, renders unchanged. A v1 value, or anything unrecognized, is
+// served as-is: until the first bounded publish lands, the stored shape
+// stays readable (fallback).
+// Verify-first (#2518, base d70e614): worker.js:2 METRICS_KEY = "metrics";
+// the /api/metrics handler (base :269-277) did
+// `env.FUNNEL_SNAPSHOT.get(METRICS_KEY, { type: "json" })` and returned the
+// stored series shape directly, so the view froze at the last good publish:
+// `2026-10-11T08:24:13Z publisher: published metrics series (26188986
+// bytes)` with every later PUT 413ing from `2026-10-11T09:24:15Z` on.
+const METRICS_READING_KEYS = ["daily", "r7", "r28", "delta"];
+const METRICS_PART_KEYS = ["numerators", "denominators"];
+
+function expandSeriesBuckets(buckets, stride, count) {
+  const values = Array.isArray(buckets) ? buckets : [];
+  const expanded = [];
+  for (let day = 0; day < count; day += 1) {
+    const bucket = values[Math.floor(day / stride)];
+    expanded.push(bucket === undefined ? null : bucket);
+  }
+  return expanded;
+}
+
+function expandMetricsLeaf(leaf, olderCount, stride) {
+  if (!leaf || typeof leaf !== "object" || Array.isArray(leaf)) {
+    return leaf;
+  }
+  const isSeries = METRICS_READING_KEYS.every((key) => Array.isArray(leaf[key]));
+  if (!isSeries) {
+    const tree = {};
+    for (const [key, value] of Object.entries(leaf)) {
+      tree[key] = expandMetricsLeaf(value, olderCount, stride);
+    }
+    return tree;
+  }
+  const expanded = { kind: leaf.kind };
+  for (const key of [...METRICS_READING_KEYS, ...METRICS_PART_KEYS]) {
+    if (!Array.isArray(leaf[key])) {
+      continue;
+    }
+    expanded[key] = [
+      ...expandSeriesBuckets(leaf[`older_${key}`], stride, olderCount),
+      ...leaf[key],
+    ];
+  }
+  if (leaf.gap !== undefined) {
+    expanded.gap = leaf.gap;
+  }
+  if (leaf.source !== undefined) {
+    expanded.source = leaf.source;
+  }
+  return expanded;
+}
+
+function normalizeMetricsSeries(stored) {
+  if (!stored || typeof stored !== "object" || Array.isArray(stored)) {
+    return stored;
+  }
+  if (
+    stored.schema_version !== 2 ||
+    !Array.isArray(stored.days) ||
+    !stored.metrics ||
+    typeof stored.metrics !== "object"
+  ) {
+    return stored;
+  }
+  const total = stored.days.length;
+  const recent = Number.isInteger(stored.recent_days) ? stored.recent_days : total;
+  const recentCount = Math.max(0, Math.min(total, recent));
+  const olderCount = total - recentCount;
+  const stride =
+    Number.isInteger(stored.stride) && stored.stride > 0 ? stored.stride : 1;
+  const metrics = expandMetricsLeaf(stored.metrics, olderCount, stride);
+  const aligned = (values) => {
+    if (!Array.isArray(values)) {
+      return values;
+    }
+    if (values.length > total) {
+      return values.slice(values.length - total);
+    }
+    return [...values, ...Array(total - values.length).fill(null)];
+  };
+  const alignTree = (node) => {
+    if (!node || typeof node !== "object" || Array.isArray(node)) {
+      return node;
+    }
+    if (METRICS_READING_KEYS.every((key) => Array.isArray(node[key]))) {
+      const leaf = { ...node };
+      for (const key of [...METRICS_READING_KEYS, ...METRICS_PART_KEYS]) {
+        if (key in leaf) {
+          leaf[key] = aligned(leaf[key]);
+        }
+      }
+      return leaf;
+    }
+    const tree = {};
+    for (const [key, value] of Object.entries(node)) {
+      tree[key] = alignTree(value);
+    }
+    return tree;
+  };
+  return {
+    schema_version: 1,
+    as_of: stored.as_of,
+    start_date: stored.start_date,
+    days: stored.days.slice(),
+    source_updated_at: stored.source_updated_at,
+    metrics: alignTree(metrics),
+  };
+}
+
 function jsonResponse(value, status = 200) {
   return new Response(JSON.stringify(value), {
     status,
@@ -274,7 +392,7 @@ async function handleRequest(request, env) {
     if (!metrics) {
       return jsonResponse({ error: "metrics unavailable" }, 503);
     }
-    return jsonResponse(metrics);
+    return jsonResponse(normalizeMetricsSeries(metrics));
   }
 
   if (url.pathname === "/api/refresh") {
@@ -345,4 +463,4 @@ async function handleRequest(request, env) {
 }
 
 export default { fetch: handleRequest };
-export { METRICS_KEY, REFRESH_KEY, SNAPSHOT_KEY };
+export { METRICS_KEY, REFRESH_KEY, SNAPSHOT_KEY, normalizeMetricsSeries };

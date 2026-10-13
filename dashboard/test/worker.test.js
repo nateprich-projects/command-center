@@ -3,7 +3,12 @@ import { generateKeyPairSync, createSign } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-import worker, { METRICS_KEY, REFRESH_KEY, verifyAccessJwt } from "../worker.js";
+import worker, {
+  METRICS_KEY,
+  REFRESH_KEY,
+  normalizeMetricsSeries,
+  verifyAccessJwt,
+} from "../worker.js";
 
 function encodeJson(value) {
   return Buffer.from(JSON.stringify(value)).toString("base64url");
@@ -148,6 +153,119 @@ test("an authorized metrics request reads the separate metrics key", async () =>
 
   assert.equal(response.status, 200);
   assert.deepEqual(await response.json(), metrics);
+});
+
+test("a stored v1 series is served as-is until a bounded publish lands", () => {
+  const stored = {
+    schema_version: 1,
+    as_of: "2026-10-11",
+    days: ["2026-10-10", "2026-10-11"],
+    metrics: { A: { A1: { total: { daily: [2, 3] } } } },
+  };
+
+  assert.deepEqual(normalizeMetricsSeries(stored), stored);
+});
+
+test("an unrecognized stored shape falls back to passthrough", () => {
+  const stored = { schema_version: 99, days: ["2026-10-11"], metrics: {} };
+
+  assert.deepEqual(normalizeMetricsSeries(stored), stored);
+  assert.equal(normalizeMetricsSeries(null), null);
+});
+
+test("a bounded v2 series expands to day-aligned v1 for the page", () => {
+  const stored = {
+    schema_version: 2,
+    as_of: "2026-10-11",
+    start_date: "2026-10-05",
+    days: [
+      "2026-10-05",
+      "2026-10-06",
+      "2026-10-07",
+      "2026-10-08",
+      "2026-10-09",
+      "2026-10-10",
+      "2026-10-11",
+    ],
+    recent_days: 3,
+    stride: 2,
+    source_updated_at: "2026-10-11T08:24:00Z",
+    metrics: {
+      A: {
+        A1: {
+          total: {
+            kind: "sum",
+            daily: [8, 9, 10],
+            r7: [7, 8, 9],
+            r28: [6, 7, 8],
+            delta: [1, 1, 1],
+            older_daily: [1, 3],
+            older_r7: [1, 3],
+            older_r28: [1, 3],
+            older_delta: [0, 0],
+          },
+        },
+      },
+    },
+  };
+
+  const served = normalizeMetricsSeries(stored);
+
+  assert.equal(served.schema_version, 1);
+  assert.deepEqual(served.days, stored.days);
+  assert.equal(served.as_of, stored.as_of);
+  assert.equal(served.start_date, stored.start_date);
+  assert.equal(served.source_updated_at, stored.source_updated_at);
+  const leaf = served.metrics.A.A1.total;
+  assert.deepEqual(leaf.daily, [1, 1, 3, 3, 8, 9, 10]);
+  assert.deepEqual(leaf.r7, [1, 1, 3, 3, 7, 8, 9]);
+  assert.deepEqual(leaf.delta, [0, 0, 0, 0, 1, 1, 1]);
+  assert.ok(!("older_daily" in leaf));
+});
+
+test("the metrics endpoint serves an expanded bounded series", async () => {
+  const fixture = accessFixture();
+  const stored = {
+    schema_version: 2,
+    as_of: "2026-10-11",
+    days: ["2026-10-05", "2026-10-06", "2026-10-07"],
+    recent_days: 2,
+    stride: 7,
+    metrics: {
+      A: {
+        A1: {
+          total: {
+            kind: "sum",
+            daily: [9, 10],
+            r7: [8, 9],
+            r28: [7, 8],
+            delta: [1, 1],
+            older_daily: [4],
+            older_r7: [4],
+            older_r28: [4],
+            older_delta: [0],
+          },
+        },
+      },
+    },
+  };
+  const env = {
+    ACCESS_TEAM_DOMAIN: fixture.teamDomain,
+    ACCESS_AUD: fixture.audience,
+    ACCESS_JWKS_FETCH: fixture.fetchImpl,
+    FUNNEL_SNAPSHOT: { async get() { return stored; } },
+  };
+  const response = await worker.fetch(new Request("https://funnel.nateprich.com/api/metrics", {
+    headers: { "Cf-Access-Jwt-Assertion": fixture.sign() },
+  }), env);
+
+  assert.equal(response.status, 200);
+  const served = await response.json();
+  assert.equal(served.schema_version, 1);
+  assert.deepEqual(served.days, stored.days);
+  const leaf = served.metrics.A.A1.total;
+  assert.deepEqual(leaf.daily, [4, 9, 10]);
+  assert.deepEqual(leaf.r7, [4, 8, 9]);
 });
 
 test("the metrics endpoint is read-only and reports a missing series", async () => {

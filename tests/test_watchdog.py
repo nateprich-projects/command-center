@@ -1234,11 +1234,17 @@ def test_the_watchdog_note_does_not_call_an_unreadable_file_never_run(
 # recovery branch (base lines ~391-401): close the single first hit only.
 # The ticket's shorthand "never reuses or closes" is therefore corrected
 # from source: reuse held (PATCH in place), closes never happened. The
-# actionable precondition -- the base enforces no single-live rule, in the
-# alert branch under either list order and in recovery -- is confirmed, and
-# proceeding is justified on that evidence. This matches the plan's Decided
-# direction (new-plus-close replaces update-in-place): the recorded
-# update-in-place is the replaced behavior.
+# actionable precondition -- the base enforces no single-live rule (zero
+# closes in the alert branch under either list order; recovery closes only
+# the first hit) -- is confirmed, and proceeding is justified on that
+# evidence. Authority to proceed despite confirmed reuse is the plan's
+# Decided direction (new-plus-close replaces update-in-place, rejecting the
+# standing update-in-place behavior): the recorded PATCH-reuse is the
+# replaced behavior, and the missing close is the defect. The executable
+# test_base_premises_match_base_source below proves these premises from
+# the real base bytes when the base object is present, and skips where the
+# checkout is shallow; test_base_alert_path_* drives both list orders from
+# a faithful replica so no live #1252 read is needed.
 # #1252 grounding (packet evidence, no live read): the ticket stipulates
 # #1252 is a watchdog-owned alert to close ("close superseded
 # watchdog-owned alerts including #1252"); the plan records as measured
@@ -1281,6 +1287,43 @@ def _base_branch(open_issues, problems):
     if hit:
         return {"patched": [hit["number"]], "created": 0, "closed": []}
     return {"patched": [], "created": 1, "closed": []}
+
+
+def test_base_premises_match_base_source():
+    """Prove the First-verify premises from the real base bytes.
+
+    Reads base b0a20b5 locally via `git show` (no `gh` needed). Asserts the
+    open function (existing_issue scanning for the body MARKER, called once
+    from main()), the alert branch's in-place PATCH with zero closes, and
+    the single-hit recovery close. Skips where the base object is absent
+    (shallow CI), where the replica probe below remains the evidence.
+    """
+    import subprocess
+
+    proc = subprocess.run(
+        ["git", "show",
+         "b0a20b5223e90e76571518302a6463590e8f9f3d"
+         ":.github/scripts/watchdog.py"],
+        capture_output=True, text=True, timeout=30, cwd=str(ROOT))
+    if proc.returncode != 0 or not proc.stdout:
+        pytest.skip("base b0a20b5:.github/scripts/watchdog.py not readable here")
+    src = proc.stdout
+
+    # Open function: existing_issue() returns the first open issue whose
+    # body holds the MARKER, called once from main().
+    assert "def existing_issue() -> Dict:" in src
+    assert 'if MARKER in (issue.get("body")' in src
+    assert "open_issue = existing_issue()" in src
+
+    # Alert branch: update-in-place PATCH of the hit's body, zero closes.
+    anchor = "# Update in place rather than filing a second issue"
+    assert anchor in src
+    segment = src.split(anchor, 1)[1].split("\n    else:", 1)[0]
+    assert '"-f", "body=" + body' in segment
+    assert "state=closed" not in segment
+
+    # Recovery branch closes the single first hit.
+    assert "Heartbeats are healthy again. Closing." in src
 
 
 def test_base_alert_path_reuses_first_hit_and_never_closes():

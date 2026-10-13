@@ -21560,15 +21560,63 @@ def review_queue(
     return found
 
 
+def has_send_back_marker(comments: object) -> bool:
+    """Whether an issue thread carries the #2460 send-back record (#2524).
+
+    The send-back command posts ``SEND_BACK_COMMENT_PREFIX`` with a Nate
+    provenance block on the parent issue itself; that comment is the only
+    send-back record this predicate trusts. A thread that is not a comment
+    list, a marker from an untrusted author, and missing or unreadable
+    provenance all read as absent, so a forged marker can never excuse kept
+    children (#1788). Reading absent keeps the with-children refusal
+    standing.
+    """
+    for comment in trusted_comments(comments):
+        body = comment.get("body")
+        if (not isinstance(body, str)
+                or not body.startswith(SEND_BACK_COMMENT_PREFIX)):
+            continue
+        provenance = parse_provenance(comment)
+        if (provenance is None
+                or provenance.get("voice") not in ("nate-relayed",
+                                                   "nate-direct")):
+            continue
+        return True
+    return False
+
+
+def sent_back_to_ideas(item: Item,
+                       comments: Optional[Sequence[dict]] = None) -> bool:
+    """Whether GitHub shows the #2460 send-back record on this parent (#2524).
+
+    Thin adapter over the parent's own issue comments: a caller-held thread
+    wins when one is supplied, otherwise the thread is read from GitHub. A
+    missing or unreadable thread reads as absent, so the with-children
+    refusal stands. No cache, no state file, no journal: GitHub is the
+    state.
+    """
+    if comments is None:
+        try:
+            comments = _issue_comments(item)
+        except Exception:
+            return False
+    return has_send_back_marker(comments)
+
+
 def unshapeable_reason(state: Optional[str], status: Optional[str],
-                       children_total: int) -> Optional[str]:
+                       children_total: int, children_done: int = 0,
+                       sent_back: bool = False) -> Optional[str]:
     """Why a row cannot be shaped now, or ``None`` when it can (#2139).
 
     The one shapeable-now predicate: ``shapeable_idea`` filters with it, and
     ``shape.apply_shape`` refuses a stale apply with it on its fresh re-read,
     so the picker offers a row exactly when apply would proceed on it. A
-    closed issue is never shaped, nor is one that has left Ideas or already
-    has children. The needs-shaping label, tier and headroom are not here:
+    closed issue is never shaped, nor is one that has left Ideas. A row with
+    children stays refused, except for a sent-back Ideas row whose
+    sub-issues are all closed (#2524): the #2460 send-back record on the
+    parent excuses the kept-closed evidence children. A row with any open
+    child, or without that record, stays refused; missing inputs fail closed
+    to the refusal. The needs-shaping label, tier and headroom are not here:
     they are the picker's alone, because ``shape-apply --voice nate-relayed``
     shapes unlabelled ideas in session.
     """
@@ -21577,6 +21625,9 @@ def unshapeable_reason(state: Optional[str], status: Optional[str],
     if status != "Ideas":
         return "status-changed"
     if children_total > 0:
+        if (sent_back and isinstance(children_done, int)
+                and children_done == children_total):
+            return None
         return "with-children"
     return None
 
@@ -21613,9 +21664,24 @@ def shapeable_idea(items: Sequence[Item], tier: Optional[str],
         )
         if tier is not None and needed != tier:
             continue
+        state = getattr(item, "state", None)
+        status = getattr(item, "status", None)
+        children_total = getattr(item, "children_total", 0)
+        children_done = getattr(item, "children_done", 0)
+        # The send-back thread is read only for the one row this exemption
+        # can release: open at Ideas with every sub-issue closed. Any other
+        # row keeps its refusal without spending a comment read.
+        sent_back = (
+            state == "OPEN"
+            and status == "Ideas"
+            and isinstance(children_total, int)
+            and isinstance(children_done, int)
+            and children_total > 0
+            and children_done == children_total
+            and sent_back_to_ideas(item)
+        )
         reason = unshapeable_reason(
-            getattr(item, "state", None), getattr(item, "status", None),
-            getattr(item, "children_total", 0))
+            state, status, children_total, children_done, sent_back)
         if reason is not None:
             if skipped is not None:
                 skipped.append({

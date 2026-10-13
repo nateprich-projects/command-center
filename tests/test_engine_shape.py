@@ -124,7 +124,8 @@ def stub_gh(monkeypatch, item):
 
     monkeypatch.setattr(
         shape, "_read_fresh_shape_facts",
-        lambda target: (target.state, target.status, target.children_total),
+        lambda target: (target.state, target.status, target.children_total,
+                        target.children_done),
         raising=False,
     )
 
@@ -2249,7 +2250,8 @@ def test_apply_refuses_when_fresh_status_has_left_ideas(monkeypatch, capsys):
 
     def read_fresh(target):
         reads.append(target.ref)
-        return fresh.state, fresh.status, fresh.children_total
+        return (fresh.state, fresh.status, fresh.children_total,
+                fresh.children_done)
 
     monkeypatch.setattr(shape, "_read_fresh_shape_facts", read_fresh)
 
@@ -2290,7 +2292,8 @@ def test_apply_refuses_when_fresh_project_item_has_children(
     )
     monkeypatch.setattr(
         shape, "_read_fresh_shape_facts",
-        lambda target: (fresh.state, fresh.status, fresh.children_total),
+        lambda target: (fresh.state, fresh.status, fresh.children_total,
+                        fresh.children_done),
     )
 
     assert shape.apply_shape(
@@ -2452,7 +2455,7 @@ def test_fresh_shape_facts_read_the_exact_project_item(monkeypatch):
     monkeypatch.setattr(funnel, "member_repos", lambda: [REPO])
     monkeypatch.setattr(funnel, "gh_graphql", read_project)
 
-    assert shape._read_fresh_shape_facts(item) == ("OPEN", "Shaped", 3)
+    assert shape._read_fresh_shape_facts(item) == ("OPEN", "Shaped", 3, 1)
     (query, variables), = calls
     assert variables == {"login": funnel.PROJECT_OWNER,
                          "number": funnel.PROJECT_NUMBER}
@@ -2477,7 +2480,8 @@ def test_body_only_edit_in_fresh_project_read_still_applies(
     calls = stub_gh(monkeypatch, item)
     monkeypatch.setattr(
         shape, "_read_fresh_shape_facts",
-        lambda target: (fresh.state, fresh.status, fresh.children_total),
+        lambda target: (fresh.state, fresh.status, fresh.children_total,
+                        fresh.children_done),
     )
 
     assert shape.apply_shape(
@@ -2748,7 +2752,7 @@ def test_apply_reports_an_unconfirmed_status_without_marking(monkeypatch):
     item = idea(42)
     monkeypatch.setattr(
         shape, "_read_fresh_shape_facts",
-        lambda target: ("OPEN", "Ideas", 0))
+        lambda target: ("OPEN", "Ideas", 0, 0))
 
     def graphql(query, **variables):
         raise funnel.GitHubError("boom")

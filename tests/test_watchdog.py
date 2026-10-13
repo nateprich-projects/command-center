@@ -1326,6 +1326,17 @@ def test_base_premises_match_base_source():
     assert '"-f", "body=" + body' in segment
     assert "state=closed" not in segment
 
+    # Create (open) branch: with problems and no marker hit, POST one new
+    # issue titled "Scheduled runs need attention" -- never a reuse (no
+    # PATCH of an existing issue) and never a close. This is the base open
+    # path the ticket's First-verify names, recorded from the base bytes.
+    create_segment = src.split(anchor, 1)[1].split("\n    else:", 1)[1]
+    create_segment = create_segment.split("\n    for problem", 1)[0]
+    assert '"title=Scheduled runs need attention"' in create_segment
+    assert '"-X", "POST"' in create_segment
+    assert '"-X", "PATCH"' not in create_segment
+    assert "state=closed" not in create_segment
+
     # Recovery branch closes the single first hit.
     assert "Heartbeats are healthy again. Closing." in src
 

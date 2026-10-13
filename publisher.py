@@ -82,6 +82,19 @@ METRICS_KEY = "metrics"
 #: froze metrics publishing once the series outgrew it (#2516). The publisher
 #: asks metrics.py for a series under a smaller target and never attempts a
 #: PUT it knows the limit would reject.
+#: Verify-first (#2518, base d70e614): _metrics_series_bytes (base :685) ran
+#: `metrics.py series`, accepted only schema_version 1, and encoded the whole
+#: envelope with one `json.dumps(...).encode("utf-8")` (base :716) as a single
+#: KV value; publish_metrics_series (base :719) did one
+#: `kv.put(METRICS_KEY, payload)` (base :727). Snapshot isolation: base :729
+#: `except (PublisherError, KVError)` logs a warning without raising, and the
+#: metrics call sits after the snapshot PUT, so a metrics 413 never stops the
+#: snapshot. Publisher log: `2026-10-11T09:24:15Z ... PUT metrics returned
+#: 413: {"code":10024,"message":"Value size 26266394 bytes exceeds maximum
+#: allowed size of 25MiB"}` while `2026-10-11T09:25:18Z ... snapshot
+#: brief-1791710316484989000-bfd5e538582acb91.json is already published` and
+#: `2026-10-11T09:36:24Z ... brief finished: exit 0` show the snapshot path
+#: continuing through the 413s.
 KV_VALUE_LIMIT_BYTES = 25 * 1024 * 1024
 METRICS_PUBLISH_TARGET_BYTES = 20 * 1024 * 1024
 #: Leaf arrays the dashboard page reads; numerators/denominators are

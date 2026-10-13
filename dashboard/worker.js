@@ -222,6 +222,12 @@ async function isAuthorized(request, env) {
 // position, renders unchanged. A v1 value, or anything unrecognized, is
 // served as-is: until the first bounded publish lands, the stored shape
 // stays readable (fallback).
+// Verify-first (#2518, base d70e614): worker.js:2 METRICS_KEY = "metrics";
+// the /api/metrics handler (base :269-277) did
+// `env.FUNNEL_SNAPSHOT.get(METRICS_KEY, { type: "json" })` and returned the
+// stored series shape directly, so the view froze at the last good publish:
+// `2026-10-11T08:24:13Z publisher: published metrics series (26188986
+// bytes)` with every later PUT 413ing from `2026-10-11T09:24:15Z` on.
 const METRICS_READING_KEYS = ["daily", "r7", "r28", "delta"];
 const METRICS_PART_KEYS = ["numerators", "denominators"];
 

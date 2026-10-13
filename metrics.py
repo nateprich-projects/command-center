@@ -44,6 +44,15 @@ SERIES_DAYS = 90
 #: froze metrics publishing once the 90-day series outgrew it (#2516). The
 #: series publishes under a smaller target so ordinary daily growth keeps
 #: headroom instead of hovering at the limit.
+#: Verify-first (#2518, base d70e614): metrics.py:42 SERIES_DAYS = 90;
+#: series_from_rows (base :2367) builds 90 daily/r7/r28/delta values per leaf
+#: with no size bound, and the series command printed it unbounded (base
+#: :3052 `result = series_from_rows(rows, now)`). Publisher log:
+#: `2026-10-11T08:24:13Z publisher: published metrics series (26188986
+#: bytes)` (last success) then `2026-10-11T09:24:15Z publisher: warning:
+#: metrics series was not published: PUT metrics returned 413:
+#: {"code":10024,"message":"Value size 26266394 bytes exceeds maximum
+#: allowed size of 25MiB"}` (first failure).
 KV_VALUE_LIMIT_BYTES = 25 * 1024 * 1024
 SERIES_PUBLISH_TARGET_BYTES = 20 * 1024 * 1024
 #: Recent days kept at full daily resolution. The dashboard charts the newest

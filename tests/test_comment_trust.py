@@ -143,6 +143,9 @@ BODY_READERS: Dict[str, str] = {
     ".github/scripts/watchdog.py:is_watchdog_alert":
         "the watchdog's own open issue, found by the marker in its body "
         "plus the alert title prefix",
+    "funnel.py:live_watchdog_alerts":
+        "the watchdog's own open issue body, found by the marker in its "
+        "body plus the alert title prefix",
     ".github/scripts/watchdog.py:main":
         "the watchdog's own open issue, found by the marker in its body",
     ".github/scripts/overseer_filing.py:extract_routing_block":

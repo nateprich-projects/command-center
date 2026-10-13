@@ -16969,6 +16969,86 @@ def member_issues_without_project_items(
             "issues": found,
         }
     return {"status": "read", "issues": found}
+
+
+#: The watchdog alert title and body marker, shared with
+#: `.github/scripts/watchdog.py` (`ALERT_TITLE`, `MARKER`). That script owns
+#: both strings; these copies exist so the brief can recognise a live owned
+#: alert among orphan issues without importing the Actions script, and a test
+#: pins them equal so the two cannot silently drift.
+WATCHDOG_ALERT_TITLE = "Scheduled runs need attention"
+WATCHDOG_MARKER = "<!-- command-center-watchdog -->"
+
+
+def live_watchdog_alerts(orphan_issues, body_of) -> List[Dict[str, object]]:
+    """Live watchdog-owned alerts among the orphan-issue scan.
+
+    Ownership needs both halves of the watchdog's own rule: a title starting
+    with the alert title, plus the watchdog-written body marker. Either alone
+    is not enough, for the same reason as in the watchdog's reuse rule — a
+    foreign issue may share the title, and a quoted marker proves nothing
+    without the title. ``body_of`` reads one orphan row's issue body (or
+    returns None when it cannot be read); an unreadable body confirms
+    nothing, so the alert stays listed only under the orphan scan, as today.
+    """
+    section = orphan_issues if isinstance(orphan_issues, Mapping) else {}
+    issues = section.get("issues")
+    if not isinstance(issues, list):
+        return []
+    found: List[Dict[str, object]] = []
+    for row in issues:
+        if not isinstance(row, Mapping):
+            continue
+        title = row.get("title")
+        if not isinstance(title, str) or not title.startswith(
+            WATCHDOG_ALERT_TITLE
+        ):
+            continue
+        try:
+            body = body_of(row)
+        except Exception:
+            continue
+        if not isinstance(body, str) or WATCHDOG_MARKER not in body:
+            continue
+        found.append(dict(row))
+    return found
+
+
+def watchdog_alert_watch_gate(alert: Mapping) -> Dict[str, object]:
+    """One funnel-watch must-answer brief line for a live owned alert.
+
+    The row keeps the ``watch_gates`` shape (``ref``/``title``/``url``/
+    ``class``/``question``/``waited``) so it renders on the funnel watch's
+    own list, outside ``items`` and ``total_needing_nate`` — never a Project
+    item, Class, or gate. The orphan scan carries no time, so the wait reads
+    ``unknown`` rather than a guessed age.
+    """
+    return {
+        "ref": alert.get("ref"),
+        "title": alert.get("title"),
+        "url": alert.get("url"),
+        "class": "Broken",
+        "question": "Recover the scheduled runs?",
+        "waited": humanise(None),
+    }
+
+
+def _watchdog_alert_body(alert: Mapping) -> Optional[str]:
+    """One orphan row's live issue body, or None when it cannot be read."""
+    ref = alert.get("ref")
+    if not isinstance(ref, str) or "#" not in ref:
+        return None
+    repo_name, _, number = ref.rpartition("#")
+    if not repo_name or not number.isdigit():
+        return None
+    payload = _gh_json(
+        "gh", "issue", "view", number, "--repo", repo_name,
+        "--json", "body",
+    )
+    if not isinstance(payload, dict):
+        return None
+    body = payload.get("body")
+    return body if isinstance(body, str) else None
 def status_state_mismatches(items: Iterable[Item]) -> List[Dict[str, object]]:
     """Items whose Project Status and GitHub state contradict each other.
 
@@ -17696,6 +17776,7 @@ def cmd_brief(
     decline_routing: Optional[Dict[str, object]] = None,
     main_ci: Optional[List[Dict[str, object]]] = None,
     orphan_issues: Optional[Dict[str, object]] = None,
+    watchdog_alerts: Optional[Sequence[Mapping[str, object]]] = None,
 ) -> int:
     missing = list(missing or [])
     timings = {} if timings is None else timings
@@ -17721,12 +17802,19 @@ def cmd_brief(
 
     def decision_payload():
         # Questions the funnel watch answers leave Nate's list and total and
-        # are shown as ``watch_gates`` instead (#1891).
+        # are shown as ``watch_gates`` instead (#1891). A live watchdog-owned
+        # alert joins that same must-answer list as a derived line (#2501):
+        # it is owned by the watch, never a Project item.
         decisions, watched = split_decisions(items)
         by_ref = {i.ref: i for i in items}
+        watch_rows = [watch_gate_json(i, now, by_ref) for i in watched]
+        watch_rows.extend(
+            watchdog_alert_watch_gate(alert)
+            for alert in (watchdog_alerts or [])
+        )
         return decisions, by_ref, [
             item_json(i, now, by_ref) for i in decisions
-        ], [watch_gate_json(i, now, by_ref) for i in watched]
+        ], watch_rows
 
     try:
         import heartbeat
@@ -26153,6 +26241,19 @@ def main(argv: Optional[Sequence[str]] = None, *,
                     degraded,
                     deadline=deadline,
                 )
+                # Confirm a live watchdog-owned alert among those orphans
+                # (#2501). One body read per title-matching candidate only —
+                # normally zero — and only a clean read counts, so the
+                # derived watch line never fires on a title alone and never
+                # fails the brief when the body cannot be read.
+                watchdog_alerts = None
+                if (
+                    isinstance(orphans, dict)
+                    and orphans.get("status") == "read"
+                ):
+                    watchdog_alerts = live_watchdog_alerts(
+                        orphans, _watchdog_alert_body
+                    )
                 # Keep the existing brief JSON as the command's stdout. The
                 # display snapshot is a separate, best-effort side effect and
                 # must not change what callers parse or whether the command
@@ -26175,6 +26276,7 @@ def main(argv: Optional[Sequence[str]] = None, *,
                             decline_routing=decline_routing,
                             main_ci=main_ci,
                             orphan_issues=orphans,
+                            watchdog_alerts=watchdog_alerts,
                         )
                 finally:
                     output = brief_stdout.getvalue()

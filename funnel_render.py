@@ -51,7 +51,8 @@ Then `watch_gates`, whenever non-empty, as its own short list headed as
 answered by the funnel watch: for each, its `class`, `question`, the `title`
 as a link to `url`, and how long it has `waited`. The funnel watch answers
 these; not Nate's decision. Never fold them into the decision list or count
-them in `total_needing_nate`. """ + WATCH_GATES_QUESTIONS + """
+them in `total_needing_nate`. A live watchdog-owned alert appears here as a
+derived line while its issue stays open; it is never a Project item. """ + WATCH_GATES_QUESTIONS + """
 
 Then `working_tree_touched`, whenever non-empty, as its own short list. For
 each grouped HEAD transition show `before.head` to `after.head` and every

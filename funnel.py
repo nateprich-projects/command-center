@@ -12434,6 +12434,7 @@ def reset_api_usage() -> None:
     _GRAPHQL_SPEND.update(
         {"calls": 0, "cost": 0, "remaining": None, "reset_at": None}
     )
+    _REST_SPEND.update({"calls": 0})
     _GRAPHQL_COST_READS = 0
     _GRAPHQL_CALLER_SPEND.clear()
     _PROJECT_ITEM_PAGE_COUNT = 0
@@ -27672,6 +27673,364 @@ def report_api_cost(run: Optional[str] = None,
         return
 
 
+# --------------------------------------------------------------------------
+# Project reads over REST (#2417, #2421).
+#
+# The funnel's GraphQL pool (5,000 points an hour) hits its floor most
+# nights, while the core pool behind REST sits nearly unused. This block
+# loads the same Project rows through
+# ``GET /users/nateprich/projectsV2/2/items?fields=<ids>`` instead.
+#
+# It sits beside the GraphQL path and no caller uses it yet: the ticket
+# builds the read path first and switches lanes later. ``_from_node`` stays
+# the GraphQL row parser; ``rest_item_to_item`` is its REST counterpart.
+# --------------------------------------------------------------------------
+
+#: The user-level Projects v2 items route, on the core pool. Built from the
+#: same owner/number constants as the GraphQL project queries.
+REST_PROJECT_ITEMS_PATH = "/users/{}/projectsV2/{}/items".format(
+    PROJECT_OWNER, PROJECT_NUMBER
+)
+
+#: Per-process REST spend: one call counted per attempted ``gh api`` REST
+#: request. Not state of record and it never outlives the process, like
+#: ``_GRAPHQL_SPEND``. Kept separate from it so each pool's spend stays
+#: visible and the existing GraphQL doctor/report contract is unchanged.
+_REST_SPEND: Dict[str, object] = {"calls": 0}
+
+
+def rest_spend() -> Dict[str, object]:
+    """What this process has spent on REST core-pool requests so far."""
+    return dict(_REST_SPEND)
+
+
+def _record_rest_request() -> None:
+    """Count one REST request, even when its response is unusable."""
+    _REST_SPEND["calls"] = int(_REST_SPEND["calls"]) + 1
+
+
+def report_rest_spend(stream=None) -> None:
+    """Print what this process spent on REST, if it spent anything.
+
+    To **stderr**, never stdout, for the same reason as
+    ``report_graphql_spend``: lane commands emit JSON that routines parse.
+    A run that made no REST call prints nothing rather than a row of zeros.
+    """
+    spend = rest_spend()
+    if not spend["calls"]:
+        return
+    print(
+        "rest: {} call(s) on the core pool".format(spend["calls"]),
+        file=stream if stream is not None else sys.stderr,
+    )
+
+
+#: What a REST routing field reads when it cannot route: absent, malformed,
+#: ambiguous, or naming a value outside the field's known options. It is an
+#: explicit marker rather than a default such as Ideas or Broken, so a row
+#: whose Project value cannot be read never silently joins a queue.
+REST_UNKNOWN_VALUE = "unknown"
+
+
+def _rest_field_matches(entry: object, refs: Sequence[str]) -> bool:
+    """Whether one REST field entry is one of the wanted fields.
+
+    Entries are matched by field id or field name: the ``fields=<ids>``
+    request projects by id, but recorded payloads and future shapes may key
+    by name, so both identify the field. Anything that is not a dict, or a
+    dict carrying neither, never matches.
+    """
+    if not isinstance(entry, dict):
+        return False
+    candidates = []
+    for key in ("field_id", "fieldId", "field", "id", "name"):
+        value = entry.get(key)
+        if isinstance(value, dict):
+            candidates.extend([value.get("id"), value.get("name")])
+        elif isinstance(value, str):
+            candidates.append(value)
+    return any(candidate in refs for candidate in candidates)
+
+
+def _rest_single_select_raw(entry: object) -> Optional[str]:
+    """Read one entry's single-select name at ``.value.name.raw``.
+
+    Returns None when the entry is not that shape: no value, a value with
+    no name, or a blank name. Text and date values live elsewhere on the
+    entry and are never mistaken for a single-select name here.
+    """
+    if not isinstance(entry, dict):
+        return None
+    value = entry.get("value")
+    if isinstance(value, dict):
+        name = value.get("name")
+        if isinstance(name, dict):
+            name = name.get("raw")
+        if isinstance(name, str) and name.strip():
+            return name.strip()
+        return None
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
+def parse_rest_single_select(
+    fields: object, *refs: str,
+    known_values: Optional[Sequence[str]] = None,
+) -> str:
+    """Read one REST single-select field, failing closed.
+
+    Returns the selected option name when exactly one matching entry
+    carries a readable name at ``.fields[].value.name.raw`` (or a plain
+    string value) and, when ``known_values`` is given, that name is one of
+    them. Every other shape — absent field, malformed entry, two entries
+    disagreeing, or a name outside ``known_values`` — returns
+    ``REST_UNKNOWN_VALUE`` with no default routing.
+    """
+    if not refs:
+        raise ValueError("parse_rest_single_select needs a field id or name")
+    entries = fields if isinstance(fields, list) else []
+    raws = [
+        _rest_single_select_raw(entry)
+        for entry in entries
+        if _rest_field_matches(entry, refs)
+    ]
+    raws = [raw for raw in raws if raw is not None]
+    if len(set(raws)) != 1:
+        # Zero matches (absent), only blank/malformed matches, or two
+        # entries disagreeing: none of them is a readable selection.
+        return REST_UNKNOWN_VALUE
+    raw = raws[0]
+    if known_values is not None and raw not in known_values:
+        return REST_UNKNOWN_VALUE
+    return raw
+
+
+#: The routing fields the REST row converter reads, as attribute name to
+#: (field id-or-name, known option names). ids come from the Project schema
+#: where the funnel already knows them; Origin, Risk and Domain have no
+#: stored ids so they match by field name.
+REST_ROUTING_FIELDS: Dict[str, Tuple[Tuple[str, ...], Tuple[str, ...]]] = {
+    "status": ((STATUS_FIELD_ID, "Status"), tuple(STAGES)),
+    "klass": (
+        (CLASS_FIELD_ID, "Class"),
+        tuple(list(LADDER) + list(CLASS_RENAMES)),
+    ),
+    "origin": (("Origin",), tuple(ORIGIN_OPTIONS)),
+    "risk": (("Risk",), tuple(RISK_OPTIONS)),
+    "needs": ((NEEDS_FIELD_ID, "Needs"), tuple(NEEDS_OPTIONS)),
+    "domain": (("Domain",), tuple(DOMAIN_OPTIONS)),
+    "pinned": ((PINNED_FIELD_ID, "Pinned"), ("Pinned",)),
+}
+
+
+def _rest_content(node: dict) -> dict:
+    """The issue payload inside one REST Project item row."""
+    for key in ("content", "issue"):
+        value = node.get(key)
+        if isinstance(value, dict):
+            return value
+    return node
+
+
+def _rest_names(value: object, login_key: str = "name") -> List[str]:
+    """Read REST label/assignee names given as strings or node dicts."""
+    if isinstance(value, dict):
+        value = value.get("nodes", value.get("items"))
+    if not isinstance(value, list):
+        return []
+    names = []
+    for entry in value:
+        if isinstance(entry, str) and entry.strip():
+            names.append(entry.strip())
+        elif isinstance(entry, dict):
+            name = entry.get(login_key)
+            if isinstance(name, str) and name.strip():
+                names.append(name.strip())
+    return names
+
+
+def rest_item_to_item(
+    node: object,
+    field_map: Optional[Mapping[str, Tuple[Tuple[str, ...], Tuple[str, ...]]]] = None,
+) -> Optional[Item]:
+    """Convert one REST Project item row to an ``Item``, or None to skip.
+
+    Rows without an issue number are drafts (or pull requests), exactly as
+    in ``_from_node``. Routing fields that are absent or unknown read as
+    ``REST_UNKNOWN_VALUE`` — never a default Status or Class — so such a
+    row fails closed downstream instead of joining a queue it was not
+    routed to. The lock text and history fields stay unset: this is the
+    cheap list projection, like the compact begin view.
+    """
+    if not isinstance(node, dict):
+        return None
+    content = _rest_content(node)
+    number = content.get("number")
+    if not isinstance(number, int) or isinstance(number, bool) or number < 1:
+        return None
+    repository = content.get("repository")
+    repo = None
+    if isinstance(repository, dict):
+        repo = repository.get("nameWithOwner")
+    if not isinstance(repo, str) or not repo:
+        repo = content.get("repo") if isinstance(
+            content.get("repo"), str) else None
+    if not repo:
+        return None
+    fields = node.get("fields")
+    if not isinstance(fields, list):
+        fields = node.get("field_values")
+    mapping = field_map or REST_ROUTING_FIELDS
+    routing: Dict[str, str] = {}
+    for attr, (refs, known) in mapping.items():
+        routing[attr] = parse_rest_single_select(
+            fields, *refs, known_values=known
+        )
+    body = content.get("body")
+    if not isinstance(body, str):
+        body = None
+    parent = content.get("parent")
+    parent_ref = None
+    if isinstance(parent, dict):
+        parent_repo = (
+            parent.get("repository", {}).get("nameWithOwner")
+            if isinstance(parent.get("repository"), dict) else None
+        )
+        if (isinstance(parent_repo, str) and isinstance(
+                parent.get("number"), int)):
+            parent_ref = "{}#{}".format(parent_repo, parent["number"])
+    state = content.get("state")
+    if state not in ("OPEN", "CLOSED"):
+        state = "OPEN" if content.get("open", True) else "CLOSED"
+    return Item(
+        repo=repo,
+        number=number,
+        title=content.get("title") if isinstance(
+            content.get("title"), str) else "",
+        url=content.get("url") if isinstance(
+            content.get("url"), str) else "",
+        state=state,
+        body=body,
+        body_loaded="body" in content,
+        state_reason=content.get("stateReason"),
+        created_at=parse_time(content.get("createdAt")),
+        status=routing.get("status"),
+        klass=routing.get("klass"),
+        origin=routing.get("origin"),
+        risk=routing.get("risk"),
+        pinned=routing.get("pinned") == "Pinned",
+        needs=routing.get("needs"),
+        domain=routing.get("domain"),
+        labels=_rest_names(content.get("labels")),
+        assignees=_rest_names(
+            content.get("assignees"), login_key="login"),
+        parent=parent_ref,
+        closed_at=parse_time(content.get("closedAt")),
+        item_id=node.get("id") if isinstance(
+            node.get("id"), str) else None,
+    )
+
+
+def _rest_get_json(endpoint: str):
+    """GET one REST endpoint through ``gh api`` and parse its JSON body."""
+    try:
+        proc = _run_gh(
+            ["gh", "api", endpoint], capture_output=True, text=True)
+    finally:
+        # The request went out even when the child never answered.
+        _record_rest_request()
+    if proc.returncode != 0:
+        raise GitHubError(
+            "REST request failed: {}".format(
+                _graphql_text(getattr(proc, "stderr", "")).strip()
+                or "gh exited {}".format(proc.returncode)
+            )
+        )
+    try:
+        return json.loads(getattr(proc, "stdout", ""))
+    except (TypeError, ValueError) as exc:
+        raise GitHubError(
+            "malformed REST response: {}".format(exc)) from exc
+
+
+def _rest_items_page(payload: object) -> Tuple[List[dict], Optional[str]]:
+    """Split one REST items response into rows and a next cursor.
+
+    Accepts a bare list (one page, no cursor) or a dict carrying its rows
+    under ``items`` with the cursor under ``pageInfo`` (``hasNextPage`` /
+    ``endCursor``) or a top-level ``next_cursor`` / ``nextCursor``. A dict
+    with rows and no cursor is a single page.
+    """
+    if isinstance(payload, list):
+        return [row for row in payload if isinstance(row, dict)], None
+    if not isinstance(payload, dict):
+        raise GitHubError("malformed REST items response")
+    rows = payload.get("items")
+    if not isinstance(rows, list):
+        raise GitHubError("malformed REST items response")
+    cursor: Optional[str] = None
+    page_info = payload.get("pageInfo") or payload.get("page_info")
+    if isinstance(page_info, dict) and page_info.get("hasNextPage"):
+        end = page_info.get("endCursor") or page_info.get("end_cursor")
+        if isinstance(end, str) and end:
+            cursor = end
+    if cursor is None:
+        for key in ("next_cursor", "nextCursor"):
+            value = payload.get(key)
+            if isinstance(value, str) and value:
+                cursor = value
+                break
+    return [row for row in rows if isinstance(row, dict)], cursor
+
+
+def load_rest_project_items(
+    field_ids: Sequence[str],
+    *,
+    page_size: int = PROJECT_ITEM_PAGE_SIZE,
+    _request=None,
+) -> List[Item]:
+    """Load every Project item row over REST, with bodies and field values.
+
+    Pages ``REST_PROJECT_ITEMS_PATH`` with ``?fields=<ids>`` until the
+    response carries no next cursor. Each page costs one REST core-pool
+    request, counted in ``rest_spend()``. Returns ``Item`` rows; drafts
+    (rows without an issue number) are skipped, as in ``_from_node``.
+    ``_request`` takes an endpoint and returns parsed JSON; tests use it to
+    replay recorded payloads, production uses ``_rest_get_json``.
+    """
+    ids = [entry for entry in field_ids if isinstance(entry, str) and entry]
+    if not ids:
+        raise ValueError("load_rest_project_items needs field ids")
+    if (not isinstance(page_size, int) or isinstance(page_size, bool)
+            or page_size < 1):
+        raise ValueError("page_size must be a positive int")
+    request = _request or _rest_get_json
+    base = "{}?fields={}".format(
+        REST_PROJECT_ITEMS_PATH, ",".join(ids))
+    items: List[Item] = []
+    cursor: Optional[str] = None
+    seen_cursors: Set[str] = set()
+    while True:
+        endpoint = base
+        if cursor:
+            endpoint += "&cursor={}".format(cursor)
+        payload = request(endpoint)
+        rows, next_cursor = _rest_items_page(payload)
+        for row in rows:
+            item = rest_item_to_item(row)
+            if item is not None:
+                items.append(item)
+        if not next_cursor:
+            break
+        if next_cursor in seen_cursors:
+            raise GitHubError(
+                "REST Project items did not advance")
+        seen_cursors.add(next_cursor)
+        cursor = next_cursor
+    return items
+
+
 def report_graphql_spend(stream=None) -> None:
     """Print what this process spent on GraphQL, if it spent anything.
 
@@ -27711,6 +28070,7 @@ if __name__ == "__main__":
                 # In a `finally` so a run that dies on an exhausted budget still says
                 # what it spent — that run is exactly the one whose numbers matter.
                 report_graphql_spend()
+                report_rest_spend()
         sys.exit(code)
     finally:
         _ACTIVE_GRAPHQL_CALLER.reset(caller_token)

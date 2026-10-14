@@ -3524,6 +3524,114 @@ def _ticket_work_tier(item: Item) -> Optional[str]:
     return "standard"
 
 
+#: Wording that names a prerequisite next to an explicit issue/PR reference
+#: (#2497). Only an explicit ``#N`` or ``owner/repo#N`` beside one of these
+#: words records a canonical condition; a free-text description without a
+#: reference stays withheld until a body edit.
+_DECLINE_PREREQUISITE_TRIGGER = (
+    r"blocked\s+on|needs?|needed|requires?|required|requiring|prerequisites?"
+)
+
+#: An explicit reference, bare (resolved against the ticket's repo) or
+#: fully qualified.
+_DECLINE_PREREQUISITE_REF = (
+    r"(?:(?P<repo>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+))?"
+    r"#(?P<number>[1-9][0-9]*)(?![A-Za-z0-9_])"
+)
+
+#: Filler allowed between the wording and its reference: "blocked on the
+#: merge of #N", "needs PR #N", "requires ticket owner/repo#N".
+_DECLINE_PREREQUISITE_FILLER = (
+    r"(?:\s+(?:the|a|an|merge|merging|landing|of|ticket|issue|pr|"
+    r"pull\s+request))*"
+)
+
+_DECLINE_PREREQUISITE_PATTERNS = (
+    re.compile(
+        r"\b(?:" + _DECLINE_PREREQUISITE_TRIGGER + r")\b"
+        + _DECLINE_PREREQUISITE_FILLER + r"\s*"
+        + _DECLINE_PREREQUISITE_REF,
+        re.IGNORECASE,
+    ),
+    re.compile(
+        _DECLINE_PREREQUISITE_REF
+        + r"\s+as\s+(?:an?\s+)?(?:" + _DECLINE_PREREQUISITE_TRIGGER + r")\b",
+        re.IGNORECASE,
+    ),
+)
+
+
+def _decline_prerequisite_ref(
+    route: Mapping[str, object], repo: str,
+) -> Optional[str]:
+    """Return the one canonical prerequisite ref a decline route names.
+
+    The route's ``decline_excerpt`` is the durable record, so the condition
+    is derived from it on every check with nothing stored. Exactly one
+    distinct explicit reference is a condition; zero, or two different ones,
+    is not (a free-text mention without ``#N`` never matches).
+    """
+    excerpt = route.get("decline_excerpt") if isinstance(route, Mapping) else None
+    if not isinstance(excerpt, str):
+        return None
+    found: List[str] = []
+    for pattern in _DECLINE_PREREQUISITE_PATTERNS:
+        for match in pattern.finditer(excerpt):
+            number = match.group("number")
+            ref = "{}{}{}".format(match.group("repo") or repo, "#", number)
+            if re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#[1-9][0-9]*", ref) is None:
+                continue
+            if ref not in found:
+                found.append(ref)
+    return found[0] if len(found) == 1 else None
+
+
+def _github_prerequisite_satisfied(ref: str) -> Optional[bool]:
+    """Return live GitHub state for one prerequisite ref, if knowable.
+
+    An issue satisfies when closed for any reason; a PR satisfies only when
+    merged, never when merely closed. Uncached REST reads: this decides
+    queue membership. Anything unknowable (not found, unreadable, a PR
+    whose merge state cannot be established) returns ``None`` so the caller
+    fails closed and keeps withholding.
+    """
+    repo, _, number = ref.rpartition("#")
+    try:
+        pr = _gh_api_json("repos/{}/pulls/{}".format(repo, number))
+    except Exception:
+        return None
+    if isinstance(pr, dict):
+        merged_at = pr.get("merged_at")
+        return bool(pr.get("merged")) or (
+            isinstance(merged_at, str) and bool(merged_at)
+        )
+    try:
+        issue = _gh_api_json("repos/{}/issues/{}".format(repo, number))
+    except Exception:
+        return None
+    if isinstance(issue, dict):
+        if "pull_request" in issue:
+            return None
+        return str(issue.get("state") or "").lower() == "closed"
+    return None
+
+
+def _decline_prerequisite_satisfied(
+    ref: str, item: Item, by_ref: Dict[str, Item],
+) -> Optional[bool]:
+    """Whether a canonical decline prerequisite is satisfied, if knowable.
+
+    A prerequisite the fresh Project load already carries is an issue, so its
+    loaded state decides with no extra request. Anything else (a PR, which
+    the ``... on Issue`` listing never carries, or an untracked row) is
+    re-resolved live from GitHub on each check.
+    """
+    blocker = by_ref.get(ref)
+    if blocker is not None:
+        return blocker.state == "CLOSED"
+    return _github_prerequisite_satisfied(ref)
+
+
 def _decline_route_withholds_startability(
     item: Item, by_ref: Dict[str, Item],
 ) -> bool:
@@ -3544,7 +3652,16 @@ def _decline_route_withholds_startability(
         current_digest = hashlib.sha256(
             item.body.encode("utf-8")
         ).hexdigest()
-        return current_digest == route.get("acceptance_digest")
+        if current_digest != route.get("acceptance_digest"):
+            return False
+        # Unchanged digest still withholds, unless the one prerequisite the
+        # route names has landed since (#2497). The condition re-resolves
+        # from GitHub state on each check with nothing stored, so no body
+        # edit is needed for the lift.
+        prerequisite = _decline_prerequisite_ref(route, item.repo)
+        if prerequisite is None:
+            return True
+        return _decline_prerequisite_satisfied(prerequisite, item, by_ref) is not True
     if (
         item.needs == "external-event"
         and route.get("type") == "pending-gate-answer"

@@ -399,7 +399,8 @@ def test_packet_asks_for_seams_a_reproduction_and_sequenced_wide_changes(
     assert ("Neither is a reason to split small work: what fits one run "
             "stays one ticket" in normalized)
     assert ("For each `## Review focus` bullet, put one `Accept` test in the "
-            "ticket that owns that behavior. Copy the bullet's text verbatim, "
+            "ticket that owns that behavior. Prefix the copied line as "
+            "`Guard (must not happen):` plus the bullet's text verbatim, "
             "exactly once." in normalized)
 
 

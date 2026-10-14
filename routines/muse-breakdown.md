@@ -26,7 +26,7 @@ breaking it at all?
   it in `depends_on`.
 - Sequence expand, migrate, contract only for a genuinely wide change; make a needed refactor its own prefactor ticket, first; small work stays one ticket.
 - One indivisible plan is one ticket.
-- For each `## Review focus` bullet, put one `Accept` test in its owning ticket; copy the text verbatim once.
+- For each `## Review focus` bullet, put one `Accept` test in its owning ticket; prefix it `Guard (must not happen):` plus the text verbatim, once.
 
 ## The answer
 

@@ -225,7 +225,7 @@ async function authorizedDomainEnv() {
     ACCESS_AUD: access.audience,
     ACCESS_JWKS_FETCH: access.fetchImpl,
     FUNNEL_SNAPSHOT: { async get() { return null; } },
-    ...assetEnv({ "/domain.html": domainHtml, "/index.html": indexHtml }, seen),
+    ...assetEnv({ "/domain": domainHtml, "/index.html": indexHtml }, seen),
   };
   return { access, env, seen, domainHtml, indexHtml };
 }
@@ -237,7 +237,7 @@ test("/domains/<domain> serves the new file behind the Access check", async () =
   }), env);
 
   assert.equal(response.status, 200);
-  assert.deepEqual(seen, ["/domain.html"]);
+  assert.deepEqual(seen, ["/domain"]);
   assert.equal(await response.text(), domainHtml);
   assert.equal(response.headers.get("cache-control"), "no-cache, must-revalidate");
 });
@@ -256,6 +256,6 @@ test("/ still serves the current page byte-identical", async () => {
 test("the detail route serves only the new file", async () => {
   const source = await readFile(new URL("../worker.js", import.meta.url), "utf8");
   const block = source.slice(source.indexOf('"/domains/"'));
-  assert.match(block, /\/domain\.html/);
-  assert.doesNotMatch(block, /index\.html|app\.js|styles\.css/);
+  assert.match(block, /"\/domain"/);
+  assert.doesNotMatch(block, /\.html|index\.html|app\.js|styles\.css/);
 });

@@ -77,7 +77,8 @@ SIZING_END = "## Ordering and independence"
 # rendered plan carries one or more focus bullets.
 REVIEW_FOCUS_ACCEPT_RULE = (
     "For each `## Review focus` bullet, put one `Accept` test in the ticket "
-    "that owns that behavior. Copy the bullet's text verbatim, exactly once."
+    "that owns that behavior. Prefix the copied line as `Guard (must not "
+    "happen):` plus the bullet's text verbatim, exactly once."
 )
 
 #: An external dependency: owner/repo#n, the only string shape accepted.

@@ -1,6 +1,6 @@
 ---
 name: command-center-overseer
-description: Daily overseer for the command-center domain (command-center, including github-runners): work Nate's five phases one step per run, keep the domain records, and file work through the funnel over repo-scoped REST. Use for the command-center project's daily routine.
+description: Daily overseer for the command-center domain (command-center, including github-runners): work Nate's five phases one step per run, keep the domain records, and file work through the funnel over REST once #2417 lands, else Mac handoff. Use for the command-center project's daily routine.
 ---
 
 # command-center overseer
@@ -22,8 +22,7 @@ below the top is measured, never assumed.
 You run as a daily routine in a cloud thread. The routine re-clones the
 attached repository each run. Know the limits, all measured (#2438):
 
-- GitHub GraphQL returns 403. The user-owned Project has no REST surface you
-  can reach either. Read and file through repo-scoped REST only.
+- GitHub GraphQL returns 403. Read through repo-scoped REST.
 - You see no local MCP servers and no `~/.claude`. This committed skill is
   your instructions.
 - Every run draws on Nate's Max plan. Do the one phase step and stop.
@@ -94,20 +93,12 @@ funnel work; never take one.
 
 ## Filing work
 
-File work as an issue over repo-scoped REST in the attached repository
-(`POST repos/{owner}/{repo}/issues`). Probe 2 failed, so cloud threads
-cannot set Project fields; a hobby-linux workflow (`overseer-filing`,
-#2512) adds the filed issue to Project 2 and sets Status Ideas, Origin
-agent, Risk, Needs and Domain. Nothing about filing goes through the
-Mac: there is no Mac handoff.
-
-Every filed issue carries this routing block in its body, with all
-three values spelled exactly:
-
-<!-- command-center-routing -->
-```json
-{"Risk": "standard", "Needs": "agent", "Domain": "command-center"}
-```
+File work as a funnel issue over repo-scoped REST once #2417 lands
+(`POST repos/{owner}/{repo}/issues` in the attached repository). If
+probe 2 (#2438) shows cloud threads cannot reach the Projects API, use
+the Mac handoff instead: write the ready-to-file issue (title, body,
+Risk, Needs, Domain) into the domain's records and leave the REST
+filing and Project-field step to the Mac.
 
 - `Risk` is `standard` or `escalated`. Escalate only a risk the work
   declares; a wording-scan hit alone never escalates.
@@ -119,9 +110,7 @@ three values spelled exactly:
   `career-toolset`, `jeffy-finance-agent`.
 
 Routing is never defaulted. An unknown or missing value fails closed:
-the item is left unset and a comment says why. For issues filed in this
-repository the workflow fires on `issues: opened`; no dispatch is
-needed.
+the item is left unset and a comment says why.
 
 ## Read-only data, no secrets
 
@@ -132,8 +121,6 @@ needed.
   script values and no keys here. Never copy the FantasyPros key, any
   token, or any credential into the thread, the skill, the records, or
   a filed issue.
-- The workflow files with its own repository secret, whose name is all
-  you ever need to know. Never read it, print it, or write it anywhere.
 
 ## Environment notes
 

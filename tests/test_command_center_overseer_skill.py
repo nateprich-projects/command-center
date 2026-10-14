@@ -3,14 +3,12 @@
 The skill is the daily routine's instructions, committed in the attached
 repository because cloud threads see no ``~/.claude``. These tests prove
 the ticket's Accept: the skill names the five-phase loop, the record
-path, and the amended filing fallback (REST in the attached repo with a
-routing block, #2512 — probe 2 failed, so nothing about filing goes
-through the Mac), and it carries no secret material.
+path, and the filing fallback (REST once #2417 lands, else the Mac
+handoff if probe 2 fails), and it carries no secret material.
 """
 
 from __future__ import annotations
 
-import json
 import pathlib
 import re
 import sys
@@ -22,8 +20,6 @@ import funnel  # noqa: E402
 
 SKILL = ROOT / "skills" / "command-center-overseer" / "SKILL.md"
 LINKED = ROOT / ".claude" / "skills" / "command-center-overseer" / "SKILL.md"
-
-ROUTING_MARKER = "<!-- command-center-routing -->"
 
 #: Secret material, not secret vocabulary: the skill must be able to say
 #: "no secrets", "token" and "FantasyPros key" while carrying no value.
@@ -90,35 +86,33 @@ def test_record_path_and_record_kinds_are_named():
     assert "Records hold knowledge; work status stays on issues." in skill
 
 
-def test_routing_block_parses_with_live_option_values():
-    skill = _skill()
-    assert ROUTING_MARKER in skill
-    rest = skill.split(ROUTING_MARKER, 1)[1]
-    fenced = re.search(r"```json\s*\n(.*?)(\r?\n```)", rest, re.DOTALL)
-    assert fenced, "no fenced ```json block follows the routing marker"
-    block = json.loads(fenced.group(1))
-    assert set(block) == {"Risk", "Needs", "Domain"}, (
-        "the routing block must carry exactly Risk, Needs and Domain"
-    )
-    assert block["Risk"] in funnel.RISK_OPTIONS
-    assert block["Needs"] in funnel.NEEDS_OPTIONS
-    assert block["Domain"] == "command-center"
-    assert block["Domain"] in funnel.DOMAIN_OPTIONS
-
-
-def test_filing_fallback_is_rest_plus_workflow_not_the_mac():
+def test_filing_fallback_is_rest_once_2417_else_mac_handoff():
     skill = " ".join(_skill().split())
     for phrase in (
-        "repo-scoped REST",
-        "overseer-filing",
-        "Project 2",
-        "Status Ideas, Origin agent, Risk, Needs and Domain",
+        "#2417",
+        "REST",
+        "Mac handoff",
+        "probe 2",
         "Routing is never defaulted",
-        "Nothing about filing goes through the Mac",
-        "there is no Mac handoff",
-        "no dispatch is needed",
     ):
         assert phrase in skill, "filing fallback missing: {}".format(phrase)
+    for phrase in (
+        "there is no Mac handoff",
+        "Nothing about filing goes through the Mac",
+        "overseer-filing",
+        "#2512",
+    ):
+        assert phrase not in skill, (
+            "the off-Mac fallback is not the ticket's: {}".format(phrase)
+        )
+    for option in funnel.RISK_OPTIONS:
+        assert option in skill, (
+            "the skill must name the live Risk option {}".format(option)
+        )
+    for option in funnel.NEEDS_OPTIONS:
+        assert option in skill, (
+            "the skill must name the live Needs option {}".format(option)
+        )
     for option in funnel.DOMAIN_OPTIONS:
         assert "`{}`".format(option) in skill, (
             "the skill must name the live Domain option {}".format(option)

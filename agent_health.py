@@ -21,6 +21,15 @@ SILENCE_FLOOR_SECONDS = 3600
 #: when its last recorded run is this old. This is deliberately independent of
 #: the one-hour floor used by the inferred cadence path.
 ABSOLUTE_SILENCE_SECONDS = 6 * 3600
+#: Per-agent silence floors, in seconds, for intentionally sparse weekday
+#: schedules (#2584, #2585). Claude's only weekday schedule is the
+#: twelve-hourly funnel-watch (`RRULE:FREQ=DAILY;BYHOUR=4,16;BYMINUTE=13` in
+#: `codex_run.py`), so a normal overnight gap of 7-12h is the schedule
+#: working, not a lane that died. The 13-hour floor covers the 12-hour
+#: cadence plus one hour of slack: a genuinely missed twelve-hourly run
+#: still alarms, only ~1h late. `PAUSED_AGENTS` semantics are unchanged —
+#: this quiets only the silence conditions, never dying or errored runs.
+AGENT_SILENCE_FLOOR_SECONDS: Dict[str, int] = {"claude": 13 * 3600}
 MINIMUM_HISTORY = 8
 
 #: The normal rhythm is learned from the trailing fortnight. This is deliberately
@@ -467,6 +476,7 @@ def assess(
     normal_multiple: Optional[int] = None,
     silence_floor_seconds: Optional[int] = None,
     absolute_silence_seconds: Optional[int] = None,
+    agent_silence_floors: Optional[Dict[str, int]] = None,
     minimum_history: Optional[int] = None,
     history_window_seconds: Optional[int] = None,
     unfinished_seconds: Optional[int] = None,
@@ -499,6 +509,12 @@ def assess(
     it, for the same reason: a pause explains a gap in records, not a run
     that died or three that errored, so a stale flag cannot suppress an
     active stuck agent. Defaults off so existing callers read as before.
+
+    ``agent_silence_floors`` maps an agent to a minimum silence threshold in
+    seconds, for intentionally sparse schedules (#2585). It raises only the
+    two silence floors — the inferred-cadence threshold and the absolute
+    floor — and leaves dying, errored, degraded, open-start and drift
+    conditions untouched. Defaults to ``AGENT_SILENCE_FLOOR_SECONDS``.
 
     ``regressions_only`` is used by the brief: it suppresses floor and
     unclassified finishes and requires the recorded runtime head so every
@@ -538,6 +554,9 @@ def assess(
         ABSOLUTE_SILENCE_SECONDS
         if absolute_silence_seconds is None else absolute_silence_seconds
     )
+    if agent_silence_floors is None:
+        agent_silence_floors = AGENT_SILENCE_FLOOR_SECONDS
+    per_agent_floor = agent_silence_floors.get(agent, 0)
     minimum_history = MINIMUM_HISTORY if minimum_history is None else minimum_history
     history_window_seconds = (
         HISTORY_WINDOW_SECONDS
@@ -602,7 +621,9 @@ def assess(
             # the records before it are older than the reason for the quiet.
             latest = max(latest, hold_until)
         quiet_for = now - latest
-        threshold = max(silence_floor_seconds, normal_multiple * normal)
+        threshold = max(
+            silence_floor_seconds, per_agent_floor, normal_multiple * normal
+        )
         if quiet_for > threshold:
             ratio = quiet_for / normal if normal else float("inf")
             ratio_text = "{:.0f}x normal".format(ratio) if ratio != float("inf") else "unbounded"
@@ -644,14 +665,15 @@ def assess(
             if hold_until is not None:
                 latest = max(latest, hold_until)
             quiet_for = now - latest
-            if quiet_for > absolute_silence_seconds:
+            absolute_floor = max(absolute_silence_seconds, per_agent_floor)
+            if quiet_for > absolute_floor:
                 problems.append(
                     "`{}`: absolute silence floor {} exceeded. "
                     "Nothing recorded for {} — last at <t:{}:f>; "
                     "cadence unavailable with fewer than {} gaps in the "
                     "trailing {} history.".format(
                         agent,
-                        _duration(absolute_silence_seconds),
+                        _duration(absolute_floor),
                         _duration(quiet_for),
                         int(latest),
                         minimum_history,

@@ -62,11 +62,18 @@ def _parameters(candidate: PARAMETERS) -> Iterator[None]:
     previous = {name: getattr(watchdog, name) for name in names}
     for name, value in zip(names, candidate):
         setattr(watchdog, name, value)
+    # The replay compares the four shared calibration parameters. The
+    # per-agent silence overlay (#2585) is a separate dimension the replay
+    # never varied, so hold it empty here — its own regression test covers
+    # it — and these candidate counts keep measuring what they measured.
+    previous_floor = watchdog.AGENT_SILENCE_FLOOR_SECONDS
+    watchdog.AGENT_SILENCE_FLOOR_SECONDS = {}
     try:
         yield
     finally:
         for name, value in previous.items():
             setattr(watchdog, name, value)
+        watchdog.AGENT_SILENCE_FLOOR_SECONDS = previous_floor
 
 
 def _silence_problems(agent: str, rows: List[Dict[str, float]], now: float,

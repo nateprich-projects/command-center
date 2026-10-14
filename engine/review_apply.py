@@ -225,6 +225,15 @@ def decide(answer: Dict[str, object]) -> Tuple[str, List[str], Optional[str]]:
     findings override a summary approval, so a diff the pass caught —
     a requirement met twice over, a line missing — can never merge on
     the strength of the verdict word alone. Pure: no IO.
+
+    A requirement the lane runner already routed to the ticket as a
+    refuted base premise (#2549) is not duplicated here as an
+    implementer-directed blocker: its ticket-directed routing line is
+    already in ``blocking``, so rebuilding an unmet line for it would
+    re-ask the implementer on the next head. Suppression needs both the
+    routing line present and the entry itself refuted (base-premise
+    shape with the marker observation), so a bare marker never drops a
+    genuine finding.
     """
     verdict = str(answer["verdict"])
     blocking = list(answer["blocking"])  # type: ignore[arg-type]
@@ -242,11 +251,25 @@ def decide(answer: Dict[str, object]) -> Tuple[str, List[str], Optional[str]]:
             "the model said {!r}".format(verdict))
         verdict = "rejected"
         blocking = blocking + ["unsure: " + item for item in unsure]
+    routed = any(review.is_premise_refuted_routing(line)
+                 for line in blocking)
     unmet = [entry for entry in requirements  # type: ignore[union-attr]
-             if isinstance(entry, dict) and entry.get("status") == "unmet"]
+             if isinstance(entry, dict) and entry.get("status") == "unmet"
+             and not (routed and review.is_premise_refuted_result(
+                 entry.get("requirement"), entry))]
     req_unsure = [entry for entry in requirements  # type: ignore[union-attr]
                   if isinstance(entry, dict)
                   and entry.get("status") == "unsure"]
+    suppressed = (
+        sum(1 for entry in requirements
+            if isinstance(entry, dict) and entry.get("status") == "unmet")
+        - len(unmet))
+    if suppressed:
+        notes.append(
+            "recorded with {} refuted base premise(s) routed to the "
+            "ticket for amend-or-send-back; no implementer-directed "
+            "rejection for the premise".format(suppressed))
+        verdict = "rejected"
     if unmet or req_unsure:
         parts = []
         if unmet:

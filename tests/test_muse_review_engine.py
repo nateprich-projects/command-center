@@ -2062,6 +2062,37 @@ def test_a_rejection_records_the_code_derived_blocking_list(tmp_path):
     )
 
 
+def test_a_refuted_base_premise_is_recorded_routed_to_the_ticket(tmp_path):
+    """#2549: a judge's refuted base-premise observation is recorded routed
+    to the ticket for amend-or-send-back, with no implementer-directed
+    rejection for the premise, so the next head is not re-rejected on it."""
+    requirement = ("Reproduction: base never reuses an open claim; "
+                   "verify on base first")
+    evidence = ("premise refuted (base): base reuses via PATCH in "
+                "the funnel claim update")
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), _packet(),
+        answers=(_requirements_answer(requirement),
+                 _judge_answer(requirement, status="unmet",
+                               evidence=evidence)))
+
+    assert proc.returncode == 0, proc.stderr
+    judge = (repo / "muse.prompt.2").read_text()
+    assert "the ticket premise is refuted, not the diff" in judge
+    applied = json.loads((repo / "apply.answer").read_text())
+    assert applied["verdict"] == "rejected"
+    assert applied["blocking"] == [
+        "premise refuted -- routed to ticket for amend-or-send-back: "
+        "{} -- {}".format(requirement, evidence)
+    ]
+    assert applied["routing"]["route"] == "ticket"
+    assert applied["routing"]["kind"] == "amend-or-send-back"
+    assert applied["routing"]["ticket_ref"] == "owner/repo#6"
+    assert applied["routing"]["ticket_findings"] == [
+        {"requirement": requirement, "evidence": evidence}
+    ]
+
+
 def _assigned_requirements(prompt):
     marker = "The assigned requirements are:\n```json\n"
     start = prompt.index(marker) + len(marker)
@@ -5933,11 +5964,21 @@ def test_a_replay_writes_the_derived_answer_and_removes_its_run_directory(
                    "MUSE_RUNDIR_PROBE": str(probe)})
 
     assert proc.returncode == 0, proc.stderr
-    assert json.loads(answer_path.read_text()) == derive_judge_answer(FOUR, [
+    expected = derive_judge_answer(FOUR, [
         {"requirement": requirement,
          "status": "unmet" if requirement == "requirement 2" else "met",
          "evidence": "thing.py:1"}
         for requirement in FOUR])
+    # No premise is refuted here, so the answer carries the
+    # implementer route with no findings (#2549).
+    expected["routing"] = {
+        "route": "implementer",
+        "kind": None,
+        "ticket_ref": "owner/repo#6",
+        "ticket_findings": [],
+        "note": None,
+    }
+    assert json.loads(answer_path.read_text()) == expected
     # Owner-only: its evidence quotes the private packet.
     assert stat.S_IMODE(answer_path.stat().st_mode) == 0o600
     run_dir = pathlib.Path(probe.read_text().splitlines()[0].split(" ", 1)[1])

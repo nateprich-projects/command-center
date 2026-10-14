@@ -1044,6 +1044,27 @@ DRIFT_SIGNAL_NAMES = (
 # --------------------------------------------------------------------------
 
 
+def sub_issue_is_closed(state: object, state_reason: object = None) -> bool:
+    """Whether one sub-issue counts as closed for #2524 open-only counts.
+
+    GitHub reports every closure as ``CLOSED`` state, whatever the reason:
+    completed, not-planned, transferred-closed and duplicate-closed all
+    count as closed. Only ``OPEN`` is open. A missing or unreadable state
+    reads as not closed, so callers keep their fail-closed behaviour
+    (breakdown resumes the sibling; shape keeps its with-children refusal).
+    """
+    if isinstance(state, str):
+        if state.upper() == "CLOSED":
+            return True
+        if state.upper() == "OPEN":
+            return False
+    if isinstance(state_reason, str) and state_reason.upper() in (
+        "COMPLETED", "NOT_PLANNED", "DUPLICATE", "TRANSFERRED",
+    ):
+        return True
+    return False
+
+
 @dataclass
 class Item:
     """One issue in the funnel, with its Project fields resolved."""
@@ -1130,6 +1151,13 @@ class Item:
 
     @property
     def children_all_closed(self) -> bool:
+        """No open sub-issue: every child closed (#2524).
+
+        ``children_done`` is GitHub's native ``subIssuesSummary.completed``
+        count, which increments for every ``CLOSED`` sub-issue whatever its
+        reason (completed, not-planned, transferred-closed,
+        duplicate-closed); only ``OPEN`` keeps it below the total.
+        """
         return self.children_total > 0 and self.children_done == self.children_total
 
     def waited(self, now: datetime) -> Optional[timedelta]:
@@ -3601,7 +3629,13 @@ def _startable_without_repo_readiness(
     awaiting_review: Set[str],
     agent: str = "codex",
 ) -> bool:
-    """Apply the queue exclusions that do not require a repository read."""
+    """Apply the queue exclusions that do not require a repository read.
+
+    The work queue counts open tickets only (#2524): a kept closed
+    evidence child is ``CLOSED`` whatever its reason (completed,
+    not-planned, transferred-closed, duplicate-closed) and never enters
+    the queue beside its open siblings.
+    """
     needs = item.needs
     machine_local = needs == "claude-code-environment"
     human = needs == "human"
@@ -21618,7 +21652,10 @@ def unshapeable_reason(state: Optional[str], status: Optional[str],
     closed issue is never shaped, nor is one that has left Ideas. A row with
     children stays refused, except for a sent-back Ideas row whose
     sub-issues are all closed (#2524): the #2460 send-back record on the
-    parent excuses the kept-closed evidence children. A row with any open
+    parent excuses the kept-closed evidence children. All-closed means no
+    sub-issue with GitHub state ``OPEN``; completed, not-planned,
+    transferred-closed and duplicate-closed all count as closed via the
+    native ``children_done``/``children_total`` summary. A row with any open
     child, or without that record, stays refused; missing inputs fail closed
     to the refusal. The needs-shaping label, tier and headroom are not here:
     they are the picker's alone, because ``shape-apply --voice nate-relayed``
@@ -24230,6 +24267,11 @@ def closed_itself_comment(tickets: Sequence[Item], drift: Sequence[str]) -> str:
 def _auto_closeable_project(item: Item, *, children_done: Optional[int] = None
                             ) -> bool:
     """Whether an item has earned the funnel's unattended close.
+
+    Completion counts open tickets only (#2524): close needs every ticket
+    closed (completed, not-planned, transferred-closed and
+    duplicate-closed all count as closed; only ``OPEN`` blocks), via the
+    native ``children_done``/``children_total`` summary.
 
     ``funnel merge`` sees the Project summary before GitHub closes the ticket,
     so it supplies the post-merge child count. Every other caller uses the

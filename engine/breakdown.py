@@ -217,6 +217,7 @@ def fetch_siblings(repo: str, number: int) -> List[dict]:
             "number": child_number,
             "title": node.get("title"),
             "state": node.get("state"),
+            "stateReason": node.get("stateReason"),
         })
     siblings.sort(key=lambda entry: entry["number"])
     return siblings
@@ -876,9 +877,12 @@ def match_existing_siblings(tickets: Sequence[dict],
 
     A closed sibling never matches (#2524): it is kept evidence, not a work
     ticket, so a planned ticket reusing its title creates a new sub-issue
-    beside it instead of resuming the closed one. Only an affirmatively
-    closed state skips; an unreadable state keeps the old resume behaviour
-    rather than duplicating a ticket on a missing field.
+    beside it instead of resuming the closed one. Completed, not-planned,
+    transferred-closed and duplicate-closed all count as closed (GitHub
+    reports each as ``CLOSED`` state, with the reason in ``stateReason``
+    where present). Only an affirmatively closed sub-issue skips; an
+    unreadable state keeps the old resume behaviour rather than
+    duplicating a ticket on a missing field.
     """
     planned_by_title: Dict[str, List[int]] = {}
     existing_by_title: Dict[str, List[dict]] = {}
@@ -887,7 +891,9 @@ def match_existing_siblings(tickets: Sequence[dict],
     for sibling in siblings:
         if not isinstance(sibling, dict):
             continue
-        if str(sibling.get("state") or "").upper() == "CLOSED":
+        if funnel.sub_issue_is_closed(
+            sibling.get("state"), sibling.get("stateReason")
+        ):
             continue
         title = sibling.get("title")
         if isinstance(title, str):

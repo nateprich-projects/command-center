@@ -2575,6 +2575,43 @@ def test_closed_tickets_never_enter_the_work_queue():
     assert [i.number for i in startable(rows)] == [2]
 
 
+def test_closed_tickets_of_every_reason_never_enter_the_work_queue():
+    """#2524: completed, not-planned, transferred-closed and
+    duplicate-closed all count as closed in the queue; only OPEN is work."""
+    rows = [project(1, "Building", "New", children=6, done=1),
+            ticket(2, 1)]
+    for number, reason in ((3, "COMPLETED"), (4, "NOT_PLANNED"),
+                           (5, "DUPLICATE"), (6, "TRANSFERRED")):
+        rows.append(ticket(number, 1, state="CLOSED", state_reason=reason))
+    assert [i.number for i in startable(rows)] == [2]
+
+
+def test_completion_counts_open_tickets_only():
+    """#2524: completion needs every ticket closed; any OPEN blocks, while
+    a parent whose children are all closed (any reason) is complete."""
+    open_parent = project(1, "Building", "Broken", children=10, done=9)
+    closed_parent = project(2, "Building", "Broken", children=10, done=10)
+    assert funnel._auto_closeable_project(open_parent) is False
+    assert funnel._auto_closeable_project(closed_parent) is True
+    assert closed_parent.children_all_closed is True
+    assert open_parent.children_all_closed is False
+
+
+def test_sub_issue_is_closed_counts_every_close_reason():
+    """#2524: only OPEN is open; every CLOSED reason counts as closed."""
+    assert funnel.sub_issue_is_closed("OPEN") is False
+    assert funnel.sub_issue_is_closed("open") is False
+    assert funnel.sub_issue_is_closed("CLOSED") is True
+    assert funnel.sub_issue_is_closed("closed") is True
+    assert funnel.sub_issue_is_closed("CLOSED", "TRANSFERRED") is True
+    assert funnel.sub_issue_is_closed("CLOSED", "DUPLICATE") is True
+    assert funnel.sub_issue_is_closed("CLOSED", "COMPLETED") is True
+    assert funnel.sub_issue_is_closed("CLOSED", "NOT_PLANNED") is True
+    assert funnel.sub_issue_is_closed(None) is False
+    assert funnel.sub_issue_is_closed(None, None) is False
+    assert funnel.sub_issue_is_closed("OPEN", "COMPLETED") is False
+
+
 def test_a_blocked_plan_is_not_owed_a_breakdown():
     rows = [item(1, "Ready", "New", children_total=0, labels=["blocked"])]
     assert funnel.awaiting_breakdown(rows) == []

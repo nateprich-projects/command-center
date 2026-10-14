@@ -1445,12 +1445,25 @@ def test_closed_evidence_siblings_never_match_planned_tickets():
               "title": "migration slice", "state": "CLOSED"}
     also_closed = dict(closed, number=202, ref="owner/repo#202",
                         state="closed")
+    transferred = dict(closed, number=204, ref="owner/repo#204",
+                       state="CLOSED", stateReason="TRANSFERRED")
+    duplicate = dict(closed, number=205, ref="owner/repo#205",
+                     state="CLOSED", stateReason="DUPLICATE")
+    completed = dict(closed, number=206, ref="owner/repo#206",
+                     state="CLOSED", stateReason="COMPLETED")
+    not_planned = dict(closed, number=207, ref="owner/repo#207",
+                       state="CLOSED", stateReason="NOT_PLANNED")
     missing_state = {"ref": "owner/repo#203", "repo": REPO, "number": 203,
                      "title": "unknown slice"}
     assert breakdown.match_existing_siblings(
         [{"title": "migration slice"}], [closed]) == {}
     assert breakdown.match_existing_siblings(
         [{"title": "migration slice"}], [also_closed]) == {}
+    # Transferred-closed and duplicate-closed count as closed (#2524):
+    # GitHub still reports them as CLOSED state.
+    for variant in (transferred, duplicate, completed, not_planned):
+        assert breakdown.match_existing_siblings(
+            [{"title": "migration slice"}], [variant]) == {}
     # An unreadable state keeps the old resume behaviour rather than
     # duplicating a ticket on a missing field.
     assert breakdown.match_existing_siblings(

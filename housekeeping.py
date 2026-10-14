@@ -611,8 +611,13 @@ def log_is_held(path: Path, lsof: Optional[str] = None) -> bool:
 
 
 def dir_size_bytes(path: Path) -> int:
-    """Sum file bytes below a dir, best-effort, never following symlinks."""
+    """Sum file bytes below a dir, best-effort, never following symlinks.
+
+    Hard-linked files count once: the walk tracks seen ``(st_dev, st_ino)``
+    pairs and adds ``st_size`` only on first sight, matching ``du`` semantics.
+    """
     total = 0
+    seen = set()
     stack = [path]
     while stack:
         current = stack.pop()
@@ -627,7 +632,12 @@ def dir_size_bytes(path: Path) -> int:
                 if entry.is_dir(follow_symlinks=False):
                     stack.append(Path(entry.path))
                 elif entry.is_file(follow_symlinks=False):
-                    total += entry.stat(follow_symlinks=False).st_size
+                    st = entry.stat(follow_symlinks=False)
+                    key = (st.st_dev, st.st_ino)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    total += st.st_size
             except OSError:
                 continue
     return total

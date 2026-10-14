@@ -11,6 +11,30 @@ import worker from "../worker.js";
 // re-enter the worker. The pre-existing ASSETS stubs never redirected, so
 // they passed while production looped. This stub reproduces the redirect,
 // so a .html fetch fails here the way it failed in production.
+//
+// Premise record, verified against origin/main before the fix (working-copy
+// lines identical except worker.js:418,433,451, which the fix changes):
+// - dashboard/worker.js:360 `handleRequest` serves the routes; :199
+//   `isAuthorized` gates every route at :368 (only /api/github-webhook at
+//   :365 is exempt), so the Access check fronts /stages, /domains and
+//   /domains/<d> unchanged.
+// - /stages (:411 `pathname === "/stages"`) and /domains (:426) are worker
+//   routes, so an extensionless redirect to either re-enters the worker and
+//   loops when the worker itself fetches a .html path.
+// - /domain is not a worker route: no `pathname === "/domain"` condition
+//   exists (grep empty); `/domain` appears only as the ASSETS fetch target
+//   inside the "/domains/" block (:442 startsWith, :451 fetch), so the old
+//   301 to /domain rendered while dropping the domain segment.
+// - Base fetches were /stages.html (:418), /domains.html (:433) and
+//   /domain.html (:451).
+// - dashboard/wrangler.toml:13 sets run_worker_first = true with no
+//   html_handling line, so default html_handling applies and is kept.
+// - The pre-existing stub dashboard/test/stages.test.js:205 `assetEnv`
+//   never redirects: no 301/302/redirect/location in the base test file; it
+//   answers 200 directly, which is why it passed while production looped.
+// - CI proof: .github/workflows/tests.yml:54-55 runs
+//   `npm --prefix dashboard test`, and dashboard/package.json:8 defines
+//   that as `node --test test/*.test.js`, so this file runs in CI.
 
 function encodeJson(value) {
   return Buffer.from(JSON.stringify(value)).toString("base64url");
@@ -146,6 +170,44 @@ test("/domains/<d> serves the detail file at the named URL without redirecting",
   assert.equal(response.status, 200);
   assert.deepEqual(seen, ["/domain"]);
   assert.equal(await response.text(), domainHtml);
+});
+
+test("the pre-fix .html fetch 301s to a worker route: the loop shape", async () => {
+  const { access, env } = await authorizedRedirectEnv();
+  // Old worker.js:418 fetched "/stages.html" from ASSETS. Under faithful
+  // html_handling that answers 301 to /stages, which is a worker route, so
+  // the browser re-entered the worker and the pre-fix worker 301d again.
+  const first = await env.ASSETS.fetch(
+    new Request("https://funnel.nateprich.com/stages.html"),
+  );
+  assert.equal(first.status, 301);
+  assert.equal(
+    new URL(first.headers.get("location"), "https://funnel.nateprich.com").pathname,
+    "/stages",
+  );
+  // Post-fix the same URL loads in one worker pass (no redirect to follow).
+  const { response, hops } = await followThroughWorker("/stages", env, access);
+  assert.equal(hops, 0);
+  assert.equal(response.status, 200);
+});
+
+test("the pre-existing assetEnv stub never redirected", async () => {
+  const source = await readFile(new URL("./stages.test.js", import.meta.url), "utf8");
+  const start = source.indexOf("function assetEnv");
+  assert.ok(start !== -1, "the pre-existing assetEnv stub exists");
+  const block = source.slice(start, source.indexOf("\n}\n", start));
+  assert.doesNotMatch(block, /30[12378]/);
+  assert.doesNotMatch(block, /location/i);
+  assert.doesNotMatch(block, /redirect/i);
+});
+
+test("/domain is not a worker route: only an ASSETS target", async () => {
+  const source = await readFile(new URL("../worker.js", import.meta.url), "utf8");
+  assert.doesNotMatch(source, /pathname === "\/domain"/);
+  const blockStart = source.indexOf('startsWith("/domains/")');
+  assert.ok(blockStart !== -1, "the /domains/<d> block exists");
+  const block = source.slice(blockStart, source.indexOf("}", source.indexOf('"/domain"', blockStart)) + 1);
+  assert.match(block, /"\/domain"/);
 });
 
 test("the Access check still fronts all three routes", async () => {

@@ -2612,6 +2612,46 @@ def test_sub_issue_is_closed_counts_every_close_reason():
     assert funnel.sub_issue_is_closed("OPEN", "COMPLETED") is False
 
 
+def test_no_open_sub_issues_is_the_shared_count_level_check():
+    """#2524: the shape, Ready and completion paths share one predicate."""
+    assert funnel.no_open_sub_issues(10, 10) is True
+    assert funnel.no_open_sub_issues(10, 9) is False
+    assert funnel.no_open_sub_issues(2, 0) is False
+    assert funnel.no_open_sub_issues(0, 0) is False
+    assert funnel.no_open_sub_issues(None, 10) is False
+    assert funnel.no_open_sub_issues(10, None) is False
+    assert funnel.no_open_sub_issues(True, True) is False
+    parent = item(1, "Building", "Broken", children_total=10,
+                  children_done=10)
+    assert parent.children_all_closed is True
+    assert funnel.no_open_sub_issues(
+        parent.children_total, parent.children_done) is True
+
+
+def test_loader_maps_native_summary_to_child_counts():
+    """#2524: ``children_done`` is GitHub's native completed count."""
+    node = {
+        "status": {"name": "Ideas"},
+        "content": {
+            "number": 2078,
+            "title": "sent-back parent",
+            "url": "https://github.com/nateprich-projects/command-center/issues/2078",
+            "state": "OPEN",
+            "repository": {"nameWithOwner": "nateprich-projects/command-center"},
+            "labels": {"nodes": []},
+            "assignees": {"nodes": []},
+            "parent": None,
+            "subIssuesSummary": {"total": 10, "completed": 10},
+        },
+    }
+    parsed = funnel._from_node(node)
+    assert parsed.children_total == 10
+    assert parsed.children_done == 10
+    assert parsed.children_all_closed is True
+    assert funnel.no_open_sub_issues(
+        parsed.children_total, parsed.children_done) is True
+
+
 def test_a_blocked_plan_is_not_owed_a_breakdown():
     rows = [item(1, "Ready", "New", children_total=0, labels=["blocked"])]
     assert funnel.awaiting_breakdown(rows) == []

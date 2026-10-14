@@ -1065,6 +1065,26 @@ def sub_issue_is_closed(state: object, state_reason: object = None) -> bool:
     return False
 
 
+def no_open_sub_issues(children_total: object,
+                       children_done: object) -> bool:
+    """Whether a native sub-issue summary shows no open sub-issue (#2524).
+
+    The count-level counterpart of ``sub_issue_is_closed``: GitHub's native
+    ``subIssuesSummary.completed`` increments for every ``CLOSED`` sub-issue
+    whatever its reason (completed, not-planned, transferred-closed,
+    duplicate-closed); only ``OPEN`` keeps it below the total. Non-integer
+    or missing inputs read as having an open sub-issue, so callers keep
+    their fail-closed behaviour.
+    """
+    if (isinstance(children_total, bool)
+            or isinstance(children_done, bool)):
+        return False
+    if (not isinstance(children_total, int)
+            or not isinstance(children_done, int)):
+        return False
+    return children_total > 0 and children_done == children_total
+
+
 @dataclass
 class Item:
     """One issue in the funnel, with its Project fields resolved."""
@@ -1158,7 +1178,7 @@ class Item:
         reason (completed, not-planned, transferred-closed,
         duplicate-closed); only ``OPEN`` keeps it below the total.
         """
-        return self.children_total > 0 and self.children_done == self.children_total
+        return no_open_sub_issues(self.children_total, self.children_done)
 
     def waited(self, now: datetime) -> Optional[timedelta]:
         """How long this item has waited on its current gate or work queue."""
@@ -3639,8 +3659,13 @@ def _startable_without_repo_readiness(
     needs = item.needs
     machine_local = needs == "claude-code-environment"
     human = needs == "human"
+    # A kept closed evidence child never enters the queue beside its open
+    # siblings: transferred-closed and duplicate-closed report ``CLOSED``
+    # state like every other closure, so the per-issue check names them
+    # explicitly alongside the open-state gate.
     if (
         item.state != "OPEN"
+        or sub_issue_is_closed(item.state, item.state_reason)
         or item.is_blocked
         or item.open_blockers
         or item.children_total
@@ -15448,8 +15473,7 @@ def _could_carry_closed_itself_marker(
     completed = item.children_done if children_done is None else children_done
     return (
         _can_close_itself(item)
-        and item.children_total > 0
-        and completed == item.children_total
+        and no_open_sub_issues(item.children_total, completed)
     )
 
 
@@ -21666,8 +21690,7 @@ def unshapeable_reason(state: Optional[str], status: Optional[str],
     if status != "Ideas":
         return "status-changed"
     if children_total > 0:
-        if (sent_back and isinstance(children_done, int)
-                and children_done == children_total):
+        if sent_back and no_open_sub_issues(children_total, children_done):
             return None
         return "with-children"
     return None
@@ -21715,10 +21738,7 @@ def shapeable_idea(items: Sequence[Item], tier: Optional[str],
         sent_back = (
             state == "OPEN"
             and status == "Ideas"
-            and isinstance(children_total, int)
-            and isinstance(children_done, int)
-            and children_total > 0
-            and children_done == children_total
+            and no_open_sub_issues(children_total, children_done)
             and sent_back_to_ideas(item)
         )
         reason = unshapeable_reason(
@@ -24303,8 +24323,7 @@ def _finished_close_candidate(item: Item, *,
     return (
         item.state == "OPEN"
         and item.status == "Building"
-        and item.children_total > 0
-        and completed == item.children_total
+        and no_open_sub_issues(item.children_total, completed)
         and (
             klass in SELF_CLOSING_UPKEEP_CLASSES
             or klass in (

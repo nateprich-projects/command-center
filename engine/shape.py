@@ -122,8 +122,7 @@ def _fresh_shape_check(item) -> Tuple[Optional[str], str, Optional[str], int]:
     sent_back = (
         fresh_state == "OPEN"
         and fresh_status == "Ideas"
-        and fresh_children > 0
-        and fresh_done == fresh_children
+        and funnel.no_open_sub_issues(fresh_children, fresh_done)
         and funnel.sent_back_to_ideas(item)
     )
     return (

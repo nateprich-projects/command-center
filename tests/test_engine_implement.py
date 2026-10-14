@@ -6415,7 +6415,7 @@ def test_finish_git_invocation_sites_match_the_recorded_inventory():
     expected = Counter({
         ("rev-parse", "--show-toplevel"): 2,
         ("rev-parse", "HEAD"): 2,
-        ("rev-parse", "--verify"): 2,
+        ("rev-parse", "--verify"): 3,
         ("rev-parse", "origin/main"): 1,
         ("branch", "--show-current"): 2,
         ("status", "--porcelain"): 1,
@@ -6427,7 +6427,7 @@ def test_finish_git_invocation_sites_match_the_recorded_inventory():
         ("commit", "--only"): 1,
         ("diff", "--name-status"): 1,
         ("rev-list", "--count"): 2,
-        ("fetch", "origin"): 2,
+        ("fetch", "origin"): 3,
         ("merge-base", "--is-ancestor"): 2,
         ("merge", "-s"): 1,
         ("push", "--set-upstream"): 1,
@@ -6435,8 +6435,8 @@ def test_finish_git_invocation_sites_match_the_recorded_inventory():
     assert actual == expected
 
     inventory = (ROOT / "docs" / "finish-subprocess-bounds.md").read_text()
-    assert "29 bounded Git callsites" in inventory
-    assert "28 static callsites" in inventory
+    assert "31 bounded Git callsites" in inventory
+    assert "30 static callsites" in inventory
     for command in (
         "git diff --name-only -z",
         "git diff --cached --name-only -z",

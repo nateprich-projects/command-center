@@ -6378,6 +6378,112 @@ def awaiting_review(
     return blocked
 
 
+#: A finish that pushed nothing records the head it left behind in the PR
+#: body it rewrites (#2541). The marker is the offer gate's memory: a ticket
+#: whose open PR still shows this head was already looked at and changed
+#: nothing, so it is not offered again until a new review verdict lands.
+#: The HTML comment rides inside the runner's evidence block, which the
+#: review packet already strips from ``pr_body``, and a body edit never
+#: counts as the trusted-comment evidence that re-covers an unsure-only
+#: rejection, so the marker cannot disturb the review queue.
+NO_PUSH_FINISH_MARKER_RE = re.compile(
+    r"<!--\s*no-push-finish\s+head=(?P<head>[0-9a-fA-F]{40})"
+    r"\s+at=(?P<at>\S+?)\s*-->",
+)
+
+
+def render_no_push_finish_marker(head: str, at: str) -> str:
+    """Render the no-push record a finish writes into the PR body (#2541)."""
+    return "<!-- no-push-finish head={} at={} -->".format(head, at)
+
+
+def no_push_finish_markers(body: object) -> List[Tuple[str, str]]:
+    """Every parseable no-push record in a PR body, oldest first (#2541).
+
+    Only records with a 40-hex head and a timestamp ``parse_time`` reads
+    count. An unparseable or hand-edited record reads as absent — the same
+    direction as the garbled-lock rule — because the alternative wedges
+    the ticket until someone notices.
+    """
+    if not isinstance(body, str):
+        return []
+    found: List[Tuple[datetime, str, str]] = []
+    for match in NO_PUSH_FINISH_MARKER_RE.finditer(body):
+        stamp = parse_time(match.group("at"))
+        if stamp is None:
+            continue
+        found.append((stamp, match.group("head"), match.group("at")))
+    found.sort(key=lambda entry: entry[0])
+    return [(head, at) for _, head, at in found]
+
+
+def _no_push_gate_verdict_at(row: Mapping[str, object],
+                             repo: str) -> Optional[datetime]:
+    """When the row's latest trusted verdict was posted, if knowable."""
+    verdict = _row_verdict(row, repo)
+    if not isinstance(verdict, dict):
+        return None
+    return parse_time(verdict.get("comment_created_at"))
+
+
+def no_push_reoffer_withheld(
+    items: Sequence[Item],
+    pr_facts: Optional[Mapping[str, Optional[Dict[str, object]]]] = None,
+) -> Set[str]:
+    """Tickets a no-push finish already looked at, by ref (#2541).
+
+    A ticket is withheld when its open funnel PR carries a no-push record
+    for its current head with no trusted review verdict posted after that
+    record. A new head lifts the hold only through the review verdict it
+    still needs: any head change leaves the old verdict uncovered, so
+    ``awaiting_review`` withholds the ticket anyway, and a merge-of-main
+    head change never reads as new work here. A newly posted verdict of
+    any kind re-arms the ticket, returning it to the ordinary hand-back.
+
+    The normal caller supplies the shared batch from ``ticket_pr_facts``;
+    a direct caller creates that one repository-wide GraphQL read here
+    rather than paying once per PR. No local state is read or written:
+    the record, the head, and the verdict all come from the PR snapshot.
+    """
+    if pr_facts is None:
+        pr_facts = ticket_pr_facts(items)
+    withheld: Set[str] = set()
+    for item in items:
+        for row in _pr_rows_for_ref(pr_facts, item.ref):
+            if str(row.get("state") or "OPEN").upper() != "OPEN":
+                continue
+            if not is_funnel_pr(item.repo, row):
+                continue
+            head = row.get("headRefOid")
+            if not isinstance(head, str) or not head:
+                continue
+            markers = [
+                (marked_head, parse_time(at))
+                for marked_head, at in no_push_finish_markers(
+                    row.get("body"))
+                if marked_head.lower() == head.lower()
+            ]
+            markers = [
+                (marked_head, stamp) for marked_head, stamp in markers
+                if stamp is not None
+            ]
+            if not markers:
+                continue
+            latest_marker_at = max(stamp for _, stamp in markers)
+            try:
+                verdict_at = _no_push_gate_verdict_at(row, item.repo)
+            except GitHubError:
+                # The verdict cannot be established; withholding on a
+                # maybe-superseded record could wedge the ticket, so the
+                # gate stays out of the way exactly as an unreadable PR
+                # scan does for the rest of the offer path.
+                continue
+            if verdict_at is not None and verdict_at > latest_marker_at:
+                continue
+            withheld.add(item.ref)
+    return withheld
+
+
 def recent_ticket_starts(
     rows: Sequence[Mapping[str, object]],
 ) -> List[Optional[str]]:
@@ -17286,6 +17392,15 @@ def cmd_queue(
     # #165 as startable for two weeks while every begin refused it, and that
     # mismatch is what hid the wedge.
     finished = finished_by_comments_runs(items)
+    # The queue shows what begin would offer: a no-push head waits for its
+    # next verdict here too, so the listing never names work begin skips.
+    no_push_waiting: Set[str] = set()
+    if pr_facts is not None and pr_facts_unavailable is None:
+        try:
+            no_push_waiting = no_push_reoffer_withheld(items, pr_facts)
+        except (GitHubError, BriefSectionTimeout, OSError,
+                subprocess.SubprocessError):
+            no_push_waiting = set()
     decisions, watched = split_decisions(items)
     candidate_items = (
         getattr(items, "startable_candidates", None)
@@ -17299,7 +17414,7 @@ def cmd_queue(
     )
     tickets = startable_listing(
         listing_items if listing_items is not None else items,
-        awaiting_review=set(in_review) | set(finished),
+        awaiting_review=set(in_review) | set(finished) | no_push_waiting,
         repo_readiness=repo_readiness,
         candidate_items=candidate_items,
     )
@@ -17530,6 +17645,10 @@ def cmd_next(
     # approvals for an older head.
     blocked.difference_update(approved_conflicting_refs(pr_facts))
     blocked.update(finished_by_comments(items))
+    if pr_facts is not None:
+        # A ticket whose open PR records a no-push finish on its current
+        # head waits for a new review verdict (#2541).
+        blocked.update(no_push_reoffer_withheld(items, pr_facts))
     backoff_rows = _backoff_rows()
     backed_off = backoff_withheld(backoff_rows, now)
     ticket = next_ticket_for_tier(
@@ -23056,6 +23175,10 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
         # claim/WIP checks below.
         blocked.difference_update(approved_conflicting_refs(pr_facts))
         blocked.update(finished_by_comments(items))
+        # A ticket whose open PR records a no-push finish on its current
+        # head is not offered again until a new review verdict lands (#2541).
+        # Every implement lane begins here, so one shared gate covers them.
+        blocked.update(no_push_reoffer_withheld(items, pr_facts))
         # A merge attempt that errored may still have merged remotely, so the
         # ticket stays open locally with an unknown remote state (#732). It is
         # not startable until the next run re-reads GitHub; the recorded error

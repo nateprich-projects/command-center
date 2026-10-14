@@ -1785,13 +1785,18 @@ def render_evidence_block(*, sha: str, merged: Optional[dict],
                           reproduction: dict, repo: str,
                           prior_fixes: Optional[
                               Sequence[Tuple[int, str, Optional[str]]]
-                          ] = ()) -> str:
+                          ] = (),
+                          no_push_marker: Optional[str] = None) -> str:
     """The runner's evidence block for a PR body (``EVIDENCE_MARKER``).
 
     ``sha`` is the commit the finish pushed, ``merged`` the merged suite's
     record (None when the head's suite ran alone) and ``reproduction`` the
     added-test classification's (#1805). ``prior_fixes`` is the bounded
-    prior-fix scan's result; None means it could not run.
+    prior-fix scan's result; None means it could not run. ``no_push_marker``
+    is a ``render_no_push_finish_marker`` record for a finish that pushed
+    nothing (#2541); it rides inside the block as an HTML comment, so the
+    review packet's evidence reader ignores it while the offer gate reads it
+    from the same body.
     """
     if merged is None:
         suite = "not run (the head's own suite passed)"
@@ -1839,6 +1844,8 @@ def render_evidence_block(*, sha: str, merged: Optional[dict],
         if len(found) > MAX_EVIDENCE_PRIOR_FIXES:
             lines.append("- (+{} more prior fixes)".format(
                 len(found) - MAX_EVIDENCE_PRIOR_FIXES))
+    if no_push_marker is not None:
+        lines.append(no_push_marker)
     lines.append(EVIDENCE_END_MARKER)
     return "\n".join(lines) + "\n"
 
@@ -3569,6 +3576,29 @@ def _note_test_source(source: str, *, repo: str) -> str:
     return "CI workflow step"
 
 
+def _remote_ticket_tip(root: pathlib.Path, branch: str) -> Optional[str]:
+    """The remote ticket branch tip after a fresh fetch, if establishable.
+
+    None covers both absence and unreadability: a finish that cannot tell
+    whether its push changes the head must not record a no-push (#2541),
+    so the gate keeps offering rather than wedging the ticket.
+    """
+    fetched = _run(["git", "fetch", "origin",
+                    "+refs/heads/{0}:refs/remotes/origin/{0}".format(branch)],
+                   cwd=root, check=False,
+                   timeout=REMOTE_GIT_TIMEOUT_SECONDS)
+    if fetched.returncode != 0:
+        return None
+    tip = _run(["git", "rev-parse", "--verify",
+                "refs/remotes/origin/{}".format(branch)],
+               cwd=root, check=False,
+               timeout=LOCAL_GIT_TIMEOUT_SECONDS)
+    if tip.returncode != 0:
+        return None
+    value = tip.stdout.strip()
+    return value or None
+
+
 def _push_ticket_branch(root: pathlib.Path, branch: str, *, ref: str,
                         run: Optional[str], agent: str) -> None:
     """Push the ticket branch as a fast-forward, even after a rebase (#890).
@@ -3901,6 +3931,12 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
     checkpointed = False
     try:
         continued = _remote_branch_exists(context["root"], context["branch"])
+        # The remote tip before this run pushes anything: when it still
+        # equals HEAD afterwards, the push moved nothing and the finish
+        # records that in the PR body, so begin stops re-offering this
+        # head until a new review verdict lands (#2541). Read before the
+        # checkpoint, which pushes when the tree holds work.
+        pre_push_tip = _remote_ticket_tip(context["root"], context["branch"])
         checkpointed = _checkpoint_work(
             context["root"], context["number"], context["branch"],
             ref=ref, run=run, agent=agent,
@@ -4018,6 +4054,10 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
         # is, after any merge the push added (#1805).
         pushed = _run(["git", "rev-parse", "HEAD"], cwd=context["root"],
                       timeout=LOCAL_GIT_TIMEOUT_SECONDS).stdout.strip()
+        pushed_nothing = (
+            isinstance(pushed, str) and bool(pushed)
+            and pre_push_tip == pushed
+        )
         # Recheck before the PR effect in case the merge or push surfaced
         # another scratch file.
         _check_no_run_scratch(context["root"])
@@ -4044,12 +4084,20 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
         merged.get("base") if isinstance(merged, dict) else "origin/main"
     ) or "origin/main"
     prior_fixes = _prior_fix_evidence(context["root"], prior_base, pushed)
+    no_push_marker = (
+        funnel.render_no_push_finish_marker(
+            pushed,
+            datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        )
+        if pushed_nothing else None
+    )
     body = render_pr_body(
         ticket, answer, continued=continued, tests=tests,
         test_source=test_source,
         evidence=render_evidence_block(
             sha=pushed, merged=merged, reproduction=reproduced,
-            repo=resolved, prior_fixes=prior_fixes))
+            repo=resolved, prior_fixes=prior_fixes,
+            no_push_marker=no_push_marker))
     pr_context = dict(context, head_sha=pushed)
     pr = pr_effect(resolved, pr_context, ticket, body)
     note = "PR #{}".format(pr["number"])

@@ -8,17 +8,44 @@ so the next head is not re-rejected on the same carried premise. A prior
 premise-refuted finding is excluded from the Prior blocking item addressed
 carry-forward.
 
-First verification, recorded here rather than in a PR the runner posts:
-(a) base reuses via PATCH and (b) base never writes the named
-claude-code-environment path are ticket-body claims on GitHub (#2500,
-#2492), unreachable from this checkout without `gh`/network, so neither is
-asserted in code: routing fires only on a per-head judge observation with
-its own code/record ref. (c) is established in code: `build_scoped_rereview`
-carries prior blocking items (engine/review.py), the scoped lister asks one
+First verification, confirmed in this checkout and recorded here (the
+runner posts the PR from the run summary, which carries the same refs):
+(a) base reused via PATCH: pre-fix `.github/scripts/watchdog.py` `main()`
+PATCH-updated the matching open alert body in place (`gh api -X PATCH ...
+-f body=`, "Update in place rather than filing a second issue";
+`git show d70e614^:.github/scripts/watchdog.py`), recorded in the
+amended-ticket comment at tests/test_watchdog.py:1301-1309 ("the old
+main() PATCH-reused a matching open issue in place"); fix commit d70e614
+(#2500, #2553) replaced it with open-new plus close-superseded, and the
+current `.github/scripts/watchdog.py` `close_alert` still PATCH-closes
+(`-X PATCH ... -f state=closed`). So the #2500 verify-first premise
+("never reuses") was false about base: confirmed. Routing still fires
+only on a per-head judge observation with its own code/record ref.
+(b) base never wrote claude-code-environment at the decline seam for the
+#2492 plain calendar-wait shape: with the calendar patterns neutralized
+the reason classifies "unknown"
+(tests/test_engine_implement.py:4945-4960,
+`test_classify_decline_reason_read_unknown_without_calendar_rule`:
+"which finish_declined routed to blocked plus Needs agent, never to the
+session lane. The decline seam therefore never wrote
+claude-code-environment"), and the unknown branch in
+engine/implement.py `finish_declined` (the `not ... calendar_wait_routed`
+branch ending at the `declined_needs_effect` + `block_effect` calls)
+defaults to `write_declined_agent_needs` (engine/implement.py:2659-2664,
+`write_needs(item_id, "agent", ...)`); the session-lane writer
+`write_declined_session_needs` (engine/implement.py:2678-2690) fires only
+for genuine-Mac waits matching STILL_CLAUDE_RES, which plain
+calendar-wait wording does not. Recorded likewise in
+tests/test_engine_implement.py:4981-4989 ("the old decline route never
+wrote claude-code-environment"). So the #2492 reproduction premise (base
+writes claude-code-environment at that seam) was false about base:
+confirmed.
+(c) is established in code: `build_scoped_rereview` carries prior
+blocking items (engine/review.py), the scoped lister asks one
 `Prior blocking item addressed (<kind>): <finding>` per carried item
-(scripts/muse-review-engine), and `derive_judge_answer` records an unmet one
-as `requirement unmet: ...` rejected — the carry-forward this ticket breaks
-for routed premises.
+(scripts/muse-review-engine), and `derive_judge_answer` records an unmet
+one as `requirement unmet: ...` rejected — the carry-forward this ticket
+breaks for routed premises.
 """
 
 from __future__ import annotations
@@ -41,12 +68,15 @@ TICKET = {"ref": REPO + "#2500", "number": 2500,
           "url": "https://github.com/{}/issues/2500".format(REPO)}
 
 #: The #2500 PATCH-reuse shape: a Reproduction requirement asserting base
-#: never reuses, refuted by observed PATCH reuse on base.
+#: never reuses, refuted by observed PATCH reuse on base (pre-fix
+#: `.github/scripts/watchdog.py` `main()` PATCH-updated the matching open
+#: alert body in place; fix commit d70e614).
 REUSE_REQUIREMENT = (
     "Reproduction: base never reuses an open claim; verify on base first")
 REUSE_OBSERVATION = (
-    "premise refuted (base): base reuses via PATCH in "
-    "funnel.py claim update (gh api --method PATCH)")
+    "premise refuted (base): base PATCH-updates the matching open alert "
+    "in place in .github/scripts/watchdog.py main "
+    "(gh api -X PATCH -f body=)")
 
 
 def _result(requirement, status="unmet", evidence="nope"):
@@ -80,8 +110,11 @@ def test_refuted_patch_reuse_premise_routes_to_ticket():
 def test_verify_first_environment_premise_routes_to_ticket():
     requirement = ("Verify first on base: base writes the "
                    "claude-code-environment record before implement runs")
-    evidence = ("premise refuted (base): base never writes that record; "
-                "no write in engine/implement.py or its records")
+    evidence = ("premise refuted (base): the decline seam never writes "
+                "that Needs value for plain calendar-wait wording; "
+                "an unknown decline routes to blocked plus Needs agent "
+                "(engine/implement.py finish_declined, "
+                "write_declined_agent_needs)")
     routing = review.route_lane_verdict(
         {"ref": REPO + "#2492"},
         [requirement],

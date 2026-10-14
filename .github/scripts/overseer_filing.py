@@ -125,6 +125,14 @@ mutation($project: ID!, $item: ID!, $field: ID!, $option: String!) {
 }
 """
 
+ADD_ITEM = """
+mutation($project: ID!, $content: ID!) {
+  addProjectV2ItemById(input: {projectId: $project, contentId: $content}) {
+    item { id }
+  }
+}
+"""
+
 
 def extract_routing_block(body: str) -> Tuple[Optional[Dict], Optional[str]]:
     """Read the routing block, distinguishing absent from malformed.
@@ -291,38 +299,65 @@ def project_selects() -> Tuple[str, Dict[str, Dict[str, str]]]:
     return project_id, selects
 
 
-def existing_item_id(owner: str, repo: str, number: int,
-                     project_id: str) -> Optional[str]:
+def lookup_issue(owner: str, repo: str, number: int,
+                   project_id: str) -> Tuple[Optional[str], Optional[str]]:
+    """Return the ``(issue_id, item_id)`` for one issue.
+
+    ``item_id`` is None when the issue is not yet in the Project.
+    ``issue_id`` is None when the issue itself is missing or not visible.
+    The issue id is the GraphQL node id the add mutation needs as
+    ``contentId`` (#2546).
+    """
     data = gh_graphql(ISSUE_QUERY, owner=owner, repo=repo, number=number)
     issue = (data.get("repository") or {}).get("issue")
     if not isinstance(issue, dict):
-        return None
+        return None, None
+    issue_id = issue.get("id")
+    if not isinstance(issue_id, str) or not issue_id:
+        return None, None
     nodes = (issue.get("projectItems") or {}).get("nodes") or []
     for node in nodes:
         if not isinstance(node, dict):
             continue
         project = node.get("project") or {}
         if project.get("id") == project_id and node.get("id"):
-            return str(node.get("id"))
-    return None
+            return issue_id, str(node.get("id"))
+    return issue_id, None
+
+
+def existing_item_id(owner: str, repo: str, number: int,
+                     project_id: str) -> Optional[str]:
+    _, item_id = lookup_issue(owner, repo, number, project_id)
+    return item_id
+
+
+def add_item(project_id: str, content_id: str) -> str:
+    """Add an issue to Project 2 by GraphQL mutation (#2546).
+
+    ``gh project item-add`` resolves ``--owner`` to a User or
+    Organization, which a fine-grained PAT such as PROJECT_FILING_TOKEN
+    cannot answer (``unknown owner type``); the mutation needs only the
+    project id and the issue's node id, over the same token as every
+    other call here.
+    """
+    response = gh_graphql(ADD_ITEM, project=project_id, content=content_id)
+    item = (response.get("addProjectV2ItemById") or {}).get("item") or {}
+    item_id = item.get("id")
+    if not isinstance(item_id, str) or not item_id:
+        raise RuntimeError("addProjectV2ItemById returned no item id")
+    return item_id
 
 
 def ensure_item_id(repo: str, number: int, project_id: str) -> str:
     """Add the issue to Project 2, reusing its item when already filed."""
     owner, _, short = repo.partition("/")
-    found = existing_item_id(owner, short, number, project_id)
+    content_id, found = lookup_issue(owner, short, number, project_id)
     if found:
         return found
-    url = "https://github.com/{}/issues/{}".format(repo, number)
-    payload = json.loads(gh(
-        "project", "item-add", str(funnel.PROJECT_NUMBER),
-        "--owner", funnel.PROJECT_OWNER,
-        "--url", url, "--format", "json",
-    ))
-    item_id = payload.get("id")
-    if not isinstance(item_id, str) or not item_id:
-        raise RuntimeError("project item-add returned no item id")
-    return item_id
+    if content_id is None:
+        raise RuntimeError("issue {}/issues/{} is missing or not visible".format(
+            repo, number))
+    return add_item(project_id, content_id)
 
 
 def write_field(project_id: str, item_id: str, selects: dict,

@@ -2552,6 +2552,29 @@ def test_approved_plans_with_no_tickets_are_owed_a_breakdown():
     assert [i.number for i in funnel.awaiting_breakdown(rows)] == [1]
 
 
+def test_ready_with_only_closed_children_is_still_owed_a_breakdown():
+    """#2524: Ready counts open tickets only. A reshaped sent-back parent
+    whose children are all kept closed evidence still needs its breakdown,
+    while any open child means work already exists."""
+    sent_back = item(1, "Ready", "Broken", days=2,
+                     children_total=10, children_done=10)
+    with_open = item(2, "Ready", "Broken", days=3,
+                     children_total=10, children_done=9)
+    childless = item(3, "Ready", "Broken", days=1, children_total=0)
+    closed_parent = item(4, "Ready", "Broken", days=4, state="CLOSED",
+                         children_total=10, children_done=10)
+    assert [i.number for i in funnel.awaiting_breakdown(
+        [with_open, sent_back, childless, closed_parent])] == [1, 3]
+
+
+def test_closed_tickets_never_enter_the_work_queue():
+    """#2524: the queue counts open tickets only. A kept closed evidence
+    child is never offered as work beside its open siblings."""
+    rows = [project(1, "Building", "New", children=2, done=1),
+            ticket(2, 1), ticket(3, 1, state="CLOSED")]
+    assert [i.number for i in startable(rows)] == [2]
+
+
 def test_a_blocked_plan_is_not_owed_a_breakdown():
     rows = [item(1, "Ready", "New", children_total=0, labels=["blocked"])]
     assert funnel.awaiting_breakdown(rows) == []

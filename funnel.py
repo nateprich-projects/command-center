@@ -2420,7 +2420,7 @@ def ideas(items: Iterable[Item]) -> List[Item]:
 
 
 def awaiting_breakdown(items: Iterable[Item]) -> List[Item]:
-    """Approved plans with no tickets yet — Claude owes these a breakdown.
+    """Approved plans with no open tickets yet — Claude owes these a breakdown.
 
     Deliberately *after* reviewing in the Claude routine's order. Bottom-up says
     clear the lowest-funnel work first, and a review is Building-stage while a
@@ -2428,6 +2428,10 @@ def awaiting_breakdown(items: Iterable[Item]) -> List[Item]:
     creates it. Starvation is not a risk because PRs awaiting review are a finite
     class, bounded by what Codex can produce under the lock and the budget — and
     only finite classes may preempt.
+
+    Only open sub-issues count (#2524): a Ready project whose children are all
+    closed — kept send-back evidence beside which breakdown appends new work —
+    still needs its breakdown, while a project with any open ticket does not.
     """
     return sorted(
         (
@@ -2435,7 +2439,7 @@ def awaiting_breakdown(items: Iterable[Item]) -> List[Item]:
             for i in items
             if i.state == "OPEN"
             and i.status == "Ready"
-            and not i.children_total
+            and i.children_total - i.children_done <= 0
             and not i.is_blocked
         ),
         key=lambda i: (i.status_since or datetime.max.replace(tzinfo=timezone.utc),

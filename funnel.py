@@ -6365,6 +6365,12 @@ def awaiting_review(
             # the funnel's work (#1794).
             if not is_funnel_pr(item.repo, row):
                 continue
+            if lane_review_capped(row.get("comments")):
+                # Past three reviews the lane asks for nothing more, and
+                # the implementer is not asked again either: the PR stays
+                # routed to the ticket with the ticket open (#2550).
+                blocked.add(item.ref)
+                continue
             # A PR whose review asked for changes is *not* blocked: its ticket
             # goes back to the engineer to fix. Without this a rejected PR has no
             # owner — the reviewer will not revisit it and the engineer is never
@@ -21629,6 +21635,40 @@ def ticket_pr_facts(
 ReviewStanding = namedtuple("ReviewStanding", "state reason")
 
 
+#: Lane reviews requested per PR before the lane stops asking (#2550,
+#: plan #2548). The 09-28 stopping rule lived only in watch judgement
+#: while PR #2539 reached 14 rejected of 14 and PR #2521 reached 10
+#: rejected of 10; in code the re-review gate now counts recorded lane
+#: verdicts and requests no fourth review. One-rework-per-class stays in
+#: watch judgement and out of this count.
+MAX_LANE_REVIEWS = 3
+
+
+def count_lane_reviews(comments: object) -> int:
+    """Recorded lane reviews on a PR, from its GitHub comment rows.
+
+    Each trusted verdict comment is one review, approved or rejected;
+    anything else on the thread is not. Untrusted rows never count
+    (#1787), and an unreadable comment list counts nothing, so a PR
+    whose history could not be read stays reviewable rather than
+    wedging shut.
+    """
+    if not isinstance(comments, (list, tuple)):
+        return 0
+    count = 0
+    for row in comments:
+        if not isinstance(row, Mapping):
+            continue
+        if _verdict_from_comment(row) is not None:
+            count += 1
+    return count
+
+
+def lane_review_capped(comments: object) -> bool:
+    """Whether a PR is past re-review: three recorded reviews already."""
+    return count_lane_reviews(comments) >= MAX_LANE_REVIEWS
+
+
 def review_standing(
     repo: str, row: Mapping[str, object],
     verdict: object, comments: Optional[Sequence[Mapping[str, object]]],
@@ -21656,6 +21696,9 @@ def review_standing(
       rejects as stale, so an uncomputed mergeability waits for the next
       read instead of being judged.
     - ``covered``: a verdict covers the current head (``verdict_covers_head``).
+    - ``capped``: three lane reviews are already recorded
+      (``lane_review_capped``), so no further re-review is requested and
+      the PR stays routed to the ticket (#2550).
     - ``reviewable``: everything else. Red CI and an empty rollup are
       reviewable, so the review pre-check rejects them with a reason.
 
@@ -21694,6 +21737,12 @@ def review_standing(
         return ReviewStanding(
             "covered",
             "a verdict already covers head {}".format(str(head_sha)[:12]))
+    if lane_review_capped(comments):
+        return ReviewStanding(
+            "capped",
+            "{} recorded reviews; no further re-review past {} "
+            "(09-28 stop)".format(
+                count_lane_reviews(comments), MAX_LANE_REVIEWS))
     return ReviewStanding("reviewable", None)
 
 
@@ -21705,10 +21754,13 @@ def review_queue(
 ) -> List[Dict]:
     """Open ticket PRs that need a review, best-first.
 
-    A PR needs review when no verdict covers its **current head**. That covers
-    three cases with one rule: never reviewed, reviewed and then pushed to, and
-    reviewed-and-rejected then fixed. The last is what hands a rejected PR back
-    to a reviewer once the engineer has acted on it.
+    A PR needs review when no verdict covers its **current head** and the
+    lane has not already reviewed it three times (``review_standing``
+    ``capped``). That covers three cases with one rule: never reviewed,
+    reviewed and then pushed to, and reviewed-and-rejected then fixed. The
+    last is what hands a rejected PR back to a reviewer once the engineer
+    has acted on it — up to the 09-28 three-review stop (#2550), after
+    which the PR stays routed to the ticket instead.
 
     `tier` filters by the *ticket's* risk, not the PR's size. A reviewer is
     matched to the work the same way an engine is: the expensive judgement is

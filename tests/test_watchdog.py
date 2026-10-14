@@ -1492,3 +1492,147 @@ def test_recovery_leaves_foreign_issues_untouched(monkeypatch):
         touched = set(_closed_numbers(calls))
         assert 9999 not in touched
         assert 8888 not in touched
+
+
+# --- one live alert per incident: reuse on identical problem set (#2552) ---
+#
+# The new-plus-close path opened a fresh alert on every hourly run during one
+# continuous alarm. Now an evaluation whose problem set exactly equals the
+# live owned alert's reuses it — no new issue, no close, no per-run comment
+# or edit — a changed set rotates to one new alert with the old closed, and
+# owned_alerts() pages past the first 100 open issues to find the live one.
+
+_PROBLEMS_A = ["`codex`: Nothing recorded for 3d11h."]
+_PROBLEMS_B = ["`codex`: Nothing recorded for 3d11h.",
+               "`muse`: heartbeat unreadable (HTTP 502)."]
+
+
+def _incident_gh(calls, state, created_number):
+    """A `gh` double with a mutable open-issue list behind the list endpoint.
+
+    POST /issues appends the posted body as a new open issue; PATCH closes
+    by number; comments record only.
+    """
+    def fake_gh(*args):
+        calls.append(args)
+        joined = " ".join(args)
+        if "issues?state=open" in joined:
+            return json.dumps(state["open"])
+        if "/comments" in joined:
+            return "{}"
+        if args[1:3] == ("-X", "PATCH"):
+            number = int(args[3].rsplit("/", 1)[-1])
+            state["open"] = [issue for issue in state["open"]
+                             if issue["number"] != number]
+            return "{}"
+        if args[1:3] == ("-X", "POST"):
+            body = next(argument[len("body="):]
+                        for argument in args
+                        if argument.startswith("body="))
+            state["open"].append({"number": created_number,
+                                  "title": watchdog.ALERT_TITLE,
+                                  "body": body})
+            return json.dumps({"number": created_number})
+        raise AssertionError("unexpected gh call: {}".format(args))
+    return fake_gh
+
+
+def _run_watchdog(monkeypatch, problems):
+    monkeypatch.setattr(watchdog.heartbeat, "PROVIDERS", {"codex": "openai"})
+    monkeypatch.setattr(watchdog, "records", lambda agent: [])
+    monkeypatch.setattr(
+        watchdog, "assess",
+        lambda agent, rows, now, paused=False: list(problems))
+
+
+def _writes(calls):
+    return [call for call in calls
+            if call[1:3] == ("-X", "POST") or call[1:3] == ("-X", "PATCH")]
+
+
+def test_repeated_identical_evaluations_keep_a_single_open_alert(monkeypatch):
+    """Accept: an unchanged alarm reuses the live alert — the second run
+    opens nothing, closes nothing, and comments nowhere."""
+    calls = []
+    state = {"open": []}
+    _run_watchdog(monkeypatch, _PROBLEMS_A)
+    monkeypatch.setattr(
+        watchdog, "gh", _incident_gh(calls, state, 100))
+
+    assert watchdog.main() == 0
+    assert [issue["number"] for issue in state["open"]] == [100]
+    assert (watchdog._alert_problems(state["open"][0])
+            == frozenset(_PROBLEMS_A))
+
+    del calls[:]
+    assert watchdog.main() == 0
+
+    assert _writes(calls) == []
+    assert [issue["number"] for issue in state["open"]] == [100]
+
+
+def test_changed_problem_set_rotates_to_a_new_alert(monkeypatch):
+    """Accept: a changed problem set opens one new alert and closes the old,
+    leaving exactly one live alert."""
+    calls = []
+    state = {"open": []}
+    _run_watchdog(monkeypatch, _PROBLEMS_A)
+    monkeypatch.setattr(
+        watchdog, "gh", _incident_gh(calls, state, 100))
+
+    assert watchdog.main() == 0
+    assert [issue["number"] for issue in state["open"]] == [100]
+
+    _run_watchdog(monkeypatch, _PROBLEMS_B)
+    monkeypatch.setattr(
+        watchdog, "gh", _incident_gh(calls, state, 101))
+    del calls[:]
+    assert watchdog.main() == 0
+
+    creates = [call for call in calls
+               if call[1:3] == ("-X", "POST")
+               and call[3].endswith("/issues")]
+    assert len(creates) == 1
+    assert _closed_numbers(calls) == [100]
+    assert [issue["number"] for issue in state["open"]] == [101]
+    assert (watchdog._alert_problems(state["open"][0])
+            == frozenset(_PROBLEMS_B))
+
+
+def test_owned_alerts_finds_a_live_alert_past_the_first_page(monkeypatch):
+    """Accept: with 100 foreign open issues on page one, the live owned
+    alert on page two is still found — and an unchanged evaluation reuses
+    it instead of opening a duplicate beside it."""
+    foreign = [{"number": number, "title": "Something else", "body": "x"}
+               for number in range(1, 101)]
+    live = {"number": 5000, "title": watchdog.ALERT_TITLE,
+            "body": watchdog.MARKER + "\n\n- `codex`: boom"}
+    pages = {1: foreign, 2: [live]}
+    seen_pages = []
+    calls = []
+
+    def fake_gh(*args):
+        calls.append(args)
+        joined = " ".join(args)
+        if "issues?state=open" in joined:
+            page = int(joined.rsplit("page=", 1)[-1].split("&")[0].split()[0])
+            seen_pages.append(page)
+            return json.dumps(pages.get(page, []))
+        if "/comments" in joined:
+            return "{}"
+        if args[1:3] == ("-X", "PATCH"):
+            return "{}"
+        if args[1:3] == ("-X", "POST"):
+            return json.dumps({"number": 5001})
+        raise AssertionError("unexpected gh call: {}".format(args))
+
+    monkeypatch.setattr(watchdog, "gh", fake_gh)
+
+    assert watchdog.owned_alerts() == [live]
+    assert seen_pages == [1, 2]
+
+    _run_watchdog(monkeypatch, ["`codex`: boom"])
+    del calls[:]
+    assert watchdog.main() == 0
+
+    assert _writes(calls) == []

@@ -378,10 +378,40 @@ def is_watchdog_alert(issue: Dict) -> bool:
     return MARKER in (issue.get("body") or "")
 
 
+def _alert_problems(issue: Dict) -> frozenset:
+    """The problem set a live owned alert was opened for.
+
+    The alert body lists one problem per "- " line; reading those lines
+    back is the problem set the current evaluation compares against.
+    An alert whose body lists no problems compares as the empty set, so
+    it never matches a live alarm — it rotates, it is not reused.
+    """
+    body = issue.get("body") or ""
+    if not isinstance(body, str):
+        return frozenset()
+    return frozenset(
+        line[2:] for line in body.splitlines() if line.startswith("- ")
+    )
+
+
 def owned_alerts() -> List[Dict]:
-    """Every open watchdog-owned alert issue, newest or oldest first."""
-    raw = gh("api", "repos/{}/issues?state=open&per_page=100".format(REPO))
-    return [issue for issue in json.loads(raw) if is_watchdog_alert(issue)]
+    """Every open watchdog-owned alert issue, across all result pages.
+
+    The issue list pages at 100 entries; a live owned alert past the
+    first page must still be found, or the watchdog would open a
+    duplicate beside it on every run.
+    """
+    owned = []
+    page = 1
+    while True:
+        raw = gh("api", "repos/{}/issues?state=open&per_page=100&page={}".format(
+            REPO, page))
+        issues = json.loads(raw)
+        owned.extend(
+            issue for issue in issues if is_watchdog_alert(issue))
+        if len(issues) < 100:
+            return owned
+        page += 1
 
 
 def existing_issue() -> Dict:
@@ -455,10 +485,21 @@ def main() -> int:
            "", "It closes itself once the heartbeats recover."]
     )
 
-    # One live alert: open a new issue per incident, then close every
-    # superseded watchdog-owned alert so exactly one stays open. The new
-    # issue opens first, so a failed open never closes the live alert out
-    # from under an active alarm.
+    # One live alert per incident: when the current problem set exactly
+    # equals a live owned alert's problem set, that alert already covers
+    # this incident — reuse it with no new issue, no close, and no
+    # per-run comment or edit. Otherwise open a new issue for the changed
+    # incident, then close every superseded watchdog-owned alert so
+    # exactly one stays open. The new issue opens first, so a failed open
+    # never closes the live alert out from under an active alarm.
+    current = frozenset(problems)
+    for issue in owned:
+        if _alert_problems(issue) == current:
+            print("reusing #{}".format(issue["number"]))
+            for problem in problems:
+                print("  " + problem)
+            return 0
+
     created = open_alert(body)
     print("opened #{}".format(created["number"]))
     for issue in owned:

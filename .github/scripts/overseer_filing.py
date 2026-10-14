@@ -257,12 +257,23 @@ def resolve_event() -> Tuple[str, int, Optional[str], Optional[str]]:
     raise RuntimeError("unsupported event {}".format(event_name or "unknown"))
 
 
-def fetch_issue(repo: str, number: int) -> Tuple[str, Optional[str]]:
-    """The body's text and its author's login for one issue, over REST."""
+def fetch_issue(repo: str, number: int) -> Tuple[str, Optional[str],
+                                              Optional[str]]:
+    """The body's text, its author's login, and its REST ``node_id``.
+
+    The ``node_id`` is the GraphQL node id the add mutation needs as
+    ``contentId`` (#2546); it comes from this REST read, not from the
+    GraphQL issue lookup, which only checks for an existing Project item.
+    """
     payload = json.loads(gh("api", "repos/{}/issues/{}".format(repo, number)))
     if not isinstance(payload, dict):
         raise RuntimeError("issue read returned no object")
-    return str(payload.get("body") or ""), funnel.comment_author(payload)
+    node_id = payload.get("node_id")
+    return (
+        str(payload.get("body") or ""),
+        funnel.comment_author(payload),
+        node_id if isinstance(node_id, str) and node_id else None,
+    )
 
 
 def project_selects() -> Tuple[str, Dict[str, Dict[str, str]]]:
@@ -299,36 +310,21 @@ def project_selects() -> Tuple[str, Dict[str, Dict[str, str]]]:
     return project_id, selects
 
 
-def lookup_issue(owner: str, repo: str, number: int,
-                   project_id: str) -> Tuple[Optional[str], Optional[str]]:
-    """Return the ``(issue_id, item_id)`` for one issue.
-
-    ``item_id`` is None when the issue is not yet in the Project.
-    ``issue_id`` is None when the issue itself is missing or not visible.
-    The issue id is the GraphQL node id the add mutation needs as
-    ``contentId`` (#2546).
-    """
+def existing_item_id(owner: str, repo: str, number: int,
+                     project_id: str) -> Optional[str]:
+    """Return the existing Project item id, or None when not yet filed."""
     data = gh_graphql(ISSUE_QUERY, owner=owner, repo=repo, number=number)
     issue = (data.get("repository") or {}).get("issue")
     if not isinstance(issue, dict):
-        return None, None
-    issue_id = issue.get("id")
-    if not isinstance(issue_id, str) or not issue_id:
-        return None, None
+        return None
     nodes = (issue.get("projectItems") or {}).get("nodes") or []
     for node in nodes:
         if not isinstance(node, dict):
             continue
         project = node.get("project") or {}
         if project.get("id") == project_id and node.get("id"):
-            return issue_id, str(node.get("id"))
-    return issue_id, None
-
-
-def existing_item_id(owner: str, repo: str, number: int,
-                     project_id: str) -> Optional[str]:
-    _, item_id = lookup_issue(owner, repo, number, project_id)
-    return item_id
+            return str(node.get("id"))
+    return None
 
 
 def add_item(project_id: str, content_id: str) -> str:
@@ -348,13 +344,18 @@ def add_item(project_id: str, content_id: str) -> str:
     return item_id
 
 
-def ensure_item_id(repo: str, number: int, project_id: str) -> str:
-    """Add the issue to Project 2, reusing its item when already filed."""
+def ensure_item_id(repo: str, number: int, project_id: str,
+                   content_id: Optional[str]) -> str:
+    """Add the issue to Project 2, reusing its item when already filed.
+
+    ``content_id`` is the issue's ``node_id`` from the REST issue read
+    (#2546); the GraphQL lookup only reuses an existing item.
+    """
     owner, _, short = repo.partition("/")
-    content_id, found = lookup_issue(owner, short, number, project_id)
+    found = existing_item_id(owner, short, number, project_id)
     if found:
         return found
-    if content_id is None:
+    if not isinstance(content_id, str) or not content_id:
         raise RuntimeError("issue {}/issues/{} is missing or not visible".format(
             repo, number))
     return add_item(project_id, content_id)
@@ -433,9 +434,10 @@ def main() -> int:
             repo or "unknown repo"))
         return 2
     ref = "{}/issues/{}".format(repo, number)
+    content_id: Optional[str] = None
     if body is None:
         try:
-            body, author = fetch_issue(repo, number)
+            body, author, content_id = fetch_issue(repo, number)
         except (RuntimeError, ValueError) as exc:
             print("overseer_filing: cannot read {}: {}".format(ref, exc))
             return 1
@@ -453,9 +455,20 @@ def main() -> int:
     if reason is None:
         assert block is not None
         values, reason = validate_routing(block)
+    if content_id is None:
+        # `issues: opened` already carried the body and author, but the
+        # add mutation's contentId still comes from the REST issue read
+        # (#2546): the event's node id is not used. Skipped issues above
+        # return before this read, so unmarked and untrusted issues stay
+        # untouched with no extra call.
+        try:
+            _, _, content_id = fetch_issue(repo, number)
+        except (RuntimeError, ValueError) as exc:
+            print("overseer_filing: cannot read {}: {}".format(ref, exc))
+            return 1
     try:
         project_id, selects = project_selects()
-        item_id = ensure_item_id(repo, number, project_id)
+        item_id = ensure_item_id(repo, number, project_id, content_id)
     except (RuntimeError, ValueError) as exc:
         print("overseer_filing: cannot file {}: {}".format(ref, exc))
         return 1

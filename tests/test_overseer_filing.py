@@ -242,6 +242,12 @@ class _GhFake:
 
     def __call__(self, *args):
         self.calls.append(args)
+        if (args[:1] == ("api",) and len(args) >= 2
+                and args[1].startswith("repos/")
+                and "/issues/" in args[1]):
+            return json.dumps({"body": "plain human issue",
+                               "user": {"login": "nateprich"},
+                               "node_id": "ISSUE-1"})
         if args[:2] == ("api", "graphql"):
             query = ""
             for entry in args:
@@ -360,6 +366,39 @@ def test_add_item_issues_the_graphql_mutation_not_gh_project(monkeypatch):
     assert fake.project_cli_calls() == []
 
 
+def test_main_uses_rest_node_id_as_content_id(monkeypatch, tmp_path):
+    """#2546: contentId is the REST node_id, not the GraphQL issue id."""
+    fake = _GhFake()
+    real_call = _GhFake.__call__
+
+    def divergent_gh(*args):
+        if (args[:1] == ("api",) and len(args) >= 2
+                and args[1].startswith("repos/")
+                and "/issues/" in args[1]):
+            return json.dumps({"body": _body(VALID),
+                               "user": {"login": "nateprich"},
+                               "node_id": "REST-NODE-1"})
+        if args[:2] == ("api", "graphql") and any(
+                "projectItems" in str(entry) for entry in args):
+            return json.dumps({"data": {"repository": {"issue": {
+                "id": "GRAPHQL-ISSUE-1",
+                "projectItems": {"nodes": []},
+            }}}})
+        return real_call(fake, *args)
+
+    monkeypatch.setattr(overseer_filing, "gh", divergent_gh)
+    monkeypatch.setenv("GH_TOKEN", "filing-token")
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "issues")
+    path = tmp_path / "event.json"
+    path.write_text(json.dumps(_issues_event(body=_body(VALID))))
+    monkeypatch.setenv("GITHUB_EVENT_PATH", str(path))
+    assert overseer_filing.main() == 0
+    # The add delegates through real_call, so fake.calls holds it.
+    assert len(fake.adds()) == 1
+    assert "content=REST-NODE-1" in fake.adds()[0]
+    assert "content=GRAPHQL-ISSUE-1" not in fake.adds()[0]
+
+
 def test_main_files_valid_block_with_all_five_fields(monkeypatch, tmp_path):
     fake = _GhFake()
     status = _run_main(monkeypatch, tmp_path, fake, "issues",
@@ -427,7 +466,8 @@ def test_main_supports_workflow_dispatch(monkeypatch, tmp_path):
     def dispatch_gh(*args):
         if args[:2] == ("api", "repos/{}/issues/9".format(REPO)):
             return json.dumps({"body": _body(VALID),
-                               "user": {"login": "nateprich"}})
+                               "user": {"login": "nateprich"},
+                               "node_id": "ISSUE-1"})
         return _GhFake.__call__(fake, *args)
 
     fake = _GhFake()
@@ -448,7 +488,8 @@ def test_main_supports_repository_dispatch(monkeypatch, tmp_path):
     def dispatch_gh(*args):
         if args[:2] == ("api", "repos/{}/issues/11".format(REPO)):
             return json.dumps({"body": _body(VALID),
-                               "user": {"login": "nateprich"}})
+                               "user": {"login": "nateprich"},
+                               "node_id": "ISSUE-1"})
         return _GhFake.__call__(fake, *args)
 
     monkeypatch.setenv("GH_TOKEN", "filing-token")

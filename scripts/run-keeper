@@ -45,6 +45,20 @@ KEEPER_LABEL="com.nateprich.command-center-run-keeper"
 ROUTINE_PATH="routines/codex-work.md"
 LAUNCH_AGENTS_DIR="${HOME:-}/Library/LaunchAgents"
 
+# Run-clone maintenance setup (#2561). Every heartbeat fetch pulls each new
+# blob into this clone, and a loose-object backlog trips automatic
+# maintenance on nearly every git command, piling up overlapping repacks.
+# Suppress the foreground triggers, keep fetches packed, and register the
+# clone so scheduled maintenance stays the only compactor. Runs every cycle
+# before any other git command, so a fresh or re-cloned run clone converges
+# on its own; linked sentinel worktrees share this config and object store,
+# so they inherit it. Failures tolerate like the refresh below: setup must
+# never suppress the health or readiness lines.
+"$GIT" -C "$REPO" config maintenance.auto false >/dev/null 2>&1 || true
+"$GIT" -C "$REPO" config gc.auto 0 >/dev/null 2>&1 || true
+"$GIT" -C "$REPO" config fetch.unpackLimit 1 >/dev/null 2>&1 || true
+"$GIT" -C "$REPO" maintenance register >/dev/null 2>&1 || true
+
 # Keep the existing keeper responsibility.  A failed refresh must not suppress
 # the health or readiness lines: the keeper is meant to remain useful during
 # degradation.  The pre-pull HEAD is the install trigger: prompts and plists

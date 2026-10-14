@@ -26,6 +26,14 @@ tests" beats "add the parser" then "add the tests" then "wire it up".
 For a no-diff ticket, its `Accept` names the GitHub-artifact evidence channel the
 finish check verifies: a comment, rename event, closed PR, or posted measurement.
 
+For an analysis-marker-present project, except `Curate`/`Describe`/`Hypothesize`
+(which per #2407 close with findings in domain records), the final ticket's
+`Accept` must require the full findings text posted as a comment on the parent
+issue: a comment on a child ticket only, a parent comment that only links to a
+child ticket or file, or a `docs/` file does not satisfy it. If the parent issue
+cannot be posted to because the workspace has no GitHub access, stop and surface
+that as a capability gap; do not write the findings to a repo file instead.
+
 An `Accept` that names a run outcome or a post-merge runtime fact names its
 evidence channel during breakdown: either a CI check that covers it or a
 `**Run evidence:**` PR comment in the canonical fenced-JSON form (command, exit

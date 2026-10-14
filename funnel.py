@@ -28031,6 +28031,119 @@ def load_rest_project_items(
     return items
 
 
+# --------------------------------------------------------------------------
+# Project writes over REST (#2417, #2422).
+#
+# Field updates and item adds through the REST item endpoints under
+# ``REST_PROJECT_ITEMS_PATH``, beside the GraphQL mutations (``SET_FIELD``,
+# ``write_project_select``, ``gh project item-add``). No caller uses these
+# yet: the ticket builds the write path first and switches lanes later.
+# Every transport or API failure raises ``GitHubError`` at once, so a write
+# that half-applies never reports success.
+# --------------------------------------------------------------------------
+
+
+def _rest_request_json(method: str, endpoint: str, body=None):
+    """Send one REST write through ``gh api`` and parse its JSON body."""
+    command = ["gh", "api", "-X", method, endpoint]
+    kwargs: Dict[str, object] = {"capture_output": True, "text": True}
+    if body is not None:
+        command += ["--input", "-"]
+        kwargs["input"] = json.dumps(body)
+    try:
+        proc = _run_gh(command, **kwargs)
+    finally:
+        # The request went out even when the child never answered.
+        _record_rest_request()
+    if proc.returncode != 0:
+        raise GitHubError(
+            "REST request failed: {}".format(
+                _graphql_text(getattr(proc, "stderr", "")).strip()
+                or "gh exited {}".format(proc.returncode)
+            )
+        )
+    try:
+        return json.loads(getattr(proc, "stdout", ""))
+    except (TypeError, ValueError) as exc:
+        raise GitHubError(
+            "malformed REST response: {}".format(exc)) from exc
+
+
+def rest_update_project_item_field(
+    item_id: str,
+    field_id: str,
+    value: object,
+    *,
+    _request=None,
+) -> dict:
+    """Update one Project item field over REST; raise on any failure.
+
+    PATCHes ``REST_PROJECT_ITEMS_PATH/<item_id>``. The response must
+    confirm the same item id, or this raises ``GitHubError`` instead of
+    reporting success. ``_request`` takes ``(method, endpoint, body)``
+    and returns parsed JSON; tests use it to replay recorded payloads,
+    production uses ``_rest_request_json``.
+    """
+    if not isinstance(item_id, str) or not item_id.strip():
+        raise ValueError("rest_update_project_item_field needs an item id")
+    if not isinstance(field_id, str) or not field_id.strip():
+        raise ValueError("rest_update_project_item_field needs a field id")
+    request = _request or _rest_request_json
+    endpoint = "{}/{}".format(REST_PROJECT_ITEMS_PATH, item_id)
+    response = request("PATCH", endpoint, {"field_id": field_id, "value": value})
+    if not isinstance(response, dict) or response.get("id") != item_id:
+        raise GitHubError(
+            "REST field update for {} did not confirm {}".format(
+                item_id, field_id
+            )
+        )
+    return response
+
+
+def rest_update_project_item_fields(
+    item_id: str,
+    updates: Mapping[str, object],
+    *,
+    _request=None,
+) -> None:
+    """Update several Project item fields over REST, in mapping order.
+
+    The first failure raises ``GitHubError`` at once: a write that
+    half-applies never reports success, and the caller retries from the
+    fields that did not confirm rather than assuming the rest landed.
+    """
+    if not isinstance(updates, Mapping) or not updates:
+        raise ValueError(
+            "rest_update_project_item_fields needs a non-empty mapping"
+        )
+    request = _request or _rest_request_json
+    for field_id, value in updates.items():
+        rest_update_project_item_field(
+            item_id, field_id, value, _request=request
+        )
+
+
+def rest_add_project_item(content_id: str, *, _request=None) -> str:
+    """Add one issue to the Project over REST; return the new item id.
+
+    POSTs ``REST_PROJECT_ITEMS_PATH`` with the issue's node id. The
+    response must carry a non-empty string ``id``; anything else raises
+    ``GitHubError`` instead of claiming the add succeeded. ``_request``
+    takes ``(method, endpoint, body)`` and returns parsed JSON; tests use
+    it to replay recorded payloads, production uses ``_rest_request_json``.
+    """
+    if not isinstance(content_id, str) or not content_id.strip():
+        raise ValueError("rest_add_project_item needs a content id")
+    request = _request or _rest_request_json
+    response = request(
+        "POST", REST_PROJECT_ITEMS_PATH, {"content_id": content_id}
+    )
+    item_id = response.get("id") if isinstance(response, dict) else None
+    if not isinstance(item_id, str) or not item_id:
+        raise GitHubError("REST item-add did not return a new item id")
+    return item_id
+
+
 def report_graphql_spend(stream=None) -> None:
     """Print what this process spent on GraphQL, if it spent anything.
 

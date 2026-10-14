@@ -22,6 +22,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 import funnel  # noqa: E402
+from engine import review  # noqa: E402
 from engine import review_apply  # noqa: E402
 from engine.review_apply import AnswerError  # noqa: E402
 
@@ -278,6 +279,54 @@ def test_a_rejection_keeps_its_blocking_list():
     verdict, blocking, note = review_apply.decide(
         {"verdict": "rejected", "blocking": ["fix this"], "unsure": []})
     assert (verdict, blocking, note) == ("rejected", ["fix this"], None)
+
+
+def test_a_routed_premise_is_not_duplicated_as_an_implementer_blocker():
+    requirement = ("Reproduction: base never reuses an open claim; "
+                   "verify on base first")
+    evidence = ("premise refuted (base): base reuses via PATCH in "
+                "the funnel claim update")
+    routed = "{} {} -- {}".format(
+        review.PREMISE_REFUTED_ROUTING_PREFIX, requirement, evidence)
+    verdict, blocking, note = review_apply.decide(
+        {"verdict": "rejected", "blocking": [routed], "unsure": [],
+         "requirements": [{"requirement": requirement, "status": "unmet",
+                            "evidence": evidence}]})
+
+    assert verdict == "rejected"
+    assert blocking == [routed]
+    assert "routed to the ticket for amend-or-send-back" in note
+
+
+def test_a_refuted_entry_without_its_routing_line_stays_blocking():
+    requirement = ("Reproduction: base never reuses an open claim; "
+                   "verify on base first")
+    evidence = ("premise refuted (base): base reuses via PATCH in "
+                "the funnel claim update")
+    verdict, blocking, _ = review_apply.decide(
+        {"verdict": "rejected", "blocking": [], "unsure": [],
+         "requirements": [{"requirement": requirement, "status": "unmet",
+                            "evidence": evidence}]})
+
+    assert verdict == "rejected"
+    assert blocking == ["requirement unmet: {} -- {}".format(
+        requirement, evidence)]
+
+
+def test_a_marker_on_other_work_is_never_suppressed():
+    requirement = "Add retry coverage for the claim path"
+    evidence = "premise refuted (base): base retries in foo.py:12"
+    routed = "{} {} -- {}".format(
+        review.PREMISE_REFUTED_ROUTING_PREFIX,
+        "Reproduction: base never reuses", "premise refuted (base): x")
+    verdict, blocking, _ = review_apply.decide(
+        {"verdict": "rejected", "blocking": [routed], "unsure": [],
+         "requirements": [{"requirement": requirement, "status": "unmet",
+                            "evidence": evidence}]})
+
+    assert verdict == "rejected"
+    assert blocking == [routed, "requirement unmet: {} -- {}".format(
+        requirement, evidence)]
 
 
 def test_unsure_turns_an_approval_into_a_rejection():

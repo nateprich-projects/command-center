@@ -547,6 +547,17 @@ def uncertain_judge_results(requirements: Sequence[str],
             for requirement in canonical]
 
 
+def judge_blocking_line(status: str, requirement: object,
+                        evidence: object) -> str:
+    """One recordable blocking line for a non-met judge result.
+
+    Shared by ``derive_judge_answer`` and the refuted-premise routing below
+    so the implementer-directed lines are byte-identical on both paths.
+    """
+    kind = "unmet" if status == "unmet" else "unsure"
+    return "requirement {}: {} -- {}".format(kind, requirement, evidence)
+
+
 def derive_judge_answer(requirements: Sequence[str],
                         results: Sequence[dict]) -> Dict[str, object]:
     """Build the apply answer in code; any uncertainty rejects the review.
@@ -585,7 +596,7 @@ def derive_judge_answer(requirements: Sequence[str],
             })
     extra_count = max(0, len(records) - len(canonical))
     blocking = [
-        "requirement {}: {} -- {}".format(
+        judge_blocking_line(
             entry["status"], entry["requirement"], entry["evidence"])
         for entry in shaped if entry["status"] != "met"
     ]
@@ -597,6 +608,201 @@ def derive_judge_answer(requirements: Sequence[str],
         "blocking": blocking,
         "unsure": [],
         "requirements": shaped,
+    }
+
+
+#: Canonical evidence prefix a lane judge uses when a ticket verify-first or
+#: reproduction requirement asserting base behavior is contradicted by
+#: opposite base behavior the judge observed in code or records (#2549). What
+#: follows the prefix is the judge's attestation, in its own words, of what
+#: base actually does and the code or record ref where it saw it. Code trusts
+#: the attestation but requires both the marker and a base-premise-shaped
+#: requirement (see ``is_base_premise_requirement``), so a marker on a
+#: genuine implementation miss never routes fixable work to the ticket.
+REFUTED_BASE_PREMISE_EVIDENCE_PREFIX = "premise refuted (base):"
+
+#: Recorded blocking-line prefix routing a refuted base premise to the ticket
+#: for amend-or-send-back instead of directing the implementer (#2549). The
+#: line carries the requirement and the judge's observation; the prefix is
+#: what the Prior-blocking carry-forward excludes, so a routed premise never
+#: re-rejects a new head while the ticket owns it.
+PREMISE_REFUTED_ROUTING_PREFIX = (
+    "premise refuted -- routed to ticket for amend-or-send-back:")
+
+
+#: A ticket verify-first or reproduction requirement asserts base behavior in
+#: one of these shapes (#2549): the `Reproduction:` first-Accept row, an
+#: explicit verify-first check, or a passes-on-base check. Only these shapes
+#: can carry a refuted base premise; a Do obligation or a `Does not break:`
+#: rule fails the shape even when its evidence carries the marker.
+_REPRODUCTION_PREFIX_RE = re.compile(r"\s*reproduction\s*:", re.IGNORECASE)
+_VERIFY_FIRST_RE = re.compile(r"\bverify[\s-]*first\b", re.IGNORECASE)
+_PASSES_ON_BASE_RE = re.compile(
+    r"\bpasses?\s*-?\s*on\s*-?\s*base\b", re.IGNORECASE)
+_REPRODUCTION_RE = re.compile(r"\breproduction\b", re.IGNORECASE)
+_BASE_RE = re.compile(r"\bbase\b", re.IGNORECASE)
+
+#: A scoped re-review wraps a carried finding as `Prior blocking item
+#: addressed (<kind>): <finding>`, and derived blocking lines read
+#: `requirement <status>: <requirement> -- <evidence>`. Unwrap both before
+#: asking what ticket requirement a result answers (#2549).
+_PRIOR_WRAPPER_RE = re.compile(
+    r"^prior blocking item addressed\s*\([^)]*\)\s*:\s*(.*)$",
+    re.IGNORECASE | re.DOTALL)
+_DERIVED_LINE_RE = re.compile(
+    r"^requirement\s+(?:unmet|unsure)\s*:\s*(.*?)\s*--\s*(.*)$",
+    re.IGNORECASE | re.DOTALL)
+
+
+def _unwrapped_requirement(requirement: object) -> str:
+    """The ticket requirement inside scoped wrappers and derived lines."""
+    text = requirement if isinstance(requirement, str) else ""
+    match = _PRIOR_WRAPPER_RE.match(text.strip())
+    if match is not None:
+        text = match.group(1)
+    match = _DERIVED_LINE_RE.match(text.strip())
+    if match is not None:
+        text = match.group(1)
+    return text.strip()
+
+
+def is_base_premise_requirement(requirement: object) -> bool:
+    """Whether a requirement can carry a refuted base premise (#2549).
+
+    Only a ticket verify-first or reproduction requirement asserting base
+    behavior qualifies: the `Reproduction:` Accept shape, an explicit
+    verify-first check, a passes-on-base check, or reproduction prose about
+    base. `Does not break:` rows and any other obligation never qualify, so
+    a misplaced marker on implementation work stays implementer-directed.
+    Scoped `Prior blocking item addressed` wrappers are unwrapped first, so
+    a carried legacy premise still routes on a fresh observation.
+    """
+    text = _unwrapped_requirement(requirement)
+    if not text:
+        return False
+    lowered = text.strip().casefold()
+    if lowered.startswith("does not break:"):
+        return False
+    if _REPRODUCTION_PREFIX_RE.match(text) is not None:
+        return True
+    if _VERIFY_FIRST_RE.search(text) is not None:
+        return True
+    if _PASSES_ON_BASE_RE.search(text) is not None:
+        return True
+    return (_REPRODUCTION_RE.search(text) is not None
+            and _BASE_RE.search(text) is not None)
+
+
+def is_refuted_base_premise_evidence(evidence: object) -> bool:
+    """Whether judge evidence attests opposite base behavior (#2549).
+
+    True only for the canonical marker with a non-empty observation after
+    it: the marker alone, without what base actually does, routes nothing.
+    """
+    if not isinstance(evidence, str):
+        return False
+    stripped = evidence.strip()
+    if (stripped[:len(REFUTED_BASE_PREMISE_EVIDENCE_PREFIX)].casefold()
+            != REFUTED_BASE_PREMISE_EVIDENCE_PREFIX.casefold()):
+        return False
+    return bool(
+        stripped[len(REFUTED_BASE_PREMISE_EVIDENCE_PREFIX):].strip())
+
+
+def is_premise_refuted_result(requirement: str, result: object) -> bool:
+    """Whether one judge result refutes its ticket premise about base (#2549).
+
+    Refuted only when the assigned requirement asserts base behavior in a
+    verify-first or reproduction shape and the judge's evidence carries the
+    refuted marker with its observed opposite base behavior: a firm `unmet`
+    observation, never an `unsure`, and never a marker on other work.
+    """
+    if not isinstance(result, dict):
+        return False
+    if result.get("requirement") != requirement:
+        return False
+    if result.get("status") != "unmet":
+        return False
+    if not is_base_premise_requirement(requirement):
+        return False
+    return is_refuted_base_premise_evidence(result.get("evidence"))
+
+
+def is_premise_refuted_routing(item: object) -> bool:
+    """Whether a recorded blocking line routes a premise to the ticket."""
+    return (isinstance(item, str)
+            and item.strip().casefold().startswith(
+                PREMISE_REFUTED_ROUTING_PREFIX.casefold()))
+
+
+def route_lane_verdict(ticket: Optional[dict],
+                       requirements: Sequence[str],
+                       results: Sequence[dict]) -> Dict[str, object]:
+    """Route a lane review's judge outcome to the ticket or implementer.
+
+    When the lane judge finds a ticket verify-first or reproduction premise
+    false about base behavior (observed shape: #2500 on reuse, #2492 on
+    claude-code-environment), the review ends routed to the ticket for
+    amend-or-send-back instead of a rejected verdict the implementer must
+    fix, so the next head is not re-rejected on the same carried premise
+    (#2549). A genuine miss with no opposite base behavior observed keeps
+    its implementer-directed rejected verdict.
+
+    Returns the recordable ``verdict`` (still binary, so the merge gate and
+    review-apply read it unchanged) with ``blocking`` carrying the
+    implementer-directed lines first and the ticket-directed routing lines
+    after them, plus the ``route`` (``ticket`` or ``implementer``), the
+    ``ticket_findings`` routed for amend-or-send-back, and the
+    ``implementer_blocking`` lines, which never name a routed premise.
+    """
+    canonical = _canonical_requirements(requirements)
+    records = list(results) if isinstance(results, (list, tuple)) else []
+    refuted = set()
+    for index, requirement in enumerate(canonical):
+        entry = records[index] if index < len(records) else None
+        if is_premise_refuted_result(requirement, entry):
+            refuted.add(index)
+    answer = derive_judge_answer(requirements, results)
+    shaped = answer["requirements"]
+    implementer_blocking = [
+        judge_blocking_line(
+            entry["status"], entry["requirement"], entry["evidence"])
+        for index, entry in enumerate(shaped)
+        if entry["status"] != "met" and index not in refuted
+    ]
+    extra_count = max(0, len(records) - len(canonical))
+    if extra_count:
+        implementer_blocking.append(
+            "unexpected extra judge result(s): {}".format(extra_count))
+    ticket_findings = [
+        {"requirement": shaped[index]["requirement"],
+         "evidence": shaped[index]["evidence"]}
+        for index in sorted(refuted)
+    ]
+    ticket_blocking = [
+        "{} {} -- {}".format(
+            PREMISE_REFUTED_ROUTING_PREFIX,
+            finding["requirement"], finding["evidence"])
+        for finding in ticket_findings
+    ]
+    ticket_ref = (ticket or {}).get("ref") if isinstance(ticket, dict) else None
+    if refuted:
+        note = (
+            "routed {} refuted base premise(s) to ticket {} for "
+            "amend-or-send-back; no implementer-directed rejection for "
+            "the premise".format(
+                len(ticket_findings), ticket_ref or "unknown"))
+    else:
+        note = None
+    return {
+        "route": "ticket" if refuted else "implementer",
+        "kind": "amend-or-send-back" if refuted else None,
+        "verdict": answer["verdict"],
+        "blocking": implementer_blocking + ticket_blocking,
+        "implementer_blocking": implementer_blocking,
+        "ticket_findings": ticket_findings,
+        "ticket_ref": ticket_ref,
+        "note": note,
     }
 
 
@@ -3842,6 +4048,7 @@ def empty_scoped_rereview() -> Dict[str, object]:
         "active": False,
         "prior_rejected_head": None,
         "prior_blocking_items": [],
+        "premise_refuted_items": [],
         "interdiff": None,
         "full_review_fallback": False,
         "fallback_reasons": [],
@@ -3858,6 +4065,12 @@ def _stopping_rule_kind(item: object) -> Optional[str]:
     and other unknown entries force a full review.
     """
     if not isinstance(item, str) or not item.strip():
+        return None
+    if is_premise_refuted_routing(item):
+        # A premise routed to the ticket for amend-or-send-back is not a
+        # stopping-rule kind: it must never scope a re-review (#2549). The
+        # carry-forward drops it before classification; this guard keeps the
+        # classifier from ever admitting it if the order changes.
         return None
     text = re.sub(r"\s+", " ", item.casefold()).strip()
     if text.startswith("unsure:"):
@@ -4015,10 +4228,18 @@ def build_scoped_rereview(
     raw_blocking = rejected.get("blocking")
     raw_blocking = raw_blocking if isinstance(raw_blocking, list) else []
     classified = []
+    premise_refuted = []
     unclassified = False
     process_gate = False
     seen_findings = set()
     for item in raw_blocking:
+        if is_premise_refuted_routing(item):
+            # A prior premise-refuted finding is excluded from the check and
+            # never re-rejects a new head while routed to the ticket (#2549).
+            # It stays visible in `premise_refuted_items`, never silent.
+            if item not in premise_refuted:
+                premise_refuted.append(item)
+            continue
         if _review_process_prerequisite(item):
             process_gate = True
             continue
@@ -4032,6 +4253,7 @@ def build_scoped_rereview(
         seen_findings.add(key)
         classified.append({"kind": kind, "finding": item})
     packet["prior_blocking_items"] = classified
+    packet["premise_refuted_items"] = premise_refuted
     fallback_reasons: List[str] = []
 
     if not SCOPED_REREVIEW_ENABLED:

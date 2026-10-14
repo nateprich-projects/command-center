@@ -3198,6 +3198,15 @@ line that does the work; an unmet result names the input, the path through
 the diff and the wrong outcome. The `Risks:` in `pr_body` are where to look hardest. When `evidence`
 is `unavailable`, or the packet has none, say so and judge as you otherwise
 would.
+
+When an assigned requirement is a ticket verify-first or `Reproduction:`
+requirement asserting base behavior and the packet's code or records show the
+opposite base behavior, the ticket premise is refuted, not the diff: judge it
+unmet and begin `evidence` with `premise refuted (base): ` followed by what
+base actually does and the code or record ref where it was observed. A
+genuine implementation miss — the diff failing a ticket Do or Accept
+obligation with no opposite base behavior observed — stays a plain unmet and
+never carries that marker.
 HEADER
   if [[ -n "$PROMPT_REVIEW_JUDGE_RULES" ]]; then
     printf '\n%s\n' "$PROMPT_REVIEW_JUDGE_RULES"
@@ -3490,7 +3499,7 @@ import sys
 
 sys.path.insert(0, sys.argv[1])
 from engine.review import (derive_judge_answer, mark_verified_premise_requirements,
-                           uncertain_judge_results)
+                           route_lane_verdict, uncertain_judge_results)
 
 requirements = json.load(open(sys.argv[2]))
 chunks = json.load(open(sys.argv[3]))
@@ -3513,6 +3522,19 @@ for index in range(chunk_count):
 packet = json.load(open(sys.argv[7]))
 results = mark_verified_premise_requirements(packet, results)
 answer = derive_judge_answer(requirements, results)
+# A refuted base premise routes to the ticket for amend-or-send-back, never
+# to the implementer as another unmet requirement (#2549). The recorded
+# verdict word stays binary; the routing lines in blocking carry the route,
+# and the next head's carry-forward excludes them.
+routing = route_lane_verdict(packet.get("ticket"), requirements, results)
+answer["blocking"] = routing["blocking"]
+answer["routing"] = {
+    "route": routing["route"],
+    "kind": routing["kind"],
+    "ticket_ref": routing["ticket_ref"],
+    "ticket_findings": routing["ticket_findings"],
+    "note": routing["note"],
+}
 with open(sys.argv[6], "w") as handle:
     json.dump(answer, handle, indent=2)
 PY

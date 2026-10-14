@@ -1187,6 +1187,7 @@ def test_packet_carries_every_field():
         "active": False,
         "prior_rejected_head": None,
         "prior_blocking_items": [],
+        "premise_refuted_items": [],
         "interdiff": None,
         "full_review_fallback": False,
         "fallback_reasons": [],

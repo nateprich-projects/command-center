@@ -242,6 +242,12 @@ class _GhFake:
 
     def __call__(self, *args):
         self.calls.append(args)
+        if (args[:1] == ("api",) and len(args) >= 2
+                and args[1].startswith("repos/")
+                and "/issues/" in args[1]):
+            return json.dumps({"body": "plain human issue",
+                               "user": {"login": "nateprich"},
+                               "node_id": "ISSUE-1"})
         if args[:2] == ("api", "graphql"):
             query = ""
             for entry in args:
@@ -256,9 +262,10 @@ class _GhFake:
             if "updateProjectV2ItemFieldValue" in query:
                 return json.dumps({"data": {"updateProjectV2ItemFieldValue": {
                     "projectV2Item": {"id": self._last_item()}}}})
+            if "addProjectV2ItemById" in query:
+                return json.dumps({"data": {"addProjectV2ItemById": {
+                    "item": {"id": self._last_item()}}}})
             return json.dumps(self.project)
-        if args[:2] == ("project", "item-add"):
-            return json.dumps({"id": "ITEM-9"})
         if args[:3] == ("api", "-X", "POST"):
             return json.dumps({})
         raise AssertionError("unexpected gh call: {}".format(args))
@@ -270,6 +277,14 @@ class _GhFake:
         return [call for call in self.calls
                 if any("updateProjectV2ItemFieldValue" in str(entry)
                        for entry in call)]
+
+    def adds(self):
+        return [call for call in self.calls
+                if any("addProjectV2ItemById" in str(entry)
+                       for entry in call)]
+
+    def project_cli_calls(self):
+        return [call for call in self.calls if call[:1] == ("project",)]
 
     def comments(self):
         return [call for call in self.calls
@@ -340,6 +355,50 @@ def test_main_ignores_a_valid_block_from_an_untrusted_author(monkeypatch,
     assert fake.comments() == []
 
 
+def test_add_item_issues_the_graphql_mutation_not_gh_project(monkeypatch):
+    """#2546: the add goes through addProjectV2ItemById, never gh project."""
+    fake = _GhFake()
+    monkeypatch.setattr(overseer_filing, "gh", fake)
+    assert overseer_filing.add_item("PVT-1", "ISSUE-1") == "ITEM-9"
+    assert len(fake.adds()) == 1
+    assert "project=PVT-1" in fake.adds()[0]
+    assert "content=ISSUE-1" in fake.adds()[0]
+    assert fake.project_cli_calls() == []
+
+
+def test_main_uses_rest_node_id_as_content_id(monkeypatch, tmp_path):
+    """#2546: contentId is the REST node_id, not the GraphQL issue id."""
+    fake = _GhFake()
+    real_call = _GhFake.__call__
+
+    def divergent_gh(*args):
+        if (args[:1] == ("api",) and len(args) >= 2
+                and args[1].startswith("repos/")
+                and "/issues/" in args[1]):
+            return json.dumps({"body": _body(VALID),
+                               "user": {"login": "nateprich"},
+                               "node_id": "REST-NODE-1"})
+        if args[:2] == ("api", "graphql") and any(
+                "projectItems" in str(entry) for entry in args):
+            return json.dumps({"data": {"repository": {"issue": {
+                "id": "GRAPHQL-ISSUE-1",
+                "projectItems": {"nodes": []},
+            }}}})
+        return real_call(fake, *args)
+
+    monkeypatch.setattr(overseer_filing, "gh", divergent_gh)
+    monkeypatch.setenv("GH_TOKEN", "filing-token")
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "issues")
+    path = tmp_path / "event.json"
+    path.write_text(json.dumps(_issues_event(body=_body(VALID))))
+    monkeypatch.setenv("GITHUB_EVENT_PATH", str(path))
+    assert overseer_filing.main() == 0
+    # The add delegates through real_call, so fake.calls holds it.
+    assert len(fake.adds()) == 1
+    assert "content=REST-NODE-1" in fake.adds()[0]
+    assert "content=GRAPHQL-ISSUE-1" not in fake.adds()[0]
+
+
 def test_main_files_valid_block_with_all_five_fields(monkeypatch, tmp_path):
     fake = _GhFake()
     status = _run_main(monkeypatch, tmp_path, fake, "issues",
@@ -347,7 +406,10 @@ def test_main_files_valid_block_with_all_five_fields(monkeypatch, tmp_path):
     assert status == 0
     assert len(fake.writes()) == 5
     assert fake.comments() == []
-    assert any(call[:2] == ("project", "item-add") for call in fake.calls)
+    assert len(fake.adds()) == 1
+    assert "project=PVT-1" in fake.adds()[0]
+    assert "content=ISSUE-1" in fake.adds()[0]
+    assert fake.project_cli_calls() == []
 
 
 def test_main_reuses_an_already_filed_item(monkeypatch, tmp_path):
@@ -356,8 +418,8 @@ def test_main_reuses_an_already_filed_item(monkeypatch, tmp_path):
                        _issues_event(body=_body(VALID)))
     assert status == 0
     assert len(fake.writes()) == 5
-    assert not any(call[:2] == ("project", "item-add")
-                   for call in fake.calls)
+    assert fake.adds() == []
+    assert fake.project_cli_calls() == []
 
 
 def test_main_malformed_block_gets_no_fields_and_a_comment(monkeypatch,
@@ -367,7 +429,8 @@ def test_main_malformed_block_gets_no_fields_and_a_comment(monkeypatch,
         monkeypatch, tmp_path, fake, "issues",
         _issues_event(body=_body('{"Risk": "standard",')))
     assert status == 0
-    assert any(call[:2] == ("project", "item-add") for call in fake.calls)
+    assert len(fake.adds()) == 1
+    assert fake.project_cli_calls() == []
     assert fake.writes() == []
     assert len(fake.comments()) == 1
     posted = fake.comments()[0]
@@ -403,7 +466,8 @@ def test_main_supports_workflow_dispatch(monkeypatch, tmp_path):
     def dispatch_gh(*args):
         if args[:2] == ("api", "repos/{}/issues/9".format(REPO)):
             return json.dumps({"body": _body(VALID),
-                               "user": {"login": "nateprich"}})
+                               "user": {"login": "nateprich"},
+                               "node_id": "ISSUE-1"})
         return _GhFake.__call__(fake, *args)
 
     fake = _GhFake()
@@ -424,7 +488,8 @@ def test_main_supports_repository_dispatch(monkeypatch, tmp_path):
     def dispatch_gh(*args):
         if args[:2] == ("api", "repos/{}/issues/11".format(REPO)):
             return json.dumps({"body": _body(VALID),
-                               "user": {"login": "nateprich"}})
+                               "user": {"login": "nateprich"},
+                               "node_id": "ISSUE-1"})
         return _GhFake.__call__(fake, *args)
 
     monkeypatch.setenv("GH_TOKEN", "filing-token")

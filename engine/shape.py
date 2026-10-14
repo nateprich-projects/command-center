@@ -1653,6 +1653,90 @@ def read_blocked_by_refs(item) -> List[str]:
     return refs
 
 
+#: Marker naming a refused cycle-closing dependency in shape apply output.
+SKIPPED_CYCLE_DEPENDENCY_OUTCOME = "skipped cycle-closing depends_on"
+
+
+def _reverse_wait_source(target, item_ref: str) -> Optional[str]:
+    """Name how ``target`` already waits on ``item_ref``, if it does.
+
+    Native blocked-by edges and comment block references are checked
+    separately so a comment-based wait cannot slip past a native-only
+    read (#2593): #2409 waited on #2482 by comment while the shape of
+    #2482 proposed the reverse native edge.
+    """
+    native = set(getattr(target, "blocked_by_refs", None) or [])
+    for value in list(getattr(target, "open_blockers", None) or []):
+        ref = funnel._dependency_ref(target, value)
+        if ref is not None:
+            native.add(ref)
+    if item_ref in native:
+        return "native blocked_by"
+    for value in list(getattr(target, "block_references", None) or []):
+        if funnel._dependency_ref(target, value) == item_ref:
+            return "comment block reference"
+    return None
+
+
+def _would_close_block_cycle(item, dep: str, target) -> bool:
+    """Whether writing ``item`` blocked-by ``dep`` closes a block cycle.
+
+    Runs funnel's own cycle detector over the two-node subgraph with the
+    proposed edge added: any reported cycle must traverse the new edge
+    and the target's existing wait on the item, which is exactly the
+    observed #2482/#2409 shape. Kept to the fresh pair, so a wider
+    transitive validation stays a separate idea.
+    """
+    probe = copy.copy(item)
+    probe.open_blockers = (
+        list(getattr(item, "open_blockers", None) or []) + [dep]
+    )
+    rows = [probe, target]
+    by_ref = {probe.ref: probe, target.ref: target}
+    reasons = funnel._block_cycle_reasons(rows, by_ref)
+    return any(reasons.get(ref) for ref in (probe.ref, target.ref))
+
+
+def _skipped_dependency_line(item_ref: str, dep: str, source: str) -> str:
+    """One apply-output line naming a refused depends_on edge."""
+    return (
+        "{} {} for {}: {} already waits on {} via {}".format(
+            SKIPPED_CYCLE_DEPENDENCY_OUTCOME, dep, item_ref,
+            dep, item_ref, source,
+        )
+    )
+
+
+def _drop_cycle_closing_dependencies(item, pending: Sequence[str]):
+    """Split pending depends_on refs into kept edges and refused ones.
+
+    Each target is re-read fresh from the Project immediately before
+    the write: the packet row may predate the reverse wait (#2593
+    shaped #2482 minutes after #2409's comment wait appeared). A
+    target that cannot be re-read keeps its edge; the write itself
+    still fails closed on a ref GitHub cannot resolve.
+    """
+    kept = []
+    skipped = []
+    for dep in pending or []:
+        fresh = funnel.load_project_items_by_refs([dep])
+        target = None
+        if (isinstance(fresh, list) and len(fresh) == 1
+                and getattr(fresh[0], "ref", None) == dep):
+            target = fresh[0]
+        if target is None:
+            kept.append(dep)
+            continue
+        source = _reverse_wait_source(target, item.ref)
+        if source is None and _would_close_block_cycle(item, dep, target):
+            source = "block cycle"
+        if source is None:
+            kept.append(dep)
+        else:
+            skipped.append((dep, source))
+    return kept, skipped
+
+
 def fetch_repo_text(repo: str, path: str) -> Tuple[str, bool]:
     """One text file at the repo's default branch, or ("", True).
 
@@ -1994,7 +2078,11 @@ def apply_shape(items: list, now: datetime, ref: str,
     Sequencing dependencies ride the body write as native blocked-by
     edges (#1053): one ``gh issue edit`` carries the rendered plan and
     the edges together, so a ref GitHub cannot resolve fails the whole
-    write instead of recording a plan whose dependency is missing.
+    write instead of recording a plan whose dependency is missing. A
+    dependency whose target already waits on this item is skipped
+    instead of closing a block cycle (#2593): the refusal is printed
+    and posted as an issue comment, and the rest of the apply
+    continues.
     """
     if voice not in ("agent", "nate-relayed"):
         raise ShapeError("shape provenance voice must be agent or nate-relayed")
@@ -2048,11 +2136,6 @@ def apply_shape(items: list, now: datetime, ref: str,
     pending_dependencies = [
         ref for ref in depends_on if ref not in current_blocker_set
     ]
-    command = ["gh", "issue", "edit", str(item.number), "--repo",
-               item.repo, "--body", body]
-    blocked_by = blocked_by_values(pending_dependencies, item.repo)
-    if blocked_by:
-        command += ["--add-blocked-by", ",".join(blocked_by)]
 
     # The packet and decision may be minutes old. Re-read immediately before
     # the first issue mutation; a closed issue, a moved stage or a newly added
@@ -2070,20 +2153,33 @@ def apply_shape(items: list, now: datetime, ref: str,
               ))
         return 0
 
+    # Drop cycle-closing edges before they reach --add-blocked-by (#2593).
+    # Each target is re-read fresh here rather than trusted from the
+    # packet, so a reverse wait that appeared after the packet still
+    # refuses the edge.
+    kept_dependencies, skipped_dependencies = (
+        _drop_cycle_closing_dependencies(item, pending_dependencies)
+    )
+    command = ["gh", "issue", "edit", str(item.number), "--repo",
+               item.repo, "--body", body]
+    blocked_by = blocked_by_values(kept_dependencies, item.repo)
+    if blocked_by:
+        command += ["--add-blocked-by", ",".join(blocked_by)]
+
     out = funnel._run_gh(command, capture_output=True, text=True)
     if out.returncode != 0:
         write_error = out.stderr.strip() or "gh issue edit failed"
-        if pending_dependencies:
+        if kept_dependencies:
             try:
                 confirmed_blockers = read_blocked_by_refs(item)
             except funnel.GitHubError as exc:
                 raise funnel.GitHubError(
                     "{}; could not confirm blocked-by edge(s) {} for {}: {}".format(
-                        write_error, ", ".join(pending_dependencies), item.ref, exc
+                        write_error, ", ".join(kept_dependencies), item.ref, exc
                     )
                 ) from exc
             missing_dependencies = [
-                ref for ref in pending_dependencies
+                ref for ref in kept_dependencies
                 if ref not in set(confirmed_blockers)
             ]
             if missing_dependencies:
@@ -2099,13 +2195,28 @@ def apply_shape(items: list, now: datetime, ref: str,
             item.blocked_by_refs = confirmed_blockers
         else:
             raise funnel.GitHubError(write_error)
-    elif pending_dependencies:
+    elif kept_dependencies:
         item.blocked_by_refs = list(dict.fromkeys(
-            list(current_blockers or []) + pending_dependencies
+            list(current_blockers or []) + kept_dependencies
         ))
     # The session keeps this object after the issue-body write. Keep its
     # body aligned with GitHub before a same-session reader evaluates it.
     item.body = body
+
+    for dep, source in skipped_dependencies:
+        line = _skipped_dependency_line(item.ref, dep, source)
+        print(line)
+        notice = funnel._run_gh(
+            ["gh", "issue", "comment", str(item.number),
+             "--repo", item.repo, "--body", line],
+            capture_output=True, text=True,
+        )
+        if notice.returncode != 0:
+            raise funnel.GitHubError(
+                notice.stderr.strip()
+                or "could not record the skipped depends_on notice for "
+                "{}".format(item.ref)
+            )
 
     if hotspot_routes:
         post_hotspot_remainders(

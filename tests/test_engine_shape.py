@@ -3153,6 +3153,7 @@ def test_apply_records_sequencing_edges_with_the_body_write(
     # writes the plan — one mutation, never a plan without its edge.
     item = idea(42)
     calls = stub_gh(monkeypatch, item)
+    stub_dep_targets(monkeypatch)
     assert shape.apply_shape(
         [item], NOW, item.ref,
         answer(depends_on=["owner/repo#165"]),
@@ -3186,6 +3187,7 @@ def test_apply_skips_a_dependency_already_on_the_loaded_item(monkeypatch):
 def test_apply_accepts_a_raced_edge_only_after_re_read(monkeypatch):
     item = idea(42)
     calls = stub_gh(monkeypatch, item)
+    stub_dep_targets(monkeypatch)
     original_graphql = funnel.gh_graphql
     rereads = []
 
@@ -3223,6 +3225,7 @@ def test_apply_keeps_a_refused_edge_failure_when_re_read_shows_no_edge(
         monkeypatch):
     item = idea(42)
     calls = stub_gh(monkeypatch, item)
+    stub_dep_targets(monkeypatch)
     original_graphql = funnel.gh_graphql
     original_run = funnel.subprocess.run
 
@@ -3252,6 +3255,7 @@ def test_apply_keeps_a_refused_edge_failure_when_re_read_shows_no_edge(
 def test_apply_fails_closed_when_edge_re_read_is_incomplete(monkeypatch):
     item = idea(42)
     stub_gh(monkeypatch, item)
+    stub_dep_targets(monkeypatch)
     original_graphql = funnel.gh_graphql
     original_run = funnel.subprocess.run
 
@@ -3293,6 +3297,7 @@ def test_apply_fails_before_writing_when_initial_edges_are_unavailable(
 def test_apply_renders_cross_repo_dependencies_as_urls(monkeypatch):
     item = idea(42)
     calls = stub_gh(monkeypatch, item)
+    stub_dep_targets(monkeypatch)
     assert shape.apply_shape(
         [item], NOW, item.ref,
         answer(depends_on=["other/repo#7"]),
@@ -3940,3 +3945,110 @@ def test_decide_on_an_open_issue_is_unchanged():
     assert shape.decide(
         validated, klass="Broken", origin_voice="agent", state="OPEN"
     ) == shape.decide(validated, klass="Broken", origin_voice="agent")
+
+
+# -- cycle-closing depends_on guard (#2593) ---------------------------------
+
+
+def stub_dep_targets(monkeypatch, *targets):
+    """Serve fresh Project rows for the guard's target re-reads."""
+    by_ref = {target.ref: target for target in targets}
+
+    def load(refs, **kwargs):
+        rows = []
+        for ref in refs:
+            if ref not in by_ref:
+                return None
+            rows.append(by_ref[ref])
+        return rows
+
+    monkeypatch.setattr(funnel, "load_project_items_by_refs", load)
+
+
+def test_apply_skips_a_comment_based_cycle_closing_edge(monkeypatch, capsys):
+    """Reproduction (#2593, observed #2482/#2409 order): the reverse wait
+    exists as a comment block reference, then the shape proposes the
+    cycle-closing depends_on. No native blocked_by is written for it,
+    the output names the refused ref, and the same line is posted as a
+    comment while the innocent edge still lands."""
+    item = idea(42)
+    cycled = idea(43, status="Shaped", block_references=["#42"])
+    other = idea(44, status="Shaped")
+    calls = stub_gh(monkeypatch, item)
+    stub_dep_targets(monkeypatch, cycled, other)
+
+    assert shape.apply_shape(
+        [item], NOW, item.ref,
+        answer(depends_on=[cycled.ref, other.ref]),
+        run="shape-run", agent="muse") == 0
+
+    edits = gh_calls(calls, "gh", "issue", "edit")
+    assert edits
+    written = edits[0][1]
+    assert "--add-blocked-by" in written
+    added = written[written.index("--add-blocked-by") + 1].split(",")
+    assert added == ["44"]
+    assert item.blocked_by_refs == [other.ref]
+
+    output = capsys.readouterr().out
+    line = (
+        "skipped cycle-closing depends_on {} for {}: {} already waits "
+        "on {} via comment block reference".format(
+            cycled.ref, item.ref, cycled.ref, item.ref)
+    )
+    assert line in output
+    comments = [call[1][-1]
+                for call in gh_calls(calls, "gh", "issue", "comment")]
+    assert line in comments
+
+
+def test_apply_trusts_the_fresh_target_read_over_the_packet_row(
+        monkeypatch, capsys):
+    """The guard must not read block state from before the reverse edge
+    is visible: the packet row shows no wait, but the fresh re-read
+    carries a native blocked_by back to the item being shaped."""
+    item = idea(42)
+    stale = idea(43, status="Shaped")
+    fresh = idea(43, status="Shaped", blocked_by_refs=[item.ref])
+    calls = stub_gh(monkeypatch, item)
+    stub_dep_targets(monkeypatch, fresh)
+
+    assert shape.apply_shape(
+        [stale, item], NOW, item.ref,
+        answer(depends_on=[stale.ref]),
+        run="shape-run", agent="muse") == 0
+
+    edits = gh_calls(calls, "gh", "issue", "edit")
+    assert edits
+    assert "--add-blocked-by" not in edits[0][1]
+    assert item.blocked_by_refs == []
+
+    output = capsys.readouterr().out
+    line = (
+        "skipped cycle-closing depends_on {} for {}: {} already waits "
+        "on {} via native blocked_by".format(
+            stale.ref, item.ref, stale.ref, item.ref)
+    )
+    assert line in output
+    comments = [call[1][-1]
+                for call in gh_calls(calls, "gh", "issue", "comment")]
+    assert line in comments
+
+
+def test_apply_keeps_an_edge_the_project_cannot_confirm(monkeypatch):
+    """An unverifiable target keeps its edge: the guard refuses only
+    detected reverse waits, and the write still fails closed on a ref
+    GitHub cannot resolve."""
+    item = idea(42)
+    calls = stub_gh(monkeypatch, item)
+    stub_dep_targets(monkeypatch)
+
+    assert shape.apply_shape(
+        [item], NOW, item.ref,
+        answer(depends_on=["owner/repo#44"]),
+        run="shape-run", agent="muse") == 0
+
+    edits = gh_calls(calls, "gh", "issue", "edit")
+    assert edits
+    written = edits[0][1]
+    assert written[written.index("--add-blocked-by") + 1] == "44"

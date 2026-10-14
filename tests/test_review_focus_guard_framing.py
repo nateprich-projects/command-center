@@ -8,6 +8,21 @@ copied line at breakdown time as ``Guard (must not happen):`` plus the
 bullet verbatim, with no lister change and no sweep of already-copied
 tickets (including the #2497 guards rewritten by funnel-watch push dfb98af).
 
+Premise evidence (ticket gate — both hold, so the fix proceeds):
+- engine/breakdown.py defines REVIEW_FOCUS_ACCEPT_RULE as
+  "For each `## Review focus` bullet, put one `Accept` test in the ticket
+  that owns that behavior. Prefix the copied line as `Guard (must not
+  happen):` plus the bullet's text verbatim, exactly once."
+- routines/muse-breakdown.md:29 carries the same copy rule:
+  "For each `## Review focus` bullet, put one `Accept` test in its owning
+  ticket; prefix it `Guard (must not happen):` plus the text verbatim, once."
+- tests/test_decline_prerequisite_lift.py:100 defines
+  test_closed_but_unmerged_pr_still_withheld, asserting withhold on a
+  closed-but-unmerged PR via
+  "assert funnel._decline_route_withholds_startability(item, by_ref) is True"
+  with the fake API returning
+  {"state": "closed", "merged": False, "merged_at": None}.
+
 Fixture scope is the observed #2485 to #2497 pair only: no extra synthetic
 variants. Every GitHub read here goes through fakes; nothing reaches GitHub.
 """

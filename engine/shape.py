@@ -63,9 +63,11 @@ def validation_exit(attempt: Optional[int]) -> int:
     return RETRY_EXIT if attempt < FINAL_ATTEMPT else 1
 
 
-def _read_fresh_shape_facts(item) -> Tuple[str, Optional[str], int]:
-    """Read the target's current issue state, Project Status and complete
-    child count: the inputs of ``funnel.unshapeable_reason`` (#2139)."""
+def _read_fresh_shape_facts(
+        item) -> Tuple[str, Optional[str], int, int]:
+    """Read the target's current issue state, Project Status, complete child
+    count and closed-child count: the inputs of
+    ``funnel.unshapeable_reason`` (#2139, #2524)."""
     fresh_items = funnel.load_project_items_by_refs([item.ref])
     if (not isinstance(fresh_items, list) or len(fresh_items) != 1
             or getattr(fresh_items[0], "ref", None) != item.ref):
@@ -96,7 +98,39 @@ def _read_fresh_shape_facts(item) -> Tuple[str, Optional[str], int]:
             "could not read current sub-issue count for {} before shape "
             "apply".format(item.ref)
         )
-    return state, status, children_total
+    children_done = getattr(fresh, "children_done", None)
+    if (not isinstance(children_done, int)
+            or isinstance(children_done, bool) or children_done < 0):
+        raise funnel.GitHubError(
+            "could not read current closed sub-issue count for {} before "
+            "shape apply".format(item.ref)
+        )
+    return state, status, children_total, children_done
+
+
+def _fresh_shape_check(item) -> Tuple[Optional[str], str, Optional[str], int]:
+    """Re-read the target and refuse a stale apply through the shared predicate.
+
+    Returns the refusal from ``funnel.unshapeable_reason`` (#2139, with the
+    #2524 sent-back exemption) alongside the fresh facts the stale-apply log
+    line reports. The send-back thread is read only for an Ideas row whose
+    children are all closed; anything else keeps its refusal without one.
+    """
+    fresh_state, fresh_status, fresh_children, fresh_done = (
+        _read_fresh_shape_facts(item)
+    )
+    sent_back = (
+        fresh_state == "OPEN"
+        and fresh_status == "Ideas"
+        and funnel.no_open_sub_issues(fresh_children, fresh_done)
+        and funnel.sent_back_to_ideas(item)
+    )
+    return (
+        funnel.unshapeable_reason(
+            fresh_state, fresh_status, fresh_children, fresh_done,
+            sent_back),
+        fresh_state, fresh_status, fresh_children,
+    )
 
 
 #: The answer keys shape-apply accepts — exactly these, no extras. From
@@ -1977,9 +2011,9 @@ def apply_shape(items: list, now: datetime, ref: str,
     if answer["hotspot_targets"]:
         # Routing may capture a missing Implement plan, so confirm the source
         # idea is still shapeable before the first route write.
-        fresh_state, fresh_status, fresh_children = _read_fresh_shape_facts(item)
-        stale_reason = funnel.unshapeable_reason(
-            fresh_state, fresh_status, fresh_children)
+        stale_reason, fresh_state, fresh_status, fresh_children = (
+            _fresh_shape_check(item)
+        )
         if stale_reason is not None:
             status_label = fresh_status if fresh_status is not None else "missing"
             print("{} ref={} reason={} fresh Status={} children={} "
@@ -2024,9 +2058,9 @@ def apply_shape(items: list, now: datetime, ref: str,
     # the first issue mutation; a closed issue, a moved stage or a newly added
     # child makes this answer stale, by the picker's own predicate (#2139).
     # Body-only edits deliberately do not block the apply.
-    fresh_state, fresh_status, fresh_children = _read_fresh_shape_facts(item)
-    stale_reason = funnel.unshapeable_reason(
-        fresh_state, fresh_status, fresh_children)
+    stale_reason, fresh_state, fresh_status, fresh_children = (
+        _fresh_shape_check(item)
+    )
     if stale_reason is not None:
         status_label = fresh_status if fresh_status is not None else "missing"
         print("{} ref={} reason={} fresh Status={} children={} "

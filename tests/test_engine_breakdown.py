@@ -1440,6 +1440,69 @@ def test_ambiguous_titles_do_not_guess_and_explicit_refs_stay_explicit(
         "https://github.com/owner/repo/issues/202"]
 
 
+def test_closed_evidence_siblings_never_match_planned_tickets():
+    """#2524: a closed sibling is kept evidence, not a work ticket."""
+    closed = {"ref": "owner/repo#201", "repo": REPO, "number": 201,
+              "title": "migration slice", "state": "CLOSED"}
+    also_closed = dict(closed, number=202, ref="owner/repo#202",
+                        state="closed")
+    transferred = dict(closed, number=204, ref="owner/repo#204",
+                       state="CLOSED", stateReason="TRANSFERRED")
+    duplicate = dict(closed, number=205, ref="owner/repo#205",
+                     state="CLOSED", stateReason="DUPLICATE")
+    completed = dict(closed, number=206, ref="owner/repo#206",
+                     state="CLOSED", stateReason="COMPLETED")
+    not_planned = dict(closed, number=207, ref="owner/repo#207",
+                       state="CLOSED", stateReason="NOT_PLANNED")
+    missing_state = {"ref": "owner/repo#203", "repo": REPO, "number": 203,
+                     "title": "unknown slice"}
+    assert breakdown.match_existing_siblings(
+        [{"title": "migration slice"}], [closed]) == {}
+    assert breakdown.match_existing_siblings(
+        [{"title": "migration slice"}], [also_closed]) == {}
+    # Transferred-closed and duplicate-closed count as closed (#2524):
+    # GitHub still reports them as CLOSED state.
+    for variant in (transferred, duplicate, completed, not_planned):
+        assert breakdown.match_existing_siblings(
+            [{"title": "migration slice"}], [variant]) == {}
+    # An unreadable state keeps the old resume behaviour rather than
+    # duplicating a ticket on a missing field.
+    assert breakdown.match_existing_siblings(
+        [{"title": "unknown slice"}], [missing_state]) == {
+            0: missing_state}
+
+
+def test_breakdown_creates_beside_closed_evidence_without_touching_it(
+        monkeypatch):
+    """#2524: a planned ticket reusing a closed sibling's title creates a new
+    sub-issue beside it; the closed sibling gets no Project writes and the
+    coverage comment never names it."""
+    siblings = [
+        {"ref": "owner/repo#201", "repo": REPO, "number": 201,
+         "title": "migration slice", "state": "CLOSED"},
+        {"ref": "owner/repo#202", "repo": REPO, "number": 202,
+         "title": "open slice", "state": "OPEN"},
+    ]
+    calls = stub_apply(monkeypatch, siblings=siblings)
+    errors, normalized, _ = validate({"tickets": [
+        raw_ticket(title="migration slice"),
+        raw_ticket(title="open slice"),
+    ]})
+    assert errors == []
+    assert normalized is not None
+
+    result = breakdown.apply(REPO, 1, normalized)
+
+    assert [row["ticket"]["title"] for row in calls["created"]] == [
+        "migration slice"]
+    assert [row["ref"] for row in result["created"]] == [
+        "owner/repo#101", "owner/repo#202"]
+    assert [row[2] for row in calls["needs"]] == [
+        "owner/repo#101", "owner/repo#202"]
+    assert all(row[3] != "owner/repo#201" for row in calls["fields"])
+    assert "owner/repo#201" not in calls["comments"][0][2]
+
+
 def test_a_closed_project_takes_no_breakdown(monkeypatch):
     calls = stub_apply(monkeypatch, plan=plan(state="CLOSED"))
     errors, normalized, _ = validate({"tickets": [raw_ticket()]})

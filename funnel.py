@@ -1044,6 +1044,47 @@ DRIFT_SIGNAL_NAMES = (
 # --------------------------------------------------------------------------
 
 
+def sub_issue_is_closed(state: object, state_reason: object = None) -> bool:
+    """Whether one sub-issue counts as closed for #2524 open-only counts.
+
+    GitHub reports every closure as ``CLOSED`` state, whatever the reason:
+    completed, not-planned, transferred-closed and duplicate-closed all
+    count as closed. Only ``OPEN`` is open. A missing or unreadable state
+    reads as not closed, so callers keep their fail-closed behaviour
+    (breakdown resumes the sibling; shape keeps its with-children refusal).
+    """
+    if isinstance(state, str):
+        if state.upper() == "CLOSED":
+            return True
+        if state.upper() == "OPEN":
+            return False
+    if isinstance(state_reason, str) and state_reason.upper() in (
+        "COMPLETED", "NOT_PLANNED", "DUPLICATE", "TRANSFERRED",
+    ):
+        return True
+    return False
+
+
+def no_open_sub_issues(children_total: object,
+                       children_done: object) -> bool:
+    """Whether a native sub-issue summary shows no open sub-issue (#2524).
+
+    The count-level counterpart of ``sub_issue_is_closed``: GitHub's native
+    ``subIssuesSummary.completed`` increments for every ``CLOSED`` sub-issue
+    whatever its reason (completed, not-planned, transferred-closed,
+    duplicate-closed); only ``OPEN`` keeps it below the total. Non-integer
+    or missing inputs read as having an open sub-issue, so callers keep
+    their fail-closed behaviour.
+    """
+    if (isinstance(children_total, bool)
+            or isinstance(children_done, bool)):
+        return False
+    if (not isinstance(children_total, int)
+            or not isinstance(children_done, int)):
+        return False
+    return children_total > 0 and children_done == children_total
+
+
 @dataclass
 class Item:
     """One issue in the funnel, with its Project fields resolved."""
@@ -1130,7 +1171,14 @@ class Item:
 
     @property
     def children_all_closed(self) -> bool:
-        return self.children_total > 0 and self.children_done == self.children_total
+        """No open sub-issue: every child closed (#2524).
+
+        ``children_done`` is GitHub's native ``subIssuesSummary.completed``
+        count, which increments for every ``CLOSED`` sub-issue whatever its
+        reason (completed, not-planned, transferred-closed,
+        duplicate-closed); only ``OPEN`` keeps it below the total.
+        """
+        return no_open_sub_issues(self.children_total, self.children_done)
 
     def waited(self, now: datetime) -> Optional[timedelta]:
         """How long this item has waited on its current gate or work queue."""
@@ -2420,7 +2468,7 @@ def ideas(items: Iterable[Item]) -> List[Item]:
 
 
 def awaiting_breakdown(items: Iterable[Item]) -> List[Item]:
-    """Approved plans with no tickets yet — Claude owes these a breakdown.
+    """Approved plans with no open tickets yet — Claude owes these a breakdown.
 
     Deliberately *after* reviewing in the Claude routine's order. Bottom-up says
     clear the lowest-funnel work first, and a review is Building-stage while a
@@ -2428,6 +2476,10 @@ def awaiting_breakdown(items: Iterable[Item]) -> List[Item]:
     creates it. Starvation is not a risk because PRs awaiting review are a finite
     class, bounded by what Codex can produce under the lock and the budget — and
     only finite classes may preempt.
+
+    Only open sub-issues count (#2524): a Ready project whose children are all
+    closed — kept send-back evidence beside which breakdown appends new work —
+    still needs its breakdown, while a project with any open ticket does not.
     """
     return sorted(
         (
@@ -2435,7 +2487,7 @@ def awaiting_breakdown(items: Iterable[Item]) -> List[Item]:
             for i in items
             if i.state == "OPEN"
             and i.status == "Ready"
-            and not i.children_total
+            and i.children_total - i.children_done <= 0
             and not i.is_blocked
         ),
         key=lambda i: (i.status_since or datetime.max.replace(tzinfo=timezone.utc),
@@ -3714,12 +3766,23 @@ def _startable_without_repo_readiness(
     awaiting_review: Set[str],
     agent: str = "codex",
 ) -> bool:
-    """Apply the queue exclusions that do not require a repository read."""
+    """Apply the queue exclusions that do not require a repository read.
+
+    The work queue counts open tickets only (#2524): a kept closed
+    evidence child is ``CLOSED`` whatever its reason (completed,
+    not-planned, transferred-closed, duplicate-closed) and never enters
+    the queue beside its open siblings.
+    """
     needs = item.needs
     machine_local = needs == "claude-code-environment"
     human = needs == "human"
+    # A kept closed evidence child never enters the queue beside its open
+    # siblings: transferred-closed and duplicate-closed report ``CLOSED``
+    # state like every other closure, so the per-issue check names them
+    # explicitly alongside the open-state gate.
     if (
         item.state != "OPEN"
+        or sub_issue_is_closed(item.state, item.state_reason)
         or item.is_blocked
         or item.open_blockers
         or item.children_total
@@ -15639,8 +15702,7 @@ def _could_carry_closed_itself_marker(
     completed = item.children_done if children_done is None else children_done
     return (
         _can_close_itself(item)
-        and item.children_total > 0
-        and completed == item.children_total
+        and no_open_sub_issues(item.children_total, completed)
     )
 
 
@@ -21848,15 +21910,66 @@ def review_queue(
     return found
 
 
+def has_send_back_marker(comments: object) -> bool:
+    """Whether an issue thread carries the #2460 send-back record (#2524).
+
+    The send-back command posts ``SEND_BACK_COMMENT_PREFIX`` with a Nate
+    provenance block on the parent issue itself; that comment is the only
+    send-back record this predicate trusts. A thread that is not a comment
+    list, a marker from an untrusted author, and missing or unreadable
+    provenance all read as absent, so a forged marker can never excuse kept
+    children (#1788). Reading absent keeps the with-children refusal
+    standing.
+    """
+    for comment in trusted_comments(comments):
+        body = comment.get("body")
+        if (not isinstance(body, str)
+                or not body.startswith(SEND_BACK_COMMENT_PREFIX)):
+            continue
+        provenance = parse_provenance(comment)
+        if (provenance is None
+                or provenance.get("voice") not in ("nate-relayed",
+                                                   "nate-direct")):
+            continue
+        return True
+    return False
+
+
+def sent_back_to_ideas(item: Item,
+                       comments: Optional[Sequence[dict]] = None) -> bool:
+    """Whether GitHub shows the #2460 send-back record on this parent (#2524).
+
+    Thin adapter over the parent's own issue comments: a caller-held thread
+    wins when one is supplied, otherwise the thread is read from GitHub. A
+    missing or unreadable thread reads as absent, so the with-children
+    refusal stands. No cache, no state file, no journal: GitHub is the
+    state.
+    """
+    if comments is None:
+        try:
+            comments = _issue_comments(item)
+        except Exception:
+            return False
+    return has_send_back_marker(comments)
+
+
 def unshapeable_reason(state: Optional[str], status: Optional[str],
-                       children_total: int) -> Optional[str]:
+                       children_total: int, children_done: int = 0,
+                       sent_back: bool = False) -> Optional[str]:
     """Why a row cannot be shaped now, or ``None`` when it can (#2139).
 
     The one shapeable-now predicate: ``shapeable_idea`` filters with it, and
     ``shape.apply_shape`` refuses a stale apply with it on its fresh re-read,
     so the picker offers a row exactly when apply would proceed on it. A
-    closed issue is never shaped, nor is one that has left Ideas or already
-    has children. The needs-shaping label, tier and headroom are not here:
+    closed issue is never shaped, nor is one that has left Ideas. A row with
+    children stays refused, except for a sent-back Ideas row whose
+    sub-issues are all closed (#2524): the #2460 send-back record on the
+    parent excuses the kept-closed evidence children. All-closed means no
+    sub-issue with GitHub state ``OPEN``; completed, not-planned,
+    transferred-closed and duplicate-closed all count as closed via the
+    native ``children_done``/``children_total`` summary. A row with any open
+    child, or without that record, stays refused; missing inputs fail closed
+    to the refusal. The needs-shaping label, tier and headroom are not here:
     they are the picker's alone, because ``shape-apply --voice nate-relayed``
     shapes unlabelled ideas in session.
     """
@@ -21865,6 +21978,8 @@ def unshapeable_reason(state: Optional[str], status: Optional[str],
     if status != "Ideas":
         return "status-changed"
     if children_total > 0:
+        if sent_back and no_open_sub_issues(children_total, children_done):
+            return None
         return "with-children"
     return None
 
@@ -21901,9 +22016,21 @@ def shapeable_idea(items: Sequence[Item], tier: Optional[str],
         )
         if tier is not None and needed != tier:
             continue
+        state = getattr(item, "state", None)
+        status = getattr(item, "status", None)
+        children_total = getattr(item, "children_total", 0)
+        children_done = getattr(item, "children_done", 0)
+        # The send-back thread is read only for the one row this exemption
+        # can release: open at Ideas with every sub-issue closed. Any other
+        # row keeps its refusal without spending a comment read.
+        sent_back = (
+            state == "OPEN"
+            and status == "Ideas"
+            and no_open_sub_issues(children_total, children_done)
+            and sent_back_to_ideas(item)
+        )
         reason = unshapeable_reason(
-            getattr(item, "state", None), getattr(item, "status", None),
-            getattr(item, "children_total", 0))
+            state, status, children_total, children_done, sent_back)
         if reason is not None:
             if skipped is not None:
                 skipped.append({
@@ -24453,6 +24580,11 @@ def _auto_closeable_project(item: Item, *, children_done: Optional[int] = None
                             ) -> bool:
     """Whether an item has earned the funnel's unattended close.
 
+    Completion counts open tickets only (#2524): close needs every ticket
+    closed (completed, not-planned, transferred-closed and
+    duplicate-closed all count as closed; only ``OPEN`` blocks), via the
+    native ``children_done``/``children_total`` summary.
+
     ``funnel merge`` sees the Project summary before GitHub closes the ticket,
     so it supplies the post-merge child count. Every other caller uses the
     count already loaded on the item.
@@ -24483,8 +24615,7 @@ def _finished_close_candidate(item: Item, *,
     return (
         item.state == "OPEN"
         and item.status == "Building"
-        and item.children_total > 0
-        and completed == item.children_total
+        and no_open_sub_issues(item.children_total, completed)
         and (
             klass in SELF_CLOSING_UPKEEP_CLASSES
             or klass in (

@@ -218,6 +218,7 @@ def fetch_siblings(repo: str, number: int) -> List[dict]:
             "number": child_number,
             "title": node.get("title"),
             "state": node.get("state"),
+            "stateReason": node.get("stateReason"),
         })
     siblings.sort(key=lambda entry: entry["number"])
     return siblings
@@ -874,12 +875,27 @@ def match_existing_siblings(tickets: Sequence[dict],
     Titles that occur more than once in either list are left unmatched rather
     than guessed by position. A dependency on one of those existing issues
     can still name its explicit ``owner/repo#n`` ref in the answer.
+
+    A closed sibling never matches (#2524): it is kept evidence, not a work
+    ticket, so a planned ticket reusing its title creates a new sub-issue
+    beside it instead of resuming the closed one. Completed, not-planned,
+    transferred-closed and duplicate-closed all count as closed (GitHub
+    reports each as ``CLOSED`` state, with the reason in ``stateReason``
+    where present). Only an affirmatively closed sub-issue skips; an
+    unreadable state keeps the old resume behaviour rather than
+    duplicating a ticket on a missing field.
     """
     planned_by_title: Dict[str, List[int]] = {}
     existing_by_title: Dict[str, List[dict]] = {}
     for index, ticket in enumerate(tickets):
         planned_by_title.setdefault(ticket["title"], []).append(index)
     for sibling in siblings:
+        if not isinstance(sibling, dict):
+            continue
+        if funnel.sub_issue_is_closed(
+            sibling.get("state"), sibling.get("stateReason")
+        ):
+            continue
         title = sibling.get("title")
         if isinstance(title, str):
             existing_by_title.setdefault(title, []).append(sibling)

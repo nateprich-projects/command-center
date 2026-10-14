@@ -2552,6 +2552,106 @@ def test_approved_plans_with_no_tickets_are_owed_a_breakdown():
     assert [i.number for i in funnel.awaiting_breakdown(rows)] == [1]
 
 
+def test_ready_with_only_closed_children_is_still_owed_a_breakdown():
+    """#2524: Ready counts open tickets only. A reshaped sent-back parent
+    whose children are all kept closed evidence still needs its breakdown,
+    while any open child means work already exists."""
+    sent_back = item(1, "Ready", "Broken", days=2,
+                     children_total=10, children_done=10)
+    with_open = item(2, "Ready", "Broken", days=3,
+                     children_total=10, children_done=9)
+    childless = item(3, "Ready", "Broken", days=1, children_total=0)
+    closed_parent = item(4, "Ready", "Broken", days=4, state="CLOSED",
+                         children_total=10, children_done=10)
+    assert [i.number for i in funnel.awaiting_breakdown(
+        [with_open, sent_back, childless, closed_parent])] == [1, 3]
+
+
+def test_closed_tickets_never_enter_the_work_queue():
+    """#2524: the queue counts open tickets only. A kept closed evidence
+    child is never offered as work beside its open siblings."""
+    rows = [project(1, "Building", "New", children=2, done=1),
+            ticket(2, 1), ticket(3, 1, state="CLOSED")]
+    assert [i.number for i in startable(rows)] == [2]
+
+
+def test_closed_tickets_of_every_reason_never_enter_the_work_queue():
+    """#2524: completed, not-planned, transferred-closed and
+    duplicate-closed all count as closed in the queue; only OPEN is work."""
+    rows = [project(1, "Building", "New", children=6, done=1),
+            ticket(2, 1)]
+    for number, reason in ((3, "COMPLETED"), (4, "NOT_PLANNED"),
+                           (5, "DUPLICATE"), (6, "TRANSFERRED")):
+        rows.append(ticket(number, 1, state="CLOSED", state_reason=reason))
+    assert [i.number for i in startable(rows)] == [2]
+
+
+def test_completion_counts_open_tickets_only():
+    """#2524: completion needs every ticket closed; any OPEN blocks, while
+    a parent whose children are all closed (any reason) is complete."""
+    open_parent = project(1, "Building", "Broken", children=10, done=9)
+    closed_parent = project(2, "Building", "Broken", children=10, done=10)
+    assert funnel._auto_closeable_project(open_parent) is False
+    assert funnel._auto_closeable_project(closed_parent) is True
+    assert closed_parent.children_all_closed is True
+    assert open_parent.children_all_closed is False
+
+
+def test_sub_issue_is_closed_counts_every_close_reason():
+    """#2524: only OPEN is open; every CLOSED reason counts as closed."""
+    assert funnel.sub_issue_is_closed("OPEN") is False
+    assert funnel.sub_issue_is_closed("open") is False
+    assert funnel.sub_issue_is_closed("CLOSED") is True
+    assert funnel.sub_issue_is_closed("closed") is True
+    assert funnel.sub_issue_is_closed("CLOSED", "TRANSFERRED") is True
+    assert funnel.sub_issue_is_closed("CLOSED", "DUPLICATE") is True
+    assert funnel.sub_issue_is_closed("CLOSED", "COMPLETED") is True
+    assert funnel.sub_issue_is_closed("CLOSED", "NOT_PLANNED") is True
+    assert funnel.sub_issue_is_closed(None) is False
+    assert funnel.sub_issue_is_closed(None, None) is False
+    assert funnel.sub_issue_is_closed("OPEN", "COMPLETED") is False
+
+
+def test_no_open_sub_issues_is_the_shared_count_level_check():
+    """#2524: the shape, Ready and completion paths share one predicate."""
+    assert funnel.no_open_sub_issues(10, 10) is True
+    assert funnel.no_open_sub_issues(10, 9) is False
+    assert funnel.no_open_sub_issues(2, 0) is False
+    assert funnel.no_open_sub_issues(0, 0) is False
+    assert funnel.no_open_sub_issues(None, 10) is False
+    assert funnel.no_open_sub_issues(10, None) is False
+    assert funnel.no_open_sub_issues(True, True) is False
+    parent = item(1, "Building", "Broken", children_total=10,
+                  children_done=10)
+    assert parent.children_all_closed is True
+    assert funnel.no_open_sub_issues(
+        parent.children_total, parent.children_done) is True
+
+
+def test_loader_maps_native_summary_to_child_counts():
+    """#2524: ``children_done`` is GitHub's native completed count."""
+    node = {
+        "status": {"name": "Ideas"},
+        "content": {
+            "number": 2078,
+            "title": "sent-back parent",
+            "url": "https://github.com/nateprich-projects/command-center/issues/2078",
+            "state": "OPEN",
+            "repository": {"nameWithOwner": "nateprich-projects/command-center"},
+            "labels": {"nodes": []},
+            "assignees": {"nodes": []},
+            "parent": None,
+            "subIssuesSummary": {"total": 10, "completed": 10},
+        },
+    }
+    parsed = funnel._from_node(node)
+    assert parsed.children_total == 10
+    assert parsed.children_done == 10
+    assert parsed.children_all_closed is True
+    assert funnel.no_open_sub_issues(
+        parsed.children_total, parsed.children_done) is True
+
+
 def test_a_blocked_plan_is_not_owed_a_breakdown():
     rows = [item(1, "Ready", "New", children_total=0, labels=["blocked"])]
     assert funnel.awaiting_breakdown(rows) == []

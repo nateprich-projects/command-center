@@ -18808,21 +18808,46 @@ def project_single_select(field_name: str) -> dict:
     return {"id": field["id"], "options": by_name}
 
 
+#: Project single-selects writable over REST without a schema read (#2423):
+#: field name to (field id, known option names). ``Origin``, ``Risk`` and
+#: ``Domain`` have no stored ids, so writes to them still resolve through
+#: ``project_single_select``; any other name fails closed.
+PROJECT_WRITE_FIELD_IDS: Dict[str, Tuple[str, Tuple[str, ...]]] = {
+    "Status": (STATUS_FIELD_ID, tuple(STAGES)),
+    "Class": (CLASS_FIELD_ID, tuple(list(LADDER) + list(CLASS_RENAMES))),
+    "Pinned": (PINNED_FIELD_ID, ("Pinned",)),
+    "Needs": (NEEDS_FIELD_ID, tuple(NEEDS_OPTIONS)),
+}
+
+
 def write_project_select(item_id: str, field_name: str, value: str,
                          ref: str) -> None:
-    """Write and confirm one canonical Project single-select value."""
-    field = project_single_select(field_name)
-    option = field["options"].get(value)
-    if option is None:
+    """Write and confirm one canonical Project single-select value.
+
+    Writes go over REST (#2423): the value is the option's display name and
+    the response must confirm the item id, so a half-applied write raises
+    instead of reporting success. An unknown value fails closed before any
+    request. A field with no stored id still resolves through
+    ``project_single_select`` and then writes over REST.
+    """
+    known = PROJECT_WRITE_FIELD_IDS.get(field_name)
+    if known is not None:
+        field_id, options = known
+        if value not in options:
+            raise GitHubError(
+                "Project field {} has no option {}".format(field_name, value))
+    else:
+        field = project_single_select(field_name)
+        if field["options"].get(value) is None:
+            raise GitHubError(
+                "Project field {} has no option {}".format(field_name, value))
+        field_id = field["id"]
+    try:
+        rest_update_project_item_field(item_id, field_id, value)
+    except GitHubError as exc:
         raise GitHubError(
-            "Project field {} has no option {}".format(field_name, value))
-    response = gh_graphql(
-        SET_FIELD, project=PROJECT_ID, item=item_id,
-        field=field["id"], option=option)
-    if not _status_write_confirmed(response, item_id):
-        raise GitHubError(
-            "GitHub did not confirm the {} update for {} to {}".format(
-                field_name, ref, value))
+            "GitHub did not confirm the {} update for {} to {}: {}".format(
+                field_name, ref, value, exc)) from exc
 
 CLEAR_FIELD = """
 mutation($project: ID!, $item: ID!, $field: ID!) {
@@ -18953,21 +18978,9 @@ def _write_status(item: Item, status: str, now: datetime) -> Optional[str]:
         return None
 
     try:
-        response = gh_graphql(
-            SET_FIELD,
-            project=PROJECT_ID,
-            item=item.item_id,
-            field=STATUS_FIELD_ID,
-            option=_option_id(STATUS_FIELD_ID, status),
-        )
+        rest_update_project_item_field(item.item_id, STATUS_FIELD_ID, status)
     except GitHubError as exc:
         return "{}".format(exc)
-
-    if not _status_write_confirmed(response, item.item_id):
-        return (
-            "GitHub did not confirm the Status update for {} to {}"
-            .format(item.ref, status)
-        )
 
     previous = item.status
     item.status = status
@@ -19123,15 +19136,11 @@ def cmd_park(items: List[Item], now: datetime, ref: str, reason: str,
 
     # Done and Parked must remain distinguishable. Set the Project status first,
     # then close with NOT_PLANNED, then leave the reason where it can be read
-    # without opening the Project.
+    # without opening the Project. The Status write goes over REST (#2423)
+    # and raises on any failure instead of reporting success.
     if item.status != "Parked":
-        gh_graphql(
-            SET_FIELD,
-            project=PROJECT_ID,
-            item=item.item_id,
-            field=STATUS_FIELD_ID,
-            option=_option_id(STATUS_FIELD_ID, "Parked"),
-        )
+        rest_update_project_item_field(
+            item.item_id, STATUS_FIELD_ID, "Parked")
 
     close = _run_gh(
         ["gh", "issue", "close", str(item.number), "--repo", item.repo,
@@ -27692,6 +27701,19 @@ REST_PROJECT_ITEMS_PATH = "/users/{}/projectsV2/{}/items".format(
     PROJECT_OWNER, PROJECT_NUMBER
 )
 
+#: The field set a brief/begin board load requests over REST (#2423): the
+#: routing single-selects with stored ids, plus the lock text field so the
+#: single-in-motion claim reads through. Origin, Risk and Domain have no
+#: stored ids; ``rest_item_to_item`` matches them by field name when the
+#: response carries them, and they read ``REST_UNKNOWN_VALUE`` otherwise.
+REST_BOARD_FIELD_IDS = (
+    STATUS_FIELD_ID,
+    CLASS_FIELD_ID,
+    NEEDS_FIELD_ID,
+    PINNED_FIELD_ID,
+    LOCK_FIELD_ID,
+)
+
 #: Per-process REST spend: one call counted per attempted ``gh api`` REST
 #: request. Not state of record and it never outlives the process, like
 #: ``_GRAPHQL_SPEND``. Kept separate from it so each pool's spend stays
@@ -27850,6 +27872,62 @@ def _rest_names(value: object, login_key: str = "name") -> List[str]:
     return names
 
 
+def _rest_text_value(fields: object, *refs: str) -> Optional[str]:
+    """Read one REST text field (such as the lock field) as a string.
+
+    Returns the text when exactly one matching entry carries a readable
+    string — a plain string value or a dict holding one under ``text``.
+    Zero matches, or two entries disagreeing, read as None: the lock
+    convention reads an unparseable value as unlocked rather than wedging
+    the queue, exactly as ``parse_time`` does for a garbled claim.
+    """
+    if not refs:
+        raise ValueError("_rest_text_value needs a field id or name")
+    entries = fields if isinstance(fields, list) else []
+    texts = []
+    for entry in entries:
+        if not _rest_field_matches(entry, refs):
+            continue
+        if not isinstance(entry, dict):
+            continue
+        value = entry.get("value")
+        if isinstance(value, dict):
+            for key in ("text", "raw", "title"):
+                text = value.get(key)
+                if isinstance(text, str) and text.strip():
+                    texts.append(text.strip())
+                    break
+        elif isinstance(value, str) and value.strip():
+            texts.append(value.strip())
+    if len(texts) != 1:
+        return None
+    return texts[0]
+
+
+def _rest_status_updated_at(fields: object) -> Optional[datetime]:
+    """Read the Status field's own write time from a REST entry, if carried.
+
+    The compact GraphQL views carry ``updatedAt`` on the Status value as the
+    interim gate age until a timeline read replaces it; a REST entry carrying
+    the same timestamp under ``updatedAt`` reads the same way. Entries
+    without one leave it unknown, as before.
+    """
+    entries = fields if isinstance(fields, list) else []
+    refs = REST_ROUTING_FIELDS["status"][0]
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        if not _rest_field_matches(entry, refs):
+            continue
+        for key in ("updatedAt", "updated_at"):
+            raw = entry.get(key)
+            if isinstance(raw, str) and raw.strip():
+                at = parse_time(raw)
+                if at is not None:
+                    return at
+    return None
+
+
 def rest_item_to_item(
     node: object,
     field_map: Optional[Mapping[str, Tuple[Tuple[str, ...], Tuple[str, ...]]]] = None,
@@ -27860,8 +27938,10 @@ def rest_item_to_item(
     in ``_from_node``. Routing fields that are absent or unknown read as
     ``REST_UNKNOWN_VALUE`` — never a default Status or Class — so such a
     row fails closed downstream instead of joining a queue it was not
-    routed to. The lock text and history fields stay unset: this is the
-    cheap list projection, like the compact begin view.
+    routed to. The lock text, blocker connection, child summary and Status
+    write time read through when the row carries them, as in ``_from_node``;
+    rows without them keep the compact-view defaults. Timeline history still
+    comes from the time-at-gate GraphQL read alone.
     """
     if not isinstance(node, dict):
         return None
@@ -27903,7 +27983,37 @@ def rest_item_to_item(
     state = content.get("state")
     if state not in ("OPEN", "CLOSED"):
         state = "OPEN" if content.get("open", True) else "CLOSED"
-    return Item(
+    summary = content.get("subIssuesSummary")
+    if not isinstance(summary, dict):
+        summary = content.get("sub_issues_summary")
+    children_total = 0
+    children_done = 0
+    if isinstance(summary, dict):
+        total = summary.get("total")
+        completed = summary.get("completed")
+        if (isinstance(total, int) and not isinstance(total, bool)
+                and total >= 0):
+            children_total = total
+        if (isinstance(completed, int) and not isinstance(completed, bool)
+                and completed >= 0):
+            children_done = completed
+    blocked_by_refs = _blocked_by_refs_from_connection(
+        content.get("blockedBy"))
+    if blocked_by_refs is None:
+        blocked_by_refs = _blocked_by_refs_from_connection(
+            content.get("blocked_by"))
+    open_blockers: List[str] = []
+    dead_blockers: List[str] = []
+    if state == "OPEN" and parent_ref is not None:
+        blockers = ((content.get("blockedBy") or {}).get("nodes")
+                    if isinstance(content.get("blockedBy"), dict) else None)
+        if blockers is None and isinstance(
+                content.get("blocked_by"), dict):
+            blockers = content["blocked_by"].get("nodes") or []
+        dependencies = classify_blockers(blockers or [], repo)
+        open_blockers = dependencies["open"]
+        dead_blockers = dependencies["dead"]
+    item = Item(
         repo=repo,
         number=number,
         title=content.get("title") if isinstance(
@@ -27926,10 +28036,20 @@ def rest_item_to_item(
         assignees=_rest_names(
             content.get("assignees"), login_key="login"),
         parent=parent_ref,
+        children_total=children_total,
+        children_done=children_done,
+        blocked_by_refs=blocked_by_refs,
+        open_blockers=open_blockers,
+        dead_blockers=dead_blockers,
         closed_at=parse_time(content.get("closedAt")),
         item_id=node.get("id") if isinstance(
             node.get("id"), str) else None,
+        in_motion_since=parse_time(
+            _rest_text_value(fields, LOCK_FIELD_ID, LOCK_FIELD)
+        ),
+        status_updated_at=_rest_status_updated_at(fields),
     )
+    return item
 
 
 def _rest_get_json(endpoint: str):
@@ -28035,11 +28155,11 @@ def load_rest_project_items(
 # Project writes over REST (#2417, #2422).
 #
 # Field updates and item adds through the REST item endpoints under
-# ``REST_PROJECT_ITEMS_PATH``, beside the GraphQL mutations (``SET_FIELD``,
-# ``write_project_select``, ``gh project item-add``). No caller uses these
-# yet: the ticket builds the write path first and switches lanes later.
-# Every transport or API failure raises ``GitHubError`` at once, so a write
-# that half-applies never reports success.
+# ``REST_PROJECT_ITEMS_PATH``. ``_write_status``, ``write_project_select``
+# and the park Status write use these (#2423); the remaining direct
+# ``SET_FIELD`` sites still use the GraphQL mutations. Every transport or
+# API failure raises ``GitHubError`` at once, so a write that half-applies
+# never reports success.
 # --------------------------------------------------------------------------
 
 

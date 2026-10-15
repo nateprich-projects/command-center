@@ -4052,3 +4052,27 @@ def test_apply_keeps_an_edge_the_project_cannot_confirm(monkeypatch):
     assert edits
     written = edits[0][1]
     assert written[written.index("--add-blocked-by") + 1] == "44"
+
+
+def test_block_cycle_detector_sees_cycles_only_with_closing_edge():
+    """Premise (2) evidence (#2593): funnel._block_cycle_reasons is a pure
+    diagnostic over the rows it is given. Pre-write rows carrying only the
+    one-directional reverse wait (#43 waits on #42 by comment) report no
+    cycle; the same rows with the proposed closing edge added report one.
+    That is why the guard probes with the edge added instead of querying
+    the unmodified packet rows."""
+    import copy
+
+    item = idea(42)
+    target = idea(43, status="Shaped", block_references=["#42"])
+    by_ref = {item.ref: item, target.ref: target}
+    assert funnel._block_cycle_reasons([item, target], by_ref) == {}
+
+    probe = copy.copy(item)
+    probe.open_blockers = [target.ref]
+    probe_rows = [probe, target]
+    probe_by_ref = {probe.ref: probe, target.ref: target}
+    reasons = funnel._block_cycle_reasons(probe_rows, probe_by_ref)
+    assert reasons.get(probe.ref)
+
+    assert shape._would_close_block_cycle(item, target.ref, target) is True

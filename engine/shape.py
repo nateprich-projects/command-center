@@ -1681,11 +1681,20 @@ def _reverse_wait_source(target, item_ref: str) -> Optional[str]:
 def _would_close_block_cycle(item, dep: str, target) -> bool:
     """Whether writing ``item`` blocked-by ``dep`` closes a block cycle.
 
-    Runs funnel's own cycle detector over the two-node subgraph with the
-    proposed edge added: any reported cycle must traverse the new edge
-    and the target's existing wait on the item, which is exactly the
-    observed #2482/#2409 shape. Kept to the fresh pair, so a wider
-    transitive validation stays a separate idea.
+    Premise (2) verification (#2593): funnel's ``_block_cycle_reasons``
+    (funnel.py ``_block_cycle_reasons``) is a pure diagnostic over the
+    rows it is given -- it builds edges from each row's ``open_blockers``
+    plus ``block_references`` and reports only cycles present in those
+    rows. Pre-write rows carrying just the one-directional reverse wait
+    therefore report no cycle; only rows containing both edges (post-write
+    state) report one -- pinned by
+    ``test_block_cycle_detector_sees_cycles_only_with_closing_edge``.
+    So the guard cannot query the unmodified packet rows and instead runs
+    the detector over the two-node subgraph with the proposed edge added:
+    any reported cycle must traverse the new edge and the target's
+    existing wait on the item, which is exactly the observed #2482/#2409
+    shape. Kept to the fresh pair, so a wider transitive validation stays
+    a separate idea.
     """
     probe = copy.copy(item)
     probe.open_blockers = (

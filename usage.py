@@ -376,7 +376,39 @@ MUSE_PACE_OWN_CARD_CAP_V2 = {
     "cap_dollars": 109.0,
     "ceiling_percent": 100.0,
 }
-MUSE_PACE_OVERRIDE = MUSE_PACE_OWN_CARD_CAP_V2
+
+#: Nate's dated panel-anchored brake for the Muse window resetting on
+#: Sunday 2026-10-18 at 17:00 PDT (#2597, parent #2592). The gate read
+#: 6.1% ok from local dollars while the provider panel read 60% weekly
+#: at 2026-10-14 ~15:25 PDT, and the 15:45 PDT correction (4119 uncounted
+#: reminder sessions, #2381) falsifies any cap paired from local spend —
+#: so local dollars stay an ungated diagnostic and the band derives from
+#: the panel anchor alone.
+#:
+#: Trust verification, done locally before building: the #2123 display
+#: anchor yields a panel weekly reading (inventory record
+#: ``weekly-2026-10-03-36pct``: #2123 owner-reported 36% weekly,
+#: ``muse_weekly_panel_readings_v1.json``, validated by
+#: ``muse_reading_inventory``). Anchor field ``panel_used_percent``,
+#: value 60.0 weekly at 2026-10-14 ~15:25 PDT, reset Sun 10-18 17:00 PDT.
+#:
+#: The window's allowed burn is the anchor itself: 60.0 used against 60.0
+#: allowed is over by exactly the session reserve, so the brake is a level
+#: that cannot flap as the burn rate cools once the lanes stop. It names
+#: this window by its reset and lapses there with nothing to clear; a
+#: missing or malformed anchor fails the gate closed, never back to local
+#: dollars.
+MUSE_PACE_PANEL_ANCHOR_10_18 = {
+    "issue": 2597,
+    "resets_at": 1792368000.0,  # 2026-10-19 00:00 UTC, Sunday 17:00 PDT
+    "panel_used_percent": 60.0,
+    "panel_observed": "2026-10-14 ~15:25 PDT",
+    "panel_source": "owner-reported Muse account-panel reading",
+    "panel_reset": "Sunday 2026-10-18 17:00 PDT",
+    "ceiling_percent": 60.0,
+    "cap_dollars": MUSE_WEEKLY_CAP_DOLLARS,
+}
+MUSE_PACE_OVERRIDE = MUSE_PACE_PANEL_ANCHOR_10_18
 
 
 def muse_pace_override(resets_at: float, now: float) -> Optional[Dict]:
@@ -387,6 +419,9 @@ def muse_pace_override(resets_at: float, now: float) -> Optional[Dict]:
     the session reserve as a share of that cap: the reserve is dollars, so
     a smaller cap makes it a larger share. Once the provider has reopened
     the window early, ``reopened_at`` says from when its spend counts.
+    A panel-anchored override (#2597) additionally carries its anchor raw:
+    ``pace`` validates it, and a missing or malformed one fails closed
+    there rather than falling back to local dollars.
     """
     override = MUSE_PACE_OVERRIDE
     if not override:
@@ -403,6 +438,13 @@ def muse_pace_override(resets_at: float, now: float) -> Optional[Dict]:
         "weekly_reserve": round(
             100.0 * MUSE_SESSION_RESERVE_DOLLARS / cap, 2),
     }
+    if "panel_used_percent" in override:
+        found["panel_anchor"] = {
+            "used_percent": override.get("panel_used_percent"),
+            "issue": override.get("issue"),
+            "observed": override.get("panel_observed"),
+            "source": override.get("panel_source"),
+        }
     reopened = override.get("reopened_at")
     if reopened is not None and now >= float(reopened):
         found["reopened_at"] = float(reopened)
@@ -1136,6 +1178,10 @@ def read_muse(now: float) -> Optional[Dict]:
                            "weekly_reserve": override["weekly_reserve"]}
         seven["override"] = {"issue": override["issue"],
                              "until": override["until"]}
+        if "panel_anchor" in override:
+            # Attached raw, even malformed: `pace` validates, and a broken
+            # anchor fails closed there instead of reading as local dollars.
+            seven["panel_anchor"] = dict(override["panel_anchor"])
         if "reopened_at" in override:
             seven["override"]["reopened_at"] = override["reopened_at"]
     return reading
@@ -1341,6 +1387,27 @@ def _rolling_week_has_headroom(reading: Dict, windows: Dict) -> bool:
     return verdict["known"] and not verdict["over_pace"]
 
 
+def _panel_anchor_percent(seven: Dict) -> Tuple[bool, Optional[float]]:
+    """Presence and validity of a panel-anchored brake on this window.
+
+    Returns ``(present, percent)``. Absent means the local-dollar path is
+    unchanged. Present and valid means the band derives from the anchor
+    alone (#2597). Present but malformed means fail closed: the caller
+    contributes no verdict for the window, so no band is derived from the
+    local dollars the anchor replaces.
+    """
+    if "panel_anchor" not in seven:
+        return False, None
+    raw = seven["panel_anchor"]
+    value = raw.get("used_percent") if isinstance(raw, dict) else None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return True, None
+    value = float(value)
+    if not math.isfinite(value) or not 0.0 <= value <= 100.0:
+        return True, None
+    return True, value
+
+
 def pace(reading: Dict, now: float, provider: Optional[str] = None) -> Dict:
     """Is this agent within its budget?
 
@@ -1348,6 +1415,11 @@ def pace(reading: Dict, now: float, provider: Optional[str] = None) -> Dict:
     window to its target at the end. That keeps the burn even instead of
     letting a routine spend the week's capacity on Monday, and it needs no
     persistence — the window's own resets_at says how far through it we are.
+
+    A window carrying a valid ``panel_anchor`` (#2597) is judged on the
+    anchor alone; its local dollars stay a reported diagnostic. A malformed
+    anchor contributes no verdict, failing closed instead of reading as
+    local dollars.
     """
     verdicts = []
     windows = reading.get("windows", {})
@@ -1369,7 +1441,11 @@ def pace(reading: Dict, now: float, provider: Optional[str] = None) -> Dict:
         )
 
     seven = windows.get("seven_day") or {}
-    if seven.get("used_percent") is not None and seven.get("resets_at"):
+    anchor_present, anchor_used = _panel_anchor_percent(seven)
+    anchor_broken = anchor_present and anchor_used is None
+    if (seven.get("used_percent") is not None and seven.get("resets_at")
+            and not anchor_broken):
+        governing = anchor_used if anchor_present else seven["used_percent"]
         if seven.get("rolling"):
             # A trailing count has no cycle position, so the proportional line
             # is meaningless — it would read "0% allowed" forever. A rolling
@@ -1389,16 +1465,19 @@ def pace(reading: Dict, now: float, provider: Optional[str] = None) -> Dict:
                                  WEEKLY_RESERVE)
         weekly = {
             "window": "seven_day",
-            "used_percent": seven["used_percent"],
+            "used_percent": governing,
             "reserve": reserve,
             "allowed_percent": round(allowed, 1),
             "elapsed_fraction": (
                 round(elapsed_fraction, 3) if elapsed_fraction is not None else None
             ),
-            "over": seven["used_percent"] + reserve > allowed,
+            "over": governing + reserve > allowed,
         }
         if seven.get("override"):
             weekly["override"] = seven["override"]
+        if anchor_present:
+            weekly["panel_anchor"] = seven["panel_anchor"]
+            weekly["local_used_percent"] = seven["used_percent"]
         weekly.update(_projection_band(seven, weekly["over"], now))
         verdicts.append(weekly)
 

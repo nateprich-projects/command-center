@@ -610,11 +610,29 @@ def log_is_held(path: Path, lsof: Optional[str] = None) -> bool:
     return True if fallback is None else fallback
 
 
-def dir_size_bytes(path: Path) -> int:
-    """Sum file bytes below a dir, best-effort, never following symlinks.
+def _allocated_size(st: "os.stat_result") -> int:
+    """On-disk bytes for one file: ``st_blocks * 512``, ``du`` semantics.
 
-    Hard-linked files count once: the walk tracks seen ``(st_dev, st_ino)``
-    pairs and adds ``st_size`` only on first sight, matching ``du`` semantics.
+    A sparse file's apparent ``st_size`` can exceed its allocated bytes by
+    orders of magnitude, so cap accounting must count what the disk holds,
+    not the logical length. Falls back to ``st_size`` where the platform
+    reports no block count (no ``st_blocks`` attribute) or the count is
+    unusable (negative).
+    """
+    blocks = getattr(st, "st_blocks", None)
+    if blocks is None or blocks < 0:
+        return st.st_size
+    return blocks * 512
+
+
+def dir_size_bytes(path: Path) -> int:
+    """Sum allocated file bytes below a dir, best-effort, never following symlinks.
+
+    Counts what the disk holds (``st_blocks * 512`` per file, the ``du -sk``
+    semantics) rather than apparent ``st_size``, so sparse pytest debris no
+    longer inflates cap accounting. Hard-linked files count once: the walk
+    tracks seen ``(st_dev, st_ino)`` pairs and adds the allocated size only
+    on first sight, matching ``du`` semantics.
     """
     total = 0
     seen = set()
@@ -637,7 +655,7 @@ def dir_size_bytes(path: Path) -> int:
                     if key in seen:
                         continue
                     seen.add(key)
-                    total += st.st_size
+                    total += _allocated_size(st)
             except OSError:
                 continue
     return total

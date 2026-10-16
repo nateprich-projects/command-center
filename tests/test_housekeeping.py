@@ -1368,12 +1368,14 @@ def test_dir_size_bytes_counts_sparse_file_at_allocated_size_once(tmp_path):
         pytest.skip("filesystem materialized the sparse fixture")
     allocated = _allocated_bytes(sparse)
     assert housekeeping.dir_size_bytes(target) == allocated
-    # Within 5% of du -sk where du exists.
+    # Within 5% of du -sk where du exists. Run du on the file, not the
+    # directory: du on a directory also counts the directory entry's own
+    # block (4 KiB on ext4), which dir_size_bytes deliberately excludes.
     du = shutil.which("du")
     if du is None:
         pytest.skip("no du binary for the parity check")
     proc = subprocess.run(
-        [du, "-sk", str(target)],
+        [du, "-sk", str(sparse)],
         capture_output=True,
         text=True,
         check=False,

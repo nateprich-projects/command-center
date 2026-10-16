@@ -162,6 +162,7 @@ WRITERS = frozenset({
     "funnel.py:caused_by_block",
     "funnel.py:gates_answer_block",
     "funnel.py:answered_gates_body",
+    "funnel.py:_answered_needs_nate_body",
     "funnel.py:_without_gates_record",
     "funnel.py:self_approval_comment",
     "funnel.py:satisfied_block_comment",

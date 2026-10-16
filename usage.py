@@ -408,7 +408,31 @@ MUSE_PACE_PANEL_ANCHOR_10_18 = {
     "ceiling_percent": 60.0,
     "cap_dollars": MUSE_WEEKLY_CAP_DOLLARS,
 }
-MUSE_PACE_OVERRIDE = MUSE_PACE_PANEL_ANCHOR_10_18
+
+#: **The provider reset the 10-18 window early (#2606).** On Friday
+#: 2026-10-16 Nate reported that Meta had reset the weekly limit: "Meta did
+#: a reset so the brake can come off." The 60% anchor above is kept as the
+#: record of that reading, but it no longer describes the window, and as a
+#: level it would hold every lane idle until Sunday on quota the provider
+#: has given back. Following #1483, the window is re-paired to the panel's
+#: reset: a 0% anchor, ``reopened_at`` at the report (the exact reset time
+#: is unknown; the lanes ran nothing between the brake at 20:45 PDT on
+#: 10-14 and the report, so the local diagnostic reads the same either
+#: way), and the normal weekly target as its ceiling instead of 60%. The
+#: anchor still governs the band and the override still lapses at the
+#: Sunday reset with nothing to clear.
+MUSE_PACE_PANEL_RESET_10_18 = {
+    "issue": 2606,
+    "resets_at": 1792368000.0,  # 2026-10-19 00:00 UTC, Sunday 17:00 PDT
+    "panel_used_percent": 0.0,
+    "panel_observed": "2026-10-16 ~10:34 PDT",
+    "panel_source": "owner-reported Muse weekly-limit reset",
+    "panel_reset": "Sunday 2026-10-18 17:00 PDT",
+    "ceiling_percent": WEEKLY_TARGET,
+    "cap_dollars": MUSE_WEEKLY_CAP_DOLLARS,
+    "reopened_at": 1792172040.0,  # 2026-10-16 17:34 UTC, Friday 10:34 PDT
+}
+MUSE_PACE_OVERRIDE = MUSE_PACE_PANEL_RESET_10_18
 
 
 def muse_pace_override(resets_at: float, now: float) -> Optional[Dict]:

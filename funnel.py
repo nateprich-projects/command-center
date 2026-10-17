@@ -17095,6 +17095,27 @@ def _block_cycle_reasons(
             ref = _dependency_ref(item, value)
             if ref in open_refs:
                 graph[item.ref].add(ref)
+        if item.parent is None:
+            # The item loader fills open_blockers only for items with a
+            # parent, so a project's native blocked_by refs never reach
+            # open_blockers. Include them here, in the cycle graph only.
+            for value in list(item.blocked_by_refs or []):
+                ref = _dependency_ref(item, value)
+                if ref in open_refs:
+                    graph[item.ref].add(ref)
+    for item in items:
+        # A project cannot close before its open child tickets, so a wait
+        # that runs through a project's own tickets can deadlock. Close the
+        # loop in the cycle graph only; closed children hold nothing open.
+        if item.ref not in open_refs or not item.parent:
+            continue
+        parent = by_ref.get(item.parent)
+        if (
+            parent is not None
+            and parent.ref in open_refs
+            and parent.parent is None
+        ):
+            graph[parent.ref].add(item.ref)
 
     def order(ref: str) -> Tuple[int, str]:
         item = by_ref[ref]

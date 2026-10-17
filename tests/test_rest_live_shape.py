@@ -97,7 +97,7 @@ def test_live_rows_read_as_the_graphql_view_of_the_same_issues():
     assert sorted(open_ticket.blocked_by_refs) == [
         REPO + "#1837", REPO + "#1838", REPO + "#1839"]
     assert open_ticket.open_blockers == [] == open_ticket.dead_blockers
-    # Blockers are read for open tickets only; the closed one costs nothing.
+    # Blockers are read for open rows only; the closed one costs nothing.
     assert [endpoint for endpoint in seen if "blocked_by" in endpoint] == [
         "/repos/{}/issues/2027/dependencies/blocked_by?per_page=100".format(
             REPO)]
@@ -232,3 +232,21 @@ def test_an_unknown_option_fails_before_any_write():
             LIVE["patch_response"]["node_id"], funnel.STATUS_FIELD_ID,
             "Frobnicate", _request=request)
     assert all(method == "GET" for method, _, _ in calls)
+
+
+def test_an_open_project_without_a_parent_still_reads_its_blockers():
+    """Shape apply needs an open project's existing edges (#2593)."""
+    reset()
+    rows = live_rows()
+    for entry in rows[1]["fields"]:
+        if entry["name"] == "Parent issue":
+            entry["value"] = None
+    request, seen = page_request(
+        [{"items": rows, "next_cursor": None}], LIVE["blocked_by"])
+
+    items = by_number(funnel.load_rest_project_items(
+        list(funnel.REST_BOARD_FIELD_IDS), _request=request))
+
+    assert items[2027].parent is None
+    assert sorted(items[2027].blocked_by_refs) == [
+        REPO + "#1837", REPO + "#1838", REPO + "#1839"]

@@ -28483,8 +28483,10 @@ def _attach_rest_blockers(row: dict, request) -> None:
 
     The live items route carries ``issue_dependencies_summary`` counts but
     not the blocking issues, which ``classify_blockers`` needs to tell an
-    open blocker from a dead one. Only open rows with a parent count, as in
-    ``_from_node``; each costs one core-pool request.
+    open blocker from a dead one and shape apply needs as ``blocked_by_refs``
+    (an open project's existing edges, #2593). Every open row counting
+    blockers is read, one core-pool request each; a closed row keeps its
+    refs unknown, which every reader treats as unreadable.
     """
     content = _rest_content(row)
     summary = content.get("issue_dependencies_summary")
@@ -28495,9 +28497,6 @@ def _attach_rest_blockers(row: dict, request) -> None:
         return
     state = content.get("state")
     if not isinstance(state, str) or state.upper() != "OPEN":
-        return
-    if not (isinstance(content.get("parent"), dict)
-            or _rest_parent_field_value(row.get("fields"))):
         return
     repository = content.get("repository")
     repo = (repository.get("full_name") if isinstance(

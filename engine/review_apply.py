@@ -298,6 +298,27 @@ def decide(answer: Dict[str, object]) -> Tuple[str, List[str], Optional[str]]:
     return verdict, blocking, "; ".join(notes) or None
 
 
+def with_scope_note(note: Optional[str], scope_note: Optional[str]
+                   ) -> Optional[str]:
+    """Append one per-PR scope note line without touching verdict or blocking.
+
+    Ticket #2028 (plan #1840 phase 4): the unrequested-group count rides
+    in the review notes section only. It never enters ``blocking`` and
+    never changes the verdict word: only the three stopping-rule kinds
+    (a real defect with a realistic reproduction, a missing or
+    tautological Accept test, a merged-main failure) block. A missing or
+    blank scope note leaves the note unchanged.
+    """
+    if not isinstance(scope_note, str) or not scope_note.strip():
+        return note
+    cleaned = " ".join(scope_note.strip().split())
+    if not isinstance(note, str) or not note.strip():
+        return cleaned
+    if cleaned in note:
+        return note
+    return "{}; {}".format(note, cleaned)
+
+
 def truncate_raw(raw: str) -> str:
     """The raw output as a note: capped, with the cut marked."""
     if len(raw) <= MAX_RAW_NOTE:

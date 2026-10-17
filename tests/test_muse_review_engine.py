@@ -4872,6 +4872,42 @@ def test_the_routine_asks_for_cited_met_results_and_concrete_blocks():
             "outcome") in prompt
 
 
+def test_the_judges_carry_the_scope_mapping_question(tmp_path):
+    """#2028 (plan #1840 phase 4, Ticket 2): one prompt change adds the
+    bounded scope mapping question and the non-blocking note to the judge
+    header, and every judge call carries it. The baseline routine stays
+    byte-identical under its pinned hash and word cap, so the question
+    lives in the header judges read, not in the routine."""
+    from engine.review_scope import SCOPE_JUDGE_QUESTION
+
+    flat_question = " ".join(SCOPE_JUDGE_QUESTION.split())
+    assert "Map each `- scope:` evidence row" in flat_question
+    assert "ticket plan text plus its parent plan" in flat_question
+
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), _packet(),
+        answers=_review_answers(_judge_answer()))
+    assert proc.returncode == 0, proc.stderr
+    judge = (repo / "muse.prompt.2").read_text()
+    framing = " ".join(judge.split("The assigned requirements are:", 1)[0]
+                       .split())
+    for sentence in (
+        "Map each `- scope:` evidence row to the requirement that asked "
+        "for it, or to `unrequested`",
+        "ticket plan text plus its parent plan",
+        "one mapping per scope group",
+        "covering every group exactly once",
+        "no dropped groups, no invented groups",
+        "malformed mapping fails the evidence check, never the review",
+        "deferred outcomes entry with the reason",
+        "never blocks and never enters the verdict",
+        "real defect with a realistic reproduction",
+        "missing or tautological Accept test",
+        "merged-main failure blocks",
+    ):
+        assert sentence in framing, sentence
+
+
 def test_the_active_variant_reaches_both_reviewers_from_one_definition(
         tmp_path):
     proc, repo = _stubbed_runner(

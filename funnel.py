@@ -6661,7 +6661,9 @@ def awaiting_review(
 #: A finish that pushed nothing records the head it left behind in the PR
 #: body it rewrites (#2541). The marker is the offer gate's memory: a ticket
 #: whose open PR still shows this head was already looked at and changed
-#: nothing, so it is not offered again until a new review verdict lands.
+#: nothing, so it is not offered again — not even when a fresh verdict
+#: lands on that same head (#2618). Only a new head, or the stranded-head
+#: re-arm below, releases the hold.
 #: The HTML comment rides inside the runner's evidence block, which the
 #: review packet already strips from ``pr_body``, and a body edit never
 #: counts as the trusted-comment evidence that re-covers an unsure-only
@@ -6750,12 +6752,13 @@ def no_push_reoffer_withheld(
     """Tickets a no-push finish already looked at, by ref (#2541).
 
     A ticket is withheld when its open funnel PR carries a no-push record
-    for its current head with no trusted review verdict posted after that
-    record. A new head lifts the hold only through the review verdict it
-    still needs: any head change leaves the old verdict uncovered, so
-    ``awaiting_review`` withholds the ticket anyway, and a merge-of-main
-    head change never reads as new work here. A newly posted verdict of
-    any kind re-arms the ticket, returning it to the ordinary hand-back.
+    for its current head, however the covering verdict compares in time:
+    a fresh verdict on the same marked head leaves the hold in place
+    (#2618) — only a new head, or the stranded-head re-arm below,
+    releases it. A new head lifts the hold only through the review
+    verdict it still needs: any head change leaves the old verdict
+    uncovered, so ``awaiting_review`` withholds the ticket anyway, and a
+    merge-of-main head change never reads as new work here.
 
     A stranded head re-arms the other way (#2618): when the covering
     verdict rejects the current head and the newest record for that head
@@ -6793,12 +6796,10 @@ def no_push_reoffer_withheld(
                 # gate stays out of the way exactly as an unreadable PR
                 # scan does for the rest of the offer path.
                 continue
-            verdict_at = (
-                parse_time(verdict.get("comment_created_at"))
-                if isinstance(verdict, dict) else None
-            )
-            if verdict_at is not None and verdict_at > latest_marker_at:
-                continue
+            # A fresh verdict on the same marked head never releases the
+            # gate (#2618): only the stranded-head re-arm below returns
+            # the ticket, as review work, and anything else stays held
+            # until a new head.
             if _no_push_rearm_releases(verdict, head, latest_marker_at):
                 continue
             withheld.add(item.ref)

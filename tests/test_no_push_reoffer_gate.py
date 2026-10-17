@@ -4,8 +4,9 @@ The Muse implement lane re-bound #2492 seven times noting PR #2521 with no
 PR commit between finishes while other tickets sat startable. A rejected
 head hands back to the engineer once; a finish that pushes nothing records
 its head in the PR body it rewrites, and the shared offer path skips that
-head until a new review verdict lands. No local state: record, head, and
-verdict all come from the PR snapshot.
+marked head: only a new head, or the #2618 stranded-head re-arm as review
+work, releases it — a fresh verdict on the same head does not. No local
+state: record, head, and verdict all come from the PR snapshot.
 """
 
 from __future__ import annotations
@@ -160,15 +161,21 @@ def test_merge_of_main_head_change_does_not_reoffer():
         ticket_b.ref]
 
 
-def test_new_verdict_after_marker_rearms():
+def test_fresh_verdict_after_marker_stays_withheld():
+    """#2618 fixture: a fresh rejected verdict on the same marked head
+    stays gate-withheld. The ticket is not re-offered to implement; only
+    a new head, or the stranded-head re-arm, releases it."""
     project, ticket_a, ticket_b = _board()
     items = [project, ticket_a, ticket_b]
     marker = funnel.render_no_push_finish_marker(H1, T_M)
     pr_facts = {ticket_a.ref: _pr_row(
         2521, H1, body=_body(marker), verdict=_verdict(H1, T_V2))}
 
-    assert funnel.no_push_reoffer_withheld(items, pr_facts) == set()
-    assert ticket_a.ref in [i.ref for i in funnel.startable(items)]
+    assert funnel.no_push_reoffer_withheld(items, pr_facts) == {ticket_a.ref}
+    blocked = (funnel.awaiting_review(items, pr_facts=pr_facts)
+               | funnel.no_push_reoffer_withheld(items, pr_facts))
+    assert [i.ref for i in funnel.startable(items, awaiting_review=blocked)] == [
+        ticket_b.ref]
 
 
 def test_older_verdict_rearms_as_review_work():
@@ -355,19 +362,19 @@ def test_rearm_releases_stranded_head_as_review_work():
     assert standing.state == "reviewable"
 
 
-def test_rearm_keeps_fresh_verdict_on_ordinary_paths():
+def test_fresh_verdict_keeps_ordinary_review_shape():
     """A verdict newer than the marker never arms the re-arm path.
 
-    The #2541 new-verdict release still frees the gate, the rejected
-    hand-back still keeps the ticket out of review, and the head still
-    reads covered: only a marker newer than the verdict re-arms.
+    The gate withholds the marked head (#2618), the rejected hand-back
+    still keeps the ticket out of review, and the head still reads
+    covered: only a marker newer than the verdict re-arms.
     """
     project, ticket_a, ticket_b = _board()
     items = [project, ticket_a, ticket_b]
     pr_facts = {ticket_a.ref: _rearm_row(
         2521, H1, 101, verdict_at=T_V2, marker_at=T_M)}
 
-    assert funnel.no_push_reoffer_withheld(items, pr_facts) == set()
+    assert funnel.no_push_reoffer_withheld(items, pr_facts) == {ticket_a.ref}
     assert ticket_a.ref not in funnel.awaiting_review(
         items, pr_facts=pr_facts)
     standing = funnel.review_standing(
@@ -376,15 +383,16 @@ def test_rearm_keeps_fresh_verdict_on_ordinary_paths():
 
 
 def test_fresh_approval_after_marker_stays_out_of_implement():
-    """A fresh approval newer than the marker frees the gate but the ticket
-    stays review-side work through the ordinary approved path."""
+    """A fresh approval newer than the marker stays out of implement: the
+    gate withholds the marked head and the ticket stays review-side work
+    through the ordinary approved path."""
     project, ticket_a, ticket_b = _board()
     items = [project, ticket_a, ticket_b]
     pr_facts = {ticket_a.ref: _rearm_row(
         2521, H1, 101, verdict_at=T_V2, marker_at=T_M,
         verdict_kind="approved")}
 
-    assert funnel.no_push_reoffer_withheld(items, pr_facts) == set()
+    assert funnel.no_push_reoffer_withheld(items, pr_facts) == {ticket_a.ref}
     blocked = (funnel.awaiting_review(items, pr_facts=pr_facts)
                | funnel.no_push_reoffer_withheld(items, pr_facts))
     assert ticket_a.ref in blocked
@@ -455,7 +463,8 @@ def test_rearm_respects_review_cap():
 def test_rearm_releases_six_ticket_hold_without_requeue():
     """Read-only replay of the 2026-10-17 04:25 PDT hold: six stranded
     tickets plus nine startable waiting. The six release as review work
-    while ordinary rejected heads stay out of the review set."""
+    while a fresh-verdict head stays gate-withheld and ordinary rejected
+    heads stay out of the review set."""
     project = _project()
     stranded = [_ticket(number, project) for number in range(101, 107)]
     waiting = [_ticket(number, project) for number in range(107, 116)]
@@ -472,15 +481,15 @@ def test_rearm_releases_six_ticket_hold_without_requeue():
     pr_facts[fresh.ref] = _rearm_row(
         2517, H9, 117, verdict_at=T_V2, marker_at=T_M)
 
-    assert funnel.no_push_reoffer_withheld(items, pr_facts) == set()
+    assert funnel.no_push_reoffer_withheld(items, pr_facts) == {fresh.ref}
     in_review = funnel.awaiting_review(items, pr_facts=pr_facts)
     assert in_review == {ticket.ref for ticket in stranded}
     blocked = in_review | funnel.no_push_reoffer_withheld(items, pr_facts)
     offered = [i.ref for i in funnel.startable(
         items, awaiting_review=blocked)]
-    for ticket in stranded:
+    for ticket in stranded + [fresh]:
         assert ticket.ref not in offered
-    for ticket in waiting + [handback, fresh]:
+    for ticket in waiting + [handback]:
         assert ticket.ref in offered
 
 

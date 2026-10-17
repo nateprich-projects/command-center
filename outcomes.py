@@ -17,6 +17,7 @@ import argparse
 import base64
 import json
 import math
+import re
 import sys
 import time
 from datetime import datetime, timezone
@@ -791,6 +792,109 @@ def derive_outcome(
         "reasoning_effort": _top_level_run_metadata(runs, "reasoning_effort"),
         "model_source": _top_level_run_metadata(runs, "model_source"),
     }
+
+
+#: Version of the per-PR scope-metric record below.
+SCOPE_OUTCOME_SCHEMA_VERSION = 1
+
+#: A scope record whose judge mapping completed.
+SCOPE_OUTCOME_MAPPED = "mapped"
+
+#: A scope record whose mapping was skipped; ``reason`` says why.
+SCOPE_OUTCOME_DEFERRED = "deferred"
+
+
+def _scope_head_sha(value: object) -> Optional[str]:
+    """The judged head SHA, lowercased, or None when it is not one."""
+    if (isinstance(value, str) and re.fullmatch(r"[0-9a-fA-F]{40}",
+                                                value.strip())):
+        return value.strip().lower()
+    return None
+
+
+def _scope_record_base(repo: object, pr_number: object,
+                       head_sha: object) -> Dict[str, object]:
+    """The PR identity and head every scope record carries."""
+    if not isinstance(repo, str) or not repo.strip():
+        raise OutcomeError("a scope record needs a non-empty repository")
+    number = _number(pr_number)
+    if number is None:
+        raise OutcomeError("a scope record needs a positive PR number")
+    sha = _scope_head_sha(head_sha)
+    if sha is None:
+        raise OutcomeError("a scope record needs a full head SHA")
+    return {
+        "repo": repo.strip(),
+        "pr_number": number,
+        "pr": "{}#{}".format(repo.strip(), number),
+        "head_sha": sha,
+    }
+
+
+def _scope_recorded_at(now: Optional[datetime]) -> str:
+    recorded_at = now or datetime.now(timezone.utc)
+    if recorded_at.tzinfo is None:
+        recorded_at = recorded_at.replace(tzinfo=timezone.utc)
+    return recorded_at.astimezone(timezone.utc).isoformat().replace(
+        "+00:00", "Z")
+
+
+def derive_scope_outcome(repo: object, pr_number: object,
+                         head_sha: object, unrequested_count: object,
+                         group_count: object,
+                         now: Optional[datetime] = None) -> Dict[str, object]:
+    """Build one overwritten per-PR scope record from a judged mapping.
+
+    The record holds a single integer ``unrequested_count`` keyed by PR
+    number with the judged head SHA alongside, counting scope groups the
+    judge mapped to ``unrequested``. It is overwritten on each review: a
+    fresh review of the same PR replaces the prior record rather than
+    appending, so the per-PR measurement always reads the latest head.
+    Pure apart from the default clock, like ``derive_outcome``.
+    """
+    record = _scope_record_base(repo, pr_number, head_sha)
+    unrequested = _nonnegative_integer(unrequested_count)
+    groups = _nonnegative_integer(group_count)
+    if unrequested is None or groups is None:
+        raise OutcomeError(
+            "a scope record needs non-negative group counts")
+    if unrequested > groups:
+        raise OutcomeError(
+            "unrequested groups cannot exceed mapped groups")
+    record.update({
+        "schema_version": SCOPE_OUTCOME_SCHEMA_VERSION,
+        "source": "review-scope",
+        "status": SCOPE_OUTCOME_MAPPED,
+        "derived_at": _scope_recorded_at(now),
+        "group_count": groups,
+        "unrequested_count": unrequested,
+        "reason": None,
+    })
+    return record
+
+
+def deferred_scope_outcome(repo: object, pr_number: object,
+                           head_sha: object, reason: object,
+                           now: Optional[datetime] = None) -> Dict[str, object]:
+    """Build the deferred scope record for a PR whose mapping was skipped.
+
+    Oversized or unmappable diffs skip mapping rather than report a
+    partial count, which would corrupt the per-PR measurement. The entry
+    carries the reason, holds no count, and overwrites like a mapped one.
+    """
+    record = _scope_record_base(repo, pr_number, head_sha)
+    if not isinstance(reason, str) or not reason.strip():
+        raise OutcomeError("a deferred scope record needs a reason")
+    record.update({
+        "schema_version": SCOPE_OUTCOME_SCHEMA_VERSION,
+        "source": "review-scope",
+        "status": SCOPE_OUTCOME_DEFERRED,
+        "derived_at": _scope_recorded_at(now),
+        "group_count": None,
+        "unrequested_count": None,
+        "reason": reason.strip(),
+    })
+    return record
 
 
 def _nonnegative_number(value: object) -> Optional[float]:

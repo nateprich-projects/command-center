@@ -145,7 +145,14 @@ def stub_gh(monkeypatch, item):
         ]}}
 
     def run(args, capture_output=False, text=True, **kwargs):
-        calls.append(("run", tuple(args)))
+        args = tuple(args)
+        calls.append(("run", args))
+        if args[:2] == ("gh", "api"):
+            # Status writes go over REST (#2423): confirm the item id.
+            item_id = args[4].rsplit("/", 1)[-1]
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps({"id": item_id}), stderr="")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(funnel, "gh_graphql", graphql)
@@ -3205,6 +3212,11 @@ def test_apply_accepts_a_raced_edge_only_after_re_read(monkeypatch):
                 returncode=1, stdout="",
                 stderr="Target issue has already been taken",
             )
+        if args[:2] == ["gh", "api"]:
+            item_id = args[4].rsplit("/", 1)[-1]
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps({"id": item_id}), stderr="")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(funnel, "gh_graphql", graphql)

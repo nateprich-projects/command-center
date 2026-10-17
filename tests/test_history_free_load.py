@@ -317,6 +317,13 @@ class World:
             stdout = "https://github.com/{}/issues/99\n".format(REPO)
         if args[:3] == ["gh", "project", "item-add"]:
             stdout = json.dumps({"id": "pi-99"})
+        if "PATCH" in list(args):
+            for part in args:
+                if (isinstance(part, str)
+                        and funnel.REST_PROJECT_ITEMS_PATH in part):
+                    item_id = part.rsplit("/", 1)[-1]
+                    stdout = json.dumps({"id": item_id})
+                    break
         return subprocess.CompletedProcess(args, 0, stdout, "")
 
     def gh_json(self, *args):

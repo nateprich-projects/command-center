@@ -69,52 +69,48 @@ def test_a_non_terminal_write_on_a_closed_issue_is_refused(monkeypatch, no_write
     assert "Status write refused" in body
 
 
-def test_done_is_allowed_on_a_closed_issue(monkeypatch):
+def _rest_success(monkeypatch, calls=None):
+    """Status writes go over REST (#2423): confirm the item id, no GraphQL."""
+
+    def request(method, endpoint, body=None):
+        if calls is not None:
+            calls.append((method, endpoint, body))
+        return {"id": "PVTI_fake"}
+
+    monkeypatch.setattr(funnel, "_rest_request_json", request)
+
+
+def test_done_is_allowed_on_a_closed_issue(monkeypatch, no_writes):
     _state(monkeypatch, "CLOSED")
-    monkeypatch.setattr(funnel, "_option_id", lambda field, name: "opt")
-    monkeypatch.setattr(funnel, "gh_graphql", lambda *a, **k: {})
-    monkeypatch.setattr(funnel, "_status_write_confirmed", lambda *a: True)
+    _rest_success(monkeypatch)
 
     item = project()
     assert funnel._write_status(item, "Done", NOW) is None
     assert item.status == "Done"
 
 
-def test_parked_is_allowed_on_a_closed_issue(monkeypatch):
+def test_parked_is_allowed_on_a_closed_issue(monkeypatch, no_writes):
     _state(monkeypatch, "CLOSED")
-    monkeypatch.setattr(funnel, "_option_id", lambda field, name: "opt")
-    monkeypatch.setattr(funnel, "gh_graphql", lambda *a, **k: {})
-    monkeypatch.setattr(funnel, "_status_write_confirmed", lambda *a: True)
+    _rest_success(monkeypatch)
 
     item = project()
     assert funnel._write_status(item, "Parked", NOW) is None
     assert item.status == "Parked"
 
 
-def test_open_behaviour_is_unchanged(monkeypatch):
+def test_open_behaviour_is_unchanged(monkeypatch, no_writes):
     _state(monkeypatch, "OPEN")
     calls = []
-    monkeypatch.setattr(funnel, "_option_id", lambda field, name: "opt")
-    monkeypatch.setattr(
-        funnel,
-        "gh_graphql",
-        lambda query, **variables: calls.append(variables) or {
-            "updateProjectV2ItemFieldValue": {
-                "projectV2Item": {"id": "PVTI_fake"}
-            }
-        },
-    )
-    monkeypatch.setattr(funnel, "_status_write_confirmed", lambda *a: True)
+    _rest_success(monkeypatch, calls)
 
     item = project(status="Shaped")
     assert funnel._write_status(item, "Ready", NOW) is None
     assert item.status == "Ready"
-    assert calls == [{
-        "project": funnel.PROJECT_ID,
-        "item": "PVTI_fake",
-        "field": funnel.STATUS_FIELD_ID,
-        "option": "opt",
-    }]
+    assert calls == [(
+        "PATCH",
+        funnel.REST_PROJECT_ITEMS_PATH + "/PVTI_fake",
+        {"field_id": funnel.STATUS_FIELD_ID, "value": "Ready"},
+    )]
     assert item.status_since == NOW
     assert item.status_events[-1] == {
         "previous_status": "Shaped",
@@ -157,11 +153,10 @@ def test_an_unreadable_state_falls_back_to_the_loaded_one(monkeypatch, no_writes
     assert no_writes == []
 
 
-def test_an_unreadable_state_on_a_loaded_open_issue_still_writes(monkeypatch):
+def test_an_unreadable_state_on_a_loaded_open_issue_still_writes(
+        monkeypatch, no_writes):
     _state(monkeypatch, None)
-    monkeypatch.setattr(funnel, "_option_id", lambda field, name: "opt")
-    monkeypatch.setattr(funnel, "gh_graphql", lambda *a, **k: {})
-    monkeypatch.setattr(funnel, "_status_write_confirmed", lambda *a: True)
+    _rest_success(monkeypatch)
 
     item = project(state="OPEN")
     assert funnel._write_status(item, "Ready", NOW) is None
@@ -184,9 +179,7 @@ def test_an_unreadable_state_still_allows_a_terminal_write(monkeypatch):
     calls = []
     monkeypatch.setattr(funnel, "live_issue_state",
                         lambda item: calls.append(item) or None)
-    monkeypatch.setattr(funnel, "_option_id", lambda field, name: "opt")
-    monkeypatch.setattr(funnel, "gh_graphql", lambda *a, **k: {})
-    monkeypatch.setattr(funnel, "_status_write_confirmed", lambda *a: True)
+    _rest_success(monkeypatch)
 
     assert funnel._write_status(project(), "Done", NOW) is None
     assert calls == []

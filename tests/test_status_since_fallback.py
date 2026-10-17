@@ -113,9 +113,11 @@ def test_project_item_query_reads_the_status_write_time():
 
 def _stub_status_write(monkeypatch):
     monkeypatch.setattr(funnel, "status_write_refusal", lambda item, status: None)
-    monkeypatch.setattr(funnel, "_option_id", lambda field, name: "opt")
-    monkeypatch.setattr(funnel, "gh_graphql", lambda *a, **k: {})
-    monkeypatch.setattr(funnel, "_status_write_confirmed", lambda *a: True)
+
+    def request(method, endpoint, body=None):
+        return {"id": endpoint.rsplit("/", 1)[-1]}
+
+    monkeypatch.setattr(funnel, "_rest_request_json", request)
 
 
 def test_a_status_write_then_hydrate_reads_the_write_not_the_loaded_time(

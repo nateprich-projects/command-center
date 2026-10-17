@@ -214,6 +214,78 @@ def test_mixed_native_and_comment_block_cycle_is_reported_once():
     assert rows[0]["reason"] == "block cycle: #61 → #71 → #81 → #61"
 
 
+def _deadlock_rows(native=True, comment=True):
+    """Three-item deadlock shape from #2591.
+
+    Ticket #2483 of project #2482 natively waits on project #2409, which is
+    blocked back on #2482 by comment, while #2482 stays open for #2483.
+    """
+    first_project = issue(
+        2409,
+        block_references=["{}#2482".format(REPO)] if comment else [],
+    )
+    project = issue(
+        2482,
+        blocked_by_refs=["{}#2409".format(REPO)] if native else [],
+    )
+    ticket = issue(
+        2483,
+        parent="{}#2482".format(REPO),
+        open_blockers=["{}#2409".format(REPO)],
+    )
+    return [project, ticket, first_project]
+
+
+def _cycle_reasons(rows):
+    return funnel._block_cycle_reasons(
+        rows, {item.ref: item for item in rows}
+    )
+
+
+def test_project_native_blocker_edge_reports_cycle():
+    assert _cycle_reasons(_deadlock_rows()) == {
+        "{}#2409".format(REPO): ["block cycle: #2409 → #2482 → #2409"],
+    }
+
+
+def test_project_to_open_child_edge_closes_cycle():
+    assert _cycle_reasons(_deadlock_rows(native=False)) == {
+        "{}#2409".format(REPO): [
+            "block cycle: #2409 → #2482 → #2483 → #2409"
+        ],
+    }
+
+
+def test_project_cycle_clears_once_edges_removed():
+    assert _cycle_reasons(_deadlock_rows(native=False, comment=False)) == {}
+
+
+def test_project_to_closed_child_adds_no_edge():
+    project = issue(2482)
+    child = issue(
+        2483,
+        parent="{}#2482".format(REPO),
+        state="CLOSED",
+        open_blockers=["{}#2409".format(REPO)],
+    )
+    other = issue(2409, block_references=["{}#2482".format(REPO)])
+
+    assert _cycle_reasons([project, child, other]) == {}
+
+
+def test_duplicate_native_and_comment_edge_reports_cycle_once():
+    first = issue(2409, block_references=["{}#2410".format(REPO)])
+    second = issue(
+        2410,
+        blocked_by_refs=["{}#2409".format(REPO)],
+        block_references=["{}#2409".format(REPO)],
+    )
+
+    assert _cycle_reasons([second, first]) == {
+        first.ref: ["block cycle: #2409 → #2410 → #2409"],
+    }
+
+
 def test_block_chain_is_not_reported_as_a_cycle():
     first = issue(91, open_blockers=["{}#101".format(REPO)])
     second = issue(101, open_blockers=["{}#111".format(REPO)])

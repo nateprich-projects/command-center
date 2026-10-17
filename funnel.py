@@ -11715,7 +11715,7 @@ BEGIN_DETAIL_TIMELINE_ITEMS_MAX = 60
 BEGIN_DETAIL_CHILD_ITEMS_MAX = 50
 BEGIN_DETAIL_MAX_SELECTED_ITEMS = 2
 BEGIN_DETAIL_HISTORY_FIELDS_PER_EVENT_MAX = 5
-BEGIN_DETAIL_BASE_FIELDS_PER_ITEM = 4  # id, content, body, timelineItems
+BEGIN_DETAIL_BASE_FIELDS_PER_ITEM = 5  # id, statusValue, content, body, timelineItems
 BEGIN_DETAIL_CHILD_FIELDS_PER_ITEM = 3  # id, content, subIssues
 BEGIN_DETAIL_CHILD_FIELDS_PER_CHILD = 2  # createdAt, closedAt
 BEGIN_DETAIL_FIELDS_PER_ITEM_MAX = (
@@ -11741,6 +11741,9 @@ query($ids: [ID!]!, $childIds: [ID!]!) {
   history: nodes(ids: $ids) {
     ... on ProjectV2Item {
       id
+      statusValue: fieldValueByName(name: "Status") {
+        ... on ProjectV2ItemFieldSingleSelectValue { updatedAt }
+      }
       content {
         ... on Issue {
           timelineItems(last: {timeline_max}, itemTypes: [PROJECT_V2_ITEM_STATUS_CHANGED_EVENT, LABELED_EVENT, UNLABELED_EVENT]) {
@@ -11790,6 +11793,9 @@ query($ids: [ID!]!) {
   nodes(ids: $ids) {
     ... on ProjectV2Item {
       id
+      statusValue: fieldValueByName(name: "Status") {
+        ... on ProjectV2ItemFieldSingleSelectValue { updatedAt }
+      }
       content {
         ... on Issue {
           timelineItems(last: {timeline_max}, itemTypes: [PROJECT_V2_ITEM_STATUS_CHANGED_EVENT, LABELED_EVENT, UNLABELED_EVENT]) {
@@ -13098,6 +13104,13 @@ def hydrate_item_details(
                 continue
             item = by_id.get(node.get("id"))
             content = node.get("content")
+            status_value = node.get("statusValue")
+            if (item is not None and item.status_updated_at is None
+                    and isinstance(status_value, dict)):
+                # The REST board row carries no Status write time; the
+                # history read supplies it as the no-event fallback (#1949).
+                item.status_updated_at = parse_time(
+                    status_value.get("updatedAt"))
             if item is not None and isinstance(content, dict):
                 if reads_body:
                     if "body" not in content:

@@ -2264,6 +2264,51 @@ def domain_entry_allowed(items: Sequence[Item], ticket: Item) -> bool:
     return domain_slot_counts(items).get(domain, 0) < DOMAIN_SLOTS
 
 
+def _domain_cap_refused(
+    items: Sequence[Item],
+    ordered: Sequence[Item],
+    now: datetime,
+    pr_facts: Optional[Mapping[str, Optional[Dict[str, object]]]] = None,
+) -> List[Item]:
+    """Unclaimed startable tickets the domain cap alone holds back (#2618).
+
+    Mirrors ``next_ticket`` below the WIP cap: the shared order minus live
+    claims, every one refused by ``domain_entry_allowed``. Anything else —
+    at the cap, nothing unclaimed, or anything allowed — reads as no
+    domain-cap stop, so begin never names the cap for another brake's work.
+    """
+    if at_capacity(items, now, pr_facts=pr_facts):
+        return []
+    claimed = {item.ref for item in in_motion(items, now, pr_facts=pr_facts)}
+    unclaimed = [item for item in ordered if item.ref not in claimed]
+    if not unclaimed:
+        return []
+    if any(domain_entry_allowed(items, item) for item in unclaimed):
+        return []
+    return [item for item in unclaimed if not domain_entry_allowed(items, item)]
+
+
+def _domain_cap_summary(
+    items: Sequence[Item], refused: Sequence[Item],
+) -> str:
+    """Render the domain-cap stop explanation (#2618)."""
+    by_ref = {item.ref: item for item in items}
+    counts = domain_slot_counts(items)
+    domains = sorted({
+        str(effective_domain(ticket, by_ref) or "unknown")
+        for ticket in refused
+    })
+    detail = ", ".join(
+        "{} ({}/{})".format(domain, counts.get(domain, 0), DOMAIN_SLOTS)
+        for domain in domains
+    )
+    noun = "ticket" if len(refused) == 1 else "tickets"
+    return (
+        "domain cap holds {} startable {} ({}) — "
+        "in-flight work finishes first".format(len(refused), noun, detail)
+    )
+
+
 def _turn_since(item: Item) -> datetime:
     """When a turn candidate started waiting: the queue's own clock."""
     return (question_since(item) or item.status_since or item.created_at
@@ -23798,14 +23843,22 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
                 out["withheld"] = withheld
             if frozen:
                 out["freeze_withheld"] = frozen
+            # A full domain holds startable entries back while its in-flight
+            # work finishes: that is a full queue under a cap, not an empty
+            # one, so it names the cap below and never records queue-empty
+            # (#2618).
+            domain_held = _domain_cap_refused(
+                items, startable_order, now, pr_facts=pr_facts)
             # Empty means nothing can start because the work is done or is
             # waiting on someone else. The lane's own brakes holding work it
             # has not implemented, the WIP cap, a backoff, readiness, the
-            # freeze or an earlier stop, are not an empty queue (#1320).
+            # freeze, the domain cap or an earlier stop, are not an empty
+            # queue (#1320).
             # A claim in motion alone is not a brake below the cap.
             queue_empty = not (
                 out.get("why") or out.get("backed_off") or withheld
-                or frozen or at_capacity(items, now, pr_facts=pr_facts))
+                or frozen or domain_held
+                or at_capacity(items, now, pr_facts=pr_facts))
             if out.get("why"):
                 why = str(out["why"])
             elif holder is not None:
@@ -23819,6 +23872,10 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
             elif frozen:
                 why = "nothing — {}".format(
                     _freeze_withheld_summary(frozen)
+                )
+            elif domain_held:
+                why = "nothing — {}".format(
+                    _domain_cap_summary(items, domain_held)
                 )
             elif tier:
                 why = "nothing — no {} work waiting".format(tier)

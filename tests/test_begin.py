@@ -4845,3 +4845,94 @@ def test_skipped_outside_window_is_a_heartbeat_outcome():
     import heartbeat
 
     assert "skipped-outside-window" in heartbeat.OUTCOMES
+
+
+CC_REPO = "owner/command-center"
+CC_NO_PUSH_AT = "2026-10-12T01:19:00Z"
+
+
+def _cc_project(number, status, klass="Improve"):
+    return funnel.Item(
+        repo=CC_REPO,
+        number=number,
+        title="Project {}".format(number),
+        url="https://github.com/{}/issues/{}".format(CC_REPO, number),
+        state="OPEN",
+        status=status,
+        klass=klass,
+        origin="agent",
+        risk="standard",
+        needs="none",
+        children_total=1,
+    )
+
+
+def _cc_ticket(number, parent):
+    return funnel.Item(
+        repo=CC_REPO,
+        number=number,
+        title="Ticket {}".format(number),
+        url="https://github.com/{}/issues/{}".format(CC_REPO, number),
+        state="OPEN",
+        body="Risk: standard",
+        origin="agent",
+        risk="standard",
+        needs="none",
+        parent=parent.ref,
+        item_id="item-{}".format(number),
+    )
+
+
+def _cc_no_push_row(ticket_number, head):
+    return {
+        "number": 2500 + ticket_number,
+        "state": "OPEN",
+        "url": "https://github.com/{}/pull/{}".format(
+            CC_REPO, 2500 + ticket_number),
+        "headRefName": "ticket/{}".format(ticket_number),
+        "headRefOid": head,
+        "mergeable": "MERGEABLE",
+        "mergeStateStatus": "CLEAN",
+        "isCrossRepository": False,
+        "author": {"login": "nateprich"},
+        "body": "Evidence\n\n{}".format(
+            funnel.render_no_push_finish_marker(head, CC_NO_PUSH_AT)),
+        "verdict": None,
+    }
+
+
+def test_domain_cap_stop_names_the_cap_not_an_empty_queue(
+        monkeypatch, capsys):
+    """Two held command-center slots refuse startable entries: begin names
+    the domain cap instead of reporting no standard work waiting, and
+    records no queue-empty (#2618)."""
+    events = _capture_events(monkeypatch)
+    items = []
+    pr_facts = {}
+    for project_number, head in (
+            (10, "a" * 40), (20, "b" * 40)):
+        project = _cc_project(project_number, "Building")
+        ticket = _cc_ticket(project_number + 1, project)
+        items.extend((project, ticket))
+        pr_facts[ticket.ref] = _cc_no_push_row(ticket.number, head)
+    waiters = []
+    for project_number in (30, 40):
+        project = _cc_project(project_number, "Ready")
+        ticket = _cc_ticket(project_number + 1, project)
+        items.extend((project, ticket))
+        waiters.append(ticket.ref)
+
+    assert funnel.domain_slot_counts(items) == {"command-center": 2}
+
+    result, _ = _implementing_begin(
+        monkeypatch, capsys, items, pr_facts=pr_facts)
+
+    assert result["do"] == "stop"
+    assert "domain cap" in result["why"]
+    assert "work waiting" not in result["why"]
+    assert "queue" not in result
+    assert not [event for event in events
+                if event[3].get("queue") == "empty"]
+    gate = funnel.no_push_reoffer_withheld(items, pr_facts)
+    assert {i.ref for i in funnel.startable(items, awaiting_review=gate)
+            } == set(waiters)

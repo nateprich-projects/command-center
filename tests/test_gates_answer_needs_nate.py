@@ -5,6 +5,22 @@ plan whose question is not a Gates question carries no `- Gates:` line and
 `answered_gates_body` refused it with `PlanWriteRefused`. The legacy
 `- Gates:` write is unchanged (a thin adapter); a body with no Gates line
 but one `## Needs Nate` question is answered in that section instead.
+
+Premise verification (#2599, first Do clause, recorded here):
+- Current Shaped bodies carry the open question under `## Needs Nate`:
+  confirmed from the shaper itself — `engine/shape.py:render_plan`
+  renders only the Needs Nate categories with open questions, so a
+  Scope-open plan carries `- Scope and priority: ...` under
+  `## Needs Nate` with no `- Gates:` line. Pinned by
+  `test_premise_shaper_renders_single_non_gates_question` below, which
+  renders through `shape.validate_answer`/`shape.render_plan` and reads
+  the result back with `funnel.open_needs_nate_categories`. The
+  `CURRENT` fixture mirrors that shape for the #2547 class of bodies
+  (Run-keeper git maintenance settings,
+  nateprich-projects/command-center#2547); the remote #2547 body itself
+  was not re-fetched in this checkout.
+- `answered_gates_body` and `parse_gates_answer` exist in `funnel.py`:
+  confirmed callable in `test_premise_gates_seams_exist`.
 """
 
 from __future__ import annotations
@@ -18,6 +34,7 @@ import pytest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 import funnel  # noqa: E402
+from engine import shape  # noqa: E402
 
 
 AT = datetime(2026, 10, 13, 12, 0, 0, tzinfo=timezone.utc)
@@ -68,6 +85,42 @@ Roll out the worker to both repos.
 def written_current(body=CURRENT, answer=ANSWER):
     return funnel.answered_gates_body(
         body, answer, DECIDER, at=AT, run="answer-run", agent="muse")
+
+
+# --- premise verification: the ticket's verify-first clause ---
+
+
+def _scope_open_answer():
+    return {
+        "decided_from_precedent": [],
+        "decided_by_agent": [],
+        "needs_nate": {
+            "exposure": None,
+            "gates": None,
+            "scope": ["Should the rollout cover both repos?"],
+            "preference": None,
+        },
+        "proposed_class": "Maintenance",
+        "plan_markdown": "# Rollout plan\n\nRoll out the worker.\n",
+        "escalated_risk": [],
+        "depends_on": [],
+        "premises": [],
+    }
+
+
+def test_premise_shaper_renders_single_non_gates_question():
+    rendered = shape.render_plan(
+        shape.validate_answer(_scope_open_answer()))
+
+    assert "## Needs Nate" in rendered
+    assert "- Scope and priority: Should the rollout cover both repos?" in rendered
+    assert "- Gates:" not in rendered
+    assert funnel.open_needs_nate_categories(rendered) == frozenset({"scope"})
+
+
+def test_premise_gates_seams_exist():
+    assert callable(funnel.answered_gates_body)
+    assert callable(funnel.parse_gates_answer)
 
 
 # --- the accept clause: the current format answers with no hand-edit ---

@@ -13630,93 +13630,38 @@ def _load_begin_items(
     ``shape_issue`` adds the idea's comment page to the first request only,
     exactly as the full load adds it to its first page (#1625).
     """
-    global _PROJECT_ITEM_PAGE_COUNT, _PROJECT_ITEM_ROW_COUNT
-    paging = [alias for alias, _query in BEGIN_ITEM_CONNECTIONS]
-    cursors: Dict[str, str] = {}
-    seen_cursors: Dict[str, Set[str]] = {alias: set() for alias in paging}
     kept: Dict[str, Item] = {}
     open_rows = 0
     items: List[Item] = []
-    shape_field = (
-        _shape_issue_comments_field(*shape_issue)
-        if shape_issue is not None else ""
-    )
     shape_comments: Optional[List[Dict[str, object]]] = None
-    first_request = True
     project_started = time.perf_counter() if timings is not None else None
     block_comment_seconds = 0.0
     try:
-        while paging:
-            page_sizes = _begin_listing_page_sizes(
-                paging, _ACTIVE_BEGIN_ENVELOPE
-            )
-            variables: Dict[str, object] = {
-                "login": PROJECT_OWNER, "number": PROJECT_NUMBER,
-            }
-            for alias in paging:
-                if alias in cursors:
-                    variables[alias + "Cursor"] = cursors[alias]
-            _PROJECT_ITEM_PAGE_COUNT += 1
-            response = gh_graphql(
-                _begin_item_query(
-                    paging,
-                    shape_field if first_request else "",
-                    minimal_startable=minimal_startable,
-                    page_sizes=page_sizes,
-                ),
-                **variables,
-            )
-            if shape_issue is not None and first_request:
-                shape_comments = _shape_issue_comments_from_response(
-                    response, *shape_issue
-                )
-            first_request = False
-            project = _begin_project_from_response(response)
-            still_paging: List[str] = []
-            listed_rows = 0
-            for alias in paging:
-                nodes, has_next, cursor = _begin_connection_page(
-                    project, alias
-                )
-                _PROJECT_ITEM_ROW_COUNT += len(nodes)
-                listed_rows += len(nodes)
-                for node in nodes:
-                    try:
-                        item = _from_node(node)
-                    except (KeyError, TypeError, AttributeError) as exc:
-                        raise GitHubError(
-                            "begin Project connection {} returned a "
-                            "malformed row".format(alias)
-                        ) from exc
-                    if item is None:
-                        continue  # a draft issue, or a pull request
-                    # The row's own `state` is live; the filter index is
-                    # not. On 2026-09-26 `is:open` still returned #1466 a
-                    # day after it closed. So an open row is kept whichever
-                    # connection returned it (a reopened issue can still be
-                    # indexed as closed), and a closed row is kept only when
-                    # some closed-set predicate holds for it. The filter
-                    # narrows; the predicates decide.
-                    if item.state == "OPEN":
-                        open_rows += 1
-                    elif not any(
-                        predicate(item)
-                        for predicate in BEGIN_ITEM_PREDICATES.values()
-                    ):
-                        continue
-                    kept.setdefault(item.item_id or item.ref, item)
-                if has_next:
-                    if cursor in seen_cursors[alias]:
-                        raise GitHubError(
-                            "begin Project connection {} did not advance"
-                            .format(alias)
-                        )
-                    seen_cursors[alias].add(cursor)
-                    cursors[alias] = cursor
-                    still_paging.append(alias)
+        # Each connection is its own filtered REST read on the core pool
+        # (#2417). ``minimal_startable`` no longer narrows the row: a REST
+        # row carries every board field and the body at no extra cost.
+        for alias, query in BEGIN_ITEM_CONNECTIONS:
+            rows = load_rest_project_items(REST_BOARD_FIELD_IDS, query=query)
             if _ACTIVE_BEGIN_ENVELOPE is not None:
-                _ACTIVE_BEGIN_ENVELOPE.consume(listed_items=listed_rows)
-            paging = still_paging
+                _ACTIVE_BEGIN_ENVELOPE.consume(listed_items=len(rows))
+            for item in rows:
+                # The row's own `state` is live; the filter index is
+                # not. On 2026-09-26 `is:open` still returned #1466 a
+                # day after it closed. So an open row is kept whichever
+                # connection returned it (a reopened issue can still be
+                # indexed as closed), and a closed row is kept only when
+                # some closed-set predicate holds for it. The filter
+                # narrows; the predicates decide.
+                if item.state == "OPEN":
+                    open_rows += 1
+                elif not any(
+                    predicate(item)
+                    for predicate in BEGIN_ITEM_PREDICATES.values()
+                ):
+                    continue
+                kept.setdefault(item.item_id or item.ref, item)
+        if shape_issue is not None:
+            shape_comments = read_issue_comments(*shape_issue)
         if require_open and open_rows == 0:
             raise GitHubError(
                 "begin Project connection open returned no items"
@@ -13838,74 +13783,23 @@ def _begin_anchor_refs(items: Sequence[Item], members: Set[str]) -> List[str]:
 def _load_project_items_by_refs(
     refs: Sequence[str], node_fields: str = ITEM_NODE_FIELDS,
 ) -> Dict[str, Item]:
-    """Fetch Project items through one exact-ref connection per issue."""
-    global _PROJECT_ITEM_PAGE_COUNT, _PROJECT_ITEM_ROW_COUNT
+    """Fetch Project items through one exact-ref REST read per issue."""
     found: Dict[str, Item] = {}
-    start = 0
-    while start < len(refs):
-        batch_size = min(
-            PROJECT_REF_ALIASES_PER_REQUEST, len(refs) - start
+    for ref in refs:
+        rows = load_rest_project_items(
+            REST_BOARD_FIELD_IDS, query=_project_item_ref_filter(ref)
         )
-        page_size = PROJECT_REF_PAGE_SIZE
         if _ACTIVE_BEGIN_ENVELOPE is not None:
-            capacity = (
-                _ACTIVE_BEGIN_ENVELOPE.remaining
-                - BEGIN_DETAIL_WORK_RESERVE - 1
-            )
-            if capacity < 1:
-                raise BeginCannotComplete()
-            batch_size = min(batch_size, capacity)
-            page_size = min(
-                PROJECT_REF_PAGE_SIZE,
-                max(1, capacity // batch_size),
-            )
-        batch = refs[start:start + batch_size]
-        _PROJECT_ITEM_PAGE_COUNT += 1
-        response = gh_graphql(
-            _project_item_refs_query(
-                batch, node_fields=node_fields, page_size=page_size
-            ),
-            login=PROJECT_OWNER, number=PROJECT_NUMBER,
-        )
-        project = _begin_project_from_response(response)
-        listed_rows = 0
-        pages = []
-        for index, ref in enumerate(batch):
-            alias = "r{}".format(index)
-            nodes, has_next, _cursor = _begin_connection_page(
-                project, alias
-            )
-            _PROJECT_ITEM_ROW_COUNT += len(nodes)
-            listed_rows += len(nodes)
-            pages.append((ref, nodes, has_next))
-        if _ACTIVE_BEGIN_ENVELOPE is not None:
-            _ACTIVE_BEGIN_ENVELOPE.consume(listed_items=listed_rows)
-        for ref, nodes, has_next in pages:
-            match = None
-            for node in nodes:
-                try:
-                    item = _from_node(node)
-                except (KeyError, TypeError, AttributeError) as exc:
-                    raise GitHubError(
-                        "Project ref {} returned a malformed row".format(ref)
-                    ) from exc
-                if item is not None and item.ref == ref:
-                    match = item
-                    break
-            if match is None:
-                if has_next:
-                    raise GitHubError(
-                        "Project ref {} matched more than one page "
-                        "without the issue itself".format(ref)
-                    )
-                continue
-            if match.state == "OPEN" and (
-                match.is_blocked
-                or match.needs in ("agent", "external-event")
-            ):
-                _load_block_comment(match)
-            found[ref] = match
-        start += len(batch)
+            _ACTIVE_BEGIN_ENVELOPE.consume(listed_items=len(rows))
+        match = next((item for item in rows if item.ref == ref), None)
+        if match is None:
+            continue
+        if match.state == "OPEN" and (
+            match.is_blocked
+            or match.needs in ("agent", "external-event")
+        ):
+            _load_block_comment(match)
+        found[ref] = match
     return found
 
 
@@ -13940,44 +13834,15 @@ def load_regression_items(
     member_repo_names: Optional[Sequence[str]] = None,
 ) -> List[Item]:
     """Load the regression set through #1607's filtered Project connection."""
-    global _PROJECT_ITEM_PAGE_COUNT, _PROJECT_ITEM_ROW_COUNT
     members = set(
         member_repo_names if member_repo_names is not None else member_repos()
     )
-    cursors: Dict[str, str] = {}
-    seen_cursors: Set[str] = set()
     kept: Dict[str, Item] = {}
-    while True:
-        variables: Dict[str, object] = {
-            "login": PROJECT_OWNER, "number": PROJECT_NUMBER,
-        }
-        if "regress" in cursors:
-            variables["regressCursor"] = cursors["regress"]
-        _PROJECT_ITEM_PAGE_COUNT += 1
-        response = gh_graphql(_begin_item_query(["regress"]), **variables)
-        project = _begin_project_from_response(response)
-        nodes, has_next, cursor = _begin_connection_page(project, "regress")
-        _PROJECT_ITEM_ROW_COUNT += len(nodes)
-        for node in nodes:
-            try:
-                item = _from_node(node)
-            except (KeyError, TypeError, AttributeError) as exc:
-                raise GitHubError(
-                    "begin Project connection regress returned a malformed "
-                    "row"
-                ) from exc
-            if (
-                item is not None
-                and item.repo in members
-                and _is_regression_item(item)
-            ):
-                kept.setdefault(item.item_id or item.ref, item)
-        if not has_next:
-            break
-        if cursor in seen_cursors:
-            raise GitHubError("begin Project connection regress did not advance")
-        seen_cursors.add(cursor)
-        cursors["regress"] = cursor
+    for item in load_rest_project_items(
+        REST_BOARD_FIELD_IDS, query=dict(BEGIN_ITEM_CONNECTIONS)["regress"]
+    ):
+        if item.repo in members and _is_regression_item(item):
+            kept.setdefault(item.item_id or item.ref, item)
     return list(kept.values())
 
 
@@ -13994,7 +13859,6 @@ def _load_begin_anchor_items(
     or a connection with more rows than one page and no exact match on it,
     raises rather than reading as absent.
     """
-    global _PROJECT_ITEM_PAGE_COUNT, _PROJECT_ITEM_ROW_COUNT
     started = time.perf_counter() if timings is not None else None
     try:
         refs = _begin_anchor_refs(items, members)
@@ -14221,58 +14085,31 @@ def load_items(
             startable_agent=startable_agent if include_startable else None,
         )
     items: List[Item] = []
-    cursor = None
     shape_comments: Optional[List[Dict[str, object]]] = None
     project_started = time.perf_counter() if timings is not None else None
     block_comment_seconds = 0.0
     try:
-        while True:
-            variables = {"login": PROJECT_OWNER, "number": PROJECT_NUMBER}
-            if cursor:
-                variables["cursor"] = cursor
-            _PROJECT_ITEM_PAGE_COUNT += 1
-            query = ITEM_QUERY
-            if shape_issue is not None and cursor is None:
-                query = _item_query_with_shape_comments(*shape_issue)
-            response = gh_graphql(query, **variables)
-            if shape_issue is not None and cursor is None:
-                shape_comments = _shape_issue_comments_from_response(
-                    response, *shape_issue
-                )
-            project = response["user"]["projectV2"]
-            if project is None:
-                raise GitHubError(
-                    "Project {}/{} not found or not visible".format(
-                        PROJECT_OWNER, PROJECT_NUMBER
+        # The board is read over REST on the core pool (#2417); GraphQL is
+        # left to the time-at-gate history read alone.
+        for item in load_rest_project_items(REST_BOARD_FIELD_IDS):
+            # Membership is the topic. An item whose repo has not opted in
+            # is outside the funnel even though it sits in the Project.
+            if item.repo not in members:
+                continue
+            if item.state == "OPEN" and (
+                item.is_blocked
+                or item.needs in ("agent", "external-event")
+            ):
+                comment_started = time.perf_counter()
+                try:
+                    _load_block_comment(item)
+                finally:
+                    block_comment_seconds += (
+                        time.perf_counter() - comment_started
                     )
-                )
-            page = project["items"]
-            nodes = page["nodes"]
-            _PROJECT_ITEM_ROW_COUNT += len(nodes)
-            for node in nodes:
-                item = _from_node(node)
-                # Membership is the topic. An item whose repo has not opted in
-                # is outside the funnel even though it sits in the Project.
-                if item and item.repo in members:
-                    # Dependencies are already on the item: `_from_node` reads
-                    # them from `blockedBy` in the Project query. They used to
-                    # be fetched here instead, one REST call per open ticket —
-                    # do not restore a per-item dependency read in this loop.
-                    if item.state == "OPEN" and (
-                        item.is_blocked
-                        or item.needs in ("agent", "external-event")
-                    ):
-                        comment_started = time.perf_counter()
-                        try:
-                            _load_block_comment(item)
-                        finally:
-                            block_comment_seconds += (
-                                time.perf_counter() - comment_started
-                            )
-                    items.append(item)
-            if not page["pageInfo"]["hasNextPage"]:
-                break
-            cursor = page["pageInfo"]["endCursor"]
+            items.append(item)
+        if shape_issue is not None:
+            shape_comments = read_issue_comments(*shape_issue)
     finally:
         if project_started is not None:
             project_elapsed = max(
@@ -28540,9 +28377,13 @@ def load_rest_project_items(
     field_ids: Sequence[str],
     *,
     page_size: int = PROJECT_ITEM_PAGE_SIZE,
+    query: Optional[str] = None,
     _request=None,
 ) -> List[Item]:
     """Load every Project item row over REST, with bodies and field values.
+
+    ``query`` is a Project filter (the GraphQL ``items(query:)`` syntax), sent
+    as ``q``; it narrows the rows the route returns, never widens them.
 
     Pages ``REST_PROJECT_ITEMS_PATH`` with ``?fields=<ids>`` until the
     response carries no next cursor. Each page costs one REST core-pool
@@ -28551,6 +28392,7 @@ def load_rest_project_items(
     ``_request`` takes an endpoint and returns parsed JSON; tests use it to
     replay recorded payloads, production uses ``_rest_get_json``.
     """
+    global _PROJECT_ITEM_PAGE_COUNT, _PROJECT_ITEM_ROW_COUNT
     ids = [entry for entry in field_ids if isinstance(entry, str) and entry]
     if not ids:
         raise ValueError("load_rest_project_items needs field ids")
@@ -28565,6 +28407,8 @@ def load_rest_project_items(
     base = "{}?per_page={}&fields={}".format(
         REST_PROJECT_ITEMS_PATH, min(page_size, REST_ITEMS_PAGE_SIZE),
         ",".join(ids))
+    if query:
+        base += "&q={}".format(urllib.parse.quote(query, safe=""))
     items: List[Item] = []
     cursor: Optional[str] = None
     seen_cursors: Set[str] = set()
@@ -28572,8 +28416,10 @@ def load_rest_project_items(
         endpoint = base
         if cursor:
             endpoint += "&after={}".format(urllib.parse.quote(cursor, safe=""))
+        _PROJECT_ITEM_PAGE_COUNT += 1
         payload = request(endpoint)
         rows, next_cursor = _rest_items_page(payload)
+        _PROJECT_ITEM_ROW_COUNT += len(rows)
         for row in rows:
             _attach_rest_blockers(row, request)
             item = rest_item_to_item(row)

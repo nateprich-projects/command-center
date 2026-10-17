@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import base64
 import contextlib
 import contextvars
 import copy
@@ -40,6 +41,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.parse
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
 from typing import (IO, Any, Callable, Collection, Dict, FrozenSet, Iterable,
@@ -11646,124 +11648,6 @@ query($cursor: String) {
 PROJECT_ITEM_PAGE_SIZE = 100
 PROJECT_ITEM_PREVIOUS_PAGE_SIZE = 50
 
-# The full-board selection every Project item row carries. Begin uses compact
-# projections below, but ``_from_node`` accepts both shapes.
-ITEM_NODE_FIELDS = """\
-          id
-          lock: fieldValueByName(name: "In motion since") {
-            ... on ProjectV2ItemFieldTextValue { text }
-          }
-          status: fieldValueByName(name: "Status") {
-            ... on ProjectV2ItemFieldSingleSelectValue { name updatedAt }
-          }
-          class: fieldValueByName(name: "Class") {
-            ... on ProjectV2ItemFieldSingleSelectValue { name }
-          }
-          origin: fieldValueByName(name: "Origin") {
-            ... on ProjectV2ItemFieldSingleSelectValue { name }
-          }
-          risk: fieldValueByName(name: "Risk") {
-            ... on ProjectV2ItemFieldSingleSelectValue { name }
-          }
-          pinned: fieldValueByName(name: "Pinned") {
-            ... on ProjectV2ItemFieldSingleSelectValue { name }
-          }
-          needs: fieldValueByName(name: "Needs") {
-            ... on ProjectV2ItemFieldSingleSelectValue { name }
-          }
-          domain: fieldValueByName(name: "Domain") {
-            ... on ProjectV2ItemFieldSingleSelectValue { name }
-          }
-          content {
-            ... on Issue {
-              number title url body state stateReason createdAt closedAt
-              repository { nameWithOwner }
-              labels(first: 25) { nodes { name } }
-              assignees(first: 10) { nodes { login } }
-              parent { number repository { nameWithOwner } }
-              subIssuesSummary { total completed }
-              blockedBy(first: 50) {
-                totalCount
-                nodes { number state stateReason repository { nameWithOwner } }
-              }
-            }
-          }
-"""
-
-# Closed rows and anchors that the begin path needs for reconciliation keep
-# their normal routing and terminal fields, but never carry issue bodies.
-# The full-board query still uses ITEM_NODE_FIELDS.
-BEGIN_ITEM_NODE_FIELDS = ITEM_NODE_FIELDS.replace(
-    "number title url body state stateReason",
-    "number title url state stateReason",
-)
-
-# Shared queue/begin startability scan. Keep this Project list projection to
-# the fields the startable predicate, parent checks, ordering, and tier routing
-# need. Bodies and timeline/child history are deliberately absent: the
-# selected ticket's body and history are fetched after its claim.
-# The response aliases name the shared listing contract: startable issue
-# facts, Status, Class, gate (Needs), claim, and canonical ticket Risk. Pinned
-# is also read for the settled ordering rule. Origin does not route ticket
-# work, but begin and merge decide a finished project's close from this view,
-# and without it every Implement project read as Nate's and never closed (#2147).
-# Domain is read for the Fantasy-GM explicit-domain requirement (#2426).
-STARTABLE_ITEM_NODE_FIELDS = """\
-          id
-          claim: fieldValueByName(name: "In motion since") {
-            ... on ProjectV2ItemFieldTextValue { text }
-          }
-          status: fieldValueByName(name: "Status") {
-            ... on ProjectV2ItemFieldSingleSelectValue { name updatedAt }
-          }
-          class: fieldValueByName(name: "Class") {
-            ... on ProjectV2ItemFieldSingleSelectValue { name }
-          }
-          origin: fieldValueByName(name: "Origin") {
-            ... on ProjectV2ItemFieldSingleSelectValue { name }
-          }
-          gate: fieldValueByName(name: "Needs") {
-            ... on ProjectV2ItemFieldSingleSelectValue { name }
-          }
-          risk: fieldValueByName(name: "Risk") {
-            ... on ProjectV2ItemFieldSingleSelectValue { name }
-          }
-          pinned: fieldValueByName(name: "Pinned") {
-            ... on ProjectV2ItemFieldSingleSelectValue { name }
-          }
-          domain: fieldValueByName(name: "Domain") {
-            ... on ProjectV2ItemFieldSingleSelectValue { name }
-          }
-          startable: content {
-            ... on Issue {
-              number title url state stateReason createdAt closedAt
-              repository { nameWithOwner }
-              labels(first: 25) { nodes { name } }
-              parent { number repository { nameWithOwner } }
-              subIssuesSummary { total completed }
-              blockedBy(first: 50) {
-                totalCount
-                nodes { number state stateReason repository { nameWithOwner } }
-              }
-            }
-          }
-"""
-
-ITEM_QUERY = """
-query($login: String!, $number: Int!, $cursor: String) {
-  rateLimit { cost remaining resetAt }
-  user(login: $login) {
-    projectV2(number: $number) {
-      items(first: %d, after: $cursor) {
-        pageInfo { hasNextPage endCursor }
-        nodes {
-%s        }
-      }
-    }
-  }
-}
-""" % (PROJECT_ITEM_PAGE_SIZE, ITEM_NODE_FIELDS)
-
 # The begin load (#1591): every open item, plus only the closed items a begin
 # consumer reads, each set as its own server-side filtered connection. Each
 # filter stands for one Python predicate in ``BEGIN_ITEM_PREDICATES``; the
@@ -11783,86 +11667,11 @@ BEGIN_ITEM_CONNECTIONS: Tuple[Tuple[str, str], ...] = (
 )
 
 
-def _begin_item_query(
-    aliases: Sequence[str], extra_field: str = "",
-    minimal_startable: bool = False,
-    page_sizes: Optional[Mapping[str, int]] = None,
-) -> str:
-    """One aliased Project query carrying only the named begin connections.
-
-    Each connection has its own cursor variable. A request declares only the
-    aliases still paging, because GraphQL refuses a declared variable that the
-    document does not use. The filter strings are JSON-quoted, which is also a
-    valid GraphQL string literal for them. ``extra_field`` is a top-level
-    selection placed beside ``user``: the shape lane's ``shapeIssue`` comment
-    page rides the first request this way (#1625).
-    """
-    filters = dict(BEGIN_ITEM_CONNECTIONS)
-    unknown = [alias for alias in aliases if alias not in filters]
-    if unknown or not aliases:
-        raise ValueError(
-            "unknown begin item connection(s): {}".format(
-                ", ".join(unknown) or "none"
-            )
-        )
-    declarations = "".join(
-        ", ${}Cursor: String".format(alias) for alias in aliases
-    )
-    connections = "".join(
-        "      {alias}: items(first: {size}, after: ${alias}Cursor, "
-        "query: {query}) {{\n"
-        "        pageInfo {{ hasNextPage endCursor }}\n"
-        "        nodes {{ ...{fragment} }}\n"
-        "      }}\n".format(
-            alias=alias,
-            size=(page_sizes or {}).get(alias, PROJECT_ITEM_PAGE_SIZE),
-            query=json.dumps(filters[alias]),
-            fragment=(
-                "StartableItem"
-                if minimal_startable and alias == "open"
-                else "BeginItem"
-            ),
-        )
-        for alias in aliases
-    )
-    fragments = []
-    if any(not (minimal_startable and alias == "open") for alias in aliases):
-        fragments.append(
-            "\nfragment BeginItem on ProjectV2Item {{\n{fields}}}\n"
-            .format(fields=BEGIN_ITEM_NODE_FIELDS)
-        )
-    if minimal_startable and "open" in aliases:
-        fragments.append(
-            "\nfragment StartableItem on ProjectV2Item {{\n{fields}}}\n"
-            .format(fields=STARTABLE_ITEM_NODE_FIELDS)
-        )
-    return (
-        "\nquery($login: String!, $number: Int!{declarations}) {{\n"
-        "  rateLimit {{ cost remaining resetAt }}\n"
-        "  user(login: $login) {{\n"
-        "    projectV2(number: $number) {{\n"
-        "{connections}"
-        "    }}\n"
-        "  }}\n"
-        "{extra}"
-        "}}\n"
-        "{fragments}"
-    ).format(
-        declarations=declarations, connections=connections,
-        fragments="".join(fragments), extra=extra_field,
-    )
-
-
-# Filtered Project item connections used by begin's anchors (#1591) and by
-# consumers that need a small exact set. The Project filter selects one issue
-# with ``repo:<owner>/<name> #<number>`` (measured 2026-09-26; two numbers in
-# one filter match nothing and ``number:`` is not a filter), so each ref is
-# its own aliased connection.
-# ``Issue.projectItems`` is not an option: it is empty for org-repo issues in
-# this user-owned Project (LEARNINGS.md, 2026-09-05). Each connection costs
-# about 3 points, like any other Project item connection.
-PROJECT_REF_PAGE_SIZE = 5
-PROJECT_REF_ALIASES_PER_REQUEST = 20
+# Exact-ref Project reads used by begin's anchors (#1591) and by consumers
+# that need a small exact set. The Project filter selects one issue with
+# ``repo:<owner>/<name> #<number>`` (measured 2026-09-26; two numbers in one
+# filter match nothing and ``number:`` is not a filter), so each ref is its
+# own filtered REST read.
 _PROJECT_ITEM_REF_RE = re.compile(r"^([\w.-]+/[\w.-]+)#([1-9][0-9]*)$")
 
 
@@ -11872,42 +11681,6 @@ def _project_item_ref_filter(ref: str) -> str:
     if match is None:
         raise ValueError("not an issue ref: {!r}".format(ref))
     return "repo:{} #{}".format(match.group(1), match.group(2))
-
-
-def _project_item_refs_query(
-    refs: Sequence[str], node_fields: str = ITEM_NODE_FIELDS,
-    page_size: int = PROJECT_REF_PAGE_SIZE,
-) -> str:
-    """One Project query with a filtered connection per ref, ``r0`` onward."""
-    if not refs or len(refs) > PROJECT_REF_ALIASES_PER_REQUEST:
-        raise ValueError(
-            "a Project ref query carries 1 to {} refs, not {}".format(
-                PROJECT_REF_ALIASES_PER_REQUEST, len(refs)
-            )
-        )
-    connections = "".join(
-        "      r{index}: items(first: {size}, query: {query}) {{\n"
-        "        pageInfo {{ hasNextPage endCursor }}\n"
-        "        nodes {{ ...ProjectRefItem }}\n"
-        "      }}\n".format(
-            index=index, size=page_size,
-            query=json.dumps(_project_item_ref_filter(ref)),
-        )
-        for index, ref in enumerate(refs)
-    )
-    return (
-        "\nquery($login: String!, $number: Int!) {{\n"
-        "  rateLimit {{ cost remaining resetAt }}\n"
-        "  user(login: $login) {{\n"
-        "    projectV2(number: $number) {{\n"
-        "{connections}"
-        "    }}\n"
-        "  }}\n"
-        "}}\n"
-        "\nfragment ProjectRefItem on ProjectV2Item {{\n"
-        "{fields}"
-        "}}\n"
-    ).format(connections=connections, fields=node_fields)
 
 
 SHAPE_ISSUE_COMMENTS_PAGE_QUERY = """
@@ -11944,15 +11717,6 @@ def _shape_issue_comments_field(repo: str, number: int) -> str:
         "    }}\n"
         "  }}\n"
     ).format(json.dumps(owner), json.dumps(name), number)
-
-
-def _item_query_with_shape_comments(repo: str, number: int) -> str:
-    """Add the target idea's first comment page to the Project item query."""
-    issue_field = "\n" + _shape_issue_comments_field(repo, number)
-    closing = ITEM_QUERY.rfind("\n}")
-    if closing < 0:
-        raise GitHubError("could not extend the Project item query")
-    return ITEM_QUERY[:closing] + issue_field + ITEM_QUERY[closing:]
 
 
 def _standalone_shape_issue_comments_query(repo: str, number: int) -> str:
@@ -12049,7 +11813,7 @@ BEGIN_DETAIL_TIMELINE_ITEMS_MAX = 60
 BEGIN_DETAIL_CHILD_ITEMS_MAX = 50
 BEGIN_DETAIL_MAX_SELECTED_ITEMS = 2
 BEGIN_DETAIL_HISTORY_FIELDS_PER_EVENT_MAX = 5
-BEGIN_DETAIL_BASE_FIELDS_PER_ITEM = 4  # id, content, body, timelineItems
+BEGIN_DETAIL_BASE_FIELDS_PER_ITEM = 5  # id, statusValue, content, body, timelineItems
 BEGIN_DETAIL_CHILD_FIELDS_PER_ITEM = 3  # id, content, subIssues
 BEGIN_DETAIL_CHILD_FIELDS_PER_CHILD = 2  # createdAt, closedAt
 BEGIN_DETAIL_FIELDS_PER_ITEM_MAX = (
@@ -12075,6 +11839,9 @@ query($ids: [ID!]!, $childIds: [ID!]!) {
   history: nodes(ids: $ids) {
     ... on ProjectV2Item {
       id
+      statusValue: fieldValueByName(name: "Status") {
+        ... on ProjectV2ItemFieldSingleSelectValue { updatedAt }
+      }
       content {
         ... on Issue {
           timelineItems(last: {timeline_max}, itemTypes: [PROJECT_V2_ITEM_STATUS_CHANGED_EVENT, LABELED_EVENT, UNLABELED_EVENT]) {
@@ -12124,6 +11891,9 @@ query($ids: [ID!]!) {
   nodes(ids: $ids) {
     ... on ProjectV2Item {
       id
+      statusValue: fieldValueByName(name: "Status") {
+        ... on ProjectV2ItemFieldSingleSelectValue { updatedAt }
+      }
       content {
         ... on Issue {
           timelineItems(last: {timeline_max}, itemTypes: [PROJECT_V2_ITEM_STATUS_CHANGED_EVENT, LABELED_EVENT, UNLABELED_EVENT]) {
@@ -13432,6 +13202,13 @@ def hydrate_item_details(
                 continue
             item = by_id.get(node.get("id"))
             content = node.get("content")
+            status_value = node.get("statusValue")
+            if (item is not None and item.status_updated_at is None
+                    and isinstance(status_value, dict)):
+                # The REST board row carries no Status write time; the
+                # history read supplies it as the no-event fallback (#1949).
+                item.status_updated_at = parse_time(
+                    status_value.get("updatedAt"))
             if item is not None and isinstance(content, dict):
                 if reads_body:
                     if "body" not in content:
@@ -13627,72 +13404,6 @@ BEGIN_ITEM_PREDICATES: Dict[str, Callable[[Item], bool]] = {
 }
 
 
-def _begin_listing_page_sizes(
-    aliases: Sequence[str], envelope: Optional[BeginWorkEnvelope],
-) -> Optional[Dict[str, int]]:
-    """Fit the next filtered Project page inside the shared work envelope."""
-    if envelope is None:
-        return None
-    # Reserve the selected ticket and optional decline-gate detail read before
-    # spending the envelope on Project rows. One unit is also reserved for the
-    # GraphQL request that will return this page.
-    capacity = envelope.remaining - BEGIN_DETAIL_WORK_RESERVE - 1
-    if capacity < len(aliases):
-        raise BeginCannotComplete()
-    base, extra = divmod(capacity, len(aliases))
-    return {
-        alias: min(
-            PROJECT_ITEM_PAGE_SIZE,
-            base + (1 if index < extra else 0),
-        )
-        for index, alias in enumerate(aliases)
-    }
-
-
-def _begin_project_from_response(response: object) -> dict:
-    user = response.get("user") if isinstance(response, dict) else None
-    if not isinstance(user, dict) or "projectV2" not in user:
-        raise GitHubError("begin Project item response was malformed")
-    project = user["projectV2"]
-    if project is None:
-        raise GitHubError(
-            "Project {}/{} not found or not visible".format(
-                PROJECT_OWNER, PROJECT_NUMBER
-            )
-        )
-    if not isinstance(project, dict):
-        raise GitHubError("begin Project item response was malformed")
-    return project
-
-
-def _begin_connection_page(
-    project: dict, alias: str,
-) -> Tuple[List[dict], bool, Optional[str]]:
-    """Read one alias's page, failing closed on anything incomplete."""
-    connection = project.get(alias)
-    nodes = connection.get("nodes") if isinstance(connection, dict) else None
-    page_info = (
-        connection.get("pageInfo") if isinstance(connection, dict) else None
-    )
-    if (
-        not isinstance(nodes, list)
-        or not all(isinstance(node, dict) for node in nodes)
-        or not isinstance(page_info, dict)
-        or not isinstance(page_info.get("hasNextPage"), bool)
-    ):
-        raise GitHubError(
-            "begin Project connection {} was malformed".format(alias)
-        )
-    has_next = page_info["hasNextPage"]
-    cursor = page_info.get("endCursor")
-    if has_next and (not isinstance(cursor, str) or not cursor):
-        raise GitHubError(
-            "begin Project connection {} has a next page but no cursor"
-            .format(alias)
-        )
-    return nodes, has_next, cursor if has_next else None
-
-
 def _attach_shape_comments(
     items: Sequence[Item],
     shape_issue: Tuple[str, int],
@@ -13717,102 +13428,47 @@ def _load_begin_items(
     minimal_startable: bool = True,
     require_open: bool = True,
 ) -> List[Item]:
-    """Page the filtered begin connections and return the member items.
+    """Read each filtered begin connection over REST; return member items.
 
-    Every connection pages on its own cursor; a request carries only the
-    connections that still have a next page. A row is kept once, by Project
-    item id, when the predicate its connection stands for holds.
+    Each connection is one ``q``-filtered REST read, paged on its own
+    cursor. A row is kept once, by Project item id, when it is open or the
+    predicate some connection stands for holds.
 
-    ``shape_issue`` adds the idea's comment page to the first request only,
-    exactly as the full load adds it to its first page (#1625).
+    ``shape_issue`` also reads the idea's comment thread, as the full load
+    does (#1625).
     """
-    global _PROJECT_ITEM_PAGE_COUNT, _PROJECT_ITEM_ROW_COUNT
-    paging = [alias for alias, _query in BEGIN_ITEM_CONNECTIONS]
-    cursors: Dict[str, str] = {}
-    seen_cursors: Dict[str, Set[str]] = {alias: set() for alias in paging}
     kept: Dict[str, Item] = {}
     open_rows = 0
     items: List[Item] = []
-    shape_field = (
-        _shape_issue_comments_field(*shape_issue)
-        if shape_issue is not None else ""
-    )
     shape_comments: Optional[List[Dict[str, object]]] = None
-    first_request = True
     project_started = time.perf_counter() if timings is not None else None
     block_comment_seconds = 0.0
     try:
-        while paging:
-            page_sizes = _begin_listing_page_sizes(
-                paging, _ACTIVE_BEGIN_ENVELOPE
-            )
-            variables: Dict[str, object] = {
-                "login": PROJECT_OWNER, "number": PROJECT_NUMBER,
-            }
-            for alias in paging:
-                if alias in cursors:
-                    variables[alias + "Cursor"] = cursors[alias]
-            _PROJECT_ITEM_PAGE_COUNT += 1
-            response = gh_graphql(
-                _begin_item_query(
-                    paging,
-                    shape_field if first_request else "",
-                    minimal_startable=minimal_startable,
-                    page_sizes=page_sizes,
-                ),
-                **variables,
-            )
-            if shape_issue is not None and first_request:
-                shape_comments = _shape_issue_comments_from_response(
-                    response, *shape_issue
-                )
-            first_request = False
-            project = _begin_project_from_response(response)
-            still_paging: List[str] = []
-            listed_rows = 0
-            for alias in paging:
-                nodes, has_next, cursor = _begin_connection_page(
-                    project, alias
-                )
-                _PROJECT_ITEM_ROW_COUNT += len(nodes)
-                listed_rows += len(nodes)
-                for node in nodes:
-                    try:
-                        item = _from_node(node)
-                    except (KeyError, TypeError, AttributeError) as exc:
-                        raise GitHubError(
-                            "begin Project connection {} returned a "
-                            "malformed row".format(alias)
-                        ) from exc
-                    if item is None:
-                        continue  # a draft issue, or a pull request
-                    # The row's own `state` is live; the filter index is
-                    # not. On 2026-09-26 `is:open` still returned #1466 a
-                    # day after it closed. So an open row is kept whichever
-                    # connection returned it (a reopened issue can still be
-                    # indexed as closed), and a closed row is kept only when
-                    # some closed-set predicate holds for it. The filter
-                    # narrows; the predicates decide.
-                    if item.state == "OPEN":
-                        open_rows += 1
-                    elif not any(
-                        predicate(item)
-                        for predicate in BEGIN_ITEM_PREDICATES.values()
-                    ):
-                        continue
-                    kept.setdefault(item.item_id or item.ref, item)
-                if has_next:
-                    if cursor in seen_cursors[alias]:
-                        raise GitHubError(
-                            "begin Project connection {} did not advance"
-                            .format(alias)
-                        )
-                    seen_cursors[alias].add(cursor)
-                    cursors[alias] = cursor
-                    still_paging.append(alias)
+        # Each connection is its own filtered REST read on the core pool
+        # (#2417). ``minimal_startable`` no longer narrows the row: a REST
+        # row carries every board field and the body at no extra cost.
+        for alias, query in BEGIN_ITEM_CONNECTIONS:
+            rows = load_rest_project_items(REST_BOARD_FIELD_IDS, query=query)
             if _ACTIVE_BEGIN_ENVELOPE is not None:
-                _ACTIVE_BEGIN_ENVELOPE.consume(listed_items=listed_rows)
-            paging = still_paging
+                _ACTIVE_BEGIN_ENVELOPE.consume(listed_items=len(rows))
+            for item in rows:
+                # The row's own `state` is live; the filter index is
+                # not. On 2026-09-26 `is:open` still returned #1466 a
+                # day after it closed. So an open row is kept whichever
+                # connection returned it (a reopened issue can still be
+                # indexed as closed), and a closed row is kept only when
+                # some closed-set predicate holds for it. The filter
+                # narrows; the predicates decide.
+                if item.state == "OPEN":
+                    open_rows += 1
+                elif not any(
+                    predicate(item)
+                    for predicate in BEGIN_ITEM_PREDICATES.values()
+                ):
+                    continue
+                kept.setdefault(item.item_id or item.ref, item)
+        if shape_issue is not None:
+            shape_comments = read_issue_comments(*shape_issue)
         if require_open and open_rows == 0:
             raise GitHubError(
                 "begin Project connection open returned no items"
@@ -13931,77 +13587,24 @@ def _begin_anchor_refs(items: Sequence[Item], members: Set[str]) -> List[str]:
     return refs
 
 
-def _load_project_items_by_refs(
-    refs: Sequence[str], node_fields: str = ITEM_NODE_FIELDS,
-) -> Dict[str, Item]:
-    """Fetch Project items through one exact-ref connection per issue."""
-    global _PROJECT_ITEM_PAGE_COUNT, _PROJECT_ITEM_ROW_COUNT
+def _load_project_items_by_refs(refs: Sequence[str]) -> Dict[str, Item]:
+    """Fetch Project items through one exact-ref REST read per issue."""
     found: Dict[str, Item] = {}
-    start = 0
-    while start < len(refs):
-        batch_size = min(
-            PROJECT_REF_ALIASES_PER_REQUEST, len(refs) - start
+    for ref in refs:
+        rows = load_rest_project_items(
+            REST_BOARD_FIELD_IDS, query=_project_item_ref_filter(ref)
         )
-        page_size = PROJECT_REF_PAGE_SIZE
         if _ACTIVE_BEGIN_ENVELOPE is not None:
-            capacity = (
-                _ACTIVE_BEGIN_ENVELOPE.remaining
-                - BEGIN_DETAIL_WORK_RESERVE - 1
-            )
-            if capacity < 1:
-                raise BeginCannotComplete()
-            batch_size = min(batch_size, capacity)
-            page_size = min(
-                PROJECT_REF_PAGE_SIZE,
-                max(1, capacity // batch_size),
-            )
-        batch = refs[start:start + batch_size]
-        _PROJECT_ITEM_PAGE_COUNT += 1
-        response = gh_graphql(
-            _project_item_refs_query(
-                batch, node_fields=node_fields, page_size=page_size
-            ),
-            login=PROJECT_OWNER, number=PROJECT_NUMBER,
-        )
-        project = _begin_project_from_response(response)
-        listed_rows = 0
-        pages = []
-        for index, ref in enumerate(batch):
-            alias = "r{}".format(index)
-            nodes, has_next, _cursor = _begin_connection_page(
-                project, alias
-            )
-            _PROJECT_ITEM_ROW_COUNT += len(nodes)
-            listed_rows += len(nodes)
-            pages.append((ref, nodes, has_next))
-        if _ACTIVE_BEGIN_ENVELOPE is not None:
-            _ACTIVE_BEGIN_ENVELOPE.consume(listed_items=listed_rows)
-        for ref, nodes, has_next in pages:
-            match = None
-            for node in nodes:
-                try:
-                    item = _from_node(node)
-                except (KeyError, TypeError, AttributeError) as exc:
-                    raise GitHubError(
-                        "Project ref {} returned a malformed row".format(ref)
-                    ) from exc
-                if item is not None and item.ref == ref:
-                    match = item
-                    break
-            if match is None:
-                if has_next:
-                    raise GitHubError(
-                        "Project ref {} matched more than one page "
-                        "without the issue itself".format(ref)
-                    )
-                continue
-            if match.state == "OPEN" and (
-                match.is_blocked
-                or match.needs in ("agent", "external-event")
-            ):
-                _load_block_comment(match)
-            found[ref] = match
-        start += len(batch)
+            _ACTIVE_BEGIN_ENVELOPE.consume(listed_items=len(rows))
+        match = next((item for item in rows if item.ref == ref), None)
+        if match is None:
+            continue
+        if match.state == "OPEN" and (
+            match.is_blocked
+            or match.needs in ("agent", "external-event")
+        ):
+            _load_block_comment(match)
+        found[ref] = match
     return found
 
 
@@ -14036,44 +13639,15 @@ def load_regression_items(
     member_repo_names: Optional[Sequence[str]] = None,
 ) -> List[Item]:
     """Load the regression set through #1607's filtered Project connection."""
-    global _PROJECT_ITEM_PAGE_COUNT, _PROJECT_ITEM_ROW_COUNT
     members = set(
         member_repo_names if member_repo_names is not None else member_repos()
     )
-    cursors: Dict[str, str] = {}
-    seen_cursors: Set[str] = set()
     kept: Dict[str, Item] = {}
-    while True:
-        variables: Dict[str, object] = {
-            "login": PROJECT_OWNER, "number": PROJECT_NUMBER,
-        }
-        if "regress" in cursors:
-            variables["regressCursor"] = cursors["regress"]
-        _PROJECT_ITEM_PAGE_COUNT += 1
-        response = gh_graphql(_begin_item_query(["regress"]), **variables)
-        project = _begin_project_from_response(response)
-        nodes, has_next, cursor = _begin_connection_page(project, "regress")
-        _PROJECT_ITEM_ROW_COUNT += len(nodes)
-        for node in nodes:
-            try:
-                item = _from_node(node)
-            except (KeyError, TypeError, AttributeError) as exc:
-                raise GitHubError(
-                    "begin Project connection regress returned a malformed "
-                    "row"
-                ) from exc
-            if (
-                item is not None
-                and item.repo in members
-                and _is_regression_item(item)
-            ):
-                kept.setdefault(item.item_id or item.ref, item)
-        if not has_next:
-            break
-        if cursor in seen_cursors:
-            raise GitHubError("begin Project connection regress did not advance")
-        seen_cursors.add(cursor)
-        cursors["regress"] = cursor
+    for item in load_rest_project_items(
+        REST_BOARD_FIELD_IDS, query=dict(BEGIN_ITEM_CONNECTIONS)["regress"]
+    ):
+        if item.repo in members and _is_regression_item(item):
+            kept.setdefault(item.item_id or item.ref, item)
     return list(kept.values())
 
 
@@ -14082,25 +13656,18 @@ def _load_begin_anchor_items(
     timings: Optional[Dict[str, object]],
     minimal_startable: bool = True,
 ) -> List[Item]:
-    """Fetch the begin anchors by ref, up to 20 connections per request.
+    """Fetch the begin anchors by ref, one filtered REST read each.
 
     The filter narrows; Python decides: a row is kept only when its repo and
     number are exactly the ref's. A ref with no such row stays absent, as an
-    issue outside the Project is under the full load. A malformed response,
-    or a connection with more rows than one page and no exact match on it,
-    raises rather than reading as absent.
+    issue outside the Project is under the full load. A failed or malformed
+    read raises rather than reading as absent. ``minimal_startable`` is
+    accepted for callers and ignored: a REST row carries every board field.
     """
-    global _PROJECT_ITEM_PAGE_COUNT, _PROJECT_ITEM_ROW_COUNT
     started = time.perf_counter() if timings is not None else None
     try:
         refs = _begin_anchor_refs(items, members)
-        by_ref = _load_project_items_by_refs(
-            refs,
-            node_fields=(
-                BEGIN_ITEM_NODE_FIELDS if minimal_startable
-                else ITEM_NODE_FIELDS
-            ),
-        )
+        by_ref = _load_project_items_by_refs(refs)
         return [by_ref[ref] for ref in refs if ref in by_ref]
     finally:
         if started is not None:
@@ -14317,58 +13884,31 @@ def load_items(
             startable_agent=startable_agent if include_startable else None,
         )
     items: List[Item] = []
-    cursor = None
     shape_comments: Optional[List[Dict[str, object]]] = None
     project_started = time.perf_counter() if timings is not None else None
     block_comment_seconds = 0.0
     try:
-        while True:
-            variables = {"login": PROJECT_OWNER, "number": PROJECT_NUMBER}
-            if cursor:
-                variables["cursor"] = cursor
-            _PROJECT_ITEM_PAGE_COUNT += 1
-            query = ITEM_QUERY
-            if shape_issue is not None and cursor is None:
-                query = _item_query_with_shape_comments(*shape_issue)
-            response = gh_graphql(query, **variables)
-            if shape_issue is not None and cursor is None:
-                shape_comments = _shape_issue_comments_from_response(
-                    response, *shape_issue
-                )
-            project = response["user"]["projectV2"]
-            if project is None:
-                raise GitHubError(
-                    "Project {}/{} not found or not visible".format(
-                        PROJECT_OWNER, PROJECT_NUMBER
+        # The board is read over REST on the core pool (#2417); GraphQL is
+        # left to the time-at-gate history read alone.
+        for item in load_rest_project_items(REST_BOARD_FIELD_IDS):
+            # Membership is the topic. An item whose repo has not opted in
+            # is outside the funnel even though it sits in the Project.
+            if item.repo not in members:
+                continue
+            if item.state == "OPEN" and (
+                item.is_blocked
+                or item.needs in ("agent", "external-event")
+            ):
+                comment_started = time.perf_counter()
+                try:
+                    _load_block_comment(item)
+                finally:
+                    block_comment_seconds += (
+                        time.perf_counter() - comment_started
                     )
-                )
-            page = project["items"]
-            nodes = page["nodes"]
-            _PROJECT_ITEM_ROW_COUNT += len(nodes)
-            for node in nodes:
-                item = _from_node(node)
-                # Membership is the topic. An item whose repo has not opted in
-                # is outside the funnel even though it sits in the Project.
-                if item and item.repo in members:
-                    # Dependencies are already on the item: `_from_node` reads
-                    # them from `blockedBy` in the Project query. They used to
-                    # be fetched here instead, one REST call per open ticket —
-                    # do not restore a per-item dependency read in this loop.
-                    if item.state == "OPEN" and (
-                        item.is_blocked
-                        or item.needs in ("agent", "external-event")
-                    ):
-                        comment_started = time.perf_counter()
-                        try:
-                            _load_block_comment(item)
-                        finally:
-                            block_comment_seconds += (
-                                time.perf_counter() - comment_started
-                            )
-                    items.append(item)
-            if not page["pageInfo"]["hasNextPage"]:
-                break
-            cursor = page["pageInfo"]["endCursor"]
+            items.append(item)
+        if shape_issue is not None:
+            shape_comments = read_issue_comments(*shape_issue)
     finally:
         if project_started is not None:
             project_elapsed = max(
@@ -28039,6 +27579,42 @@ REST_PROJECT_ITEMS_PATH = "/users/{}/projectsV2/{}/items".format(
     PROJECT_OWNER, PROJECT_NUMBER
 )
 
+#: The field set a brief/begin board load requests over REST (#2423): the
+#: routing single-selects with stored ids, plus the lock text field so the
+#: single-in-motion claim reads through. Origin, Risk and Domain have no
+#: stored ids; ``rest_item_to_item`` matches them by field name when the
+#: response carries them, and they read ``REST_UNKNOWN_VALUE`` otherwise.
+#: The REST routes key fields by their numeric database id, never the
+#: GraphQL node id: ``?fields=PVTSSF_...`` answers HTTP 400 "invalid_ids"
+#: (measured 2026-10-17 from ``GET /users/nateprich/projectsV2/2/fields``).
+#: Node id to database id for every field the funnel reads or writes.
+REST_FIELD_DATABASE_IDS: Dict[str, int] = {
+    STATUS_FIELD_ID: 408475351,
+    CLASS_FIELD_ID: 408475545,
+    LOCK_FIELD_ID: 408497956,
+    PINNED_FIELD_ID: 410157169,
+    NEEDS_FIELD_ID: 411997140,
+}
+
+#: Database ids for the fields the funnel reads by name only.
+REST_NAMED_FIELD_DATABASE_IDS: Dict[str, int] = {
+    "Origin": 416360306,
+    "Risk": 416360356,
+    "Domain": 424937513,
+    "Parent issue": 408475358,
+}
+
+REST_BOARD_FIELD_IDS = tuple(
+    str(field_id) for field_id in (
+        list(REST_FIELD_DATABASE_IDS.values())
+        + list(REST_NAMED_FIELD_DATABASE_IDS.values())
+    )
+)
+
+#: Rows per REST items page. The route takes ``per_page`` up to 100 and
+#: pages through ``after=`` cursors carried in the ``Link`` header.
+REST_ITEMS_PAGE_SIZE = 100
+
 #: Per-process REST spend: one call counted per attempted ``gh api`` REST
 #: request. Not state of record and it never outlives the process, like
 #: ``_GRAPHQL_SPEND``. Kept separate from it so each pool's spend stays
@@ -28096,7 +27672,21 @@ def _rest_field_matches(entry: object, refs: Sequence[str]) -> bool:
             candidates.extend([value.get("id"), value.get("name")])
         elif isinstance(value, str):
             candidates.append(value)
+        elif isinstance(value, int) and not isinstance(value, bool):
+            # The live route keys entries by numeric database id.
+            candidates.append(str(value))
     return any(candidate in refs for candidate in candidates)
+
+
+def _rest_field_refs(*refs: str) -> Tuple[str, ...]:
+    """``refs`` plus the database id of each node id or name among them."""
+    out = list(refs)
+    for ref in refs:
+        database_id = REST_FIELD_DATABASE_IDS.get(
+            ref, REST_NAMED_FIELD_DATABASE_IDS.get(ref))
+        if database_id is not None:
+            out.append(str(database_id))
+    return tuple(out)
 
 
 def _rest_single_select_raw(entry: object) -> Optional[str]:
@@ -28124,7 +27714,7 @@ def _rest_single_select_raw(entry: object) -> Optional[str]:
 def parse_rest_single_select(
     fields: object, *refs: str,
     known_values: Optional[Sequence[str]] = None,
-) -> str:
+) -> Optional[str]:
     """Read one REST single-select field, failing closed.
 
     Returns the selected option name when exactly one matching entry
@@ -28132,16 +27722,27 @@ def parse_rest_single_select(
     string value) and, when ``known_values`` is given, that name is one of
     them. Every other shape — absent field, malformed entry, two entries
     disagreeing, or a name outside ``known_values`` — returns
-    ``REST_UNKNOWN_VALUE`` with no default routing.
+    ``REST_UNKNOWN_VALUE`` with no default routing. A field present with a
+    null value is unset and returns None, as GraphQL reads it.
     """
     if not refs:
         raise ValueError("parse_rest_single_select needs a field id or name")
     entries = fields if isinstance(fields, list) else []
-    raws = [
-        _rest_single_select_raw(entry)
-        for entry in entries
-        if _rest_field_matches(entry, refs)
+    refs = _rest_field_refs(*refs)
+    matches = [
+        entry for entry in entries if _rest_field_matches(entry, refs)
     ]
+    if matches and all(
+        isinstance(entry, dict) and "value" in entry
+        and entry["value"] is None
+        for entry in matches
+    ):
+        # The live route returns a requested field that holds nothing as
+        # ``"value": null``. That is an unset field, which GraphQL reads as
+        # None and the funnel routes on (a ticket inherits its parent's
+        # Class); only an absent or unreadable entry is unknown.
+        return None
+    raws = [_rest_single_select_raw(entry) for entry in matches]
     raws = [raw for raw in raws if raw is not None]
     if len(set(raws)) != 1:
         # Zero matches (absent), only blank/malformed matches, or two
@@ -28197,6 +27798,118 @@ def _rest_names(value: object, login_key: str = "name") -> List[str]:
     return names
 
 
+def _rest_text_value(fields: object, *refs: str) -> Optional[str]:
+    """Read one REST text field (such as the lock field) as a string.
+
+    Returns the text when exactly one matching entry carries a readable
+    string — a plain string value or a dict holding one under ``text``.
+    Zero matches, or two entries disagreeing, read as None: the lock
+    convention reads an unparseable value as unlocked rather than wedging
+    the queue, exactly as ``parse_time`` does for a garbled claim.
+    """
+    if not refs:
+        raise ValueError("_rest_text_value needs a field id or name")
+    entries = fields if isinstance(fields, list) else []
+    refs = _rest_field_refs(*refs)
+    texts = []
+    for entry in entries:
+        if not _rest_field_matches(entry, refs):
+            continue
+        if not isinstance(entry, dict):
+            continue
+        value = entry.get("value")
+        if isinstance(value, dict):
+            for key in ("text", "raw", "title"):
+                text = value.get(key)
+                if isinstance(text, str) and text.strip():
+                    texts.append(text.strip())
+                    break
+        elif isinstance(value, str) and value.strip():
+            texts.append(value.strip())
+    if len(texts) != 1:
+        return None
+    return texts[0]
+
+
+def _rest_status_updated_at(fields: object) -> Optional[datetime]:
+    """Read the Status field's own write time from a REST entry, if carried.
+
+    The compact GraphQL views carry ``updatedAt`` on the Status value as the
+    interim gate age until a timeline read replaces it; a REST entry carrying
+    the same timestamp under ``updatedAt`` reads the same way. Entries
+    without one leave it unknown, as before.
+    """
+    entries = fields if isinstance(fields, list) else []
+    refs = _rest_field_refs(*REST_ROUTING_FIELDS["status"][0])
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        if not _rest_field_matches(entry, refs):
+            continue
+        for key in ("updatedAt", "updated_at"):
+            raw = entry.get(key)
+            if isinstance(raw, str) and raw.strip():
+                at = parse_time(raw)
+                if at is not None:
+                    return at
+    return None
+
+
+def _rest_repo_from_url(url: object) -> Optional[str]:
+    """``owner/name`` from a REST ``repository_url``, or None."""
+    if not isinstance(url, str):
+        return None
+    match = re.match(r"https://api\.github\.com/repos/([^/]+/[^/]+)$", url)
+    return match.group(1) if match else None
+
+
+def _rest_parent_field_value(fields: object) -> Optional[dict]:
+    """The "Parent issue" field's issue value from a live REST row."""
+    refs = _rest_field_refs("Parent issue")
+    for entry in fields if isinstance(fields, list) else []:
+        if _rest_field_matches(entry, refs) and isinstance(
+                entry.get("value"), dict):
+            return entry["value"]
+    return None
+
+
+def _rest_blockers(
+    content: dict,
+) -> Tuple[Optional[List[dict]], Optional[List[str]]]:
+    """Blocker issues and complete refs for a live REST row.
+
+    A row whose ``issue_dependencies_summary`` counts no blockers has none.
+    A row counting some reads them from ``blocked_by_issues`` (attached by
+    the loader); a count with no matching list is unreadable: (None, None).
+    """
+    summary = content.get("issue_dependencies_summary")
+    total = summary.get("total_blocked_by") if isinstance(
+        summary, dict) else None
+    attached = content.get("blocked_by_issues")
+    if isinstance(attached, list):
+        refs = []
+        for blocker in attached:
+            repo = None
+            if isinstance(blocker, dict):
+                repository = blocker.get("repository")
+                repo = (repository.get("full_name") if isinstance(
+                    repository, dict) else None) or _rest_repo_from_url(
+                        blocker.get("repository_url"))
+            number = blocker.get("number") if isinstance(
+                blocker, dict) else None
+            if not repo or not isinstance(number, int):
+                return attached, None
+            refs.append("{}#{}".format(repo, number))
+        return attached, refs if total == len(refs) else None
+    if isinstance(total, int) and not isinstance(total, bool):
+        if total == 0:
+            return [], []
+        return None, None
+    # Neither shape: a fixture or older row with no dependency data, read
+    # as before (no blockers known, refs unreadable).
+    return [], None
+
+
 def rest_item_to_item(
     node: object,
     field_map: Optional[Mapping[str, Tuple[Tuple[str, ...], Tuple[str, ...]]]] = None,
@@ -28207,8 +27920,10 @@ def rest_item_to_item(
     in ``_from_node``. Routing fields that are absent or unknown read as
     ``REST_UNKNOWN_VALUE`` — never a default Status or Class — so such a
     row fails closed downstream instead of joining a queue it was not
-    routed to. The lock text and history fields stay unset: this is the
-    cheap list projection, like the compact begin view.
+    routed to. The lock text, blocker connection, child summary and Status
+    write time read through when the row carries them, as in ``_from_node``;
+    rows without them keep the compact-view defaults. Timeline history still
+    comes from the time-at-gate GraphQL read alone.
     """
     if not isinstance(node, dict):
         return None
@@ -28219,7 +27934,11 @@ def rest_item_to_item(
     repository = content.get("repository")
     repo = None
     if isinstance(repository, dict):
-        repo = repository.get("nameWithOwner")
+        # GraphQL-shaped rows spell it nameWithOwner; the live route spells
+        # it full_name.
+        repo = repository.get("nameWithOwner") or repository.get("full_name")
+    if not isinstance(repo, str) or not repo:
+        repo = _rest_repo_from_url(content.get("repository_url"))
     if not isinstance(repo, str) or not repo:
         repo = content.get("repo") if isinstance(
             content.get("repo"), str) else None
@@ -28229,7 +27948,7 @@ def rest_item_to_item(
     if not isinstance(fields, list):
         fields = node.get("field_values")
     mapping = field_map or REST_ROUTING_FIELDS
-    routing: Dict[str, str] = {}
+    routing: Dict[str, Optional[str]] = {}
     for attr, (refs, known) in mapping.items():
         routing[attr] = parse_rest_single_select(
             fields, *refs, known_values=known
@@ -28238,30 +27957,83 @@ def rest_item_to_item(
     if not isinstance(body, str):
         body = None
     parent = content.get("parent")
+    if not isinstance(parent, dict):
+        # The live route carries the parent as the "Parent issue" field's
+        # value: a REST issue with ``repository_url`` and ``number``.
+        parent = _rest_parent_field_value(fields)
     parent_ref = None
     if isinstance(parent, dict):
         parent_repo = (
             parent.get("repository", {}).get("nameWithOwner")
+            or parent.get("repository", {}).get("full_name")
             if isinstance(parent.get("repository"), dict) else None
-        )
+        ) or _rest_repo_from_url(parent.get("repository_url"))
         if (isinstance(parent_repo, str) and isinstance(
                 parent.get("number"), int)):
             parent_ref = "{}#{}".format(parent_repo, parent["number"])
     state = content.get("state")
+    if isinstance(state, str):
+        # The live route lowercases it; GraphQL and every caller use upper.
+        state = state.upper()
     if state not in ("OPEN", "CLOSED"):
         state = "OPEN" if content.get("open", True) else "CLOSED"
-    return Item(
+    state_reason = content.get("stateReason")
+    if state_reason is None and isinstance(content.get("state_reason"), str):
+        state_reason = content["state_reason"].upper()
+    summary = content.get("subIssuesSummary")
+    if not isinstance(summary, dict):
+        summary = content.get("sub_issues_summary")
+    children_total = 0
+    children_done = 0
+    if isinstance(summary, dict):
+        total = summary.get("total")
+        completed = summary.get("completed")
+        if (isinstance(total, int) and not isinstance(total, bool)
+                and total >= 0):
+            children_total = total
+        if (isinstance(completed, int) and not isinstance(completed, bool)
+                and completed >= 0):
+            children_done = completed
+    blocked_by_refs = _blocked_by_refs_from_connection(
+        content.get("blockedBy"))
+    if blocked_by_refs is None:
+        blocked_by_refs = _blocked_by_refs_from_connection(
+            content.get("blocked_by"))
+    blockers = ((content.get("blockedBy") or {}).get("nodes")
+                if isinstance(content.get("blockedBy"), dict) else None)
+    if blockers is None and isinstance(content.get("blocked_by"), dict):
+        blockers = content["blocked_by"].get("nodes") or []
+    if blockers is None:
+        # The live route carries counts only. The loader attaches each
+        # blocked row's blockers, read from the issue's dependencies route,
+        # as ``blocked_by_issues``; a row counting blockers it does not
+        # carry is unreadable rather than unblocked.
+        blockers, blocked_by_refs = _rest_blockers(content)
+    open_blockers: List[str] = []
+    dead_blockers: List[str] = []
+    if state == "OPEN" and parent_ref is not None:
+        dependencies = classify_blockers(blockers or [], repo)
+        open_blockers = dependencies["open"]
+        dead_blockers = dependencies["dead"]
+        if blockers is None:
+            raise GitHubError(
+                "REST row {}#{} counts blockers it does not carry".format(
+                    repo, number))
+    item = Item(
         repo=repo,
         number=number,
         title=content.get("title") if isinstance(
             content.get("title"), str) else "",
-        url=content.get("url") if isinstance(
-            content.get("url"), str) else "",
+        # The live route's ``url`` is the API URL; ``html_url`` is the page.
+        url=(content.get("html_url") if isinstance(
+            content.get("html_url"), str) else content.get("url") if
+            isinstance(content.get("url"), str) else ""),
         state=state,
         body=body,
         body_loaded="body" in content,
-        state_reason=content.get("stateReason"),
-        created_at=parse_time(content.get("createdAt")),
+        state_reason=state_reason,
+        created_at=parse_time(
+            content.get("createdAt") or content.get("created_at")),
         status=routing.get("status"),
         klass=routing.get("klass"),
         origin=routing.get("origin"),
@@ -28273,10 +28045,24 @@ def rest_item_to_item(
         assignees=_rest_names(
             content.get("assignees"), login_key="login"),
         parent=parent_ref,
-        closed_at=parse_time(content.get("closedAt")),
-        item_id=node.get("id") if isinstance(
-            node.get("id"), str) else None,
+        children_total=children_total,
+        children_done=children_done,
+        blocked_by_refs=blocked_by_refs,
+        open_blockers=open_blockers,
+        dead_blockers=dead_blockers,
+        closed_at=parse_time(
+            content.get("closedAt") or content.get("closed_at")),
+        # Keep the GraphQL node id: the rest of the funnel keys items by it,
+        # and the REST writes translate it (``_rest_item_database_id``).
+        item_id=(node.get("node_id") if isinstance(node.get("node_id"), str)
+                 else node.get("id") if isinstance(node.get("id"), str)
+                 else None),
+        in_motion_since=parse_time(
+            _rest_text_value(fields, LOCK_FIELD_ID, LOCK_FIELD)
+        ),
+        status_updated_at=_rest_status_updated_at(fields),
     )
+    return item
 
 
 def _rest_get_json(endpoint: str):
@@ -28299,6 +28085,52 @@ def _rest_get_json(endpoint: str):
     except (TypeError, ValueError) as exc:
         raise GitHubError(
             "malformed REST response: {}".format(exc)) from exc
+
+
+def _rest_get_page(endpoint: str) -> Dict[str, object]:
+    """GET one REST page; return its rows and the ``Link`` next cursor.
+
+    The live list routes answer a bare JSON array and carry the next page
+    only in the ``Link`` header (``rel="next"``, an ``after=`` cursor), so
+    a plain ``gh api`` read stops at the first page. This reads with ``-i``
+    and returns ``{"items": rows, "next_cursor": after-or-None}``.
+    """
+    try:
+        proc = _run_gh(
+            ["gh", "api", "-i", endpoint], capture_output=True, text=True)
+    finally:
+        _record_rest_request()
+    if proc.returncode != 0:
+        raise GitHubError(
+            "REST request failed: {}".format(
+                _graphql_text(getattr(proc, "stderr", "")).strip()
+                or "gh exited {}".format(proc.returncode)
+            )
+        )
+    text = getattr(proc, "stdout", "") or ""
+    head, sep, body = text.replace("\r\n", "\n").partition("\n\n")
+    if not sep:
+        raise GitHubError("malformed REST response: no header block")
+    try:
+        rows = json.loads(body)
+    except (TypeError, ValueError) as exc:
+        raise GitHubError(
+            "malformed REST response: {}".format(exc)) from exc
+    if not isinstance(rows, list):
+        raise GitHubError("malformed REST items response")
+    cursor = None
+    for line in head.split("\n"):
+        name, _, value = line.partition(":")
+        if name.strip().lower() != "link":
+            continue
+        for part in value.split(","):
+            if 'rel="next"' not in part:
+                continue
+            match = re.search(r"[?&]after=([^&>]+)", part)
+            if match is None:
+                raise GitHubError("REST next link carries no cursor")
+            cursor = urllib.parse.unquote(match.group(1))
+    return {"items": rows, "next_cursor": cursor}
 
 
 def _rest_items_page(payload: object) -> Tuple[List[dict], Optional[str]]:
@@ -28331,13 +28163,54 @@ def _rest_items_page(payload: object) -> Tuple[List[dict], Optional[str]]:
     return [row for row in rows if isinstance(row, dict)], cursor
 
 
+def _attach_rest_blockers(row: dict, request) -> None:
+    """Read an open ticket row's blockers when the row counts some.
+
+    The live items route carries ``issue_dependencies_summary`` counts but
+    not the blocking issues, which ``classify_blockers`` needs to tell an
+    open blocker from a dead one and shape apply needs as ``blocked_by_refs``
+    (an open project's existing edges, #2593). Every open row counting
+    blockers is read, one core-pool request each; a closed row keeps its
+    refs unknown, which every reader treats as unreadable.
+    """
+    content = _rest_content(row)
+    summary = content.get("issue_dependencies_summary")
+    if not isinstance(summary, dict) or "blocked_by_issues" in content:
+        return
+    total = summary.get("total_blocked_by")
+    if not isinstance(total, int) or isinstance(total, bool) or total < 1:
+        return
+    state = content.get("state")
+    if not isinstance(state, str) or state.upper() != "OPEN":
+        return
+    repository = content.get("repository")
+    repo = (repository.get("full_name") if isinstance(
+        repository, dict) else None) or _rest_repo_from_url(
+            content.get("repository_url"))
+    number = content.get("number")
+    if not repo or not isinstance(number, int):
+        return
+    payload = request(
+        "/repos/{}/issues/{}/dependencies/blocked_by?per_page=100".format(
+            repo, number))
+    blockers, next_cursor = _rest_items_page(payload)
+    if next_cursor:
+        raise GitHubError(
+            "{}#{} has more blockers than one page".format(repo, number))
+    content["blocked_by_issues"] = blockers
+
+
 def load_rest_project_items(
     field_ids: Sequence[str],
     *,
     page_size: int = PROJECT_ITEM_PAGE_SIZE,
+    query: Optional[str] = None,
     _request=None,
 ) -> List[Item]:
     """Load every Project item row over REST, with bodies and field values.
+
+    ``query`` is a Project filter (the GraphQL ``items(query:)`` syntax), sent
+    as ``q``; it narrows the rows the route returns, never widens them.
 
     Pages ``REST_PROJECT_ITEMS_PATH`` with ``?fields=<ids>`` until the
     response carries no next cursor. Each page costs one REST core-pool
@@ -28346,25 +28219,36 @@ def load_rest_project_items(
     ``_request`` takes an endpoint and returns parsed JSON; tests use it to
     replay recorded payloads, production uses ``_rest_get_json``.
     """
+    global _PROJECT_ITEM_PAGE_COUNT, _PROJECT_ITEM_ROW_COUNT
     ids = [entry for entry in field_ids if isinstance(entry, str) and entry]
     if not ids:
         raise ValueError("load_rest_project_items needs field ids")
     if (not isinstance(page_size, int) or isinstance(page_size, bool)
             or page_size < 1):
         raise ValueError("page_size must be a positive int")
-    request = _request or _rest_get_json
-    base = "{}?fields={}".format(
-        REST_PROJECT_ITEMS_PATH, ",".join(ids))
+    request = _request or _rest_get_page
+    # Numeric ids are what the route accepts; a node id is translated.
+    ids = [
+        str(REST_FIELD_DATABASE_IDS.get(entry, entry)) for entry in ids
+    ]
+    base = "{}?per_page={}&fields={}".format(
+        REST_PROJECT_ITEMS_PATH, min(page_size, REST_ITEMS_PAGE_SIZE),
+        ",".join(ids))
+    if query:
+        base += "&q={}".format(urllib.parse.quote(query, safe=""))
     items: List[Item] = []
     cursor: Optional[str] = None
     seen_cursors: Set[str] = set()
     while True:
         endpoint = base
         if cursor:
-            endpoint += "&cursor={}".format(cursor)
+            endpoint += "&after={}".format(urllib.parse.quote(cursor, safe=""))
+        _PROJECT_ITEM_PAGE_COUNT += 1
         payload = request(endpoint)
         rows, next_cursor = _rest_items_page(payload)
+        _PROJECT_ITEM_ROW_COUNT += len(rows)
         for row in rows:
+            _attach_rest_blockers(row, request)
             item = rest_item_to_item(row)
             if item is not None:
                 items.append(item)
@@ -28382,11 +28266,13 @@ def load_rest_project_items(
 # Project writes over REST (#2417, #2422).
 #
 # Field updates and item adds through the REST item endpoints under
-# ``REST_PROJECT_ITEMS_PATH``, beside the GraphQL mutations (``SET_FIELD``,
-# ``write_project_select``, ``gh project item-add``). No caller uses these
-# yet: the ticket builds the write path first and switches lanes later.
-# Every transport or API failure raises ``GitHubError`` at once, so a write
-# that half-applies never reports success.
+# ``REST_PROJECT_ITEMS_PATH``. No caller uses them yet: #2423's first
+# cutover sent GraphQL node ids, option names and a ``field_id`` body,
+# which the live route rejects (404 / 400 / 422, measured 2026-10-17), so
+# every write stays on the GraphQL mutations until the call sites move to
+# this corrected helper. Every transport or
+# API failure raises ``GitHubError`` at once, so a write that half-applies
+# never reports success.
 # --------------------------------------------------------------------------
 
 
@@ -28416,6 +28302,124 @@ def _rest_request_json(method: str, endpoint: str, body=None):
             "malformed REST response: {}".format(exc)) from exc
 
 
+def _msgpack_ints(data: bytes) -> Optional[List[int]]:
+    """Decode a msgpack array of non-negative ints, or None for any other
+    shape. Enough for a Project item node id's payload and nothing more."""
+    if not data:
+        return None
+    head = data[0]
+    if 0x90 <= head <= 0x9F:
+        count, at = head & 0x0F, 1
+    else:
+        return None
+    widths = {0xCC: 1, 0xCD: 2, 0xCE: 4, 0xCF: 8}
+    out = []
+    for _ in range(count):
+        if at >= len(data):
+            return None
+        marker = data[at]
+        if marker <= 0x7F:
+            out.append(marker)
+            at += 1
+        elif marker in widths:
+            width = widths[marker]
+            chunk = data[at + 1:at + 1 + width]
+            if len(chunk) != width:
+                return None
+            out.append(int.from_bytes(chunk, "big"))
+            at += 1 + width
+        else:
+            return None
+    return out if at == len(data) else None
+
+
+def _rest_item_database_id(item_id: str) -> int:
+    """The numeric id the REST item routes take for a Project item.
+
+    The funnel keys items by GraphQL node id (``PVTI_...``); the REST
+    routes answer 404 for one and take the item's database id (measured
+    2026-10-17). A ``PVTI_`` id's payload is a msgpack array ending in that
+    id. Any other shape raises: callers check the decoded item on GitHub
+    (``_rest_confirm_item``) before writing to it.
+    """
+    if item_id.isdigit():
+        return int(item_id)
+    if not item_id.startswith("PVTI_"):
+        raise GitHubError("not a Project item id: {}".format(item_id))
+    payload = item_id[len("PVTI_"):]
+    try:
+        raw = base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4))
+    except (ValueError, TypeError) as exc:
+        raise GitHubError(
+            "unreadable Project item id {}".format(item_id)) from exc
+    ints = _msgpack_ints(raw)
+    if not ints or len(ints) != 4 or ints[0] != 1 or ints[-1] < 1:
+        raise GitHubError("unreadable Project item id {}".format(item_id))
+    return ints[-1]
+
+
+#: Per-process cache of ``GET .../fields/<id>`` answers: field data type
+#: and option name to option id. Not state of record.
+_REST_FIELD_CACHE: Dict[int, Dict[str, object]] = {}
+
+
+def _rest_field_database_id(field_id: str, request) -> int:
+    """The numeric id the REST routes take for a Project field."""
+    if field_id.isdigit():
+        return int(field_id)
+    known = REST_FIELD_DATABASE_IDS.get(field_id)
+    if known is not None:
+        return known
+    for row in _rest_items_page(request(
+            "GET", "/users/{}/projectsV2/{}/fields?per_page=100".format(
+                PROJECT_OWNER, PROJECT_NUMBER), None))[0]:
+        if row.get("node_id") == field_id and isinstance(row.get("id"), int):
+            return row["id"]
+    raise GitHubError("no Project field {}".format(field_id))
+
+
+def _rest_field_value(database_id: int, value: object, request) -> object:
+    """The REST write value: a single-select option name becomes its id."""
+    meta = _REST_FIELD_CACHE.get(database_id)
+    if meta is None:
+        row = request(
+            "GET", "/users/{}/projectsV2/{}/fields/{}".format(
+                PROJECT_OWNER, PROJECT_NUMBER, database_id), None)
+        if not isinstance(row, dict) or row.get("id") != database_id:
+            raise GitHubError(
+                "REST field {} did not describe itself".format(database_id))
+        options = {}
+        for option in row.get("options") or []:
+            name = (option.get("name") or {}) if isinstance(
+                option, dict) else {}
+            name = name.get("raw") if isinstance(name, dict) else name
+            if isinstance(name, str) and isinstance(option.get("id"), str):
+                options[name] = option["id"]
+        meta = {"data_type": row.get("data_type"), "options": options}
+        _REST_FIELD_CACHE[database_id] = meta
+    if value is None or meta["data_type"] != "single_select":
+        return value
+    option_id = meta["options"].get(value)
+    if option_id is None:
+        raise GitHubError(
+            "Project field {} has no option {}".format(database_id, value))
+    return option_id
+
+
+def _rest_confirm_item(item_id: str, database_id: int, request) -> None:
+    """Read the item at ``database_id`` and require it to be ``item_id``.
+
+    Guards the node-id decode: a write never lands on an item the funnel
+    did not name.
+    """
+    row = request("GET", "{}/{}".format(
+        REST_PROJECT_ITEMS_PATH, database_id), None)
+    if (not isinstance(row, dict) or row.get("id") != database_id
+            or (not item_id.isdigit() and row.get("node_id") != item_id)):
+        raise GitHubError(
+            "REST item {} is not {}".format(database_id, item_id))
+
+
 def rest_update_project_item_field(
     item_id: str,
     field_id: str,
@@ -28425,20 +28429,38 @@ def rest_update_project_item_field(
 ) -> dict:
     """Update one Project item field over REST; raise on any failure.
 
-    PATCHes ``REST_PROJECT_ITEMS_PATH/<item_id>``. The response must
-    confirm the same item id, or this raises ``GitHubError`` instead of
-    reporting success. ``_request`` takes ``(method, endpoint, body)``
-    and returns parsed JSON; tests use it to replay recorded payloads,
-    production uses ``_rest_request_json``.
+    PATCHes ``REST_PROJECT_ITEMS_PATH/<database id>`` with
+    ``{"fields": [{"id": <field database id>, "value": ...}]}``, a
+    single-select given by option name sent as its option id (the live
+    route rejects a name with HTTP 400). Node ids are translated and the
+    target item checked first. The response must confirm the same item and
+    field, or this raises ``GitHubError`` instead of reporting success.
+    ``_request`` takes ``(method, endpoint, body)`` and returns parsed
+    JSON; tests use it to replay recorded payloads, production uses
+    ``_rest_request_json``.
     """
     if not isinstance(item_id, str) or not item_id.strip():
         raise ValueError("rest_update_project_item_field needs an item id")
     if not isinstance(field_id, str) or not field_id.strip():
         raise ValueError("rest_update_project_item_field needs a field id")
     request = _request or _rest_request_json
-    endpoint = "{}/{}".format(REST_PROJECT_ITEMS_PATH, item_id)
-    response = request("PATCH", endpoint, {"field_id": field_id, "value": value})
-    if not isinstance(response, dict) or response.get("id") != item_id:
+    database_id = _rest_item_database_id(item_id)
+    field_database_id = _rest_field_database_id(field_id, request)
+    wire_value = _rest_field_value(field_database_id, value, request)
+    _rest_confirm_item(item_id, database_id, request)
+    endpoint = "{}/{}".format(REST_PROJECT_ITEMS_PATH, database_id)
+    response = request("PATCH", endpoint, {
+        "fields": [{"id": field_database_id, "value": wire_value}]})
+    written = response.get("fields") if isinstance(response, dict) else None
+    if (
+        not isinstance(response, dict)
+        or response.get("id") != database_id
+        or (not item_id.isdigit() and response.get("node_id") != item_id)
+        or not isinstance(written, list)
+        or not any(isinstance(entry, dict)
+                   and entry.get("id") == field_database_id
+                   for entry in written)
+    ):
         raise GitHubError(
             "REST field update for {} did not confirm {}".format(
                 item_id, field_id

@@ -59,8 +59,8 @@ def test_loader_returns_items_with_field_values_and_bodies():
         seen.append(endpoint)
         assert "fields=" in endpoint
         assert endpoint.startswith(funnel.REST_PROJECT_ITEMS_PATH)
-        if "cursor=" in endpoint:
-            assert endpoint.endswith("cursor=cursor-1")
+        if "after=" in endpoint:
+            assert endpoint.endswith("after=cursor-1")
             return second
         return first
 
@@ -141,8 +141,15 @@ def test_rest_counter_increments_per_request_alongside_graphql_spend(
     def run(args, **kwargs):
         if args[:3] == ["gh", "api", "graphql"]:
             return Proc(json.dumps({"data": {"viewer": {"login": "n"}}}))
-        assert args[:2] == ["gh", "api"]
-        return Proc(json.dumps(pages.pop(0)))
+        # The live route answers a bare array and links the next page in
+        # the ``Link`` header, read with ``gh api -i``.
+        assert args[:3] == ["gh", "api", "-i"]
+        page = pages.pop(0)
+        head = "HTTP/2.0 200 OK"
+        if page.get("pageInfo"):
+            head += '\nLink: <https://api.github.com/x?after={}>; rel="next"'.format(
+                page["pageInfo"]["endCursor"])
+        return Proc(head + "\n\n" + json.dumps(page["items"]))
 
     monkeypatch.setattr(funnel.subprocess, "run", run)
 

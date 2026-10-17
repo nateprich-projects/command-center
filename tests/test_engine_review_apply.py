@@ -297,6 +297,22 @@ def test_a_scope_note_rides_the_note_without_blocking():
     assert review_apply.with_scope_note(scope, scope) == scope
     deferred = "Scope: deferred (diff has no mappable hunks)"
     assert review_apply.with_scope_note(None, deferred) == deferred
+    # Overwritten per review (Nate, 2026-09-29): a changed count
+    # replaces the earlier scope line instead of accumulating.
+    assert review_apply.with_scope_note(
+        scope, "Scope: 1 unrequested of 4 groups") == (
+            "Scope: 1 unrequested of 4 groups")
+    assert review_apply.with_scope_note(
+        "recorded as rejected; " + scope,
+        "Scope: 1 unrequested of 4 groups") == (
+            "recorded as rejected; Scope: 1 unrequested of 4 groups")
+    # A deferred mapping replaces a mapped count and vice versa.
+    assert review_apply.with_scope_note(scope, deferred) == deferred
+    assert review_apply.with_scope_note(deferred, scope) == scope
+    # One scope line only: a stale duplicate is collapsed to the new one.
+    assert review_apply.with_scope_note(
+        scope + "; " + scope, "Scope: 0 unrequested of 4 groups") == (
+            "Scope: 0 unrequested of 4 groups")
 
 
 def test_a_routed_premise_is_not_duplicated_as_an_implementer_blocker():

@@ -51,6 +51,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import funnel  # noqa: E402
 from engine import review  # noqa: E402
+from engine.review_scope import SCOPE_NOTE_PREFIX  # noqa: E402
 
 #: Malformed answer on a retryable attempt: the runner feeds the parse
 #: error back to the model and calls again with ``--attempt 2``.
@@ -308,12 +309,24 @@ def with_scope_note(note: Optional[str], scope_note: Optional[str]
     (a real defect with a realistic reproduction, a missing or
     tautological Accept test, a merged-main failure) block. A missing or
     blank scope note leaves the note unchanged.
+
+    The count is overwritten per review (Nate, 2026-09-29): when the
+    note already carries a scope line, it is replaced by the new one,
+    never accumulated alongside it. Any other note text is preserved.
     """
     if not isinstance(scope_note, str) or not scope_note.strip():
         return note
     cleaned = " ".join(scope_note.strip().split())
     if not isinstance(note, str) or not note.strip():
         return cleaned
+    parts = [part.strip() for part in note.split(";")]
+    if cleaned in parts:
+        return note
+    if cleaned.startswith(SCOPE_NOTE_PREFIX):
+        kept = [part for part in parts
+                if part and not part.startswith(SCOPE_NOTE_PREFIX)]
+        kept.append(cleaned)
+        return "; ".join(kept)
     if cleaned in note:
         return note
     return "{}; {}".format(note, cleaned)

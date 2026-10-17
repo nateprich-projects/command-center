@@ -6642,6 +6642,17 @@ def awaiting_review(
             # engineer pushes, the ticket is review work again (#487).
             verdict = _row_verdict(row, item.repo)
             if rejected_at_current_head(verdict, row.get("headRefOid")):
+                if _no_push_rearm_releases(
+                        verdict, row.get("headRefOid"),
+                        _latest_no_push_marker_at(
+                            row.get("body"), row.get("headRefOid"))):
+                    # Stranded no-push head (#2618): the implement run
+                    # already looked at exactly this rejected head and
+                    # pushed nothing, so handing it back would hold it
+                    # forever under ``no_push_reoffer_withheld``. It
+                    # returns as review work awaiting a fresh verdict on
+                    # the unchanged head.
+                    blocked.add(item.ref)
                 continue
             blocked.add(item.ref)
     return blocked
@@ -6655,6 +6666,10 @@ def awaiting_review(
 #: review packet already strips from ``pr_body``, and a body edit never
 #: counts as the trusted-comment evidence that re-covers an unsure-only
 #: rejection, so the marker cannot disturb the review queue.
+#: The one exception is the #2618 re-arm: a marker newer than the rejected
+#: verdict covering its head releases the ticket as review work awaiting a
+#: fresh verdict on the unchanged head, because no lane would otherwise
+#: revisit it. Every other covered head still reads as already judged.
 NO_PUSH_FINISH_MARKER_RE = re.compile(
     r"<!--\s*no-push-finish\s+head=(?P<head>[0-9a-fA-F]{40})"
     r"\s+at=(?P<at>\S+?)\s*-->",
@@ -6686,13 +6701,46 @@ def no_push_finish_markers(body: object) -> List[Tuple[str, str]]:
     return [(head, at) for _, head, at in found]
 
 
-def _no_push_gate_verdict_at(row: Mapping[str, object],
-                             repo: str) -> Optional[datetime]:
-    """When the row's latest trusted verdict was posted, if knowable."""
-    verdict = _row_verdict(row, repo)
-    if not isinstance(verdict, dict):
+def _latest_no_push_marker_at(body: object, head: object) -> Optional[datetime]:
+    """The newest parseable no-push record for this head, if any (#2541)."""
+    if not isinstance(head, str) or not head:
         return None
-    return parse_time(verdict.get("comment_created_at"))
+    stamps = [
+        stamp
+        for marked_head, at in no_push_finish_markers(body)
+        if marked_head.lower() == head.lower()
+        for stamp in (parse_time(at),)
+        if stamp is not None
+    ]
+    return max(stamps) if stamps else None
+
+
+def _no_push_rearm_releases(
+    verdict: object, head: object,
+    latest_marker_at: Optional[datetime],
+) -> bool:
+    """Whether a stranded no-push head re-arms as review work (#2618).
+
+    True when the latest trusted verdict rejects the current head and the
+    newest no-push record for that head is newer than the verdict: the
+    implement run already looked at exactly what the reviewer judged, so
+    neither lane would otherwise revisit the head and the hold is
+    permanent. Anything unestablished — no marker, no verdict, another
+    head, a missing timestamp — reads as no release, keeping the #2541
+    hold.
+    """
+    if latest_marker_at is None:
+        return False
+    if not isinstance(head, str) or not head:
+        return False
+    if not isinstance(verdict, dict):
+        return False
+    if not rejected_at_current_head(verdict, head):
+        return False
+    verdict_at = parse_time(verdict.get("comment_created_at"))
+    if verdict_at is None:
+        return False
+    return latest_marker_at > verdict_at
 
 
 def no_push_reoffer_withheld(
@@ -6708,6 +6756,13 @@ def no_push_reoffer_withheld(
     ``awaiting_review`` withholds the ticket anyway, and a merge-of-main
     head change never reads as new work here. A newly posted verdict of
     any kind re-arms the ticket, returning it to the ordinary hand-back.
+
+    A stranded head re-arms the other way (#2618): when the covering
+    verdict rejects the current head and the newest record for that head
+    is newer than the verdict, the gate releases the ticket and
+    ``awaiting_review`` routes it as review work awaiting a fresh verdict
+    on the unchanged head. Without that release no lane revisits the
+    head, so the hold is permanent.
 
     The normal caller supplies the shared batch from ``ticket_pr_facts``;
     a direct caller creates that one repository-wide GraphQL read here
@@ -6726,28 +6781,25 @@ def no_push_reoffer_withheld(
             head = row.get("headRefOid")
             if not isinstance(head, str) or not head:
                 continue
-            markers = [
-                (marked_head, parse_time(at))
-                for marked_head, at in no_push_finish_markers(
-                    row.get("body"))
-                if marked_head.lower() == head.lower()
-            ]
-            markers = [
-                (marked_head, stamp) for marked_head, stamp in markers
-                if stamp is not None
-            ]
-            if not markers:
+            latest_marker_at = _latest_no_push_marker_at(
+                row.get("body"), head)
+            if latest_marker_at is None:
                 continue
-            latest_marker_at = max(stamp for _, stamp in markers)
             try:
-                verdict_at = _no_push_gate_verdict_at(row, item.repo)
+                verdict = _row_verdict(row, item.repo)
             except GitHubError:
                 # The verdict cannot be established; withholding on a
                 # maybe-superseded record could wedge the ticket, so the
                 # gate stays out of the way exactly as an unreadable PR
                 # scan does for the rest of the offer path.
                 continue
+            verdict_at = (
+                parse_time(verdict.get("comment_created_at"))
+                if isinstance(verdict, dict) else None
+            )
             if verdict_at is not None and verdict_at > latest_marker_at:
+                continue
+            if _no_push_rearm_releases(verdict, head, latest_marker_at):
                 continue
             withheld.add(item.ref)
     return withheld
@@ -21986,6 +22038,14 @@ def review_standing(
     - ``reviewable``: everything else. Red CI and an empty rollup are
       reviewable, so the review pre-check rejects them with a reason.
 
+    The one head that reads ``covered`` above but is still offered: a
+    stranded no-push head (#2618) — a rejected verdict covering the
+    current head with a no-push record for that head newer than the
+    verdict. It falls through to the cap like any other head instead of
+    reading as already judged, so the review lane can record the fresh
+    verdict the re-arm waits for. Every other covered head is skipped
+    exactly as before, and the marker never counts as review evidence.
+
     ``verdict`` is the PR's latest verdict, or a zero-argument callable that
     returns it; the callable is invoked only when the head is otherwise
     reviewable, so a listing pays no verdict read for any other row.
@@ -22018,9 +22078,17 @@ def review_standing(
     if verdict_covers_head(
         verdict if isinstance(verdict, dict) else None, head_sha, comments
     ):
-        return ReviewStanding(
-            "covered",
-            "a verdict already covers head {}".format(str(head_sha)[:12]))
+        rearmed = _no_push_rearm_releases(
+            verdict, head_sha,
+            _latest_no_push_marker_at(row.get("body"), head_sha))
+        if not rearmed:
+            return ReviewStanding(
+                "covered",
+                "a verdict already covers head {}".format(str(head_sha)[:12]))
+        # Stranded no-push head (#2618): the marker is newer than the
+        # rejected verdict covering this head, so no lane would otherwise
+        # revisit it. It faces the cap below like any other head instead
+        # of reading as already judged.
     if lane_review_capped(comments):
         return ReviewStanding(
             "capped",

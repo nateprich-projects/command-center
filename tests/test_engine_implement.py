@@ -6429,14 +6429,16 @@ def test_finish_git_invocation_sites_match_the_recorded_inventory():
         ("rev-list", "--count"): 2,
         ("fetch", "origin"): 3,
         ("merge-base", "--is-ancestor"): 2,
+        ("merge-base", ""): 1,
         ("merge", "-s"): 1,
         ("push", "--set-upstream"): 1,
+        ("diff", "--no-color"): 1,
     })
     assert actual == expected
 
     inventory = (ROOT / "docs" / "finish-subprocess-bounds.md").read_text()
-    assert "31 bounded Git callsites" in inventory
-    assert "30 static callsites" in inventory
+    assert "33 bounded Git callsites" in inventory
+    assert "32 static callsites" in inventory
     for command in (
         "git diff --name-only -z",
         "git diff --cached --name-only -z",
@@ -6448,6 +6450,8 @@ def test_finish_git_invocation_sites_match_the_recorded_inventory():
         "git status --porcelain --untracked-files=all",
         "git fetch origin",
         "git merge-base --is-ancestor",
+        "git merge-base <base> <head>",
+        "git diff --no-color --no-ext-diff <ancestor> <head>",
         "git merge -s ours",
         "git push --set-upstream origin",
         "git rev-parse HEAD",
@@ -7160,6 +7164,8 @@ def test_every_finish_ends_the_pr_body_with_the_evidence_block(
         "- passes-on-base: tests/test_calc.py::test_double_two\n"
         "- no signal: tests/test_calc.py::test_triple\n"
         "- prior fix scan: not run\n"
+        "- scope: calc.py::triple (hunks 0.0)\n"
+        "- scope: tests/test_calc.py::test_half_of_three (hunks 1.0)\n"
         "<!-- /command-center-evidence -->\n"
     ).format(remote_tip(remote), main_sha[:12])
     first_sha = remote_tip(remote)
@@ -7185,6 +7191,8 @@ def test_every_finish_ends_the_pr_body_with_the_evidence_block(
         "- no signal: tests/test_calc.py::test_triple\n"
         "- red: tests/test_calc.py::test_half_of_five\n"
         "- prior fix scan: not run\n"
+        "- scope: calc.py::triple (hunks 0.0)\n"
+        "- scope: tests/test_calc.py::test_half_of_three (hunks 1.0)\n"
         "<!-- /command-center-evidence -->\n"
     ).format(remote_tip(remote), main_sha[:12])
     assert body.count(implement.EVIDENCE_MARKER) == 1
@@ -7273,6 +7281,8 @@ def test_an_over_budget_reproduction_is_recorded_and_the_pr_opens(
         "- reproduction: over budget\n"
         "- added tests: 0 red, 0 passes-on-base, 0 no signal\n"
         "- prior fix scan: not run\n"
+        "- scope: calc.py::triple (hunks 0.0)\n"
+        "- scope: tests/test_calc.py::test_triple (hunks 1.0)\n"
         "<!-- /command-center-evidence -->\n"
     ).format(remote_tip(remote), main_sha[:12])
     # The stopped run's worktree went with it.
@@ -7304,6 +7314,7 @@ def test_the_block_counts_failures_main_already_has(tmp_path, monkeypatch):
         "- reproduction: no signal\n"
         "- added tests: 0 red, 0 passes-on-base, 0 no signal\n"
         "- prior fix scan: not run\n"
+        "- scope: feature.txt::<file scope> (hunks 0.0)\n"
         "<!-- /command-center-evidence -->\n"
     ).format(remote_tip(remote), main_sha[:12])
 
@@ -7326,6 +7337,7 @@ def test_where_no_merge_can_be_made_the_block_says_nothing_ran(
         "- reproduction: not run\n"
         "- added tests: 0 red, 0 passes-on-base, 0 no signal\n"
         "- prior fix scan: not run\n"
+        "- scope: feature.txt::<file scope> (hunks 0.0)\n"
         "<!-- /command-center-evidence -->\n"
     ).format(remote_tip(remote))
 
@@ -7361,6 +7373,8 @@ def test_a_reproduction_that_fails_is_recorded_and_the_pr_opens(
         "- reproduction: not run\n"
         "- added tests: 0 red, 0 passes-on-base, 0 no signal\n"
         "- prior fix scan: not run\n"
+        "- scope: calc.py::triple (hunks 0.0)\n"
+        "- scope: tests/test_calc.py::test_half_of_three (hunks 1.0)\n"
         "<!-- /command-center-evidence -->\n"
     ).format(remote_tip(remote), main_sha[:12])
     assert "worktree add failed" not in body

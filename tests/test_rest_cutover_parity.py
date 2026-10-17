@@ -305,10 +305,15 @@ def test_rest_board_load_costs_no_graphql_call(monkeypatch):
     ]
 
     def run(args, **kwargs):
-        assert args[:2] == ["gh", "api"]
-        assert args[2].startswith(funnel.REST_PROJECT_ITEMS_PATH)
-        return SimpleNamespace(stdout=json.dumps(pages.pop(0)), stderr="",
-                               returncode=0)
+        assert args[:3] == ["gh", "api", "-i"]
+        assert args[3].startswith(funnel.REST_PROJECT_ITEMS_PATH)
+        page = pages.pop(0)
+        head = "HTTP/2.0 200 OK"
+        if page.get("pageInfo"):
+            head += '\nLink: <https://api.github.com/x?after={}>; rel="next"'.format(
+                page["pageInfo"]["endCursor"])
+        return SimpleNamespace(stdout=head + "\n\n" + json.dumps(
+            page["items"]), stderr="", returncode=0)
 
     monkeypatch.setattr(funnel.subprocess, "run", run)
     items = funnel.load_rest_project_items(list(funnel.REST_BOARD_FIELD_IDS))

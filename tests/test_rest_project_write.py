@@ -15,6 +15,33 @@ import funnel  # noqa: E402
 
 def reset():
     funnel.reset_api_usage()
+    funnel._REST_FIELD_CACHE.clear()
+
+
+#: A real Project item node id and the database id it carries (recorded
+#: 2026-10-17, ``tests/fixtures/rest_project_items_live.json``).
+NODE_ID = "PVTI_lAHOD7A-N84BihDgzg5jAGQ"
+DATABASE_ID = 241369188
+OPTIONS = {
+    408475351: {"Ready": "62970921", "Done": "2a3af7fa"},
+    408475545: {"Implement": "c1"},
+    411997140: {"none": "n1"},
+}
+
+
+def schema(method, endpoint, body):
+    """Answer the field-schema and item reads a write makes first."""
+    if "/fields/" in endpoint:
+        field = int(endpoint.rsplit("/", 1)[-1])
+        return {"id": field, "data_type": "single_select", "options": [
+            {"id": option, "name": {"raw": name}}
+            for name, option in OPTIONS[field].items()]}
+    return {"id": DATABASE_ID, "node_id": NODE_ID}
+
+
+def confirmed(body):
+    return {"id": DATABASE_ID, "node_id": NODE_ID,
+            "fields": [{"id": body["fields"][0]["id"]}]}
 
 
 def test_field_update_half_apply_reports_failure_without_success():
@@ -23,14 +50,16 @@ def test_field_update_half_apply_reports_failure_without_success():
     calls = []
 
     def request(method, endpoint, body):
+        if method == "GET":
+            return schema(method, endpoint, body)
         calls.append((method, endpoint, body))
-        if body["field_id"] == funnel.CLASS_FIELD_ID:
+        if body["fields"][0]["id"] == 408475545:
             raise funnel.GitHubError("REST request failed: HTTP 502")
-        return {"id": "PVTI_1"}
+        return confirmed(body)
 
     with pytest.raises(funnel.GitHubError, match="HTTP 502"):
         funnel.rest_update_project_item_fields(
-            "PVTI_1",
+            NODE_ID,
             {
                 funnel.STATUS_FIELD_ID: "Ready",
                 funnel.CLASS_FIELD_ID: "Implement",
@@ -41,13 +70,12 @@ def test_field_update_half_apply_reports_failure_without_success():
 
     # The first field applied, the second raised, the third never ran:
     # a half-apply that reports failure, not success.
-    assert [body["field_id"] for _, _, body in calls] == [
-        funnel.STATUS_FIELD_ID,
-        funnel.CLASS_FIELD_ID,
+    assert [body["fields"][0]["id"] for _, _, body in calls] == [
+        408475351, 408475545,
     ]
     assert all(
         method == "PATCH"
-        and endpoint == funnel.REST_PROJECT_ITEMS_PATH + "/PVTI_1"
+        and endpoint == funnel.REST_PROJECT_ITEMS_PATH + "/241369188"
         for method, endpoint, _ in calls
     )
 
@@ -55,20 +83,18 @@ def test_field_update_half_apply_reports_failure_without_success():
 def test_field_update_without_confirmation_reports_failure():
     """A 200 with no matching item id never counts as an applied write."""
     reset()
-    with pytest.raises(funnel.GitHubError, match="did not confirm"):
-        funnel.rest_update_project_item_field(
-            "PVTI_1",
-            funnel.STATUS_FIELD_ID,
-            "Ready",
-            _request=lambda method, endpoint, body: {"id": "PVTI_other"},
-        )
-    with pytest.raises(funnel.GitHubError, match="did not confirm"):
-        funnel.rest_update_project_item_field(
-            "PVTI_1",
-            funnel.STATUS_FIELD_ID,
-            "Ready",
-            _request=lambda method, endpoint, body: ["PVTI_1"],
-        )
+    for answer in ({"id": 1, "node_id": NODE_ID, "fields": [{"id": 408475351}]},
+                   {"id": DATABASE_ID, "node_id": NODE_ID, "fields": []},
+                   [NODE_ID]):
+        with pytest.raises(funnel.GitHubError, match="did not confirm"):
+            funnel.rest_update_project_item_field(
+                NODE_ID,
+                funnel.STATUS_FIELD_ID,
+                "Ready",
+                _request=lambda method, endpoint, body, answer=answer: (
+                    schema(method, endpoint, body) if method == "GET"
+                    else answer),
+            )
 
 
 def test_item_add_returns_new_item_id():
@@ -112,6 +138,8 @@ def test_write_transport_failure_surfaces_and_counts_once(monkeypatch):
         assert args[:3] == ["gh", "api", "-X"]
         if args[3] == "POST":
             return Proc(stdout=json.dumps({"id": "PVTI_new"}))
+        if args[3] == "GET":
+            return Proc(stdout=json.dumps(schema("GET", args[4], None)))
         return Proc(stderr="HTTP 502 Bad Gateway", returncode=1)
 
     monkeypatch.setattr(funnel, "_run_gh", run)
@@ -119,9 +147,10 @@ def test_write_transport_failure_surfaces_and_counts_once(monkeypatch):
     assert funnel.rest_add_project_item("I_issue_node") == "PVTI_new"
     with pytest.raises(funnel.GitHubError, match="HTTP 502"):
         funnel.rest_update_project_item_field(
-            "PVTI_1", funnel.STATUS_FIELD_ID, "Ready"
+            NODE_ID, funnel.STATUS_FIELD_ID, "Ready"
         )
-    assert funnel.rest_spend() == {"calls": 2}
+    # The add, the field schema read, the item check and the failed PATCH.
+    assert funnel.rest_spend() == {"calls": 4}
 
 
 def test_write_rejects_empty_ids_and_updates():

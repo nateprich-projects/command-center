@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import math
 import pathlib
 import re
@@ -97,17 +96,13 @@ def test_park_sets_status_closes_not_planned_then_posts_the_reason(monkeypatch):
     events = []
 
     def graphql(query, **variables):
-        pytest.fail("unexpected GraphQL request")
+        if query == funnel.SET_FIELD:
+            events.append(("set field", variables))
+            return {"updateProjectV2ItemFieldValue": {"projectV2Item": {"id": target.item_id}}}
+        events.append(("read options", variables))
+        return {"node": {"options": [{"id": "parked-option", "name": "Parked"}]}}
 
-    def run(args, **kwargs):
-        args = list(args)
-        if args[:2] == ["gh", "api"]:
-            events.append(("rest write", tuple(args)))
-            item_id = args[4].rsplit("/", 1)[-1]
-            return SimpleNamespace(
-                returncode=0, stdout=json.dumps({"id": item_id}),
-                stderr="",
-            )
+    def run(args, capture_output, text=True):
         events.append((args[2], tuple(args)))
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
@@ -120,19 +115,22 @@ def test_park_sets_status_closes_not_planned_then_posts_the_reason(monkeypatch):
     ]) == 0
 
     assert [event[0] for event in events] == [
-        "rest write", "close", "comment"
+        "read options", "set field", "close", "comment"
     ]
-    assert events[0][1][3:5] == (
-        "PATCH", funnel.REST_PROJECT_ITEMS_PATH + "/project-item-42",
-    )
-    assert events[1][1] == (
+    assert events[1][1] == {
+        "project": funnel.PROJECT_ID,
+        "item": "project-item-42",
+        "field": funnel.STATUS_FIELD_ID,
+        "option": "parked-option",
+    }
+    assert events[2][1] == (
         "gh", "issue", "close", "42", "--repo", "nateprich/beta",
         "--reason", "not planned",
     )
-    assert events[2][1][:6] == (
+    assert events[3][1][:6] == (
         "gh", "issue", "comment", "42", "--repo", "nateprich/beta",
     )
-    posted = events[2][1][-1]
+    posted = events[3][1][-1]
     assert funnel._visible_comment(posted) == (
         funnel.PARK_COMMENT_PREFIX + "No longer worth the cost"
     )
@@ -189,17 +187,13 @@ def test_park_with_wake_date_records_status_reason_and_instruction(monkeypatch):
     events = []
 
     def graphql(query, **variables):
-        pytest.fail("unexpected GraphQL request")
+        if query == funnel.SET_FIELD:
+            events.append(("set field", variables))
+            return {"updateProjectV2ItemFieldValue": {"projectV2Item": {"id": target.item_id}}}
+        events.append(("read options", variables))
+        return {"node": {"options": [{"id": "parked-option", "name": "Parked"}]}}
 
-    def run(args, **kwargs):
-        args = list(args)
-        if args[:2] == ["gh", "api"]:
-            events.append(("rest write", tuple(args)))
-            item_id = args[4].rsplit("/", 1)[-1]
-            return SimpleNamespace(
-                returncode=0, stdout=json.dumps({"id": item_id}),
-                stderr="",
-            )
+    def run(args, capture_output, text=True):
         events.append((args[2], tuple(args)))
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
@@ -215,14 +209,7 @@ def test_park_with_wake_date_records_status_reason_and_instruction(monkeypatch):
         "--run", "run-42", "--agent", "claude",
     ]) == 0
 
-    assert [event[0] for event in events] == [
-        "rest write", "close", "comment"
-    ]
-    assert events[0][1][3:5] == (
-        "PATCH", funnel.REST_PROJECT_ITEMS_PATH + "/project-item-42",
-    )
-
-    posted = events[2][1][-1]
+    posted = events[3][1][-1]
     parsed = funnel.parse_park_comment(posted)
     assert parsed == {
         "reason": "Resume after the study",
@@ -322,16 +309,7 @@ def _wire_wake_writes(monkeypatch, item, comment, events, reads=None,
     comments = {item.ref: [{"author": author, "body": comment}]}
     monkeypatch.setattr(funnel, "_issue_comments", _no_full_read)
 
-    def run(args, **kwargs):
-        args = list(args)
-        if args[:2] == ["gh", "api"]:
-            # The restored Status writes over REST (#2423).
-            events.append(("rest write", tuple(args)))
-            item_id = args[4].rsplit("/", 1)[-1]
-            return SimpleNamespace(
-                returncode=0, stdout=json.dumps({"id": item_id}),
-                stderr="",
-            )
+    def run(args, capture_output, text=True):
         events.append(("gh", tuple(args)))
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
@@ -340,10 +318,16 @@ def _wire_wake_writes(monkeypatch, item, comment, events, reads=None,
             if reads is not None:
                 reads.append(query)
             return _answer_comment_tails(query, comments)
-        pytest.fail("unexpected GraphQL request")
+        events.append(("graphql", variables))
+        return {
+            "updateProjectV2ItemFieldValue": {
+                "projectV2Item": {"id": item.item_id}
+            }
+        }
 
     monkeypatch.setattr(funnel, "_run_gh", run)
     monkeypatch.setattr(funnel, "gh_graphql", graphql)
+    monkeypatch.setattr(funnel, "_option_id", lambda *args: "building-option")
     monkeypatch.setattr(funnel, "live_issue_state", lambda current: current.state)
 
 
@@ -375,14 +359,16 @@ def test_park_wake_restores_prior_status_on_and_after_the_utc_date(
 
     assert funnel.reconcile_parked_wakes([item], now) == [item.ref]
 
-    assert [event[0] for event in events] == ["gh", "rest write"]
+    assert [event[0] for event in events] == ["gh", "graphql"]
     assert events[0][1] == (
         "gh", "issue", "reopen", "43", "--repo", "nateprich/beta"
     )
-    assert events[1][1][2:5] == (
-        "-X", "PATCH",
-        funnel.REST_PROJECT_ITEMS_PATH + "/project-item-43",
-    )
+    assert events[1][1] == {
+        "project": funnel.PROJECT_ID,
+        "item": item.item_id,
+        "field": funnel.STATUS_FIELD_ID,
+        "option": "building-option",
+    }
     assert item.state == "OPEN"
     assert item.state_reason == "REOPENED"
     assert item.status == "Building"
@@ -474,18 +460,14 @@ def _wire_batched_wakes(monkeypatch, items, comments_by_ref, *, drop=(),
         if "comments(last:" in query:
             reads.append(query)
             return _answer_comment_tails(query, comments_by_ref, drop=drop)
-        pytest.fail("unexpected GraphQL request")
+        events.append(("graphql", variables["item"]))
+        return {
+            "updateProjectV2ItemFieldValue": {
+                "projectV2Item": {"id": variables["item"]}
+            }
+        }
 
-    def run(args, **kwargs):
-        args = list(args)
-        if args[:2] == ["gh", "api"]:
-            # A due wake's restored Status writes over REST (#2423).
-            item_id = args[4].rsplit("/", 1)[-1]
-            events.append(("rest write", item_id))
-            return SimpleNamespace(
-                returncode=0, stdout=json.dumps({"id": item_id}),
-                stderr="",
-            )
+    def run(args, capture_output, text=True):
         events.append(("gh", tuple(args)))
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
@@ -498,6 +480,7 @@ def _wire_batched_wakes(monkeypatch, items, comments_by_ref, *, drop=(),
     monkeypatch.setattr(funnel, "gh_graphql", graphql)
     monkeypatch.setattr(funnel, "_run_gh", run)
     monkeypatch.setattr(funnel, "_issue_comments", complete_read)
+    monkeypatch.setattr(funnel, "_option_id", lambda *args: "status-option")
     return reads, events
 
 
@@ -557,7 +540,7 @@ def test_parked_wakes_batch_the_recorded_42_item_shape(monkeypatch, batch_size):
     assert all(
         item.status == "Parked" for item in items if item.ref not in due
     )
-    written = [target for kind, target in events if kind == "rest write"]
+    written = [target for kind, target in events if kind == "graphql"]
     assert written == [woken[ref].item_id for ref in due]
 
 

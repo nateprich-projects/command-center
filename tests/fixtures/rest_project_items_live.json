@@ -1,0 +1,351 @@
+{
+ "_source": "GET /users/nateprich/projectsV2/2/items?per_page=100&q=is:open has:parent-issue&fields=<REST_BOARD_FIELD_IDS>, recorded 2026-10-17 (issue bodies trimmed); blockers from GET /repos/nateprich-projects/command-center/issues/<n>/dependencies/blocked_by",
+ "link_header": "Link: <https://api.github.com/user/263208503/projectsV2/2/items?per_page=50&fields=408475351%2C408475545&after=Y3Vyc29yOnYyOpK5MDAwMDAwMDAuMDE5MjMwNzY5MjMwNzY5Ms4Ob36F>; rel=\"next\"",
+ "link_cursor": "Y3Vyc29yOnYyOpK5MDAwMDAwMDAuMDE5MjMwNzY5MjMwNzY5Ms4Ob36F",
+ "items": [
+  {
+   "id": 254414687,
+   "node_id": "PVTI_lAHOD7A-N84BihDgzg8qD18",
+   "content_type": "Issue",
+   "content": {
+    "number": 1466,
+    "title": "Run evidence takes a canonical comment form the reviewer judges against",
+    "html_url": "https://github.com/nateprich-projects/command-center/issues/1466",
+    "url": "https://api.github.com/repos/nateprich-projects/command-center/issues/1466",
+    "state": "closed",
+    "state_reason": "completed",
+    "body": "Define the canonical `**Run evidence:**` comment: fenced JSON carrying command, ",
+    "created_at": "2026-09-25T00:03:42Z",
+    "closed_at": "2026-09-25T16:34:34Z",
+    "labels": [],
+    "assignees": [],
+    "repository": {
+     "full_name": "nateprich-projects/command-center"
+    },
+    "sub_issues_summary": {
+     "total": 0,
+     "completed": 0,
+     "percent_completed": 0
+    },
+    "issue_dependencies_summary": {
+     "blocked_by": 0,
+     "total_blocked_by": 1,
+     "blocking": 0,
+     "total_blocking": 1
+    },
+    "node_id": "I_kwDOUO-QAM8AAAABTFz7Ow"
+   },
+   "fields": [
+    {
+     "id": 408475351,
+     "name": "Status",
+     "data_type": "single_select",
+     "value": null
+    },
+    {
+     "id": 408475358,
+     "name": "Parent issue",
+     "data_type": "parent_issue",
+     "value": {
+      "number": 1439,
+      "html_url": "https://github.com/nateprich-projects/command-center/issues/1439",
+      "repository_url": "https://api.github.com/repos/nateprich-projects/command-center",
+      "state": "closed"
+     }
+    },
+    {
+     "id": 408475545,
+     "name": "Class",
+     "data_type": "single_select",
+     "value": null
+    },
+    {
+     "id": 408497956,
+     "name": "In motion since",
+     "data_type": "text",
+     "value": null
+    },
+    {
+     "id": 410157169,
+     "name": "Pinned",
+     "data_type": "single_select",
+     "value": null
+    },
+    {
+     "id": 411997140,
+     "name": "Needs",
+     "data_type": "single_select",
+     "value": {
+      "id": "259da669",
+      "name": {
+       "raw": "none",
+       "html": "none"
+      },
+      "description": {
+       "raw": "No human step; the standard lane can build this.",
+       "html": "No human step; the standard lane can build this."
+      },
+      "color": "GRAY"
+     }
+    },
+    {
+     "id": 416360306,
+     "name": "Origin",
+     "data_type": "single_select",
+     "value": {
+      "id": "192c6da8",
+      "name": {
+       "raw": "agent",
+       "html": "agent"
+      },
+      "description": {
+       "raw": "",
+       "html": ""
+      },
+      "color": "GRAY"
+     }
+    },
+    {
+     "id": 416360356,
+     "name": "Risk",
+     "data_type": "single_select",
+     "value": {
+      "id": "668d3c21",
+      "name": {
+       "raw": "standard",
+       "html": "standard"
+      },
+      "description": {
+       "raw": "",
+       "html": ""
+      },
+      "color": "GRAY"
+     }
+    },
+    {
+     "id": 424937513,
+     "name": "Domain",
+     "data_type": "single_select",
+     "value": null
+    }
+   ]
+  },
+  {
+   "id": 258345422,
+   "node_id": "PVTI_lAHOD7A-N84BihDgzg9mCc4",
+   "content_type": "Issue",
+   "content": {
+    "number": 2027,
+    "title": "Runner scope evidence with per-PR unrequested count",
+    "html_url": "https://github.com/nateprich-projects/command-center/issues/2027",
+    "url": "https://api.github.com/repos/nateprich-projects/command-center/issues/2027",
+    "state": "open",
+    "state_reason": null,
+    "body": "Verify first: confirm #1783 evidence path exists and is reusable, locate require",
+    "created_at": "2026-09-30T05:39:58Z",
+    "closed_at": null,
+    "labels": [],
+    "assignees": [],
+    "repository": {
+     "full_name": "nateprich-projects/command-center"
+    },
+    "sub_issues_summary": {
+     "total": 0,
+     "completed": 0,
+     "percent_completed": 0
+    },
+    "issue_dependencies_summary": {
+     "blocked_by": 0,
+     "total_blocked_by": 3,
+     "blocking": 1,
+     "total_blocking": 1
+    },
+    "node_id": "I_kwDOUO-QAM8AAAABUEOGDw"
+   },
+   "fields": [
+    {
+     "id": 408475351,
+     "name": "Status",
+     "data_type": "single_select",
+     "value": null
+    },
+    {
+     "id": 408475358,
+     "name": "Parent issue",
+     "data_type": "parent_issue",
+     "value": {
+      "number": 1840,
+      "html_url": "https://github.com/nateprich-projects/command-center/issues/1840",
+      "repository_url": "https://api.github.com/repos/nateprich-projects/command-center",
+      "state": "open"
+     }
+    },
+    {
+     "id": 408475545,
+     "name": "Class",
+     "data_type": "single_select",
+     "value": null
+    },
+    {
+     "id": 408497956,
+     "name": "In motion since",
+     "data_type": "text",
+     "value": null
+    },
+    {
+     "id": 410157169,
+     "name": "Pinned",
+     "data_type": "single_select",
+     "value": null
+    },
+    {
+     "id": 411997140,
+     "name": "Needs",
+     "data_type": "single_select",
+     "value": {
+      "id": "259da669",
+      "name": {
+       "raw": "none",
+       "html": "none"
+      },
+      "description": {
+       "raw": "No human step; the standard lane can build this.",
+       "html": "No human step; the standard lane can build this."
+      },
+      "color": "GRAY"
+     }
+    },
+    {
+     "id": 416360306,
+     "name": "Origin",
+     "data_type": "single_select",
+     "value": {
+      "id": "192c6da8",
+      "name": {
+       "raw": "agent",
+       "html": "agent"
+      },
+      "description": {
+       "raw": "",
+       "html": ""
+      },
+      "color": "GRAY"
+     }
+    },
+    {
+     "id": 416360356,
+     "name": "Risk",
+     "data_type": "single_select",
+     "value": {
+      "id": "668d3c21",
+      "name": {
+       "raw": "standard",
+       "html": "standard"
+      },
+      "description": {
+       "raw": "",
+       "html": ""
+      },
+      "color": "GRAY"
+     }
+    },
+    {
+     "id": 424937513,
+     "name": "Domain",
+     "data_type": "single_select",
+     "value": null
+    }
+   ]
+  }
+ ],
+ "blocked_by": {
+  "1466": [
+   {
+    "number": 1465,
+    "repository_url": "https://api.github.com/repos/nateprich-projects/command-center",
+    "state": "closed",
+    "state_reason": "completed"
+   }
+  ],
+  "2027": [
+   {
+    "number": 1838,
+    "repository_url": "https://api.github.com/repos/nateprich-projects/command-center",
+    "state": "closed",
+    "state_reason": "completed"
+   },
+   {
+    "number": 1837,
+    "repository_url": "https://api.github.com/repos/nateprich-projects/command-center",
+    "state": "closed",
+    "state_reason": "completed"
+   },
+   {
+    "number": 1839,
+    "repository_url": "https://api.github.com/repos/nateprich-projects/command-center",
+    "state": "closed",
+    "state_reason": "completed"
+   }
+  ]
+ },
+ "patch_response": {
+  "fields": [
+   {
+    "id": 408475351,
+    "name": "Status"
+   }
+  ],
+  "id": 241369188,
+  "node_id": "PVTI_lAHOD7A-N84BihDgzg5jAGQ"
+ },
+ "status_field": {
+  "data_type": "single_select",
+  "id": 408475351,
+  "name": "Status",
+  "node_id": "PVTSSF_lAHOD7A-N84BihDgzhhY1tc",
+  "options": [
+   {
+    "id": "ae97c559",
+    "name": {
+     "html": "Ideas",
+     "raw": "Ideas"
+    }
+   },
+   {
+    "id": "8b2fdd87",
+    "name": {
+     "html": "Shaped",
+     "raw": "Shaped"
+    }
+   },
+   {
+    "id": "62970921",
+    "name": {
+     "html": "Ready",
+     "raw": "Ready"
+    }
+   },
+   {
+    "id": "16dd8712",
+    "name": {
+     "html": "Building",
+     "raw": "Building"
+    }
+   },
+   {
+    "id": "2a3af7fa",
+    "name": {
+     "html": "Done",
+     "raw": "Done"
+    }
+   },
+   {
+    "id": "cf00060c",
+    "name": {
+     "html": "Parked",
+     "raw": "Parked"
+    }
+   }
+  ]
+ }
+}

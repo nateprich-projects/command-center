@@ -265,19 +265,6 @@ class Board:
                 "--json", "state"):
             return SimpleNamespace(
                 returncode=0, stdout='{"state": "OPEN"}', stderr="")
-        if args[:2] == ("gh", "api"):
-            # Project field writes go over REST (#2423): confirm the item
-            # id and record the write beside the GraphQL ones.
-            method, endpoint = args[3], args[4]
-            self.writes.append(("REST_FIELD", (
-                method, endpoint,
-                json.loads(kwargs.get("input") or "{}"),
-            )))
-            return SimpleNamespace(
-                returncode=0,
-                stdout=json.dumps(
-                    {"id": endpoint.rsplit("/", 1)[-1]}),
-                stderr="")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     @property
@@ -460,11 +447,11 @@ def test_shape_apply_live_writes_are_identical_without_history(
     assert new.argv == old.argv
     assert new.writes == old.writes
     expected = "Ready" if needs_nate is None else "Shaped"
-    assert ("REST_FIELD", (
-        "PATCH",
-        funnel.REST_PROJECT_ITEMS_PATH + "/PVTI_{}".format(IDEA),
-        {"field_id": funnel.STATUS_FIELD_ID, "value": expected},
-    )) in new.writes
+    assert ("SET_FIELD", sorted({
+        "project": funnel.PROJECT_ID, "item": "PVTI_{}".format(IDEA),
+        "field": funnel.STATUS_FIELD_ID,
+        "option": "opt-{}".format(expected),
+    }.items())) in new.writes
     assert any(args[:4] == ("gh", "issue", "edit", str(IDEA))
                for args in new.argv)
     assert new.ref_queries == [

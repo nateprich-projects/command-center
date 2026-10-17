@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import pathlib
 import sys
 from datetime import datetime, timezone
@@ -50,33 +49,26 @@ def stub_github(monkeypatch, item, fresh):
         return [fresh] if refs == [item.ref] else None
 
     def graphql(query, **variables):
+        events.append(("graphql", query, variables))
+        if query == funnel.SET_FIELD:
+            return {
+                "updateProjectV2ItemFieldValue": {
+                    "projectV2Item": {"id": fresh.item_id}
+                }
+            }
         pytest.fail("unexpected GraphQL request")
 
-    def run(args, **kwargs):
-        args = list(args)
+    def run(args, capture_output, text=True):
         events.append(("gh", tuple(args)))
-        if args[:2] == ["gh", "api"]:
-            # The REST Project write confirms the item id it wrote (#2423).
-            item_id = args[4].rsplit("/", 1)[-1]
-            return SimpleNamespace(
-                returncode=0, stdout=json.dumps({"id": item_id}),
-                stderr="",
-            )
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(funnel, "load_items", lambda: [item])
     monkeypatch.setattr(funnel, "load_project_items_by_refs", load_fresh)
     monkeypatch.setattr(funnel, "live_issue_state", lambda current: "OPEN")
+    monkeypatch.setattr(funnel, "_option_id", lambda field, name: "ideas-option")
     monkeypatch.setattr(funnel, "gh_graphql", graphql)
     monkeypatch.setattr(funnel.subprocess, "run", run)
     return events, fresh_reads
-
-
-def _rest_writes(events):
-    return [
-        event for event in events
-        if event[0] == "gh" and event[1][:2] == ("gh", "api")
-    ]
 
 
 def test_send_back_reproduction_ensures_needs_shaping_label(monkeypatch):
@@ -93,12 +85,9 @@ def test_send_back_reproduction_ensures_needs_shaping_label(monkeypatch):
         event for event in events
         if event[0] == "gh" and event[1][:3] == ("gh", "issue", "edit")
     ]
-    rest_writes = _rest_writes(events)
-    assert len(rest_writes) == 1
-    assert rest_writes[0][1][3:5] == (
-        "PATCH", funnel.REST_PROJECT_ITEMS_PATH + "/project-item-42",
+    status_write_index = next(
+        index for index, event in enumerate(events) if event[0] == "graphql"
     )
-    status_write_index = events.index(rest_writes[0])
     label_write_index = next(
         index for index, event in enumerate(events)
         if event[0] == "gh" and event[1][:3] == ("gh", "issue", "edit")
@@ -208,16 +197,19 @@ def test_send_back_reproduction_moves_fresh_shaped_item_and_posts_reason(monkeyp
         "--yes", "--run", "run-42", "--agent", "codex",
     ]) == 0
 
-    writes = _rest_writes(events)
+    writes = [event for event in events if event[0] == "graphql"]
     comments = [
         event for event in events
         if event[0] == "gh" and event[1][:3] == ("gh", "issue", "comment")
     ]
     assert fresh_reads == [(item.ref,)]
     assert len(writes) == 1
-    assert writes[0][1][3:5] == (
-        "PATCH", funnel.REST_PROJECT_ITEMS_PATH + "/project-item-42",
-    )
+    assert writes[0][2] == {
+        "project": funnel.PROJECT_ID,
+        "item": item.item_id,
+        "field": funnel.STATUS_FIELD_ID,
+        "option": "ideas-option",
+    }
     assert len(comments) == 1
     assert comments[0][1][:6] == (
         "gh", "issue", "comment", "42", "--repo", REPO,
@@ -323,11 +315,9 @@ def test_send_back_accept_moves_building_project_to_ideas(monkeypatch):
     assert fresh.body == ACCEPT_BODY
     assert item.body == ACCEPT_BODY
     assert "needs-shaping" in fresh.labels
-    writes = _rest_writes(events)
+    writes = [event for event in events if event[0] == "graphql"]
     assert len(writes) == 1
-    assert writes[0][1][3:5] == (
-        "PATCH", funnel.REST_PROJECT_ITEMS_PATH + "/project-item-77",
-    )
+    assert writes[0][2]["option"] == "ideas-option"
     comments = [
         event for event in events
         if event[0] == "gh" and event[1][:3] == ("gh", "issue", "comment")

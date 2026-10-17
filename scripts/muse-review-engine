@@ -3199,6 +3199,17 @@ the diff and the wrong outcome. The `Risks:` in `pr_body` are where to look hard
 is `unavailable`, or the packet has none, say so and judge as you otherwise
 would.
 
+Map each `- scope:` evidence row to the requirement that asked for it, or to
+`unrequested` (#2028, plan #1840 phase 4). Read the requested work from the
+ticket plan text plus its parent plan. Answer one mapping per scope group as
+`{"scope": [{"group", "requirement", "evidence"}]}`, covering every group
+exactly once: no dropped groups, no invented groups. A group no requirement
+asked for maps to `unrequested`. A malformed mapping fails the evidence check,
+never the review: record a deferred outcomes entry with the reason instead of
+blocking. The unrequested count never blocks and never enters the verdict:
+only a real defect with a realistic reproduction, a missing or tautological
+Accept test, or a merged-main failure blocks.
+
 When an assigned requirement is a ticket verify-first or `Reproduction:`
 requirement asserting base behavior and the packet's code or records show the
 opposite base behavior, the ticket premise is refuted, not the diff: judge it

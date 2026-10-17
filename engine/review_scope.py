@@ -330,3 +330,114 @@ def scope_skip_reason(diff: object) -> Optional[str]:
     if not scope_groups(diff):
         return "diff has no mappable hunks"
     return None
+
+
+#: Verify-first record for ticket #2028 (plan #1840 phase 4, Ticket 2):
+#: the replay discipline, its two corpus seeds, and its command, read from
+#: docs/review-path-changes.md before the prompt change below.
+REVIEW_PATH_SEEDS = (
+    "command-center-review-corpus/the-league-237-must-reject.json",
+    "command-center-review-corpus/command-center-1959-must-approve.json",
+)
+REVIEW_PATH_REPLAY_COMMAND = (
+    'python3 review-replay "$PACKET" --runs 3 '
+    '--expected-verdict "$EXPECTED_VERDICT"'
+)
+
+#: The bounded scope mapping question for the judge prompt (ticket #2028,
+#: plan #1840 phase 4 Ticket 2). One mapping per scope group, answered as
+#: ``{"scope": [{"group", "requirement", "evidence"}]}`` and validated by
+#: ``parse_scope_mapping``: every group mapped exactly once, no dropped or
+#: invented groups. Each group maps against the ticket plan text plus its
+#: parent plan to a requirement ref, or to ``unrequested`` when neither
+#: asked for it. A malformed mapping fails the evidence check, never the
+#: review: the runner records a deferred outcomes entry with the reason
+#: instead of blocking. The count never blocks and never enters the
+#: verdict: only the three stopping-rule kinds block (a real defect with
+#: a realistic reproduction, a missing or tautological Accept test, a
+#: merged-main failure).
+SCOPE_JUDGE_QUESTION = (
+    "Map each `- scope:` evidence row to the requirement that asked for "
+    "it, or to `unrequested`. Read the requested work from the ticket "
+    "plan text plus its parent plan. Answer one mapping per scope group "
+    "as `{\"scope\": [{\"group\", \"requirement\", \"evidence\"}]}`, "
+    "covering every group exactly once: no dropped groups, no invented "
+    "groups. A group no requirement asked for maps to `unrequested`. A "
+    "malformed mapping fails the evidence check, never the review: record "
+    "a deferred outcomes entry with the reason instead of blocking. The "
+    "unrequested count never blocks and never enters the verdict: only a "
+    "real defect with a realistic reproduction, a missing or tautological "
+    "Accept test, or a merged-main failure blocks."
+)
+
+#: The settled prefix of the one per-PR scope note line in the review
+#: notes section. The note states the judged unrequested-group count; a
+#: deferred mapping renders a deferred note with the reason instead.
+SCOPE_NOTE_PREFIX = "Scope: "
+
+
+def render_scope_note(unrequested_count: int, group_count: int) -> str:
+    """One per-PR scope note line stating the unrequested-group count.
+
+    ``unrequested_count`` groups of ``group_count`` mapped to
+    ``unrequested``. Never blocks and never enters the verdict: it is a
+    note in the review notes section only.
+    """
+    if (isinstance(unrequested_count, bool)
+            or isinstance(group_count, bool)
+            or not isinstance(unrequested_count, int)
+            or not isinstance(group_count, int)):
+        raise ScopeMappingError("scope counts must be integers")
+    if unrequested_count < 0 or group_count < 0:
+        raise ScopeMappingError("scope counts must be non-negative")
+    if unrequested_count > group_count:
+        raise ScopeMappingError(
+            "unrequested groups cannot exceed mapped groups")
+    return "{}: {} unrequested of {} group{}".format(
+        SCOPE_NOTE_PREFIX.rstrip(": "),
+        unrequested_count, group_count,
+        "" if group_count == 1 else "s")
+
+
+def render_scope_deferred_note(reason: object) -> str:
+    """The deferred scope note line for a PR whose mapping was skipped."""
+    if not isinstance(reason, str) or not reason.strip():
+        raise ScopeMappingError("a deferred scope note needs a reason")
+    return "{}deferred ({})".format(
+        SCOPE_NOTE_PREFIX, " ".join(reason.strip().split()))
+
+
+def scope_note_for_mapping(entries: Sequence[Mapping[str, Any]]) -> str:
+    """The scope note line for one validated judge mapping.
+
+    Counts one per group mapped to ``unrequested`` via
+    ``count_unrequested``, so the note and the per-PR outcomes record
+    built from the same entries agree.
+    """
+    listed = list(entries)
+    return render_scope_note(count_unrequested(listed), len(listed))
+
+
+def scope_note_for_record(record: Mapping[str, Any]) -> str:
+    """The scope note line for one per-PR scope outcomes record.
+
+    A ``mapped`` record renders its count; a ``deferred`` record renders
+    its reason. Reading the note from the record keeps the review note
+    and the outcomes count agreeing on the same judged head.
+    """
+    if not isinstance(record, Mapping):
+        raise ScopeMappingError("a scope record must be a mapping")
+    status = record.get("status")
+    if status == "mapped":
+        unrequested = record.get("unrequested_count")
+        groups = record.get("group_count")
+        if (isinstance(unrequested, bool) or isinstance(groups, bool)
+                or not isinstance(unrequested, int)
+                or not isinstance(groups, int)):
+            raise ScopeMappingError(
+                "a mapped scope record needs integer counts")
+        return render_scope_note(unrequested, groups)
+    if status == "deferred":
+        return render_scope_deferred_note(record.get("reason"))
+    raise ScopeMappingError(
+        "a scope record must be mapped or deferred")

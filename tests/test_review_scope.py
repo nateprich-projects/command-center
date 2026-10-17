@@ -19,14 +19,22 @@ from engine.review import (
 )
 from engine.review_scope import (
     FILE_SCOPE_LABEL,
+    REVIEW_PATH_REPLAY_COMMAND,
+    REVIEW_PATH_SEEDS,
+    SCOPE_JUDGE_QUESTION,
+    SCOPE_NOTE_PREFIX,
     UNREQUESTED,
     ScopeMappingError,
     count_unrequested,
     parse_scope_mapping,
+    render_scope_deferred_note,
+    render_scope_note,
     render_scope_rows,
     scope_evidence_lines,
     scope_group_id,
     scope_groups,
+    scope_note_for_mapping,
+    scope_note_for_record,
     scope_skip_reason,
 )
 from outcomes import (
@@ -434,3 +442,98 @@ def test_scope_lines_evidence_names_a_missing_diff():
     assert implement._scope_lines_evidence(
         pathlib.Path("/nonexistent-root"), "main", "head") == [
             "- scope: not run"]
+
+
+def test_verify_first_records_both_corpus_seeds_and_the_replay_command():
+    """#2028 verify-first: the replay discipline from
+    docs/review-path-changes.md, recorded before the prompt change."""
+    assert REVIEW_PATH_SEEDS == (
+        "command-center-review-corpus/the-league-237-must-reject.json",
+        "command-center-review-corpus/command-center-1959-must-approve.json",
+    )
+    assert "review-replay" in REVIEW_PATH_REPLAY_COMMAND
+    assert "--runs 3" in REVIEW_PATH_REPLAY_COMMAND
+    assert "--expected-verdict" in REVIEW_PATH_REPLAY_COMMAND
+
+
+def test_scope_judge_question_is_present_and_bounded():
+    """#2028 prompt builder: one mapping per scope group, exactly once,
+    against ticket plan text plus parent plan, never blocking."""
+    flat = " ".join(SCOPE_JUDGE_QUESTION.split())
+    for sentence in (
+        "Map each `- scope:` evidence row",
+        "or to `unrequested`",
+        "ticket plan text plus its parent plan",
+        "one mapping per scope group",
+        "every group exactly once",
+        "no dropped groups, no invented groups",
+        "malformed mapping fails the evidence check, never the review",
+        "deferred outcomes entry with the reason",
+        "never blocks and never enters the verdict",
+        "real defect with a realistic reproduction",
+        "missing or tautological Accept test",
+        "merged-main failure blocks",
+    ):
+        assert sentence in flat, sentence
+
+
+def test_scope_note_states_the_per_pr_unrequested_count():
+    assert render_scope_note(2, 4) == "Scope: 2 unrequested of 4 groups"
+    assert render_scope_note(0, 3) == "Scope: 0 unrequested of 3 groups"
+    assert render_scope_note(0, 1) == "Scope: 0 unrequested of 1 group"
+    assert render_scope_note(1, 1) == "Scope: 1 unrequested of 1 group"
+    assert render_scope_note(2, 4).startswith(SCOPE_NOTE_PREFIX)
+    assert "\n" not in render_scope_note(2, 4)
+    with pytest.raises(ScopeMappingError):
+        render_scope_note(5, 4)
+    with pytest.raises(ScopeMappingError):
+        render_scope_note(-1, 4)
+    with pytest.raises(ScopeMappingError):
+        render_scope_note(True, 4)
+
+
+def test_deferred_scope_note_carries_the_reason():
+    assert render_scope_deferred_note(DIFF_TOO_LARGE_REASON) == (
+        "Scope: deferred ({})".format(DIFF_TOO_LARGE_REASON))
+    assert render_scope_deferred_note("  diff unavailable: nothing to map ") == (
+        "Scope: deferred (diff unavailable: nothing to map)")
+    with pytest.raises(ScopeMappingError):
+        render_scope_deferred_note("  ")
+
+
+def test_note_and_outcomes_record_agree_on_the_same_mapping():
+    """#2028 Accept: the review note count matches outcomes."""
+    groups = scope_groups(DIFF)
+    ids = [group["id"] for group in groups]
+    raw = json.dumps({"scope": [
+        {"group": ids[0], "requirement": "requirement one",
+         "evidence": "implements it"},
+        {"group": ids[1], "requirement": UNREQUESTED,
+         "evidence": "nothing asks for this"},
+        {"group": ids[2], "requirement": "requirement one",
+         "evidence": "supports it"},
+        {"group": ids[3], "requirement": UNREQUESTED,
+         "evidence": "drive-by prose"},
+    ]})
+
+    entries = parse_scope_mapping(raw, groups)
+    record = derive_scope_outcome(
+        REPO, 4242, HEAD_SHA, count_unrequested(entries), len(entries))
+
+    assert record["unrequested_count"] == 2
+    assert record["group_count"] == 4
+    assert scope_note_for_mapping(entries) == "Scope: 2 unrequested of 4 groups"
+    assert scope_note_for_record(record) == "Scope: 2 unrequested of 4 groups"
+
+
+def test_deferred_note_and_deferred_record_agree():
+    reason = scope_skip_reason("x" * (DIFF_LIMIT_BYTES + 1))
+    assert reason is not None
+    record = deferred_scope_outcome(REPO, 4242, HEAD_SHA, reason)
+
+    assert scope_note_for_record(record) == render_scope_deferred_note(reason)
+    assert scope_note_for_record(record).startswith("Scope: deferred (")
+    with pytest.raises(ScopeMappingError):
+        scope_note_for_record({"status": "mapped"})
+    with pytest.raises(ScopeMappingError):
+        scope_note_for_record({"status": "unknown"})

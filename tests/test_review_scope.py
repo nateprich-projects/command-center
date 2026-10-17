@@ -24,6 +24,7 @@ from engine.review_scope import (
     count_unrequested,
     parse_scope_mapping,
     render_scope_rows,
+    scope_evidence_lines,
     scope_group_id,
     scope_groups,
     scope_skip_reason,
@@ -318,3 +319,118 @@ def test_skip_reason_and_deferred_record_agree():
 
     assert record["status"] == "deferred"
     assert record["reason"] == reason
+
+
+def test_evidence_lines_emit_one_row_per_group():
+    lines = scope_evidence_lines(DIFF)
+
+    assert lines == render_scope_rows(scope_groups(DIFF))
+    assert len(lines) == 4
+    assert all(line.startswith("- scope: ") for line in lines)
+    assert lines[0] == "- scope: calc.py::double (hunks 0.0)"
+
+
+def test_evidence_lines_defer_with_reason():
+    oversized = scope_evidence_lines("x" * (DIFF_LIMIT_BYTES + 1))
+    assert oversized == [
+        "- scope: deferred ({})".format(DIFF_TOO_LARGE_REASON)]
+
+    assert scope_evidence_lines("") == [
+        "- scope: deferred (diff unavailable: nothing to map)"]
+    assert scope_evidence_lines(None) == [
+        "- scope: deferred (diff unavailable: nothing to map)"]
+    binary_only = ("diff --git a/logo.png b/logo.png\n"
+                   "Binary files a/logo.png and b/logo.png differ\n")
+    assert scope_evidence_lines(binary_only) == [
+        "- scope: deferred (diff has no mappable hunks)"]
+
+    for lines in (oversized, scope_evidence_lines("")):
+        assert len(lines) == 1
+        assert json.dumps(lines)
+
+
+def test_scope_rows_ride_the_runner_block_into_packet_evidence():
+    """The #1783 seam: the writer's rows are the packet's facts."""
+    from engine import implement
+    from engine.review import packet_evidence, split_evidence_block
+
+    block = implement.render_evidence_block(
+        sha=HEAD_SHA, merged=None,
+        reproduction={"line": "reproduction: not run", "tests": []},
+        repo=REPO, scope_lines=scope_evidence_lines(DIFF))
+    body, inner = split_evidence_block(
+        "Implements #4242.\n\n" + block)
+    evidence = packet_evidence(inner, HEAD_SHA)
+
+    assert evidence != "unavailable"
+    for row in scope_evidence_lines(DIFF):
+        assert row in evidence.split("\n")
+
+
+def test_runner_block_omits_scope_section_when_not_computed():
+    from engine import implement
+
+    block = implement.render_evidence_block(
+        sha=HEAD_SHA, merged=None,
+        reproduction={"line": "reproduction: not run", "tests": []},
+        repo=REPO)
+
+    assert "- scope:" not in block
+
+
+def test_scope_lines_evidence_diffs_the_branch(tmp_path):
+    """The runner call site: branch diff against its merge-base."""
+    import pathlib
+    import subprocess
+
+    from engine import implement
+
+    root = tmp_path / "repo"
+    root.mkdir()
+
+    def git(*args):
+        proc = subprocess.run(
+            ["git"] + list(args), cwd=str(root), capture_output=True,
+            text=True, timeout=60)
+        assert proc.returncode == 0, proc.stderr
+        return proc.stdout.strip()
+
+    git("init")
+    git("config", "user.email", "test@example.com")
+    git("config", "user.name", "Test")
+    (root / "calc.py").write_text(
+        '"""Calc helpers."""\n\nCONSTANT = 1\n\n\ndef double(x):\n'
+        "    result = x * 2\n    result = result + CONSTANT\n"
+        "    result = result - CONSTANT\n    result = result + 0\n"
+        "    return result\n\nFILLER = [\n"
+        "    1,\n    2,\n    3,\n    4,\n    5,\n    6,\n    7,\n    8,\n]\n")
+    git("add", "calc.py")
+    git("commit", "-m", "base")
+    base = git("rev-parse", "HEAD")
+    git("checkout", "-b", "topic")
+    (root / "calc.py").write_text(
+        '"""Calc helpers."""\n\nCONSTANT = 1\n\n\ndef double(x):\n'
+        "    result = x * 2\n    result = result + CONSTANT\n"
+        "    result = result - CONSTANT\n    result = result + 0\n"
+        "    return x * 3\n\nFILLER = [\n"
+        "    1,\n    2,\n    3,\n    4,\n    5,\n    6,\n    7,\n    8,\n]\n\n\ndef triple(x):\n    return x * 3\n")
+    git("commit", "-am", "work")
+    head = git("rev-parse", "HEAD")
+
+    lines = implement._scope_lines_evidence(
+        pathlib.Path(str(root)), base, head)
+
+    assert lines == [
+        "- scope: calc.py::double (hunks 0.0)",
+        "- scope: calc.py::triple (hunks 0.1)",
+    ]
+
+
+def test_scope_lines_evidence_names_a_missing_diff():
+    import pathlib
+
+    from engine import implement
+
+    assert implement._scope_lines_evidence(
+        pathlib.Path("/nonexistent-root"), "main", "head") == [
+            "- scope: not run"]

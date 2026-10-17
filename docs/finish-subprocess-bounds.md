@@ -18,7 +18,7 @@ git show origin/main:engine/implement.py | rg -n "def _run|subprocess\\.run|time
 
 ## Finish-path command inventory
 
-The AST inventory test pins **31 bounded Git callsites** in `engine/implement.py`:
+The AST inventory test pins **33 bounded Git callsites** in `engine/implement.py`:
 
 | Callsite | Git commands |
 | --- | --- |
@@ -36,6 +36,7 @@ The AST inventory test pins **31 bounded Git callsites** in `engine/implement.py
 | `_run_finish_tests` | `git fetch origin +refs/heads/main:refs/remotes/origin/main` (#1804) |
 | `finish_done` | `git rev-parse HEAD` after the push, the SHA the PR's evidence block is keyed to (#1805); `_remote_ticket_tip` reads the pre-push tip via `git fetch origin <ticket refspec>` and `git rev-parse --verify refs/remotes/origin/<branch>`, so a push that moves nothing records a no-push marker in the PR body (#2541) |
 | `_no_diff_base_sha` | `git rev-parse origin/main`, the HEAD the no-diff verification claim is checked against (#2452) |
+| `_scope_lines_evidence` | `git merge-base <base> <head>`; `git diff --no-color --no-ext-diff <ancestor> <head>`, the branch diff the scope rows are grouped from (#2027) |
 | `_remove_codex_run_checkout` | `git rev-parse --show-toplevel`; `git branch --show-current`; `git status --porcelain --untracked-files=all`; `git rev-parse --verify HEAD`; `git rev-parse --verify refs/remotes/origin/ticket/<n>`; `git merge-base --is-ancestor HEAD origin/main` when the ticket-tip check does not match (#2014, #2225) |
 
 `_git_name_paths` expands to these five distinct command forms; the cached diff
@@ -92,7 +93,7 @@ took at most 0.0160 seconds across seven runs. The latest green CI run
 
 Every bound is below the 2-hour claim TTL. `test_every_subprocess_callsite_has_an_explicit_timeout`
 checks that every `_run` caller supplies one. The Git AST inventory test pins its
-30 static callsites and the dynamic path-list command forms documented above.
+32 static callsites and the dynamic path-list command forms documented above.
 Timeout fixtures assert that a never-returning child is killed without a wait,
 the run finishes `errored` with work not kept, no PR effect occurs, and a slow
 call that finishes under its bound succeeds.

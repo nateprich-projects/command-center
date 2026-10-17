@@ -172,6 +172,35 @@ def render_scope_rows(groups: Sequence[Mapping[str, Any]]) -> List[str]:
     return [render_scope_row(group) for group in groups]
 
 
+def _one_line(text: object) -> str:
+    """``text`` collapsed to one whitespace-separated line."""
+    return " ".join(str(text).split())
+
+
+def scope_evidence_lines(diff: object) -> List[str]:
+    """Scope rows for the runner's evidence block, via the #1783 shape.
+
+    One ``- scope:`` fact line per group: the lines
+    ``engine.implement.render_evidence_block`` writes into the PR body and
+    ``engine.review.packet_evidence`` reads back as packet evidence. A
+    diff that must skip mapping yields one
+    ``- scope: deferred (<reason>)`` line instead, so the packet says why
+    there are no groups. Never raises: a diff the grouper cannot read
+    defers with the error as its reason.
+    """
+    try:
+        reason = scope_skip_reason(diff)
+        groups = scope_groups(diff) if reason is None else []
+    except Exception as exc:
+        return ["- scope: deferred (scope grouping unavailable: {})".format(
+            _one_line(exc))]
+    if reason is not None:
+        return ["- scope: deferred ({})".format(_one_line(reason))]
+    if not groups:
+        return ["- scope: deferred (diff has no mappable hunks)"]
+    return render_scope_rows(groups)
+
+
 def _canonical_group_ids(
         expected_groups: Sequence[Any]) -> List[str]:
     """The group ids a mapping answer must cover exactly once."""

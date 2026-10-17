@@ -1786,17 +1786,23 @@ def render_evidence_block(*, sha: str, merged: Optional[dict],
                           prior_fixes: Optional[
                               Sequence[Tuple[int, str, Optional[str]]]
                           ] = (),
+                          scope_lines: Optional[Sequence[str]] = None,
                           no_push_marker: Optional[str] = None) -> str:
     """The runner's evidence block for a PR body (``EVIDENCE_MARKER``).
 
     ``sha`` is the commit the finish pushed, ``merged`` the merged suite's
     record (None when the head's suite ran alone) and ``reproduction`` the
     added-test classification's (#1805). ``prior_fixes`` is the bounded
-    prior-fix scan's result; None means it could not run. ``no_push_marker``
-    is a ``render_no_push_finish_marker`` record for a finish that pushed
-    nothing (#2541); it rides inside the block as an HTML comment, so the
-    review packet's evidence reader ignores it while the offer gate reads it
-    from the same body.
+    prior-fix scan's result; None means it could not run. ``scope_lines``
+    are the ``- scope:`` fact rows from
+    ``engine.review_scope.scope_evidence_lines`` for this PR's diff (None
+    means no scope section is written: the caller did not compute them, or
+    the repository is a private member whose blocks withhold them like test
+    ids, counts only).
+    ``no_push_marker`` is a ``render_no_push_finish_marker`` record for a
+    finish that pushed nothing (#2541); it rides inside the block as an HTML
+    comment, so the review packet's evidence reader ignores it while the
+    offer gate reads it from the same body.
     """
     if merged is None:
         suite = "not run (the head's own suite passed)"
@@ -1844,6 +1850,13 @@ def render_evidence_block(*, sha: str, merged: Optional[dict],
         if len(found) > MAX_EVIDENCE_PRIOR_FIXES:
             lines.append("- (+{} more prior fixes)".format(
                 len(found) - MAX_EVIDENCE_PRIOR_FIXES))
+    if scope_lines is not None:
+        for line in scope_lines:
+            # Runner-computed from the branch diff; keep each on one
+            # marker-free line so the packet reader sees facts (#1783).
+            clean = " ".join(_strip_evidence_markers(str(line)).split())
+            if clean:
+                lines.append(clean)
     if no_push_marker is not None:
         lines.append(no_push_marker)
     lines.append(EVIDENCE_END_MARKER)
@@ -1865,6 +1878,37 @@ def _prior_fix_evidence(
         # available and never turns an evidence-reader failure into a failed
         # ticket finish.
         return None
+
+
+def _scope_lines_evidence(root: pathlib.Path, base: Optional[str],
+                          head: Optional[str]) -> List[str]:
+    """Scope rows for the evidence block; never fails the finish.
+
+    Diffs the ticket head against its merge-base with ``base`` and renders
+    one ``- scope:`` fact line per function group through
+    ``engine.review_scope.scope_evidence_lines`` (a deferred line when the
+    diff must skip mapping). Any local-git failure yields a
+    ``- scope: not run`` line, so the packet says the rows are missing
+    instead of implying there was nothing to map. Imported lazily because
+    ``engine.review`` already imports this module.
+    """
+    try:
+        from engine import review_scope
+
+        if not base or not head:
+            raise ImplementError("no base or head for the scope diff")
+        ancestor = _run(
+            ["git", "merge-base", base, head], cwd=root,
+            timeout=LOCAL_GIT_TIMEOUT_SECONDS).stdout.strip()
+        if not ancestor:
+            raise ImplementError("merge-base reported no ancestor")
+        diff = _run(
+            ["git", "diff", "--no-color", "--no-ext-diff",
+             "--src-prefix=a/", "--dst-prefix=b/", ancestor, head],
+            cwd=root, timeout=LOCAL_GIT_TIMEOUT_SECONDS).stdout
+        return review_scope.scope_evidence_lines(diff)
+    except Exception:
+        return ["- scope: not run"]
 
 
 def render_pr_body(ticket: dict, answer: dict, *, continued: bool,
@@ -4084,6 +4128,11 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
         merged.get("base") if isinstance(merged, dict) else "origin/main"
     ) or "origin/main"
     prior_fixes = _prior_fix_evidence(context["root"], prior_base, pushed)
+    # Scope rows name test functions the way test ids do, so member
+    # repositories withhold them exactly like test ids: their blocks carry
+    # counts only (#1796). Command-center PRs carry the full rows.
+    scope_lines = (_scope_lines_evidence(context["root"], prior_base, pushed)
+                   if _is_public_repo(resolved) else None)
     no_push_marker = (
         funnel.render_no_push_finish_marker(
             pushed,
@@ -4097,6 +4146,7 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
         evidence=render_evidence_block(
             sha=pushed, merged=merged, reproduction=reproduced,
             repo=resolved, prior_fixes=prior_fixes,
+            scope_lines=scope_lines,
             no_push_marker=no_push_marker))
     pr_context = dict(context, head_sha=pushed)
     pr = pr_effect(resolved, pr_context, ticket, body)

@@ -11550,124 +11550,6 @@ query($cursor: String) {
 PROJECT_ITEM_PAGE_SIZE = 100
 PROJECT_ITEM_PREVIOUS_PAGE_SIZE = 50
 
-# The full-board selection every Project item row carries. Begin uses compact
-# projections below, but ``_from_node`` accepts both shapes.
-ITEM_NODE_FIELDS = """\
-          id
-          lock: fieldValueByName(name: "In motion since") {
-            ... on ProjectV2ItemFieldTextValue { text }
-          }
-          status: fieldValueByName(name: "Status") {
-            ... on ProjectV2ItemFieldSingleSelectValue { name updatedAt }
-          }
-          class: fieldValueByName(name: "Class") {
-            ... on ProjectV2ItemFieldSingleSelectValue { name }
-          }
-          origin: fieldValueByName(name: "Origin") {
-            ... on ProjectV2ItemFieldSingleSelectValue { name }
-          }
-          risk: fieldValueByName(name: "Risk") {
-            ... on ProjectV2ItemFieldSingleSelectValue { name }
-          }
-          pinned: fieldValueByName(name: "Pinned") {
-            ... on ProjectV2ItemFieldSingleSelectValue { name }
-          }
-          needs: fieldValueByName(name: "Needs") {
-            ... on ProjectV2ItemFieldSingleSelectValue { name }
-          }
-          domain: fieldValueByName(name: "Domain") {
-            ... on ProjectV2ItemFieldSingleSelectValue { name }
-          }
-          content {
-            ... on Issue {
-              number title url body state stateReason createdAt closedAt
-              repository { nameWithOwner }
-              labels(first: 25) { nodes { name } }
-              assignees(first: 10) { nodes { login } }
-              parent { number repository { nameWithOwner } }
-              subIssuesSummary { total completed }
-              blockedBy(first: 50) {
-                totalCount
-                nodes { number state stateReason repository { nameWithOwner } }
-              }
-            }
-          }
-"""
-
-# Closed rows and anchors that the begin path needs for reconciliation keep
-# their normal routing and terminal fields, but never carry issue bodies.
-# The full-board query still uses ITEM_NODE_FIELDS.
-BEGIN_ITEM_NODE_FIELDS = ITEM_NODE_FIELDS.replace(
-    "number title url body state stateReason",
-    "number title url state stateReason",
-)
-
-# Shared queue/begin startability scan. Keep this Project list projection to
-# the fields the startable predicate, parent checks, ordering, and tier routing
-# need. Bodies and timeline/child history are deliberately absent: the
-# selected ticket's body and history are fetched after its claim.
-# The response aliases name the shared listing contract: startable issue
-# facts, Status, Class, gate (Needs), claim, and canonical ticket Risk. Pinned
-# is also read for the settled ordering rule. Origin does not route ticket
-# work, but begin and merge decide a finished project's close from this view,
-# and without it every Implement project read as Nate's and never closed (#2147).
-# Domain is read for the Fantasy-GM explicit-domain requirement (#2426).
-STARTABLE_ITEM_NODE_FIELDS = """\
-          id
-          claim: fieldValueByName(name: "In motion since") {
-            ... on ProjectV2ItemFieldTextValue { text }
-          }
-          status: fieldValueByName(name: "Status") {
-            ... on ProjectV2ItemFieldSingleSelectValue { name updatedAt }
-          }
-          class: fieldValueByName(name: "Class") {
-            ... on ProjectV2ItemFieldSingleSelectValue { name }
-          }
-          origin: fieldValueByName(name: "Origin") {
-            ... on ProjectV2ItemFieldSingleSelectValue { name }
-          }
-          gate: fieldValueByName(name: "Needs") {
-            ... on ProjectV2ItemFieldSingleSelectValue { name }
-          }
-          risk: fieldValueByName(name: "Risk") {
-            ... on ProjectV2ItemFieldSingleSelectValue { name }
-          }
-          pinned: fieldValueByName(name: "Pinned") {
-            ... on ProjectV2ItemFieldSingleSelectValue { name }
-          }
-          domain: fieldValueByName(name: "Domain") {
-            ... on ProjectV2ItemFieldSingleSelectValue { name }
-          }
-          startable: content {
-            ... on Issue {
-              number title url state stateReason createdAt closedAt
-              repository { nameWithOwner }
-              labels(first: 25) { nodes { name } }
-              parent { number repository { nameWithOwner } }
-              subIssuesSummary { total completed }
-              blockedBy(first: 50) {
-                totalCount
-                nodes { number state stateReason repository { nameWithOwner } }
-              }
-            }
-          }
-"""
-
-ITEM_QUERY = """
-query($login: String!, $number: Int!, $cursor: String) {
-  rateLimit { cost remaining resetAt }
-  user(login: $login) {
-    projectV2(number: $number) {
-      items(first: %d, after: $cursor) {
-        pageInfo { hasNextPage endCursor }
-        nodes {
-%s        }
-      }
-    }
-  }
-}
-""" % (PROJECT_ITEM_PAGE_SIZE, ITEM_NODE_FIELDS)
-
 # The begin load (#1591): every open item, plus only the closed items a begin
 # consumer reads, each set as its own server-side filtered connection. Each
 # filter stands for one Python predicate in ``BEGIN_ITEM_PREDICATES``; the
@@ -11687,86 +11569,11 @@ BEGIN_ITEM_CONNECTIONS: Tuple[Tuple[str, str], ...] = (
 )
 
 
-def _begin_item_query(
-    aliases: Sequence[str], extra_field: str = "",
-    minimal_startable: bool = False,
-    page_sizes: Optional[Mapping[str, int]] = None,
-) -> str:
-    """One aliased Project query carrying only the named begin connections.
-
-    Each connection has its own cursor variable. A request declares only the
-    aliases still paging, because GraphQL refuses a declared variable that the
-    document does not use. The filter strings are JSON-quoted, which is also a
-    valid GraphQL string literal for them. ``extra_field`` is a top-level
-    selection placed beside ``user``: the shape lane's ``shapeIssue`` comment
-    page rides the first request this way (#1625).
-    """
-    filters = dict(BEGIN_ITEM_CONNECTIONS)
-    unknown = [alias for alias in aliases if alias not in filters]
-    if unknown or not aliases:
-        raise ValueError(
-            "unknown begin item connection(s): {}".format(
-                ", ".join(unknown) or "none"
-            )
-        )
-    declarations = "".join(
-        ", ${}Cursor: String".format(alias) for alias in aliases
-    )
-    connections = "".join(
-        "      {alias}: items(first: {size}, after: ${alias}Cursor, "
-        "query: {query}) {{\n"
-        "        pageInfo {{ hasNextPage endCursor }}\n"
-        "        nodes {{ ...{fragment} }}\n"
-        "      }}\n".format(
-            alias=alias,
-            size=(page_sizes or {}).get(alias, PROJECT_ITEM_PAGE_SIZE),
-            query=json.dumps(filters[alias]),
-            fragment=(
-                "StartableItem"
-                if minimal_startable and alias == "open"
-                else "BeginItem"
-            ),
-        )
-        for alias in aliases
-    )
-    fragments = []
-    if any(not (minimal_startable and alias == "open") for alias in aliases):
-        fragments.append(
-            "\nfragment BeginItem on ProjectV2Item {{\n{fields}}}\n"
-            .format(fields=BEGIN_ITEM_NODE_FIELDS)
-        )
-    if minimal_startable and "open" in aliases:
-        fragments.append(
-            "\nfragment StartableItem on ProjectV2Item {{\n{fields}}}\n"
-            .format(fields=STARTABLE_ITEM_NODE_FIELDS)
-        )
-    return (
-        "\nquery($login: String!, $number: Int!{declarations}) {{\n"
-        "  rateLimit {{ cost remaining resetAt }}\n"
-        "  user(login: $login) {{\n"
-        "    projectV2(number: $number) {{\n"
-        "{connections}"
-        "    }}\n"
-        "  }}\n"
-        "{extra}"
-        "}}\n"
-        "{fragments}"
-    ).format(
-        declarations=declarations, connections=connections,
-        fragments="".join(fragments), extra=extra_field,
-    )
-
-
-# Filtered Project item connections used by begin's anchors (#1591) and by
-# consumers that need a small exact set. The Project filter selects one issue
-# with ``repo:<owner>/<name> #<number>`` (measured 2026-09-26; two numbers in
-# one filter match nothing and ``number:`` is not a filter), so each ref is
-# its own aliased connection.
-# ``Issue.projectItems`` is not an option: it is empty for org-repo issues in
-# this user-owned Project (LEARNINGS.md, 2026-09-05). Each connection costs
-# about 3 points, like any other Project item connection.
-PROJECT_REF_PAGE_SIZE = 5
-PROJECT_REF_ALIASES_PER_REQUEST = 20
+# Exact-ref Project reads used by begin's anchors (#1591) and by consumers
+# that need a small exact set. The Project filter selects one issue with
+# ``repo:<owner>/<name> #<number>`` (measured 2026-09-26; two numbers in one
+# filter match nothing and ``number:`` is not a filter), so each ref is its
+# own filtered REST read.
 _PROJECT_ITEM_REF_RE = re.compile(r"^([\w.-]+/[\w.-]+)#([1-9][0-9]*)$")
 
 
@@ -11776,42 +11583,6 @@ def _project_item_ref_filter(ref: str) -> str:
     if match is None:
         raise ValueError("not an issue ref: {!r}".format(ref))
     return "repo:{} #{}".format(match.group(1), match.group(2))
-
-
-def _project_item_refs_query(
-    refs: Sequence[str], node_fields: str = ITEM_NODE_FIELDS,
-    page_size: int = PROJECT_REF_PAGE_SIZE,
-) -> str:
-    """One Project query with a filtered connection per ref, ``r0`` onward."""
-    if not refs or len(refs) > PROJECT_REF_ALIASES_PER_REQUEST:
-        raise ValueError(
-            "a Project ref query carries 1 to {} refs, not {}".format(
-                PROJECT_REF_ALIASES_PER_REQUEST, len(refs)
-            )
-        )
-    connections = "".join(
-        "      r{index}: items(first: {size}, query: {query}) {{\n"
-        "        pageInfo {{ hasNextPage endCursor }}\n"
-        "        nodes {{ ...ProjectRefItem }}\n"
-        "      }}\n".format(
-            index=index, size=page_size,
-            query=json.dumps(_project_item_ref_filter(ref)),
-        )
-        for index, ref in enumerate(refs)
-    )
-    return (
-        "\nquery($login: String!, $number: Int!) {{\n"
-        "  rateLimit {{ cost remaining resetAt }}\n"
-        "  user(login: $login) {{\n"
-        "    projectV2(number: $number) {{\n"
-        "{connections}"
-        "    }}\n"
-        "  }}\n"
-        "}}\n"
-        "\nfragment ProjectRefItem on ProjectV2Item {{\n"
-        "{fields}"
-        "}}\n"
-    ).format(connections=connections, fields=node_fields)
 
 
 SHAPE_ISSUE_COMMENTS_PAGE_QUERY = """
@@ -11848,15 +11619,6 @@ def _shape_issue_comments_field(repo: str, number: int) -> str:
         "    }}\n"
         "  }}\n"
     ).format(json.dumps(owner), json.dumps(name), number)
-
-
-def _item_query_with_shape_comments(repo: str, number: int) -> str:
-    """Add the target idea's first comment page to the Project item query."""
-    issue_field = "\n" + _shape_issue_comments_field(repo, number)
-    closing = ITEM_QUERY.rfind("\n}")
-    if closing < 0:
-        raise GitHubError("could not extend the Project item query")
-    return ITEM_QUERY[:closing] + issue_field + ITEM_QUERY[closing:]
 
 
 def _standalone_shape_issue_comments_query(repo: str, number: int) -> str:
@@ -13531,72 +13293,6 @@ BEGIN_ITEM_PREDICATES: Dict[str, Callable[[Item], bool]] = {
 }
 
 
-def _begin_listing_page_sizes(
-    aliases: Sequence[str], envelope: Optional[BeginWorkEnvelope],
-) -> Optional[Dict[str, int]]:
-    """Fit the next filtered Project page inside the shared work envelope."""
-    if envelope is None:
-        return None
-    # Reserve the selected ticket and optional decline-gate detail read before
-    # spending the envelope on Project rows. One unit is also reserved for the
-    # GraphQL request that will return this page.
-    capacity = envelope.remaining - BEGIN_DETAIL_WORK_RESERVE - 1
-    if capacity < len(aliases):
-        raise BeginCannotComplete()
-    base, extra = divmod(capacity, len(aliases))
-    return {
-        alias: min(
-            PROJECT_ITEM_PAGE_SIZE,
-            base + (1 if index < extra else 0),
-        )
-        for index, alias in enumerate(aliases)
-    }
-
-
-def _begin_project_from_response(response: object) -> dict:
-    user = response.get("user") if isinstance(response, dict) else None
-    if not isinstance(user, dict) or "projectV2" not in user:
-        raise GitHubError("begin Project item response was malformed")
-    project = user["projectV2"]
-    if project is None:
-        raise GitHubError(
-            "Project {}/{} not found or not visible".format(
-                PROJECT_OWNER, PROJECT_NUMBER
-            )
-        )
-    if not isinstance(project, dict):
-        raise GitHubError("begin Project item response was malformed")
-    return project
-
-
-def _begin_connection_page(
-    project: dict, alias: str,
-) -> Tuple[List[dict], bool, Optional[str]]:
-    """Read one alias's page, failing closed on anything incomplete."""
-    connection = project.get(alias)
-    nodes = connection.get("nodes") if isinstance(connection, dict) else None
-    page_info = (
-        connection.get("pageInfo") if isinstance(connection, dict) else None
-    )
-    if (
-        not isinstance(nodes, list)
-        or not all(isinstance(node, dict) for node in nodes)
-        or not isinstance(page_info, dict)
-        or not isinstance(page_info.get("hasNextPage"), bool)
-    ):
-        raise GitHubError(
-            "begin Project connection {} was malformed".format(alias)
-        )
-    has_next = page_info["hasNextPage"]
-    cursor = page_info.get("endCursor")
-    if has_next and (not isinstance(cursor, str) or not cursor):
-        raise GitHubError(
-            "begin Project connection {} has a next page but no cursor"
-            .format(alias)
-        )
-    return nodes, has_next, cursor if has_next else None
-
-
 def _attach_shape_comments(
     items: Sequence[Item],
     shape_issue: Tuple[str, int],
@@ -13621,14 +13317,14 @@ def _load_begin_items(
     minimal_startable: bool = True,
     require_open: bool = True,
 ) -> List[Item]:
-    """Page the filtered begin connections and return the member items.
+    """Read each filtered begin connection over REST; return member items.
 
-    Every connection pages on its own cursor; a request carries only the
-    connections that still have a next page. A row is kept once, by Project
-    item id, when the predicate its connection stands for holds.
+    Each connection is one ``q``-filtered REST read, paged on its own
+    cursor. A row is kept once, by Project item id, when it is open or the
+    predicate some connection stands for holds.
 
-    ``shape_issue`` adds the idea's comment page to the first request only,
-    exactly as the full load adds it to its first page (#1625).
+    ``shape_issue`` also reads the idea's comment thread, as the full load
+    does (#1625).
     """
     kept: Dict[str, Item] = {}
     open_rows = 0
@@ -13780,9 +13476,7 @@ def _begin_anchor_refs(items: Sequence[Item], members: Set[str]) -> List[str]:
     return refs
 
 
-def _load_project_items_by_refs(
-    refs: Sequence[str], node_fields: str = ITEM_NODE_FIELDS,
-) -> Dict[str, Item]:
+def _load_project_items_by_refs(refs: Sequence[str]) -> Dict[str, Item]:
     """Fetch Project items through one exact-ref REST read per issue."""
     found: Dict[str, Item] = {}
     for ref in refs:
@@ -13851,24 +13545,18 @@ def _load_begin_anchor_items(
     timings: Optional[Dict[str, object]],
     minimal_startable: bool = True,
 ) -> List[Item]:
-    """Fetch the begin anchors by ref, up to 20 connections per request.
+    """Fetch the begin anchors by ref, one filtered REST read each.
 
     The filter narrows; Python decides: a row is kept only when its repo and
     number are exactly the ref's. A ref with no such row stays absent, as an
-    issue outside the Project is under the full load. A malformed response,
-    or a connection with more rows than one page and no exact match on it,
-    raises rather than reading as absent.
+    issue outside the Project is under the full load. A failed or malformed
+    read raises rather than reading as absent. ``minimal_startable`` is
+    accepted for callers and ignored: a REST row carries every board field.
     """
     started = time.perf_counter() if timings is not None else None
     try:
         refs = _begin_anchor_refs(items, members)
-        by_ref = _load_project_items_by_refs(
-            refs,
-            node_fields=(
-                BEGIN_ITEM_NODE_FIELDS if minimal_startable
-                else ITEM_NODE_FIELDS
-            ),
-        )
+        by_ref = _load_project_items_by_refs(refs)
         return [by_ref[ref] for ref in refs if ref in by_ref]
     finally:
         if started is not None:

@@ -24,7 +24,7 @@ jobs:
   check:
     runs-on: [self-hosted, linux, x64, hobby-linux]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Ensure GitHub CLI is available
         # The hobby-linux runners serve CI, which never shells out to `gh`,

@@ -878,6 +878,44 @@ GATES_LINE_RE = re.compile(
 #: both in one operation.
 GATES_ANSWERED_LINE = "{indent}- Gates: answered {at} by {decider}. {answer}"
 
+#: What an answered Needs Nate line says, for a current-format plan whose
+#: open question sits under ``## Needs Nate`` in a non-Gates category
+#: (``engine/shape.py`` renders only the categories with open questions, so
+#: such a body carries no ``- Gates:`` line at all). Same verbatim-answer
+#: rule as the legacy line; the category spelling is the body's own.
+NEEDS_ANSWERED_LINE = "{indent}- {category}: answered {at} by {decider}. {answer}"
+
+#: One question slot in a ``## Needs Nate`` section: the line's indent and
+#: category exactly as written, the answer text after the colon, and whether
+#: the slot is open or already carries an answer. Mirrors the category
+#: vocabulary ``open_needs_nate_categories`` reads, with the indent kept so
+#: the write below can preserve it.
+NEEDS_SLOT_RE = re.compile(
+    r"(?P<indent>[ \t]*)(?:-[ \t]*)?"
+    r"(?P<category>Exposure|Gates|Scope(?:[ \t]+and[ \t]+priority)?|"
+    r"Preference)[ \t]*:[ \t]*(?P<text>.*?)[ \t]*$"
+)
+
+#: A Needs Nate line that carries no question: the shaper's settled
+#: rendering. Never an answer slot.
+NEEDS_SETTLED_RE = re.compile(r"(?i)^nothing outstanding\b")
+
+#: A Needs Nate line already carrying an answer in the form the writer
+#: below produces. Only a re-answer slot, never a second question.
+NEEDS_ANSWERED_RE = re.compile(r"(?i)^answered\b")
+
+#: The ``## Needs Nate`` heading the writer below accepts, the same two
+#: spellings ``open_needs_nate_categories`` reads.
+NEEDS_NATE_HEADING_RE = re.compile(
+    r"(?im)^##[ \t]+Needs[ \t]+(?:Nate|you)[ \t]*$"
+)
+
+#: Where a ``## Needs Nate`` section ends: the next heading or runner
+#: marker, the same boundary ``open_needs_nate_categories`` reads.
+NEEDS_SECTION_END_RE = re.compile(
+    r"(?m)^#{1,6}[ \t]+|^[ \t]*<!-- command-center-[\w-]+ -->[ \t]*$"
+)
+
 #: Three rejected merges in a week means the auto-merge bar has failed. That is
 #: not "there are bugs" — it is a different and more serious fact, and the
 #: response is to stop auto-merging and fix the review prompt.
@@ -5737,6 +5775,167 @@ def _refuse_unconfined_write(original: str, updated: str) -> None:
         )
 
 
+def _needs_nate_section(body: str) -> Tuple[int, int]:
+    """The span of the single ``## Needs Nate`` section in ``body``.
+
+    Returns the ``(start, end)`` offsets of the section content: after the
+    heading line, up to the next heading or runner marker. Refuses unless
+    there is exactly one such heading, so a quoted heading elsewhere in the
+    body can never redirect the write.
+    """
+    headings = list(NEEDS_NATE_HEADING_RE.finditer(body))
+    if not headings:
+        raise PlanWriteRefused(
+            "refusing the write: this body has no `- Gates:` line and no "
+            "`## Needs Nate` section, so it is not a shaped plan and there "
+            "is no question here to answer"
+        )
+    if len(headings) != 1:
+        raise PlanWriteRefused(
+            "refusing the write: this body has {} `## Needs Nate` headings "
+            "and nothing here can tell which one holds the question. Leave "
+            "one, or record the answer as a comment".format(len(headings))
+        )
+    start = headings[0].end()
+    boundary = NEEDS_SECTION_END_RE.search(body[start:])
+    end = start + boundary.start() if boundary else len(body)
+    return (start, end)
+
+
+def _needs_nate_slot(section: str) -> re.Match:
+    """The single question slot in a ``## Needs Nate`` section.
+
+    Returns the line match holding the one question: open, or already
+    answered when this is a re-answer. Refuses when the section holds no
+    question, more than one question, or a line that is not a Needs
+    category line — any of which means the answer could land on the wrong
+    text, and guessing is how a real question gets dropped.
+    """
+    slots: List[re.Match] = []
+    answered: List[re.Match] = []
+    for line in section.splitlines():
+        if not line.strip():
+            continue
+        match = NEEDS_SLOT_RE.match(line)
+        if match is None:
+            raise PlanWriteRefused(
+                "refusing the write: the `## Needs Nate` section holds a "
+                "line that is not a Needs category line, so the question "
+                "cannot be read. Record the answer as a comment"
+            )
+        text = match.group("text")
+        if NEEDS_SETTLED_RE.match(text):
+            continue
+        if NEEDS_ANSWERED_RE.match(text):
+            answered.append(match)
+        else:
+            slots.append(match)
+    if len(slots) == 1 and not answered:
+        return slots[0]
+    if not slots and len(answered) == 1:
+        return answered[0]
+    if not slots and not answered:
+        raise PlanWriteRefused(
+            "refusing the write: the `## Needs Nate` section holds no open "
+            "question, so there is nothing here to answer"
+        )
+    raise PlanWriteRefused(
+        "refusing the write: the `## Needs Nate` section holds {} open "
+        "question(s) and {} answered one(s), and nothing here can tell "
+        "which one this answer belongs to. Leave one, or record the answer "
+        "as a comment".format(len(slots), len(answered))
+    )
+
+
+def _refuse_unconfined_needs_write(original: str, updated: str,
+                                   slot: re.Match, line: str) -> None:
+    """Raise unless only the one Needs slot line and the marker moved.
+
+    The section-path counterpart of ``_refuse_unconfined_write``: strip the
+    answer marker from both sides and require the remainder to differ in
+    exactly the slot line, rewritten to the expected answered line. A later
+    edit that widened the writer would fail here rather than silently
+    hand-editing plan prose after Ready.
+    """
+    stripped_original = _without_gates_record(original).rstrip("\n")
+    stripped_updated = _without_gates_record(updated).rstrip("\n")
+    before = stripped_original.splitlines()
+    after = stripped_updated.splitlines()
+    if len(before) != len(after):
+        raise PlanWriteRefused(
+            "refusing the write: it changes the plan outside the one Needs "
+            "Nate line and the answer marker. Editing plan prose after "
+            "Ready is the drift this write replaces; change the plan before "
+            "Ready, or record the disagreement as a comment"
+        )
+    diffs = [index for index, pair in enumerate(zip(before, after))
+             if pair[0] != pair[1]]
+    if len(diffs) != 1 or after[diffs[0]] != line:
+        raise PlanWriteRefused(
+            "refusing the write: it changes the plan outside the one Needs "
+            "Nate line and the answer marker. Editing plan prose after "
+            "Ready is the drift this write replaces; change the plan before "
+            "Ready, or record the disagreement as a comment"
+        )
+    target = slot.group(0)
+    if before[diffs[0]] != target:
+        raise PlanWriteRefused(
+            "refusing the write: it changes the plan outside the one Needs "
+            "Nate line and the answer marker. Editing plan prose after "
+            "Ready is the drift this write replaces; change the plan before "
+            "Ready, or record the disagreement as a comment"
+        )
+
+
+def _answered_needs_nate_body(body: str, answer: str, decider: str,
+                              at: Optional[datetime] = None,
+                              run: Optional[str] = None,
+                              agent: Optional[str] = None) -> str:
+    """``body`` with the one ``## Needs Nate`` question recorded as answered.
+
+    The current-format counterpart of the legacy ``- Gates:`` write below:
+    exactly two things change, the section's single question line and the
+    answer marker — replaced in place when one is already there, so a
+    second answer supersedes the first rather than stacking a block the
+    newest-first reader would have to arbitrate. The marker is the same one
+    ``parse_gates_answer`` reads, so no reader changes.
+    """
+    if open_needs_nate_categories(body) is None:
+        raise PlanWriteRefused(
+            "refusing the write: the `## Needs Nate` section cannot be "
+            "read, so the question cannot be found. Record the answer as a "
+            "comment"
+        )
+    start, end = _needs_nate_section(body)
+    slot = _needs_nate_slot(body[start:end])
+    block = gates_answer_block(
+        answer, decider, at=at, run=run, agent=agent)
+    record = json.loads(block.split("```json\n", 1)[1].rsplit("\n```", 1)[0])
+    line = NEEDS_ANSWERED_LINE.format(
+        indent=slot.group("indent"),
+        category=slot.group("category"),
+        at=record["at"],
+        decider=record["decider"],
+        answer=record["answer"],
+    )
+    section = body[start:end]
+    target = slot.group(0)
+    index = section.find(target)
+    updated_section = (
+        section[:index] + line + section[index + len(target):]
+    )
+    updated = body[:start] + updated_section + body[end:]
+
+    existing = _marked_json_block(updated, GATES_ANSWER_MARKER)
+    if existing is not None:
+        updated = updated.replace(existing, block, 1)
+    else:
+        updated = "{}\n\n{}".format(updated.rstrip("\n"), block)
+
+    _refuse_unconfined_needs_write(body, updated, slot, line)
+    return updated
+
+
 def answered_gates_body(body: str, answer: str, decider: str,
                         at: Optional[datetime] = None,
                         run: Optional[str] = None,
@@ -5748,19 +5947,20 @@ def answered_gates_body(body: str, answer: str, decider: str,
     a second answer supersedes the first rather than stacking a block the
     newest-first reader would have to arbitrate.
 
-    A body with no Gates line is refused. That is not pedantry about
-    formatting: every plan this write is for was rendered by the shaper,
-    which always emits the four category lines, so a body without one is
-    not the plan this caller thinks it is holding.
+    A body with no Gates line but a readable ``## Needs Nate`` section
+    holding exactly one question is answered in that section instead: the
+    shaper renders only the categories with open questions, so a
+    current-format plan whose question is not a Gates question carries no
+    ``- Gates:`` line. Anything else without a Gates line is refused. That
+    is not pedantry about formatting: a body with neither is not the plan
+    this caller thinks it is holding.
     """
     if not isinstance(body, str) or not body.strip():
         raise PlanWriteRefused("refusing the write: the plan body is empty")
     matches = list(GATES_LINE_RE.finditer(body))
     if not matches:
-        raise PlanWriteRefused(
-            "refusing the write: this body has no `- Gates:` line, so it is "
-            "not a shaped plan and there is no question here to answer"
-        )
+        return _answered_needs_nate_body(
+            body, answer, decider, at=at, run=run, agent=agent)
     if len(matches) > 1:
         # Refusing rather than picking one. A plan may quote the Needs form
         # while rejecting an alternative — `skills/shape` documents these

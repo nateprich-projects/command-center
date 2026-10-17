@@ -8,6 +8,7 @@ import json
 import os
 import pathlib
 import sys
+import time
 
 import pytest
 
@@ -311,8 +312,13 @@ TRIAL_AFTER_OVERRIDE = datetime.datetime(
     2026, 10, 6, 12, tzinfo=datetime.timezone.utc).timestamp()
 
 
-def test_muse_trial_total_fits_both_existing_allowance_caps():
-    """The $20 trial is below the live $109 cap and the $200 base cap."""
+def test_muse_trial_total_fits_both_existing_allowance_caps(monkeypatch):
+    """The $20 trial is below the $109 pairing cap and the $200 base cap.
+
+    The pairing is precedent now (#2597 repoints the live override), so it
+    is pinned through the stand-in rather than the live value."""
+    monkeypatch.setattr(usage, "MUSE_PACE_OVERRIDE",
+                        usage.MUSE_PACE_OWN_CARD_CAP_V2)
     active = usage.muse_trial_counter_read(0.0, TRIAL_DURING_OVERRIDE)
     assert active["cap_dollars"] == 20.0
     assert active["allowance_dollars"] == 109.0
@@ -370,9 +376,12 @@ def test_muse_trial_counter_stops_if_allowance_cannot_contain_cap(monkeypatch):
     assert result["stop"]
 
 
-def test_the_override_names_the_window_resetting_sunday_2026_10_04():
-    """#1995: Sunday 17:00 PDT is Monday 00:00 UTC, on the provider's lattice."""
-    assert usage.MUSE_PACE_OVERRIDE["resets_at"] == OVERRIDE_RESET
+def test_the_panel_pairing_named_the_window_resetting_sunday_2026_10_04():
+    """#1995: Sunday 17:00 PDT is Monday 00:00 UTC, on the provider's lattice.
+
+    The pairing is precedent now, not the live override: #2597 repoints
+    ``MUSE_PACE_OVERRIDE`` at the 10-18 window below."""
+    assert usage.MUSE_PACE_OWN_CARD_CAP_V2["resets_at"] == OVERRIDE_RESET
     reset = datetime.datetime.fromtimestamp(
         OVERRIDE_RESET, datetime.timezone.utc)
     assert (reset.year, reset.month, reset.day, reset.hour) == (2026, 10, 5, 0)
@@ -381,6 +390,10 @@ def test_the_override_names_the_window_resetting_sunday_2026_10_04():
 
 def test_the_override_prices_the_window_from_the_panel(tmp_path, monkeypatch):
     """The 15% panel / $15.98 own-card pairing supports the selected $109 cap."""
+    # The pairing is precedent now (#2597 repoints the live override), so
+    # the mechanism is pinned against this stand-in rather than dropped.
+    monkeypatch.setattr(usage, "MUSE_PACE_OVERRIDE",
+                        usage.MUSE_PACE_OWN_CARD_CAP_V2)
     cap = usage.MUSE_PACE_OWN_CARD_CAP_V2["cap_dollars"]
     assert usage.MUSE_PACE_OWN_CARD_CAP_V2["panel_displayed_percent"] == 15.0
     assert usage.MUSE_PACE_OWN_CARD_CAP_V2["meter_dollars"] == 15.98
@@ -418,6 +431,8 @@ def test_the_override_prices_the_window_from_the_panel(tmp_path, monkeypatch):
 def test_the_override_stops_at_100_less_one_session(tmp_path, monkeypatch,
                                                      spent, over):
     """The unchanged reserve rule admits below $104.50 and stops above it."""
+    monkeypatch.setattr(usage, "MUSE_PACE_OVERRIDE",
+                        usage.MUSE_PACE_OWN_CARD_CAP_V2)
     _, verdict, _ = _projected(
         tmp_path, monkeypatch, spent=spent, trailing=spent, days_left=2.0,
         at=IN_OVERRIDE)
@@ -426,8 +441,8 @@ def test_the_override_stops_at_100_less_one_session(tmp_path, monkeypatch,
 
 
 #: The #1341 pairing as it stood when the provider reopened its window early.
-#: The live override no longer has `reopened_at` (#1842), so the mechanism is
-#: pinned against this stand-in rather than dropped.
+#: The mechanism is pinned against this stand-in so it does not depend on
+#: whichever override is live (#1842; #2606 reopens again).
 REOPENED_RESET = 1790553600.0  # 2026-09-28 00:00 UTC
 REOPENED = 1790311140.0  # 2026-09-25 04:39 UTC, Thursday 21:39 PDT
 REOPENED_OVERRIDE = {
@@ -439,10 +454,6 @@ REOPENED_OVERRIDE = {
     "ceiling_percent": 100.0,
     "reopened_at": REOPENED,
 }
-
-
-def test_the_live_override_was_not_reopened():
-    assert "reopened_at" not in usage.MUSE_PACE_OVERRIDE
 
 
 def test_the_provider_reopened_the_window_on_thursday(tmp_path, monkeypatch):
@@ -509,6 +520,10 @@ def test_begin_runs_on_the_reading_that_stopped_it_tight(tmp_path, monkeypatch):
     the override it passes; the same reading a window later stops again."""
     import funnel
 
+    # The pairing is precedent now (#2597 repoints the live override), so
+    # the mechanism is pinned against this stand-in rather than dropped.
+    monkeypatch.setattr(usage, "MUSE_PACE_OVERRIDE",
+                        usage.MUSE_PACE_OWN_CARD_CAP_V2)
     monkeypatch.setattr(funnel, "_start_begin_heartbeat",
                         lambda agent, tier=None: "run-id")
 
@@ -846,3 +861,302 @@ def test_the_join_break_sentinel_is_not_reported_as_a_missing_card(
 
     assert usage.MUSE_MODEL_UNKNOWN in reading["by_model"]
     assert reading["models_without_a_card"] == []
+
+
+# --- #2597: panel-anchored brake for the 10-18 window ---
+
+#: The live override names the window resetting Sun 2026-10-18 17:00 PDT,
+#: Monday 00:00 UTC on the provider's lattice.
+ANCHOR_RESET = 1792368000.0  # 2026-10-19 00:00 UTC
+IN_ANCHOR = ANCHOR_RESET - 3 * 86400.0
+
+
+@pytest.fixture
+def sixty_anchor(monkeypatch):
+    """Run against #2597's 60% record: #2606 re-paired the live override to
+    Meta's early reset, and these tests prove the anchored brake itself."""
+    monkeypatch.setattr(usage, "MUSE_PACE_OVERRIDE",
+                        usage.MUSE_PACE_PANEL_ANCHOR_10_18)
+
+
+def test_the_60_record_names_the_10_18_window_and_its_anchor():
+    """The #2123 display anchor yields a panel weekly reading (inventory
+    record ``weekly-2026-10-03-36pct``: #2123 owner-reported 36% weekly),
+    so the gate may trust a panel anchor. This one carries 60% weekly at
+    2026-10-14 ~15:25 PDT for the window resetting Sun 10-18 17:00 PDT."""
+    override = usage.MUSE_PACE_PANEL_ANCHOR_10_18
+    assert override["issue"] == 2597
+    assert override["resets_at"] == ANCHOR_RESET
+    reset = datetime.datetime.fromtimestamp(
+        ANCHOR_RESET, datetime.timezone.utc)
+    assert (reset.year, reset.month, reset.day, reset.hour) == (2026, 10, 19, 0)
+    assert usage.muse_window_start(IN_ANCHOR) + usage.SEVEN_DAY == ANCHOR_RESET
+    assert override["panel_used_percent"] == 60.0
+    assert override["ceiling_percent"] == 60.0
+
+
+def _anchored_window(now, local_used=3.9, anchor=60.0):
+    """A 10-18-window reading as ``read_muse`` builds it under the override:
+    local dollars stay the diagnostic, the panel anchor governs the band."""
+    override = usage.muse_pace_override(
+        usage.muse_window_start(now) + usage.SEVEN_DAY, now)
+    assert override is not None
+    return {
+        "used_percent": local_used,
+        "resets_at": usage.muse_window_start(now) + usage.SEVEN_DAY,
+        "rolling": True,
+        "spent_dollars": 7.70,
+        "cap_dollars": 200.0,
+        "calls": 100,
+        "trailing_72h_dollars": 7.70,
+        "daily_rate_dollars": 2.57,
+        "projected_percent": 20.0,
+        "policy": {"weekly_target": override["weekly_target"],
+                   "weekly_reserve": override["weekly_reserve"]},
+        "override": {"issue": override["issue"], "until": override["until"]},
+        "panel_anchor": {"used_percent": anchor,
+                         "issue": override["panel_anchor"]["issue"],
+                         "observed": override["panel_anchor"]["observed"],
+                         "source": override["panel_anchor"]["source"]},
+    }
+
+
+@pytest.mark.usefixtures("sixty_anchor")
+def test_the_anchored_gate_brakes_on_the_panel_reading(tmp_path, monkeypatch):
+    """Reproduction: $7.70 local (~3.9%) reads ok unanchored, but under the
+    active 60% anchor the same window brakes as over, with both numbers."""
+    window_start = usage.muse_window_start(IN_ANCHOR)
+    now = window_start + usage.SEVEN_DAY - 3 * 86400.0
+    _muse_fixture(tmp_path, monkeypatch, [
+        _muse_record(window_start + 60, input_tokens=6_160_000,
+                     usage_id="local"),  # $7.70 at the standard card
+    ], mtime=now)
+    reading = usage.read_agent("muse", now)
+    window = reading["windows"]["seven_day"]
+    assert window["panel_anchor"]["used_percent"] == 60.0
+    assert window["used_percent"] == pytest.approx(3.85, abs=0.01)
+
+    verdict = usage.pace(reading, now, provider="meta")
+    assert verdict["over_pace"]
+    assert verdict["band"] == "over"
+    weekly = verdict["windows"][0]
+    assert weekly["used_percent"] == 60.0
+    assert weekly["allowed_percent"] == 60.0
+    assert weekly["local_used_percent"] == pytest.approx(3.85, abs=0.01)
+    assert weekly["override"]["issue"] == 2597
+
+
+@pytest.mark.usefixtures("sixty_anchor")
+def test_pace_derives_the_band_from_the_anchor_not_local_dollars():
+    """Given the anchor the band comes from it; without one the same local
+    reading is unchanged."""
+    anchored = usage.pace(
+        {"windows": {"seven_day": _anchored_window(IN_ANCHOR)}},
+        IN_ANCHOR, provider="meta")
+    assert anchored["band"] == "over"
+    assert anchored["over_pace"]
+
+    plain = dict(_anchored_window(IN_ANCHOR))
+    del plain["panel_anchor"]
+    del plain["policy"]
+    del plain["override"]
+    unanchored = usage.pace({"windows": {"seven_day": plain}},
+                            IN_ANCHOR, provider="meta")
+    assert unanchored["band"] == "ok"
+    assert not unanchored["over_pace"]
+
+
+@pytest.mark.parametrize("anchor", [
+    {"used_percent": "sixty"},
+    {"used_percent": None},
+    {"used_percent": float("nan")},
+    {"used_percent": 140.0},
+    {"used_percent": -1.0},
+    "sixty",
+    {},
+])
+@pytest.mark.usefixtures("sixty_anchor")
+def test_a_malformed_anchor_fails_closed_with_no_band_from_local_dollars(
+        anchor):
+    """The gate must not stay ok on local dollars when the anchor it
+    replaced them with is unreadable: no verdict, no band, unknown."""
+    seven = _anchored_window(IN_ANCHOR)
+    seven["panel_anchor"] = anchor
+    verdict = usage.pace({"windows": {"seven_day": seven}},
+                         IN_ANCHOR, provider="meta")
+    assert verdict == {"windows": [], "over_pace": False, "band": None,
+                       "known": False}
+
+
+@pytest.mark.usefixtures("sixty_anchor")
+def test_the_anchored_brake_does_not_flap_as_the_burn_rate_cools():
+    """The brake is a level (60 used vs 60 allowed), not a projection: a
+    cooled rate after the lanes stop still reads over."""
+    idle = _anchored_window(IN_ANCHOR)
+    idle["trailing_72h_dollars"] = 0.0
+    idle["daily_rate_dollars"] = 0.0
+    idle["projected_percent"] = 3.9
+    verdict = usage.pace({"windows": {"seven_day": idle}},
+                         IN_ANCHOR, provider="meta")
+    assert verdict["band"] == "over"
+    assert verdict["over_pace"]
+
+    hot = _anchored_window(IN_ANCHOR)
+    hot["trailing_72h_dollars"] = 93.0
+    hot["daily_rate_dollars"] = 31.0
+    hot["projected_percent"] = 115.0
+    assert usage.pace({"windows": {"seven_day": hot}},
+                      IN_ANCHOR, provider="meta")["band"] == "over"
+
+
+@pytest.mark.usefixtures("sixty_anchor")
+def test_the_anchor_lapses_at_the_reset(tmp_path, monkeypatch):
+    """The next window reads against $200 with no anchor, and `tight` is
+    back — the override never brakes past its named reset."""
+    assert usage.muse_pace_override(ANCHOR_RESET, ANCHOR_RESET) is None
+    after = ANCHOR_RESET + 3 * 86400.0
+    reading, verdict, _ = _projected(
+        tmp_path, monkeypatch, spent=44.0, trailing=93.0, days_left=6.0,
+        at=after)
+    window = reading["windows"]["seven_day"]
+    assert reading["cap_dollars"] == 200.0
+    assert "panel_anchor" not in window
+    assert "policy" not in window and "override" not in window
+    assert verdict["band"] == "tight"
+    assert "override" not in verdict["windows"][0]
+
+
+def _gate_main(monkeypatch, capsys, reading):
+    """Run ``usage.py gate muse`` against a fixed reading taken now."""
+    now = time.time()
+    fixed = dict(reading)
+    fixed["captured_at"] = now
+    fixed["source"] = "muse"
+    monkeypatch.setattr(
+        usage, "read_agent", lambda agent, at: fixed)
+    return usage.main(["gate", "muse"]), capsys.readouterr()
+
+
+@pytest.mark.usefixtures("sixty_anchor")
+def test_gate_muse_reports_over_with_the_anchor_numbers(
+        monkeypatch, capsys):
+    """``usage.py gate muse`` under the brake exits 1 printing the anchor
+    numbers — the stop a lane records as skipped-over-pace, not an empty
+    funnel."""
+    seven = _anchored_window(IN_ANCHOR)
+    seven["resets_at"] = time.time() + 3 * 86400.0
+    code, out = _gate_main(
+        monkeypatch, capsys, {"windows": {"seven_day": seven}})
+    assert code == 1
+    assert "OVER" in out.err
+    assert "60.0" in out.err
+
+
+@pytest.mark.usefixtures("sixty_anchor")
+def test_gate_muse_with_a_broken_anchor_exits_unknown(
+        monkeypatch, capsys):
+    """A malformed anchor fails closed: exit 2 with no ok from local
+    dollars."""
+    seven = _anchored_window(IN_ANCHOR)
+    seven["resets_at"] = time.time() + 3 * 86400.0
+    seven["panel_anchor"] = {"used_percent": "sixty"}
+    code, out = _gate_main(
+        monkeypatch, capsys, {"windows": {"seven_day": seven}})
+    assert code == 2
+    assert "no usable window" in out.err
+
+
+def test_the_trial_allowance_reads_the_anchor_window_cap():
+    """The panel anchor carries no dollar pairing, so the trial allowance
+    in the 10-18 window is the $200 base cap the anchor keeps for local
+    diagnostics — and the $20 trial still fits inside it."""
+    assert usage.muse_trial_allowance_dollars(IN_ANCHOR) == 200.0
+    result = usage.muse_trial_counter_read(0.0, IN_ANCHOR)
+    assert result["allowance_dollars"] == 200.0
+    assert result["contained"]
+    assert not result["stop"]
+
+
+@pytest.mark.usefixtures("sixty_anchor")
+def test_begin_preflight_stops_before_any_project_read(
+        tmp_path, monkeypatch):
+    """The anchored over stops in ``_begin_preflight`` — before the Project
+    list query — so the lane finishes as a pace stop, never an empty
+    funnel."""
+    import funnel
+
+    monkeypatch.setattr(funnel, "_start_begin_heartbeat",
+                        lambda agent, tier=None: "run-id")
+    window_start = usage.muse_window_start(IN_ANCHOR)
+    now = window_start + usage.SEVEN_DAY - 3 * 86400.0
+    _muse_fixture(tmp_path, monkeypatch, [
+        _muse_record(window_start + 60, input_tokens=6_160_000,
+                     usage_id="local"),
+    ], mtime=now)
+    out, reading = funnel._begin_preflight(
+        datetime.datetime.fromtimestamp(now, datetime.timezone.utc),
+        "muse", False)
+    assert out["gate"] == "over" and out["do"] == "stop"
+    assert reading is None
+
+
+# --- #2606: the 10-18 window re-paired to Meta's early reset ---
+
+#: Wed 2026-10-14 20:45 PDT, the first skipped-over-pace under #2597.
+BRAKE_STARTED = 1792036347.0
+
+
+def test_the_live_override_reopens_the_10_18_window_at_the_reset():
+    """Nate 2026-10-16: "Meta did a reset so the brake can come off." The
+    live override names the same window as #2597, anchored at 0% from the
+    reported reset, on the normal weekly target instead of 60%."""
+    override = usage.MUSE_PACE_OVERRIDE
+    assert override is usage.MUSE_PACE_PANEL_RESET_10_18
+    assert override["issue"] == 2606
+    assert override["resets_at"] == ANCHOR_RESET
+    assert override["panel_used_percent"] == 0.0
+    assert override["ceiling_percent"] == usage.WEEKLY_TARGET == 90.0
+    assert BRAKE_STARTED < override["reopened_at"] < ANCHOR_RESET
+    assert usage.MUSE_PACE_PANEL_ANCHOR_10_18["panel_used_percent"] == 60.0
+
+
+def test_the_live_override_reads_ok_in_the_10_18_window(
+        tmp_path, monkeypatch, capsys):
+    """The same $7.70 local window that #2597's 60% anchor braked reads ok
+    under the reset anchor, and ``usage.py gate muse`` exits 0."""
+    window_start = usage.muse_window_start(IN_ANCHOR)
+    now = window_start + usage.SEVEN_DAY - 3 * 86400.0
+    _muse_fixture(tmp_path, monkeypatch, [
+        _muse_record(window_start + 60, input_tokens=6_160_000,
+                     usage_id="local"),
+    ], mtime=now)
+    reading = usage.read_agent("muse", now)
+    window = reading["windows"]["seven_day"]
+    assert window["panel_anchor"]["used_percent"] == 0.0
+    assert window["override"]["issue"] == 2606
+
+    verdict = usage.pace(reading, now, provider="meta")
+    assert verdict["band"] == "ok"
+    assert not verdict["over_pace"]
+    weekly = verdict["windows"][0]
+    assert weekly["used_percent"] == 0.0
+
+    window["resets_at"] = time.time() + 3 * 86400.0
+    code, _ = _gate_main(monkeypatch, capsys, reading)
+    assert code == 0
+
+
+def test_the_live_override_counts_from_the_reopening():
+    """From ``reopened_at`` on, the window's spend counts only after it."""
+    reopened = usage.MUSE_PACE_OVERRIDE["reopened_at"]
+    found = usage.muse_pace_override(ANCHOR_RESET, reopened + 60.0)
+    assert found["reopened_at"] == reopened
+    assert "reopened_at" not in usage.muse_pace_override(
+        ANCHOR_RESET, reopened - 60.0)
+
+
+def test_the_live_override_lapses_at_the_reset():
+    """It never governs the window after Sunday 10-18 17:00 PDT."""
+    assert usage.muse_pace_override(ANCHOR_RESET, ANCHOR_RESET) is None
+    assert usage.muse_pace_override(
+        ANCHOR_RESET + usage.SEVEN_DAY, ANCHOR_RESET + 86400.0) is None

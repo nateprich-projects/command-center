@@ -2264,6 +2264,51 @@ def domain_entry_allowed(items: Sequence[Item], ticket: Item) -> bool:
     return domain_slot_counts(items).get(domain, 0) < DOMAIN_SLOTS
 
 
+def _domain_cap_refused(
+    items: Sequence[Item],
+    ordered: Sequence[Item],
+    now: datetime,
+    pr_facts: Optional[Mapping[str, Optional[Dict[str, object]]]] = None,
+) -> List[Item]:
+    """Unclaimed startable tickets the domain cap alone holds back (#2618).
+
+    Mirrors ``next_ticket`` below the WIP cap: the shared order minus live
+    claims, every one refused by ``domain_entry_allowed``. Anything else —
+    at the cap, nothing unclaimed, or anything allowed — reads as no
+    domain-cap stop, so begin never names the cap for another brake's work.
+    """
+    if at_capacity(items, now, pr_facts=pr_facts):
+        return []
+    claimed = {item.ref for item in in_motion(items, now, pr_facts=pr_facts)}
+    unclaimed = [item for item in ordered if item.ref not in claimed]
+    if not unclaimed:
+        return []
+    if any(domain_entry_allowed(items, item) for item in unclaimed):
+        return []
+    return [item for item in unclaimed if not domain_entry_allowed(items, item)]
+
+
+def _domain_cap_summary(
+    items: Sequence[Item], refused: Sequence[Item],
+) -> str:
+    """Render the domain-cap stop explanation (#2618)."""
+    by_ref = {item.ref: item for item in items}
+    counts = domain_slot_counts(items)
+    domains = sorted({
+        str(effective_domain(ticket, by_ref) or "unknown")
+        for ticket in refused
+    })
+    detail = ", ".join(
+        "{} ({}/{})".format(domain, counts.get(domain, 0), DOMAIN_SLOTS)
+        for domain in domains
+    )
+    noun = "ticket" if len(refused) == 1 else "tickets"
+    return (
+        "domain cap holds {} startable {} ({}) — "
+        "in-flight work finishes first".format(len(refused), noun, detail)
+    )
+
+
 def _turn_since(item: Item) -> datetime:
     """When a turn candidate started waiting: the queue's own clock."""
     return (question_since(item) or item.status_since or item.created_at
@@ -6642,6 +6687,17 @@ def awaiting_review(
             # engineer pushes, the ticket is review work again (#487).
             verdict = _row_verdict(row, item.repo)
             if rejected_at_current_head(verdict, row.get("headRefOid")):
+                if _no_push_rearm_releases(
+                        verdict, row.get("headRefOid"),
+                        _latest_no_push_marker_at(
+                            row.get("body"), row.get("headRefOid"))):
+                    # Stranded no-push head (#2618): the implement run
+                    # already looked at exactly this rejected head and
+                    # pushed nothing, so handing it back would hold it
+                    # forever under ``no_push_reoffer_withheld``. It
+                    # returns as review work awaiting a fresh verdict on
+                    # the unchanged head.
+                    blocked.add(item.ref)
                 continue
             blocked.add(item.ref)
     return blocked
@@ -6650,11 +6706,17 @@ def awaiting_review(
 #: A finish that pushed nothing records the head it left behind in the PR
 #: body it rewrites (#2541). The marker is the offer gate's memory: a ticket
 #: whose open PR still shows this head was already looked at and changed
-#: nothing, so it is not offered again until a new review verdict lands.
+#: nothing, so it is not offered again — not even when a fresh verdict
+#: lands on that same head (#2618). Only a new head, or the stranded-head
+#: re-arm below, releases the hold.
 #: The HTML comment rides inside the runner's evidence block, which the
 #: review packet already strips from ``pr_body``, and a body edit never
 #: counts as the trusted-comment evidence that re-covers an unsure-only
 #: rejection, so the marker cannot disturb the review queue.
+#: The one exception is the #2618 re-arm: a marker newer than the rejected
+#: verdict covering its head releases the ticket as review work awaiting a
+#: fresh verdict on the unchanged head, because no lane would otherwise
+#: revisit it. Every other covered head still reads as already judged.
 NO_PUSH_FINISH_MARKER_RE = re.compile(
     r"<!--\s*no-push-finish\s+head=(?P<head>[0-9a-fA-F]{40})"
     r"\s+at=(?P<at>\S+?)\s*-->",
@@ -6686,13 +6748,46 @@ def no_push_finish_markers(body: object) -> List[Tuple[str, str]]:
     return [(head, at) for _, head, at in found]
 
 
-def _no_push_gate_verdict_at(row: Mapping[str, object],
-                             repo: str) -> Optional[datetime]:
-    """When the row's latest trusted verdict was posted, if knowable."""
-    verdict = _row_verdict(row, repo)
-    if not isinstance(verdict, dict):
+def _latest_no_push_marker_at(body: object, head: object) -> Optional[datetime]:
+    """The newest parseable no-push record for this head, if any (#2541)."""
+    if not isinstance(head, str) or not head:
         return None
-    return parse_time(verdict.get("comment_created_at"))
+    stamps = [
+        stamp
+        for marked_head, at in no_push_finish_markers(body)
+        if marked_head.lower() == head.lower()
+        for stamp in (parse_time(at),)
+        if stamp is not None
+    ]
+    return max(stamps) if stamps else None
+
+
+def _no_push_rearm_releases(
+    verdict: object, head: object,
+    latest_marker_at: Optional[datetime],
+) -> bool:
+    """Whether a stranded no-push head re-arms as review work (#2618).
+
+    True when the latest trusted verdict rejects the current head and the
+    newest no-push record for that head is newer than the verdict: the
+    implement run already looked at exactly what the reviewer judged, so
+    neither lane would otherwise revisit the head and the hold is
+    permanent. Anything unestablished — no marker, no verdict, another
+    head, a missing timestamp — reads as no release, keeping the #2541
+    hold.
+    """
+    if latest_marker_at is None:
+        return False
+    if not isinstance(head, str) or not head:
+        return False
+    if not isinstance(verdict, dict):
+        return False
+    if not rejected_at_current_head(verdict, head):
+        return False
+    verdict_at = parse_time(verdict.get("comment_created_at"))
+    if verdict_at is None:
+        return False
+    return latest_marker_at > verdict_at
 
 
 def no_push_reoffer_withheld(
@@ -6702,12 +6797,20 @@ def no_push_reoffer_withheld(
     """Tickets a no-push finish already looked at, by ref (#2541).
 
     A ticket is withheld when its open funnel PR carries a no-push record
-    for its current head with no trusted review verdict posted after that
-    record. A new head lifts the hold only through the review verdict it
-    still needs: any head change leaves the old verdict uncovered, so
-    ``awaiting_review`` withholds the ticket anyway, and a merge-of-main
-    head change never reads as new work here. A newly posted verdict of
-    any kind re-arms the ticket, returning it to the ordinary hand-back.
+    for its current head, however the covering verdict compares in time:
+    a fresh verdict on the same marked head leaves the hold in place
+    (#2618) — only a new head, or the stranded-head re-arm below,
+    releases it. A new head lifts the hold only through the review
+    verdict it still needs: any head change leaves the old verdict
+    uncovered, so ``awaiting_review`` withholds the ticket anyway, and a
+    merge-of-main head change never reads as new work here.
+
+    A stranded head re-arms the other way (#2618): when the covering
+    verdict rejects the current head and the newest record for that head
+    is newer than the verdict, the gate releases the ticket and
+    ``awaiting_review`` routes it as review work awaiting a fresh verdict
+    on the unchanged head. Without that release no lane revisits the
+    head, so the hold is permanent.
 
     The normal caller supplies the shared batch from ``ticket_pr_facts``;
     a direct caller creates that one repository-wide GraphQL read here
@@ -6726,28 +6829,23 @@ def no_push_reoffer_withheld(
             head = row.get("headRefOid")
             if not isinstance(head, str) or not head:
                 continue
-            markers = [
-                (marked_head, parse_time(at))
-                for marked_head, at in no_push_finish_markers(
-                    row.get("body"))
-                if marked_head.lower() == head.lower()
-            ]
-            markers = [
-                (marked_head, stamp) for marked_head, stamp in markers
-                if stamp is not None
-            ]
-            if not markers:
+            latest_marker_at = _latest_no_push_marker_at(
+                row.get("body"), head)
+            if latest_marker_at is None:
                 continue
-            latest_marker_at = max(stamp for _, stamp in markers)
             try:
-                verdict_at = _no_push_gate_verdict_at(row, item.repo)
+                verdict = _row_verdict(row, item.repo)
             except GitHubError:
                 # The verdict cannot be established; withholding on a
                 # maybe-superseded record could wedge the ticket, so the
                 # gate stays out of the way exactly as an unreadable PR
                 # scan does for the rest of the offer path.
                 continue
-            if verdict_at is not None and verdict_at > latest_marker_at:
+            # A fresh verdict on the same marked head never releases the
+            # gate (#2618): only the stranded-head re-arm below returns
+            # the ticket, as review work, and anything else stays held
+            # until a new head.
+            if _no_push_rearm_releases(verdict, head, latest_marker_at):
                 continue
             withheld.add(item.ref)
     return withheld
@@ -21986,6 +22084,14 @@ def review_standing(
     - ``reviewable``: everything else. Red CI and an empty rollup are
       reviewable, so the review pre-check rejects them with a reason.
 
+    The one head that reads ``covered`` above but is still offered: a
+    stranded no-push head (#2618) — a rejected verdict covering the
+    current head with a no-push record for that head newer than the
+    verdict. It falls through to the cap like any other head instead of
+    reading as already judged, so the review lane can record the fresh
+    verdict the re-arm waits for. Every other covered head is skipped
+    exactly as before, and the marker never counts as review evidence.
+
     ``verdict`` is the PR's latest verdict, or a zero-argument callable that
     returns it; the callable is invoked only when the head is otherwise
     reviewable, so a listing pays no verdict read for any other row.
@@ -22018,9 +22124,17 @@ def review_standing(
     if verdict_covers_head(
         verdict if isinstance(verdict, dict) else None, head_sha, comments
     ):
-        return ReviewStanding(
-            "covered",
-            "a verdict already covers head {}".format(str(head_sha)[:12]))
+        rearmed = _no_push_rearm_releases(
+            verdict, head_sha,
+            _latest_no_push_marker_at(row.get("body"), head_sha))
+        if not rearmed:
+            return ReviewStanding(
+                "covered",
+                "a verdict already covers head {}".format(str(head_sha)[:12]))
+        # Stranded no-push head (#2618): the marker is newer than the
+        # rejected verdict covering this head, so no lane would otherwise
+        # revisit it. It faces the cap below like any other head instead
+        # of reading as already judged.
     if lane_review_capped(comments):
         return ReviewStanding(
             "capped",
@@ -23729,14 +23843,22 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
                 out["withheld"] = withheld
             if frozen:
                 out["freeze_withheld"] = frozen
+            # A full domain holds startable entries back while its in-flight
+            # work finishes: that is a full queue under a cap, not an empty
+            # one, so it names the cap below and never records queue-empty
+            # (#2618).
+            domain_held = _domain_cap_refused(
+                items, startable_order, now, pr_facts=pr_facts)
             # Empty means nothing can start because the work is done or is
             # waiting on someone else. The lane's own brakes holding work it
             # has not implemented, the WIP cap, a backoff, readiness, the
-            # freeze or an earlier stop, are not an empty queue (#1320).
+            # freeze, the domain cap or an earlier stop, are not an empty
+            # queue (#1320).
             # A claim in motion alone is not a brake below the cap.
             queue_empty = not (
                 out.get("why") or out.get("backed_off") or withheld
-                or frozen or at_capacity(items, now, pr_facts=pr_facts))
+                or frozen or domain_held
+                or at_capacity(items, now, pr_facts=pr_facts))
             if out.get("why"):
                 why = str(out["why"])
             elif holder is not None:
@@ -23750,6 +23872,10 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
             elif frozen:
                 why = "nothing — {}".format(
                     _freeze_withheld_summary(frozen)
+                )
+            elif domain_held:
+                why = "nothing — {}".format(
+                    _domain_cap_summary(items, domain_held)
                 )
             elif tier:
                 why = "nothing — no {} work waiting".format(tier)

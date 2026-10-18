@@ -27,12 +27,15 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -60,20 +63,59 @@ def _make_numbered(
     pid_text=None,
     age_days: float = 20.0,
     payload_bytes: int = 0,
+    sparse: bool = True,
 ) -> Path:
-    """Build a ``pytest-N`` fixture dir; the dir mtime is set last."""
+    """Build a ``pytest-N`` fixture dir; the dir mtime is set last.
+
+    Payloads are sparse by default (seek plus one byte: large ``st_size``
+    with almost no disk write). Pass ``sparse=False`` for fully written
+    payloads, where apparent and allocated sizes agree, so cap tests can
+    push real on-disk bytes over a patched cap quickly.
+    """
     path = root / "pytest-{}".format(number)
     path.mkdir(parents=True, exist_ok=True)
     if pid_text is not None:
         (path / ".lock").write_text(pid_text, encoding="utf-8")
     if payload_bytes:
         payload = path / "payload.bin"
-        with payload.open("wb") as handle:
-            handle.seek(payload_bytes - 1)
-            handle.write(b"\0")
+        if sparse:
+            with payload.open("wb") as handle:
+                handle.seek(payload_bytes - 1)
+                handle.write(b"\0")
+        else:
+            with payload.open("wb") as handle:
+                chunk = b"x" * (1024 * 1024)
+                remaining = payload_bytes
+                while remaining > 0:
+                    piece = chunk[: min(len(chunk), remaining)]
+                    handle.write(piece)
+                    remaining -= len(piece)
     stamp = NOW - age_days * DAY
     os.utime(path, (stamp, stamp))
     return path
+
+
+def _allocated_bytes(path: Path) -> int:
+    """On-disk bytes for one fixture file, from the OS, not the walk.
+
+    The ``du`` semantics (``st_blocks * 512``) with the same ``st_size``
+    fallback; builds test expectations without calling ``dir_size_bytes``,
+    so the walk, summation and de-dup are what the test verifies.
+    """
+    info = path.stat()
+    blocks = getattr(info, "st_blocks", None)
+    if blocks is None or blocks < 0:
+        return info.st_size
+    return blocks * 512
+
+
+def _expected_dir_total(path: Path) -> int:
+    """Sum of ``_allocated_bytes`` over the plain files directly walked."""
+    return sum(
+        _allocated_bytes(entry)
+        for entry in sorted(path.rglob("*"))
+        if entry.is_file() and not entry.is_symlink()
+    )
 
 
 def _run_pass(tmp_path, **kwargs):
@@ -237,18 +279,24 @@ def test_pid_liveness_dead_is_false_alive_and_uncertain_are_true():
     assert housekeeping.pid_is_alive(1) is True
 
 
-def test_dead_old_dirs_beyond_newest_three_are_deleted_oldest_first(tmp_path):
+def test_dead_old_dirs_beyond_newest_three_are_deleted_oldest_first(
+    tmp_path, monkeypatch
+):
     root = tmp_path / "pytest-of-test"
     root.mkdir()
     dead = str(_dead_pid())
-    # Five 900 MiB dirs: the newest three stay (2.7 GiB, under the cap),
-    # the oldest two go.
-    payload = 900 * 1024 * 1024
-    _make_numbered(root, 1, pid_text=dead, age_days=30, payload_bytes=payload)
-    _make_numbered(root, 2, pid_text=dead, age_days=20, payload_bytes=payload)
+    # Five fully written 256 KiB dirs over a patched 3.5-payload cap: the
+    # newest three stay, the oldest two go. Payloads are real bytes because
+    # sparse files count at their (near-zero) allocated size.
+    payload = 256 * 1024
+    monkeypatch.setattr(housekeeping, "CAP_BYTES", 7 * payload // 2)
+    _make_numbered(root, 1, pid_text=dead, age_days=30, payload_bytes=payload,
+                   sparse=False)
+    _make_numbered(root, 2, pid_text=dead, age_days=20, payload_bytes=payload,
+                   sparse=False)
     for number in (3, 4, 5):
         _make_numbered(root, number, pid_text=dead, age_days=20,
-                       payload_bytes=payload)
+                       payload_bytes=payload, sparse=False)
 
     (
         rows,
@@ -262,7 +310,9 @@ def test_dead_old_dirs_beyond_newest_three_are_deleted_oldest_first(tmp_path):
         brief,
     ) = _run_pass(tmp_path, explicit_roots=[str(root)])
     assert logs_swept is False
-    assert pytest_total == 5 * payload + 5 * len(dead)
+    assert pytest_total == sum(
+        _expected_dir_total(root / "pytest-{}".format(n)) for n in (1, 2, 3, 4, 5)
+    )
     assert pytest_capped is False
     assert _by_name(rows, 1)["action"] == "would-delete"
     assert _by_name(rows, 2)["action"] == "would-delete"
@@ -283,14 +333,19 @@ def test_dead_old_dirs_beyond_newest_three_are_deleted_oldest_first(tmp_path):
     assert _by_name(rows, 2)["action"] == "delete"
 
 
-def test_oldest_first_uses_mtime_not_number(tmp_path):
+def test_oldest_first_uses_mtime_not_number(tmp_path, monkeypatch):
     root = tmp_path / "pytest-of-test"
     root.mkdir()
     dead = str(_dead_pid())
     # Only one deletion is needed to reach the cap; the older mtime wins
-    # even though its number is higher.
-    _make_numbered(root, 1, pid_text=dead, age_days=20, payload_bytes=2 * GIB)
-    _make_numbered(root, 2, pid_text=dead, age_days=30, payload_bytes=2 * GIB)
+    # even though its number is higher. Payloads are real bytes because
+    # sparse files count at their (near-zero) allocated size.
+    payload = 256 * 1024
+    monkeypatch.setattr(housekeeping, "CAP_BYTES", 3 * payload // 2)
+    _make_numbered(root, 1, pid_text=dead, age_days=20,
+                   payload_bytes=payload, sparse=False)
+    _make_numbered(root, 2, pid_text=dead, age_days=30,
+                   payload_bytes=payload, sparse=False)
     for number in (3, 4, 5):
         _make_numbered(root, number, pid_text=dead, age_days=20)
 
@@ -302,18 +357,25 @@ def test_oldest_first_uses_mtime_not_number(tmp_path):
     assert _by_name(rows, 1)["action"] == "keep"
 
 
-def test_alive_lock_and_recent_failure_are_kept_in_both_modes(tmp_path):
+def test_alive_lock_and_recent_failure_are_kept_in_both_modes(
+    tmp_path, monkeypatch
+):
     """Review focus: the sweep never deletes data a live run still needs."""
+    # Protected bytes must clear the cap on disk, not just apparently:
+    # sparse payloads count at allocated size, so write real bytes.
+    payload = 256 * 1024
+    monkeypatch.setattr(housekeeping, "CAP_BYTES", 64 * 1024)
     for mode in ("dry", "apply"):
         root = tmp_path / mode / "pytest-of-test"
         root.mkdir(parents=True)
         dead = str(_dead_pid())
         alive = _make_numbered(
             root, 1, pid_text=str(os.getpid()), age_days=30,
-            payload_bytes=2 * GIB,
+            payload_bytes=payload, sparse=False,
         )
         recent = _make_numbered(
-            root, 2, pid_text=dead, age_days=1, payload_bytes=2 * GIB
+            root, 2, pid_text=dead, age_days=1, payload_bytes=payload,
+            sparse=False,
         )
         for number in (3, 4, 5):
             _make_numbered(root, number, pid_text=dead, age_days=20)
@@ -329,8 +391,8 @@ def test_alive_lock_and_recent_failure_are_kept_in_both_modes(tmp_path):
         assert "alive" in _by_name(rows, 1)["reason"]
         assert _by_name(rows, 2)["action"] == "keep"
         assert "under 14 days" in _by_name(rows, 2)["reason"]
-        # 4 GiB of protected debris: nothing eligible, so capped with
-        # alerts on both channels.
+        # Protected debris over the patched cap: nothing eligible,
+        # so capped with alerts on both channels.
         assert pytest_capped is True
         assert "action=skip-alert" in log.read_text(encoding="utf-8")
         warnings = json.loads(brief.read_text(encoding="utf-8"))
@@ -343,13 +405,20 @@ def test_alive_lock_and_recent_failure_are_kept_in_both_modes(tmp_path):
         assert "recorded_at" in warning and "retry" in warning
 
 
-def test_missing_and_unparseable_locks_are_never_deleted(tmp_path):
+def test_missing_and_unparseable_locks_are_never_deleted(
+    tmp_path, monkeypatch
+):
     root = tmp_path / "pytest-of-test"
     root.mkdir()
     dead = str(_dead_pid())
-    missing = _make_numbered(root, 1, age_days=30, payload_bytes=2 * GIB)
+    # Uncertain locks keep real on-disk bytes over the patched cap.
+    payload = 256 * 1024
+    monkeypatch.setattr(housekeeping, "CAP_BYTES", 64 * 1024)
+    missing = _make_numbered(root, 1, age_days=30, payload_bytes=payload,
+                             sparse=False)
     garbled = _make_numbered(
-        root, 2, pid_text="not-a-pid", age_days=30, payload_bytes=2 * GIB
+        root, 2, pid_text="not-a-pid", age_days=30,
+        payload_bytes=payload, sparse=False,
     )
     for number in (3, 4, 5):
         _make_numbered(root, number, pid_text=dead, age_days=20)
@@ -367,12 +436,15 @@ def test_missing_and_unparseable_locks_are_never_deleted(tmp_path):
     assert len(json.loads(brief.read_text(encoding="utf-8"))) == 1
 
 
-def test_symlinks_garbage_and_non_dirs_are_untouched(tmp_path):
+def test_symlinks_garbage_and_non_dirs_are_untouched(tmp_path, monkeypatch):
     root = tmp_path / "pytest-of-test"
     root.mkdir()
     dead = str(_dead_pid())
+    # Real (not sparse) payload bytes so the big dir counts over the cap.
+    payload = 256 * 1024
+    monkeypatch.setattr(housekeeping, "CAP_BYTES", 64 * 1024)
     target = _make_numbered(root, 1, pid_text=dead, age_days=30,
-                            payload_bytes=4 * GIB)
+                            payload_bytes=payload, sparse=False)
     current = root / "pytest-current"
     current.symlink_to(target)
     garbage = root / "garbage-1234"
@@ -384,14 +456,19 @@ def test_symlinks_garbage_and_non_dirs_are_untouched(tmp_path):
     for number in (2, 3, 4):
         _make_numbered(root, number, pid_text=dead, age_days=20)
 
+    # Expected on-disk total before --apply deletes the big dir.
+    expected_total = sum(
+        _expected_dir_total(root / "pytest-{}".format(n))
+        for n in (1, 2, 3, 4)
+    )
     rows, pytest_total, _, _, _, _, _, _, _ = _run_pass(
         tmp_path, explicit_roots=[str(root)], apply=True
     )
-    # Only the four numeric dirs are inventoried; the 4 GiB one is gone.
+    # Only the four numeric dirs are inventoried; the big one is gone.
     assert sorted(row["path"] for row in rows) == [
         str(root / "pytest-{}".format(n)) for n in (1, 2, 3, 4)
     ]
-    assert pytest_total >= 4 * GIB
+    assert pytest_total == expected_total
     assert not target.exists()
     assert current.is_symlink()
     assert (garbage / "payload.bin").read_bytes() == b"x" * 1024
@@ -416,11 +493,17 @@ def test_clean_pass_clears_a_stale_brief_warning(tmp_path):
     assert json.loads(brief.read_text(encoding="utf-8")) == []
 
 
-def test_cli_table_has_path_size_action_reason_columns(tmp_path, capsys):
+def test_cli_table_has_path_size_action_reason_columns(
+    tmp_path, capsys, monkeypatch
+):
     root = tmp_path / "pytest-of-test"
     root.mkdir()
     dead = str(_dead_pid())
-    _make_numbered(root, 1, pid_text=dead, age_days=30, payload_bytes=4 * GIB)
+    # Real (not sparse) payload bytes so the big dir counts over the cap.
+    payload = 256 * 1024
+    monkeypatch.setattr(housekeeping, "CAP_BYTES", 64 * 1024)
+    _make_numbered(root, 1, pid_text=dead, age_days=30,
+                   payload_bytes=payload, sparse=False)
     for number in (2, 3, 4):
         _make_numbered(root, number, pid_text=dead, age_days=20)
 
@@ -438,17 +521,19 @@ def test_cli_table_has_path_size_action_reason_columns(tmp_path, capsys):
         (line.split("\t")[0], line.split("\t")[1:]) for line in out[3:-1]
     )
     size, action, reason = body[str(root / "pytest-1")]
-    assert int(size) >= 4 * GIB
+    assert int(size) >= payload
     assert action == "would-delete"
     assert reason != ""
 
 
-def test_cli_apply_banner_and_delete_action(tmp_path, capsys):
+def test_cli_apply_banner_and_delete_action(tmp_path, capsys, monkeypatch):
     root = tmp_path / "pytest-of-test"
     root.mkdir()
     dead = str(_dead_pid())
+    # Real (not sparse) payload bytes so the big dir counts over the cap.
+    monkeypatch.setattr(housekeeping, "CAP_BYTES", 64 * 1024)
     gone = _make_numbered(root, 1, pid_text=dead, age_days=30,
-                          payload_bytes=4 * GIB)
+                          payload_bytes=256 * 1024, sparse=False)
     for number in (2, 3, 4):
         _make_numbered(root, number, pid_text=dead, age_days=20)
 
@@ -1065,8 +1150,12 @@ def test_leftover_workspaces_are_flagged_in_both_modes(tmp_path):
             assert row["action"] == "flag"
             assert "never deleted" in row["reason"]
             assert row["size_bytes"] > 0
-        assert flagged[str(first)]["size_bytes"] == len(b'{"done":true}')
-        assert flagged[str(second)]["size_bytes"] == 4096 + len(b"wip")
+        assert flagged[str(first)]["size_bytes"] == _expected_dir_total(
+            first
+        )
+        assert flagged[str(second)]["size_bytes"] == _expected_dir_total(
+            second
+        )
         # Flagging touches nothing, in either mode.
         assert (first / "answer.json").read_bytes() == b'{"done":true}'
         assert (second / "nested" / "deep.bin").read_bytes() == b"x" * 4096
@@ -1253,3 +1342,45 @@ def test_dir_size_bytes_counts_hard_linked_inode_once(tmp_path):
     os.link(original, target / "payload.link-a")
     os.link(original, target / "payload.link-b")
     assert housekeeping.dir_size_bytes(target) == 65536
+
+
+def test_dir_size_bytes_counts_sparse_file_at_allocated_size_once(tmp_path):
+    """Sparse file plus hardlink: allocated bytes counted once.
+
+    A sparse file's apparent ``st_size`` can exceed its on-disk bytes by
+    orders of magnitude; the sweep must count the allocation once (the
+    #2529 same-inode de-dup), not the apparent size twice.
+    """
+    target = tmp_path / "debris"
+    target.mkdir()
+    apparent = 64 * MIB
+    sparse = target / "sparse.bin"
+    with sparse.open("wb") as handle:
+        handle.seek(apparent - 1)
+        handle.write(b"\0")
+    os.link(sparse, target / "sparse.link")
+    info = sparse.stat()
+    assert info.st_size == apparent
+    blocks = getattr(info, "st_blocks", None)
+    if blocks is None or blocks < 0:
+        pytest.skip("platform reports no block counts")
+    if blocks * 512 >= apparent:
+        pytest.skip("filesystem materialized the sparse fixture")
+    allocated = _allocated_bytes(sparse)
+    assert housekeeping.dir_size_bytes(target) == allocated
+    # Within 5% of du -sk where du exists. Run du on the file, not the
+    # directory: du on a directory also counts the directory entry's own
+    # block (4 KiB on ext4), which dir_size_bytes deliberately excludes.
+    du = shutil.which("du")
+    if du is None:
+        pytest.skip("no du binary for the parity check")
+    proc = subprocess.run(
+        [du, "-sk", str(sparse)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0
+    parity = int(proc.stdout.split()[0]) * 1024
+    sized = housekeeping.dir_size_bytes(target)
+    assert abs(sized - parity) <= 0.05 * max(parity, 1)

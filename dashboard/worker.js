@@ -415,7 +415,7 @@ async function handleRequest(request, env) {
     if (!env.ASSETS || typeof env.ASSETS.fetch !== "function") {
       return new Response("Assets unavailable", { status: 503 });
     }
-    const assetRequest = new Request(new URL("/stages.html", url), request);
+    const assetRequest = new Request(new URL("/stages", url), request);
     return withSecurityHeaders(await env.ASSETS.fetch(assetRequest));
   }
 
@@ -430,7 +430,7 @@ async function handleRequest(request, env) {
     if (!env.ASSETS || typeof env.ASSETS.fetch !== "function") {
       return new Response("Assets unavailable", { status: 503 });
     }
-    const assetRequest = new Request(new URL("/domains.html", url), request);
+    const assetRequest = new Request(new URL("/domains", url), request);
     return withSecurityHeaders(await env.ASSETS.fetch(assetRequest));
   }
 
@@ -448,7 +448,7 @@ async function handleRequest(request, env) {
       if (!env.ASSETS || typeof env.ASSETS.fetch !== "function") {
         return new Response("Assets unavailable", { status: 503 });
       }
-      const assetRequest = new Request(new URL("/domain.html", url), request);
+      const assetRequest = new Request(new URL("/domain", url), request);
       return withSecurityHeaders(await env.ASSETS.fetch(assetRequest));
     }
   }

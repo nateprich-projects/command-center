@@ -242,7 +242,7 @@ async function authorizedHomeEnv() {
     ACCESS_AUD: access.audience,
     ACCESS_JWKS_FETCH: access.fetchImpl,
     FUNNEL_SNAPSHOT: { async get() { return null; } },
-    ...assetEnv({ "/domains.html": homeHtml, "/index.html": indexHtml }, seen),
+    ...assetEnv({ "/domains": homeHtml, "/index.html": indexHtml }, seen),
   };
   return { access, env, seen, homeHtml, indexHtml };
 }
@@ -254,7 +254,7 @@ test("/domains serves the new file behind the Access check", async () => {
   }), env);
 
   assert.equal(response.status, 200);
-  assert.deepEqual(seen, ["/domains.html"]);
+  assert.deepEqual(seen, ["/domains"]);
   assert.equal(await response.text(), homeHtml);
   assert.equal(response.headers.get("cache-control"), "no-cache, must-revalidate");
 });
@@ -275,6 +275,6 @@ test("the /domains route serves only the new file", async () => {
   const start = source.indexOf('=== "/domains"');
   assert.ok(start !== -1, "the exact /domains route exists");
   const block = source.slice(start, source.indexOf('"/domains/"', start));
-  assert.match(block, /\/domains\.html/);
-  assert.doesNotMatch(block, /index\.html|app\.js|styles\.css/);
+  assert.match(block, /"\/domains"/);
+  assert.doesNotMatch(block, /\.html|index\.html|app\.js|styles\.css/);
 });

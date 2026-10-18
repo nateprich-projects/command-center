@@ -229,7 +229,7 @@ async function authorizedStagesEnv() {
     ACCESS_AUD: access.audience,
     ACCESS_JWKS_FETCH: access.fetchImpl,
     FUNNEL_SNAPSHOT: { async get() { return null; } },
-    ...assetEnv({ "/stages.html": stagesHtml, "/index.html": indexHtml }, seen),
+    ...assetEnv({ "/stages": stagesHtml, "/index.html": indexHtml }, seen),
   };
   return { access, env, seen, stagesHtml, indexHtml };
 }
@@ -241,7 +241,7 @@ test("/stages serves the new file behind the Access check", async () => {
   }), env);
 
   assert.equal(response.status, 200);
-  assert.deepEqual(seen, ["/stages.html"]);
+  assert.deepEqual(seen, ["/stages"]);
   assert.equal(await response.text(), stagesHtml);
   assert.equal(response.headers.get("cache-control"), "no-cache, must-revalidate");
 });
